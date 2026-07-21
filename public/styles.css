@@ -66,3 +66,19 @@ button { color: inherit; }
 @media (max-width:1050px){.shell{grid-template-columns:78px minmax(0,1fr)}.rail{padding:22px 12px}.brand>span:last-child,.nav-item:not(.active){font-size:0}.nav-item{justify-content:center;padding:12px}.nav-item span{font-size:15px}.rail-foot{display:none}.overview-grid,.section-grid,.developer-grid{grid-template-columns:1fr}.playground-grid{grid-template-columns:1fr}.viewport-panel{grid-row:auto}.capacity-strip{grid-template-columns:1fr 140px 1fr}.radar{width:110px;height:110px}}
 @media (max-width:720px){.shell{display:block}.rail{position:fixed;bottom:0;top:auto;width:100%;height:68px;padding:8px 10px;border-right:0;border-top:1px solid var(--line);flex-direction:row}.brand,.rail-foot{display:none}.rail nav{display:flex;width:100%;justify-content:space-around}.nav-item{width:auto;display:grid;gap:1px;font-size:0;padding:8px 12px}.nav-item span{font-size:17px}.nav-item.active{box-shadow:inset 0 -2px var(--cyan)}main{padding:0 16px 88px}.topbar{min-height:90px}.top-actions .key-chip{display:none}.capacity-strip{grid-template-columns:1fr;padding:22px}.radar{display:none}.allowance{margin-top:24px}.overview-grid{grid-template-columns:1fr}.playground-grid{grid-template-columns:1fr}.viewport{min-height:320px}.inspector-grid{grid-template-columns:1fr}.inspector-grid>div+div{border-left:0;border-top:1px solid var(--line)}.topbar h1{font-size:25px}.event-row{grid-template-columns:65px 85px 1fr}}
 @media (prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
+
+/* Accessibility floor: compact data stays readable and every control is easy to hit. */
+:root{--type-body:16px;--type-ui:14px;--type-meta:12px;--type-label:10px;--tap-target:44px}
+body{font-size:var(--type-body);line-height:1.5}
+.nav-item,.primary-button,.secondary-button,.danger-button,.quiet-button,.text-button,.key-chip,.copy-code,.table-action,.service-list button{min-height:var(--tap-target)}
+.quiet-button,.text-button,.copy-code,.table-action{min-width:var(--tap-target)}
+.nav-item{font-size:var(--type-ui)}
+.allowance-head,.allowance p,.empty-inline p,.session-card strong,.session-card p,.session-card time,.quick-panel pre,.code-panel pre,.inspector-panel pre,.control-deck label,.view label,.command-log p,.address,.viewport-empty p,.empty-copy,th,td,.data-card p,.provider-grid span,.endpoint-list span,.health-grid span,.link-button{font-size:var(--type-meta)}
+.empty-inline strong,.service-list strong,.data-card strong,.identity-note>p:not(.eyebrow),.lede{font-size:var(--type-ui)}
+.service-list small{font-size:var(--type-meta)}
+.event-row{grid-template-columns:90px 125px minmax(0,1fr);font-size:var(--type-meta);line-height:1.5;color:#adbec9}
+.event-row time{color:#8ba4b5}
+.table-action{padding:8px 10px}
+.control-deck input,.view input,.view textarea{font-size:var(--type-ui)}
+@media (max-width:720px){.control-deck input,.view input,.view textarea{font-size:16px}}
+@media (prefers-reduced-motion:reduce){*,*:before,*:after{transition-duration:.001ms!important;transition-delay:0ms!important}}
