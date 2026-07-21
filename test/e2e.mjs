@@ -29,6 +29,13 @@ try {
   const sessionsDuringRun = await fetch(`${base}/v1/sessions?status=RUNNING`, { headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' } }).then((response) => response.json());
   assert.equal(sessionsDuringRun.length, 1);
   assert.match(sessionsDuringRun[0].connectUrl, /^ws:\/\//);
+  assert.match(sessionsDuringRun[0].connectUrl, /\/cdp\?apiKey=/);
+  const remoteBrowser = await chromium.connectOverCDP(sessionsDuringRun[0].connectUrl);
+  const remoteContexts = remoteBrowser.contexts();
+  assert.equal(remoteContexts.length, 1);
+  assert.equal(remoteContexts[0].pages().length, 1);
+  assert.equal(await remoteContexts[0].pages()[0].title(), 'Stratus Verification');
+  evidence.steps.push('Public authenticated CDP relay connected to the running browser');
   const observed = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/observe`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: '{}' }).then((response) => response.json());
   assert.ok(observed.some((element) => element.text.includes('Verify interaction')));
   const acted = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/act`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: 'click Verify interaction' }) }).then((response) => response.json());
@@ -90,6 +97,7 @@ try {
   assert.ok(sessionId);
   await page.getByRole('button', { name: 'Stop' }).click();
   await page.waitForFunction(() => document.querySelector('#playStatus')?.textContent === 'offline', null, { timeout: 15_000 });
+  await remoteBrowser.close().catch(() => {});
   evidence.steps.push('Session released and usage recorded');
 
   await page.getByRole('button', { name: 'Sessions' }).click();
