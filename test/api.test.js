@@ -74,3 +74,46 @@ test('signed webhooks deliver session lifecycle events', async () => {
     await new Promise((resolve) => receiver.close(resolve));
   }
 });
+
+test('control plane covers teams, permissions, keys, agents, files, and retention', async () => withApp(async (base) => {
+  const team = await (await request(base, '/v1/team')).json();
+  assert.equal(team.members[0].role, 'ADMIN');
+  assert.ok(team.permissions.VIEWER.includes('sessions.view'));
+
+  const viewer = await (await request(base, '/v1/team/members', {
+    method: 'POST', body: JSON.stringify({ email: 'viewer@example.com', role: 'VIEWER', projectIds: ['proj_stratus_demo'] })
+  })).json();
+  const denied = await request(base, '/v1/api-keys', {
+    method: 'POST', headers: { 'X-Stratus-User': viewer.id }, body: JSON.stringify({ name: 'forbidden' })
+  });
+  assert.equal(denied.status, 403);
+
+  const key = await (await request(base, '/v1/api-keys', { method: 'POST', body: JSON.stringify({ name: 'CI key' }) })).json();
+  assert.match(key.secret, /^sk_stratus_/);
+  const keyAuth = await fetch(`${base}/v1/projects`, { headers: { 'X-Stratus-API-Key': key.secret } });
+  assert.equal(keyAuth.status, 200);
+
+  const agent = await (await request(base, '/v1/agents', {
+    method: 'POST', body: JSON.stringify({ name: 'Evidence collector', instructions: 'Collect a concise page summary.' })
+  })).json();
+  const run = await (await request(base, `/v1/agents/${agent.id}/runs`, {
+    method: 'POST', body: JSON.stringify({ task: 'Verify agent lifecycle', simulated: true, mockResult: { verified: true } })
+  })).json();
+  assert.equal(run.status, 'COMPLETED');
+  const messages = await (await request(base, `/v1/agent-runs/${run.id}/messages`)).json();
+  assert.deepEqual(messages.at(-1).content.data, { verified: true });
+
+  const file = await (await request(base, '/v1/files', {
+    method: 'POST', body: JSON.stringify({ name: 'proof.txt', kind: 'upload', contentType: 'text/plain', contentBase64: Buffer.from('verified').toString('base64') })
+  })).json();
+  assert.equal(file.bytes, 8);
+  const content = await (await request(base, `/v1/files/${file.id}/content`)).text();
+  assert.equal(content, 'verified');
+
+  const settings = await (await request(base, '/v1/project-settings', {
+    method: 'PUT', body: JSON.stringify({ retentionDays: 7, zeroDataRetention: true, recordSessions: false })
+  })).json();
+  assert.equal(settings.retentionDays, 7);
+  assert.equal(settings.zeroDataRetention, true);
+  assert.equal(settings.recordSessions, false);
+}));

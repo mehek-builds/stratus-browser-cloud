@@ -115,6 +115,21 @@ try {
   await page.waitForFunction(() => document.querySelector('#contextList')?.textContent.includes('Identity'));
   evidence.steps.push('Persistent browser identity created');
 
+  await page.getByRole('button', { name: 'Agents' }).click();
+  await page.getByRole('button', { name: 'Create example agent' }).click();
+  await page.getByRole('button', { name: 'Run proof' }).click();
+  await page.waitForFunction(() => document.querySelector('#agentOutput')?.textContent.includes('COMPLETED'));
+  await page.screenshot({ path: path.join(outputDir, '07-agent-run.png'), fullPage: true });
+  evidence.steps.push('Reusable agent created, executed, and returned a structured result');
+
+  await page.getByRole('button', { name: 'Access' }).click();
+  await page.waitForFunction(() => document.querySelector('#memberList')?.textContent.includes('ADMIN'));
+  await page.getByRole('button', { name: 'Add example viewer' }).click();
+  await page.getByRole('button', { name: 'Enable zero data retention' }).click();
+  await page.waitForFunction(() => document.querySelector('#retentionSummary')?.textContent.includes('enabled'));
+  await page.screenshot({ path: path.join(outputDir, '08-access-controls.png'), fullPage: true });
+  evidence.steps.push('Organization role assignment and zero data retention controls verified');
+
   await page.getByRole('button', { name: 'Model gateway' }).click();
   await page.getByRole('button', { name: 'Send through gateway' }).click();
   await page.waitForFunction(() => document.querySelector('#modelOutput')?.textContent.includes('Local gateway response'));

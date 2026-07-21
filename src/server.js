@@ -7,8 +7,9 @@ import { config, regions } from './config.js';
 import { Store } from './store.js';
 import { BrowserManager } from './browser-manager.js';
 import { FunctionRuntime } from './function-runtime.js';
+import { AgentRuntime } from './agent-runtime.js';
 import { assertPublicUrl, htmlToText, textToMarkdown } from './security.js';
-import { hmac, id, json, now, readJson, redact } from './utils.js';
+import { hmac, id, json, now, readJson, redact, sha256 } from './utils.js';
 
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg' };
 
@@ -22,13 +23,14 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
   };
   const browsers = new BrowserManager(store, publish);
   const functions = new FunctionRuntime(store, browsers);
+  const agents = new AgentRuntime(store, browsers);
 
   const server = http.createServer(async (req, res) => {
     const requestId = id('req');
     const started = Date.now();
     res.setHeader('x-request-id', requestId);
     res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'content-type,x-stratus-api-key,x-bb-api-key,authorization');
+    res.setHeader('access-control-allow-headers', 'content-type,x-stratus-api-key,x-bb-api-key,x-stratus-user,authorization');
     res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
     try {
@@ -55,6 +57,42 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
       if (route === '/v1/projects' && req.method === 'GET') {
         const project = store.project();
         return json(res, 200, [{ id: project.id, name: project.name, createdAt: project.created_at, defaultTimeout: project.default_timeout, concurrency: project.concurrency }]);
+      }
+      if (route === '/v1/team' && req.method === 'GET') {
+        const organization = store.db.prepare('SELECT * FROM organizations LIMIT 1').get();
+        const members = store.db.prepare(`SELECT u.id,u.email,u.name,m.role,m.project_ids projectIds,m.created_at createdAt
+          FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=? ORDER BY m.created_at`).all(organization.id)
+          .map((member) => ({ ...member, projectIds: JSON.parse(member.projectIds) }));
+        return json(res, 200, { id: organization.id, name: organization.name, members, permissions: rolePermissions });
+      }
+      if (route === '/v1/team/members' && req.method === 'POST') {
+        requirePermission(store, req, 'members.manage');
+        const body = await readJson(req);
+        if (!body.email || !['ADMIN', 'CONTRIBUTOR', 'VIEWER'].includes(body.role)) throw Object.assign(new Error('email and a valid role are required'), { status: 400 });
+        const userId = id('usr');
+        const organization = store.db.prepare('SELECT id FROM organizations LIMIT 1').get();
+        store.db.prepare('INSERT INTO users (id,email,name,created_at) VALUES (?,?,?,?)').run(userId, body.email, body.name || body.email.split('@')[0], now());
+        store.db.prepare('INSERT INTO memberships (organization_id,user_id,role,project_ids,created_at) VALUES (?,?,?,?,?)')
+          .run(organization.id, userId, body.role, JSON.stringify(body.projectIds || ['*']), now());
+        return json(res, 201, { id: userId, email: body.email, role: body.role, projectIds: body.projectIds || ['*'] });
+      }
+      if (route === '/v1/api-keys' && req.method === 'GET') {
+        return json(res, 200, store.db.prepare('SELECT id,name,prefix,created_at createdAt,last_used_at lastUsedAt,revoked_at revokedAt FROM api_keys ORDER BY created_at DESC').all());
+      }
+      if (route === '/v1/api-keys' && req.method === 'POST') {
+        requirePermission(store, req, 'keys.regenerate');
+        const body = await readJson(req);
+        const secret = `sk_stratus_${crypto.randomBytes(24).toString('base64url')}`;
+        const key = { id: id('key'), name: body.name || 'Project key', prefix: secret.slice(0, 14), createdAt: now() };
+        store.db.prepare('INSERT INTO api_keys (id,project_id,name,key_hash,prefix,created_at) VALUES (?,?,?,?,?,?)')
+          .run(key.id, store.project().id, key.name, sha256(secret), key.prefix, key.createdAt);
+        return json(res, 201, { ...key, secret });
+      }
+      const keyMatch = route.match(/^\/v1\/api-keys\/([^/]+)$/);
+      if (keyMatch && req.method === 'DELETE') {
+        requirePermission(store, req, 'keys.regenerate');
+        store.db.prepare('UPDATE api_keys SET revoked_at=? WHERE id=?').run(now(), keyMatch[1]);
+        return json(res, 200, { id: keyMatch[1], revoked: true });
       }
       if (route === '/v1/usage' && req.method === 'GET') return json(res, 200, store.usage());
 
@@ -102,6 +140,17 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
       }
       const protectionMatch = route.match(/^\/v1\/sessions\/([^/]+)\/protection$/);
       if (protectionMatch && req.method === 'GET') return json(res, 200, browsers.protectionStatus(protectionMatch[1]));
+      const debugMatch = route.match(/^\/v1\/sessions\/([^/]+)\/debug$/);
+      if (debugMatch && req.method === 'GET') {
+        const session = store.getSession(debugMatch[1]);
+        if (!session) return json(res, 404, { error: { code: 'NOT_FOUND', message: 'Session not found' } });
+        const apiKeyValue = encodeURIComponent(String(apiKey));
+        return json(res, 200, {
+          debuggerUrl: `${config.publicBaseUrl}/#sessions`, debuggerFullscreenUrl: `${config.publicBaseUrl}/#playground`,
+          wsUrl: `${config.publicBaseUrl.replace(/^http/, 'ws')}/v1/sessions/${session.id}/live?apiKey=${apiKeyValue}`,
+          pages: [{ id: 'page-1', url: session.status === 'RUNNING' ? 'active' : 'closed' }]
+        });
+      }
 
       if (route === '/v1/contexts' && req.method === 'GET') return json(res, 200, store.listContexts());
       if (route === '/v1/contexts' && req.method === 'POST') return json(res, 201, store.createContext((await readJson(req)).name));
@@ -110,6 +159,55 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         const context = store.getContext(contextMatch[1]);
         return context ? json(res, 200, { id: context.id, projectId: context.projectId, name: context.name, createdAt: context.createdAt, updatedAt: context.updatedAt }) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'Context not found' } });
       }
+      if (contextMatch && req.method === 'PUT') {
+        const context = store.updateContext(contextMatch[1], await readJson(req));
+        return context ? json(res, 200, context) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'Context not found' } });
+      }
+      if (contextMatch && req.method === 'DELETE') return json(res, store.deleteContext(contextMatch[1]) ? 200 : 404, { deleted: true });
+
+      if (route === '/v1/files' && req.method === 'GET') return json(res, 200, store.listArtifacts(url.searchParams.get('sessionId'), url.searchParams.get('kind')));
+      if (route === '/v1/files' && req.method === 'POST') {
+        const body = await readJson(req, 25_000_000);
+        if (!body.name || !body.contentBase64) throw Object.assign(new Error('name and contentBase64 are required'), { status: 400 });
+        const content = Buffer.from(body.contentBase64, 'base64');
+        if (content.length > 15_000_000) throw Object.assign(new Error('Maximum decoded file size is 15 MB'), { status: 413 });
+        return json(res, 201, store.createArtifact({ sessionId: body.sessionId, kind: body.kind || 'upload', name: body.name, contentType: body.contentType, content }));
+      }
+      const fileMatch = route.match(/^\/v1\/files\/([^/]+)$/);
+      if (fileMatch && req.method === 'GET') {
+        const artifact = store.getArtifact(fileMatch[1]);
+        return artifact ? json(res, 200, artifact) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'File not found' } });
+      }
+      if (fileMatch && req.method === 'DELETE') return json(res, store.deleteArtifact(fileMatch[1]) ? 200 : 404, { deleted: true });
+      const contentMatch = route.match(/^\/v1\/files\/([^/]+)\/content$/);
+      if (contentMatch && req.method === 'GET') {
+        const artifact = store.getArtifact(contentMatch[1]);
+        if (!artifact || !fs.existsSync(artifact.storagePath)) return json(res, 404, { error: { code: 'NOT_FOUND', message: 'File not found' } });
+        res.writeHead(200, { 'content-type': artifact.contentType, 'content-length': artifact.bytes, 'content-disposition': `attachment; filename="${artifact.name}"` });
+        return fs.createReadStream(artifact.storagePath).pipe(res);
+      }
+
+      if (route === '/v1/agents' && req.method === 'GET') return json(res, 200, agents.list());
+      if (route === '/v1/agents' && req.method === 'POST') return json(res, 201, agents.create(await readJson(req)));
+      const agentResourceMatch = route.match(/^\/v1\/agents\/([^/]+)$/);
+      if (agentResourceMatch && req.method === 'GET') {
+        const agent = agents.get(agentResourceMatch[1]);
+        return agent ? json(res, 200, agent) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'Agent not found' } });
+      }
+      if (agentResourceMatch && req.method === 'PUT') return json(res, 200, agents.update(agentResourceMatch[1], await readJson(req)));
+      if (agentResourceMatch && req.method === 'DELETE') return json(res, agents.delete(agentResourceMatch[1]) ? 200 : 404, { deleted: true });
+      const agentRunsMatch = route.match(/^\/v1\/agents\/([^/]+)\/runs$/);
+      if (agentRunsMatch && req.method === 'GET') return json(res, 200, agents.runs(agentRunsMatch[1]));
+      if (agentRunsMatch && req.method === 'POST') return json(res, 201, await agents.run(agentRunsMatch[1], await readJson(req)));
+      const runMatch = route.match(/^\/v1\/agent-runs\/([^/]+)$/);
+      if (runMatch && req.method === 'GET') {
+        const run = agents.getRun(runMatch[1]);
+        return run ? json(res, 200, run) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'Agent run not found' } });
+      }
+      const runMessagesMatch = route.match(/^\/v1\/agent-runs\/([^/]+)\/messages$/);
+      if (runMessagesMatch && req.method === 'GET') return json(res, 200, agents.messages(runMessagesMatch[1]));
+      const stopRunMatch = route.match(/^\/v1\/agent-runs\/([^/]+)\/stop$/);
+      if (stopRunMatch && req.method === 'POST') return json(res, 200, await agents.stop(stopRunMatch[1]));
 
       if (route === '/v1/search' && req.method === 'POST') {
         const body = await readJson(req);
@@ -160,6 +258,43 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         store.db.prepare('INSERT INTO extensions (id,project_id,name,bytes,created_at) VALUES (?,?,?,?,?)').run(extension.id, extension.projectId, extension.name, extension.bytes, extension.createdAt);
         return json(res, 201, extension);
       }
+      if (route === '/v1/extensions' && req.method === 'GET') return json(res, 200, store.db.prepare('SELECT id,project_id projectId,name,bytes,created_at createdAt FROM extensions ORDER BY created_at DESC').all());
+      const extensionMatch = route.match(/^\/v1\/extensions\/([^/]+)$/);
+      if (extensionMatch && req.method === 'GET') {
+        const extension = store.db.prepare('SELECT id,project_id projectId,name,bytes,created_at createdAt FROM extensions WHERE id=?').get(extensionMatch[1]);
+        return extension ? json(res, 200, extension) : json(res, 404, { error: { code: 'NOT_FOUND', message: 'Extension not found' } });
+      }
+      if (extensionMatch && req.method === 'DELETE') {
+        const result = store.db.prepare('DELETE FROM extensions WHERE id=?').run(extensionMatch[1]);
+        return json(res, Number(result.changes) ? 200 : 404, { deleted: Boolean(result.changes) });
+      }
+      if (route === '/v1/certificates' && req.method === 'GET') return json(res, 200, store.db.prepare('SELECT id,name,created_at createdAt FROM certificates ORDER BY created_at DESC').all());
+      if (route === '/v1/certificates' && req.method === 'POST') {
+        const body = await readJson(req);
+        if (!body.name || !body.certificatePem || !body.keyPem) throw Object.assign(new Error('name, certificatePem, and keyPem are required'), { status: 400 });
+        const certificate = { id: id('cert'), name: body.name, createdAt: now() };
+        store.db.prepare('INSERT INTO certificates (id,project_id,name,certificate_pem,key_pem,created_at) VALUES (?,?,?,?,?,?)')
+          .run(certificate.id, store.project().id, certificate.name, body.certificatePem, body.keyPem, certificate.createdAt);
+        return json(res, 201, certificate);
+      }
+      const certificateMatch = route.match(/^\/v1\/certificates\/([^/]+)$/);
+      if (certificateMatch && req.method === 'DELETE') {
+        const result = store.db.prepare('DELETE FROM certificates WHERE id=?').run(certificateMatch[1]);
+        return json(res, Number(result.changes) ? 200 : 404, { deleted: Boolean(result.changes) });
+      }
+      if (route === '/v1/project-settings' && req.method === 'GET') {
+        const settings = store.db.prepare('SELECT * FROM project_settings WHERE project_id=?').get(store.project().id);
+        return json(res, 200, mapSettings(settings));
+      }
+      if (route === '/v1/project-settings' && req.method === 'PUT') {
+        requirePermission(store, req, 'project.settings');
+        const body = await readJson(req);
+        const current = store.db.prepare('SELECT * FROM project_settings WHERE project_id=?').get(store.project().id);
+        store.db.prepare(`UPDATE project_settings SET retention_days=?,zero_data_retention=?,record_sessions=?,record_logs=?,updated_at=? WHERE project_id=?`)
+          .run(Number(body.retentionDays ?? current.retention_days), body.zeroDataRetention ?? Boolean(current.zero_data_retention) ? 1 : 0,
+            body.recordSessions ?? Boolean(current.record_sessions) ? 1 : 0, body.recordLogs ?? Boolean(current.record_logs) ? 1 : 0, now(), store.project().id);
+        return json(res, 200, mapSettings(store.db.prepare('SELECT * FROM project_settings WHERE project_id=?').get(store.project().id)));
+      }
       if (route === '/v1/audit-log' && req.method === 'GET') {
         return json(res, 200, store.db.prepare('SELECT timestamp,action,resource,metadata FROM audit_log ORDER BY id DESC LIMIT 200').all().map((item) => ({ ...item, metadata: JSON.parse(item.metadata) })));
       }
@@ -195,7 +330,29 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
     store.db.close();
   }
 
-  return { server, store, browsers, functions, close };
+  return { server, store, browsers, functions, agents, close };
+}
+
+const rolePermissions = {
+  ADMIN: ['members.manage', 'sessions.view', 'sessions.stop', 'usage.view', 'scripts.run', 'project.settings', 'keys.view', 'keys.regenerate'],
+  CONTRIBUTOR: ['sessions.view', 'sessions.stop', 'usage.view', 'scripts.run', 'project.settings', 'keys.view'],
+  VIEWER: ['sessions.view']
+};
+
+function requirePermission(store, req, permission) {
+  const userId = req.headers['x-stratus-user'] || 'usr_owner';
+  const membership = store.db.prepare('SELECT role FROM memberships WHERE user_id=?').get(userId);
+  if (!membership || !rolePermissions[membership.role]?.includes(permission)) {
+    throw Object.assign(new Error(`Role does not allow ${permission}`), { status: 403, code: 'FORBIDDEN' });
+  }
+}
+
+function mapSettings(row) {
+  return {
+    projectId: row.project_id, retentionDays: row.retention_days,
+    zeroDataRetention: Boolean(row.zero_data_retention), recordSessions: Boolean(row.record_sessions),
+    recordLogs: Boolean(row.record_logs), updatedAt: row.updated_at
+  };
 }
 
 function serveStatic(route, res) {
@@ -262,7 +419,14 @@ function openApi(baseUrl) {
       '/v1/sessions/{id}/act': { post: { summary: 'Act from a natural-language instruction' } },
       '/v1/sessions/{id}/extract': { post: { summary: 'Extract page content' } },
       '/v1/sessions/{id}/protection': { get: { summary: 'Inspect detected protection challenges' } },
+      '/v1/sessions/{id}/debug': { get: { summary: 'Get live debugger URLs' } },
       '/v1/contexts': { get: { summary: 'List contexts' }, post: { summary: 'Create a context' } },
+      '/v1/agents': { get: { summary: 'List reusable agents' }, post: { summary: 'Create a reusable agent' } },
+      '/v1/agents/{id}/runs': { get: { summary: 'List agent runs' }, post: { summary: 'Run an agent' } },
+      '/v1/files': { get: { summary: 'List files' }, post: { summary: 'Upload a file' } },
+      '/v1/team': { get: { summary: 'Get organization members and role permissions' } },
+      '/v1/api-keys': { get: { summary: 'List project API keys' }, post: { summary: 'Create a project API key' } },
+      '/v1/project-settings': { get: { summary: 'Get retention and recording settings' }, put: { summary: 'Update retention and recording settings' } },
       '/v1/search': { post: { summary: 'Search the web' } }, '/v1/fetch': { post: { summary: 'Fetch a page' } },
       '/v1/functions': { get: { summary: 'List functions' }, post: { summary: 'Create a function' } },
       '/v1/chat/completions': { post: { summary: 'OpenAI-compatible model gateway' } }, '/v1/usage': { get: { summary: 'Get project usage and limits' } }

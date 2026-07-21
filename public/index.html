@@ -19,9 +19,11 @@
         <button class="nav-item" data-view="playground" data-short="Play"><span>▷</span>Playground</button>
         <button class="nav-item" data-view="sessions" data-short="Runs"><span>◫</span>Sessions</button>
         <button class="nav-item" data-view="contexts" data-short="IDs"><span>◎</span>Identities</button>
+        <button class="nav-item" data-view="agents" data-short="Agents"><span>◇</span>Agents</button>
         <button class="nav-item" data-view="functions" data-short="Code"><span>ƒ</span>Functions</button>
         <button class="nav-item" data-view="gateway" data-short="Models"><span>⇄</span>Model gateway</button>
         <button class="nav-item" data-view="developers" data-short="API"><span>{ }</span>Developers</button>
+        <button class="nav-item" data-view="access" data-short="Team"><span>⊙</span>Access</button>
       </nav>
       <div class="rail-foot">
         <div class="status-row"><span class="status-dot"></span>All systems ready</div>
@@ -137,6 +139,8 @@
 
       <section id="contexts" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">PERSISTENT IDENTITY</p><h2>Browser contexts</h2></div><button id="createContext" class="primary-button">Create identity</button></div><p class="lede">Keep cookies, local storage, locale, and authentication state between isolated browser sessions.</p><div id="contextList" class="card-list"></div></article><article class="panel identity-note"><p class="eyebrow">IDENTITY PROVIDERS</p><h2>Bring the access you trust</h2><p>Attach residential proxies, CAPTCHA providers, browser extensions, and account credentials through project-scoped secrets. Stratus keeps provider integrations explicit and auditable.</p><div class="provider-grid"><span>Proxy adapter</span><span>CAPTCHA adapter</span><span>Extensions</span><span>Context vault</span></div></article></div></section>
 
+      <section id="agents" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">REUSABLE AUTOMATION</p><h2>Browser agents</h2></div><button id="createAgent" class="primary-button">Create example agent</button></div><p class="lede">Define a reusable task, run it against a browser, inspect structured results, and follow every message.</p><div id="agentList" class="card-list"></div></article><article class="panel code-panel"><p class="eyebrow">LATEST RUN</p><h2>Structured result</h2><pre id="agentOutput" class="output-box">No agent run yet.</pre></article></div></section>
+
       <section id="functions" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">AGENT RUNTIME</p><h2>Functions beside the browser</h2></div><button id="createFunction" class="primary-button">Deploy example</button></div><div id="functionList" class="card-list"></div></article><article class="panel code-panel"><p class="eyebrow">EXAMPLE FUNCTION</p><h2>Return a typed result</h2><pre><code>console.log('Function started');
 return {
   ok: true,
@@ -147,6 +151,8 @@ return {
       <section id="gateway" class="view"><div class="section-grid"><article class="panel"><p class="eyebrow">MODEL ROUTER</p><h2>One endpoint, any provider</h2><p class="lede">Use the OpenAI chat completion contract. Route by price, latency, capability, or availability. The local deterministic provider keeps tests offline.</p><label>Message<textarea id="modelPrompt" rows="5">Summarize why browser agents need observability in one sentence.</textarea></label><button id="sendModel" class="primary-button">Send through gateway</button><pre id="modelOutput" class="output-box">Waiting for a request.</pre></article><article class="panel"><p class="eyebrow">ROUTING POLICY</p><h2>Fallbacks are visible</h2><div class="route-stack"><div><span>1</span><strong>Local deterministic</strong><b>healthy</b></div><div><span>2</span><strong>OpenAI adapter</strong><b>not configured</b></div><div><span>3</span><strong>Anthropic adapter</strong><b>not configured</b></div></div></article></div></section>
 
       <section id="developers" class="view"><div class="developer-grid"><article class="panel"><p class="eyebrow">DEVELOPER SURFACE</p><h2>Everything under one key</h2><div class="endpoint-list"><span><b>POST</b>/v1/sessions</span><span><b>POST</b>/v1/search</span><span><b>POST</b>/v1/fetch</span><span><b>POST</b>/v1/functions</span><span><b>POST</b>/v1/chat/completions</span><span><b>GET</b>/openapi.json</span></div></article><article class="panel"><p class="eyebrow">SERVICE HEALTH</p><h2>Deploy with evidence</h2><div id="healthGrid" class="health-grid"><span>API<strong>checking</strong></span><span>Database<strong>checking</strong></span><span>Chromium<strong>checking</strong></span><span>Worker<strong>checking</strong></span></div><div class="button-row"><a class="secondary-button link-button" href="/openapi.json" target="_blank">Open API document</a><a class="secondary-button link-button" href="/metrics" target="_blank">Metrics</a></div></article></div></section>
+
+      <section id="access" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">ORGANIZATION ACCESS</p><h2>Team and project roles</h2></div><button id="addViewer" class="primary-button">Add example viewer</button></div><div id="memberList" class="card-list"></div></article><article class="panel"><p class="eyebrow">DATA GOVERNANCE</p><h2>Retention controls</h2><div id="retentionSummary" class="route-stack"></div><button id="enableZdr" class="secondary-button">Enable zero data retention</button></article></div></section>
     </main>
   </div>
   <script type="module" src="/app.js"></script>

@@ -80,7 +80,10 @@ export class BrowserManager {
     page.on('download', async (download) => {
       const artifactPath = path.join(config.dataDir, 'artifacts', `${sessionId}-${download.suggestedFilename()}`);
       await download.saveAs(artifactPath).catch(() => {});
-      this.emit(sessionId, 'download', { name: download.suggestedFilename(), path: artifactPath });
+      if (fs.existsSync(artifactPath)) {
+        const artifact = this.store.createArtifact({ sessionId, kind: 'download', name: download.suggestedFilename(), content: fs.readFileSync(artifactPath) });
+        this.emit(sessionId, 'download', { id: artifact.id, name: artifact.name, url: artifact.downloadUrl });
+      }
     });
   }
 
@@ -130,9 +133,16 @@ export class BrowserManager {
         break;
       case 'screenshot': {
         const filename = `${sessionId}-${Date.now()}.png`;
-        const artifactPath = path.join(config.dataDir, 'artifacts', filename);
-        await page.screenshot({ path: artifactPath, fullPage: Boolean(command.fullPage) });
-        result = { filename, url: `/artifacts/${filename}` };
+        const content = await page.screenshot({ fullPage: Boolean(command.fullPage) });
+        const artifact = this.store.createArtifact({ sessionId, kind: 'screenshot', name: filename, contentType: 'image/png', content });
+        result = { id: artifact.id, filename, url: artifact.downloadUrl };
+        break;
+      }
+      case 'pdf': {
+        const filename = `${sessionId}-${Date.now()}.pdf`;
+        const content = await page.pdf({ format: command.format || 'A4', printBackground: true });
+        const artifact = this.store.createArtifact({ sessionId, kind: 'pdf', name: filename, contentType: 'application/pdf', content });
+        result = { id: artifact.id, filename, url: artifact.downloadUrl };
         break;
       }
       case 'protection':

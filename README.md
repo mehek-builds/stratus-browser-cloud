@@ -19,6 +19,10 @@ Stratus is a clean-room, self-hostable browser-agent cloud. It combines managed 
 - Extension metadata upload, audit log, health, readiness, metrics, and OpenAPI endpoints
 - TypeScript-compatible JavaScript SDK and CLI
 - Responsive operations dashboard, Playground, Live View, Inspector, identities, functions, and gateway screens
+- Reusable agents with runs, messages, structured results, and stop controls
+- Admin, Contributor, and Viewer roles with selected-project access
+- Hashed, regenerable, revocable project API keys
+- File upload/download APIs, screenshot and PDF artifacts, certificates, and retention/ZDR controls
 
 ## Run locally
 
@@ -50,7 +54,7 @@ curl -X POST http://localhost:4100/v1/sessions/SESSION_ID/commands \
   -d '{"action":"navigate","url":"https://example.com"}'
 ```
 
-Supported command actions are `navigate`, `click`, `fill`, `evaluate`, `content`, and `screenshot`.
+Supported command actions are `navigate`, `click`, `fill`, `evaluate`, `content`, `screenshot`, and `pdf`.
 
 Agent primitives are available at `POST /v1/sessions/:id/observe`, `/act`, and `/extract`. They inspect interactive elements, translate concise instructions such as `click Verify interaction`, and return clean structured page content.
 
@@ -120,10 +124,13 @@ The control plane atomically enforces 100 session reservations and a 500-hour al
 | Control | `POST /v1/sessions/:id/commands`, `GET /live-frame`, WebSocket `/live` |
 | Observability | `GET /recording`, `GET /logs`, `GET /network`, `GET /metrics` |
 | Identities | `GET/POST /v1/contexts` |
+| Agents | `GET/POST /v1/agents`, `GET/POST /v1/agents/:id/runs`, run messages and stop |
+| Files | `GET/POST /v1/files`, metadata, content, and delete routes |
 | Retrieval | `POST /v1/search`, `POST /v1/fetch` |
 | Functions | `GET/POST /v1/functions`, `POST /v1/functions/:id/invoke` |
 | Models | `POST /v1/chat/completions` |
 | Integrations | `GET/POST /v1/webhooks`, `POST /v1/extensions` |
+| Access | `GET /v1/team`, members, API keys, project settings, certificates |
 | Project | `GET /v1/projects`, `GET /v1/usage`, `GET /v1/audit-log` |
 | Operations | `GET /health`, `GET /ready`, `GET /metrics`, `GET /openapi.json` |
 

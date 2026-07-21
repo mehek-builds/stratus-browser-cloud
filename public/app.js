@@ -19,7 +19,7 @@ function toast(message) {
   toast.timer = setTimeout(() => el.classList.remove('visible'), 2400);
 }
 
-const titles = { overview: 'Browser operations', playground: 'Browser playground', sessions: 'Session archive', contexts: 'Persistent identities', functions: 'Agent functions', gateway: 'Model gateway', developers: 'Developer control plane' };
+const titles = { overview: 'Browser operations', playground: 'Browser playground', sessions: 'Session archive', contexts: 'Persistent identities', agents: 'Reusable browser agents', functions: 'Agent functions', gateway: 'Model gateway', developers: 'Developer control plane', access: 'Organization access' };
 function showView(name) {
   $$('.view').forEach((view) => view.classList.toggle('active', view.id === name));
   $$('.nav-item').forEach((button) => {
@@ -33,8 +33,10 @@ function showView(name) {
   history.replaceState(null, '', `#${name}`);
   if (name === 'sessions') loadSessions();
   if (name === 'contexts') loadContexts();
+  if (name === 'agents') loadAgents();
   if (name === 'functions') loadFunctions();
   if (name === 'developers') loadHealth();
+  if (name === 'access') loadAccess();
 }
 $$('.nav-item').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
 $$('[data-open-view]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.openView)));
@@ -148,6 +150,20 @@ async function loadFunctions() {
   state.latestFunction = list[0]?.id || null; $('#invokeLatest').disabled = !state.latestFunction;
   $('#functionList').innerHTML = list.length ? list.map((fn) => `<div class="data-card"><div><strong>${escapeHtml(fn.name)}</strong><p>${escapeHtml(fn.id)} · timeout ${fn.timeoutMs} ms</p></div><b>${fn.enabled ? 'READY' : 'PAUSED'}</b></div>`).join('') : '<p class="empty-copy">No functions deployed. Deploy the example to create one.</p>';
 }
+async function loadAgents() {
+  const list = await api('/v1/agents');
+  $('#agentList').innerHTML = list.length ? list.map((agent) => `<div class="data-card"><div><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.id)} · ${escapeHtml(agent.instructions)}</p></div><button class="table-action" data-run-agent="${agent.id}">Run proof</button></div>`).join('') : '<p class="empty-copy">No reusable agents yet.</p>';
+  $$('[data-run-agent]').forEach((button) => button.addEventListener('click', async () => {
+    const run = await api(`/v1/agents/${button.dataset.runAgent}/runs`, { method: 'POST', body: JSON.stringify({ task: 'Verify the reusable agent lifecycle', simulated: true, mockResult: { verified: true } }) });
+    $('#agentOutput').textContent = JSON.stringify(run, null, 2);
+    toast('Agent run completed');
+  }));
+}
+async function loadAccess() {
+  const [team, settings] = await Promise.all([api('/v1/team'), api('/v1/project-settings')]);
+  $('#memberList').innerHTML = team.members.map((member) => `<div class="data-card"><div><strong>${escapeHtml(member.name)}</strong><p>${escapeHtml(member.email)} · ${escapeHtml(member.projectIds.join(', '))}</p></div><b>${member.role}</b></div>`).join('');
+  $('#retentionSummary').innerHTML = `<div><span>30</span><strong>Retention window</strong><b>${settings.retentionDays} days</b></div><div><span>0</span><strong>Zero data retention</strong><b>${settings.zeroDataRetention ? 'enabled' : 'disabled'}</b></div><div><span>R</span><strong>Session recording</strong><b>${settings.recordSessions ? 'enabled' : 'disabled'}</b></div>`;
+}
 async function loadHealth() {
   const health = await fetch('/health').then((r) => r.json());
   const labels = [['API', health.status], ['Database', 'ready'], ['Chromium', health.browserExecutable ? 'ready' : 'missing'], ['Worker', health.browserExecutable ? 'ready' : 'blocked']];
@@ -162,6 +178,9 @@ $('#refreshSessions').addEventListener('click', () => loadSessions().catch((erro
 $('#closeInspector').addEventListener('click', () => $('#inspector').classList.add('hidden'));
 $('#createContext').addEventListener('click', async () => { try { await api('/v1/contexts', { method: 'POST', body: JSON.stringify({ name: `Identity ${new Date().toLocaleTimeString()}` }) }); await loadContexts(); toast('Persistent identity created'); } catch (error) { toast(error.message); } });
 $('#createFunction').addEventListener('click', async () => { try { await api('/v1/functions', { method: 'POST', body: JSON.stringify({ name: 'hello-browser-agent', code: "console.log('Function started'); return { ok: true, received: input, runtime: 'stratus-node' };" }) }); await loadFunctions(); toast('Function deployed'); } catch (error) { toast(error.message); } });
+$('#createAgent').addEventListener('click', async () => { try { await api('/v1/agents', { method: 'POST', body: JSON.stringify({ name: 'Evidence collector', instructions: 'Open a page and return a concise structured summary.' }) }); await loadAgents(); toast('Reusable agent created'); } catch (error) { toast(error.message); } });
+$('#addViewer').addEventListener('click', async () => { try { await api('/v1/team/members', { method: 'POST', body: JSON.stringify({ email: `viewer-${Date.now()}@example.com`, role: 'VIEWER', projectIds: ['proj_stratus_demo'] }) }); await loadAccess(); toast('Viewer added with selected-project access'); } catch (error) { toast(error.message); } });
+$('#enableZdr').addEventListener('click', async () => { try { await api('/v1/project-settings', { method: 'PUT', body: JSON.stringify({ zeroDataRetention: true, recordSessions: false, recordLogs: false }) }); await loadAccess(); toast('Zero data retention enabled'); } catch (error) { toast(error.message); } });
 $('#invokeLatest').addEventListener('click', async () => { try { const run = await api(`/v1/functions/${state.latestFunction}/invoke`, { method: 'POST', body: JSON.stringify({ source: 'dashboard', at: new Date().toISOString() }) }); $('#functionOutput').textContent = JSON.stringify(run, null, 2); toast('Function completed'); } catch (error) { toast(error.message); } });
 $('#sendModel').addEventListener('click', async () => { try { const completion = await api('/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'stratus-local', messages: [{ role: 'user', content: $('#modelPrompt').value }] }) }); $('#modelOutput').textContent = completion.choices[0].message.content; } catch (error) { toast(error.message); } });
 $('#copyKey').addEventListener('click', async () => { await navigator.clipboard.writeText(API_KEY); toast('Development API key copied'); });
