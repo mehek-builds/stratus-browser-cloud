@@ -12,6 +12,7 @@ Stratus is a clean-room, self-hostable browser-agent cloud. It combines managed 
 - Strict 500 browser-hour project allowance and real-time usage accounting
 - Search provider adapter and SSRF-protected fetch endpoint
 - Sandboxed JavaScript functions with logs, timeouts, inputs, outputs, and schedules metadata
+- Agent-native `observe`, `act`, and `extract` primitives on live browser sessions
 - OpenAI-compatible chat completion gateway with an offline deterministic provider
 - Signed webhooks with three bounded delivery attempts
 - Extension metadata upload, audit log, health, readiness, metrics, and OpenAPI endpoints
@@ -49,6 +50,8 @@ curl -X POST http://localhost:4100/v1/sessions/SESSION_ID/commands \
 ```
 
 Supported command actions are `navigate`, `click`, `fill`, `evaluate`, `content`, and `screenshot`.
+
+Agent primitives are available at `POST /v1/sessions/:id/observe`, `/act`, and `/extract`. They inspect interactive elements, translate concise instructions such as `click Verify interaction`, and return clean structured page content.
 
 ## SDK
 

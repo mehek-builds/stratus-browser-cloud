@@ -85,6 +85,8 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
 
       const commandMatch = route.match(/^\/v1\/sessions\/([^/]+)\/commands$/);
       if (commandMatch && req.method === 'POST') return json(res, 200, await browsers.command(commandMatch[1], await readJson(req)));
+      const agentMatch = route.match(/^\/v1\/sessions\/([^/]+)\/(observe|act|extract)$/);
+      if (agentMatch && req.method === 'POST') return json(res, 200, await browsers.agent(agentMatch[1], agentMatch[2], await readJson(req)));
       const eventMatch = route.match(/^\/v1\/sessions\/([^/]+)\/(recording|logs|network)$/);
       if (eventMatch && req.method === 'GET') {
         const all = store.events(eventMatch[1]);
@@ -254,6 +256,9 @@ function openApi(baseUrl) {
       '/v1/sessions': { get: { summary: 'List sessions' }, post: { summary: 'Create a browser session' } },
       '/v1/sessions/{id}': { get: { summary: 'Get a session' }, post: { summary: 'Release a session' } },
       '/v1/sessions/{id}/commands': { post: { summary: 'Control a browser session' } },
+      '/v1/sessions/{id}/observe': { post: { summary: 'Observe interactive page elements' } },
+      '/v1/sessions/{id}/act': { post: { summary: 'Act from a natural-language instruction' } },
+      '/v1/sessions/{id}/extract': { post: { summary: 'Extract page content' } },
       '/v1/contexts': { get: { summary: 'List contexts' }, post: { summary: 'Create a context' } },
       '/v1/search': { post: { summary: 'Search the web' } }, '/v1/fetch': { post: { summary: 'Fetch a page' } },
       '/v1/functions': { get: { summary: 'List functions' }, post: { summary: 'Create a function' } },

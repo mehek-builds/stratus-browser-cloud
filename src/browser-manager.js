@@ -123,6 +123,56 @@ export class BrowserManager {
     return result;
   }
 
+  async agent(sessionId, operation, input = {}) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime || runtime.simulated) throw Object.assign(new Error('Real browser runtime is not active'), { status: 409 });
+    const { page } = runtime;
+    const started = Date.now();
+    let result;
+    if (operation === 'observe') {
+      result = await page.locator('a,button,input,textarea,select,[role="button"]').evaluateAll((elements) => elements.slice(0, 100).map((element, index) => ({
+        index,
+        tag: element.tagName.toLowerCase(),
+        text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 180),
+        type: element.getAttribute('type'),
+        href: element.getAttribute('href'),
+        disabled: Boolean(element.disabled),
+        visible: Boolean(element.getBoundingClientRect().width && element.getBoundingClientRect().height)
+      })).filter((item) => item.visible));
+    } else if (operation === 'act') {
+      const instruction = String(input.instruction || '').trim();
+      if (!instruction) throw Object.assign(new Error('instruction is required'), { status: 400 });
+      const clickMatch = instruction.match(/^(?:click|press|choose|select)\s+(?:the\s+)?["']?(.+?)["']?$/i);
+      const fillMatch = instruction.match(/^(?:fill|type|enter)\s+["']?(.+?)["']?\s+(?:into|in)\s+["']?(.+?)["']?$/i);
+      if (clickMatch) {
+        const target = clickMatch[1].replace(/\s+(?:button|link)$/i, '');
+        const locator = page.getByRole('button', { name: target, exact: false }).or(page.getByRole('link', { name: target, exact: false })).or(page.getByText(target, { exact: false }));
+        await locator.first().click({ timeout: Number(input.timeout || 10_000) });
+        result = { action: 'click', target };
+      } else if (fillMatch) {
+        const [, value, target] = fillMatch;
+        const locator = page.getByLabel(target, { exact: false }).or(page.getByPlaceholder(target, { exact: false }));
+        await locator.first().fill(value, { timeout: Number(input.timeout || 10_000) });
+        result = { action: 'fill', target, value };
+      } else {
+        throw Object.assign(new Error('Instruction is not actionable. Start with click, press, fill, type, or enter.'), { status: 422, code: 'UNSUPPORTED_INSTRUCTION' });
+      }
+    } else if (operation === 'extract') {
+      const selector = input.selector || 'body';
+      const locator = page.locator(selector).first();
+      result = {
+        url: page.url(),
+        title: await page.title(),
+        text: (await locator.innerText()).trim(),
+        attributes: input.attributes ? Object.fromEntries(await Promise.all(input.attributes.map(async (name) => [name, await locator.getAttribute(name)]))) : undefined
+      };
+    } else {
+      throw Object.assign(new Error(`Unknown agent operation: ${operation}`), { status: 400 });
+    }
+    this.emit(sessionId, `agent.${operation}`, { durationMs: Date.now() - started, input, result });
+    return result;
+  }
+
   async liveFrame(sessionId) {
     const runtime = this.sessions.get(sessionId);
     if (!runtime || runtime.simulated) return null;

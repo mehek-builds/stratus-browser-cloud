@@ -26,10 +26,20 @@ try {
   await page.waitForFunction(() => document.querySelector('#playStatus')?.textContent === 'live', null, { timeout: 30_000 });
   await page.waitForFunction(() => document.querySelector('#liveFrame')?.naturalWidth > 0, null, { timeout: 30_000 });
   evidence.steps.push('Real Chromium session launched and navigated');
-  await page.getByRole('button', { name: 'Click proof button' }).click();
+  const sessionsDuringRun = await fetch(`${base}/v1/sessions?status=RUNNING`, { headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' } }).then((response) => response.json());
+  assert.equal(sessionsDuringRun.length, 1);
+  assert.match(sessionsDuringRun[0].connectUrl, /^ws:\/\//);
+  const observed = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/observe`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: '{}' }).then((response) => response.json());
+  assert.ok(observed.some((element) => element.text.includes('Verify interaction')));
+  const acted = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/act`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: 'click Verify interaction' }) }).then((response) => response.json());
+  assert.equal(acted.action, 'click');
   await page.waitForTimeout(1200);
+  const interactionText = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/commands`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'evaluate', expression: "document.querySelector('#proof').textContent" }) }).then((response) => response.json());
+  assert.equal(interactionText, 'Interaction verified');
+  const extracted = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/extract`, { method: 'POST', headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' }, body: JSON.stringify({ selector: 'main' }) }).then((response) => response.json());
+  assert.match(extracted.text, /Interaction verified/);
   await page.screenshot({ path: path.join(outputDir, '02-live-browser.png'), fullPage: true });
-  evidence.steps.push('Live browser frame and event stream rendered');
+  evidence.steps.push('Live browser frame plus observe, act, extract, and event stream verified');
 
   const sessionId = await page.evaluate(() => window.location.hash && document.querySelector('#commandLog p')?.textContent);
   assert.ok(sessionId);
@@ -43,12 +53,34 @@ try {
   await page.screenshot({ path: path.join(outputDir, '03-session-history.png'), fullPage: true });
   assert.match(await page.locator('#sessionsTable').textContent(), /COMPLETED/);
   evidence.steps.push('Completed session visible in archive');
+  await page.getByRole('button', { name: 'Inspect' }).click();
+  await page.waitForTimeout(250);
+  assert.match(await page.locator('#inspectorEvents').textContent(), /command.completed/);
+  await page.screenshot({ path: path.join(outputDir, '04-session-inspector.png'), fullPage: true });
+  evidence.steps.push('Session Inspector replay and event timeline verified');
 
   await page.getByRole('button', { name: 'Functions' }).click();
   await page.getByRole('button', { name: 'Deploy example' }).click();
   await page.getByRole('button', { name: 'Invoke latest' }).click();
   await page.waitForFunction(() => document.querySelector('#functionOutput')?.textContent.includes('COMPLETED'));
   evidence.steps.push('Function deployment and invocation completed');
+
+  await page.getByRole('button', { name: 'Identities' }).click();
+  await page.getByRole('button', { name: 'Create identity' }).click();
+  await page.waitForFunction(() => document.querySelector('#contextList')?.textContent.includes('Identity'));
+  evidence.steps.push('Persistent browser identity created');
+
+  await page.getByRole('button', { name: 'Model gateway' }).click();
+  await page.getByRole('button', { name: 'Send through gateway' }).click();
+  await page.waitForFunction(() => document.querySelector('#modelOutput')?.textContent.includes('Local gateway response'));
+  evidence.steps.push('OpenAI-compatible model gateway completed');
+
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await mobile.goto(`${base}/#overview`, { waitUntil: 'networkidle' });
+  assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+  await mobile.screenshot({ path: path.join(outputDir, '05-mobile-overview.png'), fullPage: true });
+  await mobile.close();
+  evidence.steps.push('Mobile layout verified without horizontal overflow');
 
   const usage = await fetch(`${base}/v1/usage`, { headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' } }).then((response) => response.json());
   assert.equal(usage.concurrent, 0);

@@ -1,13 +1,17 @@
 {
-  "startedAt": "2026-07-21T19:39:58.438Z",
-  "base": "http://127.0.0.1:56289",
+  "startedAt": "2026-07-21T19:44:38.229Z",
+  "base": "http://127.0.0.1:56632",
   "steps": [
     "Dashboard overview rendered",
     "Real Chromium session launched and navigated",
-    "Live browser frame and event stream rendered",
+    "Live browser frame plus observe, act, extract, and event stream verified",
     "Session released and usage recorded",
     "Completed session visible in archive",
-    "Function deployment and invocation completed"
+    "Session Inspector replay and event timeline verified",
+    "Function deployment and invocation completed",
+    "Persistent browser identity created",
+    "OpenAI-compatible model gateway completed",
+    "Mobile layout verified without horizontal overflow"
   ],
   "usage": {
     "concurrent": 0,
@@ -17,5 +21,5 @@
     "browserHoursRemaining": 499.9995
   },
   "status": "PASS",
-  "endedAt": "2026-07-21T19:40:03.335Z"
+  "endedAt": "2026-07-21T19:44:46.086Z"
 }

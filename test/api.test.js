@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { createApp } from '../src/server.js';
 
 async function withApp(run) {
@@ -31,6 +32,11 @@ test('API covers project, context, function, model, and usage flows', async () =
   const usage = await (await request(base, '/v1/usage')).json();
   assert.equal(usage.concurrentLimit, 100);
   assert.equal(usage.browserHoursAllowance, 500);
+  const fetched = await (await request(base, '/v1/fetch', { method: 'POST', body: JSON.stringify({ url: `${base}/health` }) })).json();
+  assert.equal(fetched.status, 200);
+  assert.match(fetched.text, /status/);
+  const extension = await (await request(base, '/v1/extensions', { method: 'POST', body: JSON.stringify({ name: 'test-extension', contentBase64: Buffer.from('extension-bytes').toString('base64') }) })).json();
+  assert.equal(extension.bytes, 15);
 }));
 
 test('simulated session API records lifecycle and events without consuming browser compute', async () => withApp(async (base) => {
@@ -44,3 +50,27 @@ test('simulated session API records lifecycle and events without consuming brows
   assert.ok(events.some((event) => event.type === 'session.started'));
   assert.ok(events.some((event) => event.type === 'session.ended'));
 }));
+
+test('signed webhooks deliver session lifecycle events', async () => {
+  const deliveries = [];
+  const receiver = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    deliveries.push({ signature: req.headers['x-stratus-signature'], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+    res.writeHead(204).end();
+  });
+  await new Promise((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+  const receiverUrl = `http://127.0.0.1:${receiver.address().port}/events`;
+  try {
+    await withApp(async (base) => {
+      const webhook = await (await request(base, '/v1/webhooks', { method: 'POST', body: JSON.stringify({ url: receiverUrl, events: ['session.started'], secret: 'verification-secret' }) })).json();
+      assert.match(webhook.id, /^wh_/);
+      await request(base, '/v1/sessions', { method: 'POST', body: JSON.stringify({ simulated: true }) });
+      assert.equal(deliveries.length, 1);
+      assert.equal(deliveries[0].body.type, 'session.started');
+      assert.match(deliveries[0].signature, /^[a-f0-9]{64}$/);
+    });
+  } finally {
+    await new Promise((resolve) => receiver.close(resolve));
+  }
+});

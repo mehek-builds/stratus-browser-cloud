@@ -9,7 +9,10 @@ export class Stratus {
       retrieve: (sessionId) => this.request(`/v1/sessions/${sessionId}`),
       release: (sessionId) => this.request(`/v1/sessions/${sessionId}`, { method: 'POST', body: { status: 'REQUEST_RELEASE' } }),
       command: (sessionId, command) => this.request(`/v1/sessions/${sessionId}/commands`, { method: 'POST', body: command }),
-      recording: (sessionId) => this.request(`/v1/sessions/${sessionId}/recording`)
+      recording: (sessionId) => this.request(`/v1/sessions/${sessionId}/recording`),
+      observe: (sessionId, input = {}) => this.request(`/v1/sessions/${sessionId}/observe`, { method: 'POST', body: input }),
+      act: (sessionId, instruction, options = {}) => this.request(`/v1/sessions/${sessionId}/act`, { method: 'POST', body: { instruction, ...options } }),
+      extract: (sessionId, input = {}) => this.request(`/v1/sessions/${sessionId}/extract`, { method: 'POST', body: input })
     };
     this.contexts = { create: (input = {}) => this.request('/v1/contexts', { method: 'POST', body: input }), list: () => this.request('/v1/contexts') };
     this.search = (query, options = {}) => this.request('/v1/search', { method: 'POST', body: { query, ...options } });
