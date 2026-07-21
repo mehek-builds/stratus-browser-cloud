@@ -1,0 +1,21 @@
+{
+  "name": "stratus-browser-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A clean-room, self-hostable browser-agent cloud.",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "NODE_ENV=test node --test --test-concurrency=1 test/*.test.js",
+    "test:e2e": "NODE_ENV=test node test/e2e.mjs",
+    "verify": "npm test && npm run test:e2e"
+  },
+  "dependencies": {
+    "playwright-core": "^1.54.1",
+    "ws": "^8.18.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

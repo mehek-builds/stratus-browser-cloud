@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <title>Stratus Browser Cloud</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Primary navigation">
+      <a class="brand" href="#overview" aria-label="Stratus home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>STRATUS</strong><small>Browser operations</small></span>
+      </a>
+      <nav>
+        <button class="nav-item active" data-view="overview"><span>⌁</span>Overview</button>
+        <button class="nav-item" data-view="playground"><span>▷</span>Playground</button>
+        <button class="nav-item" data-view="sessions"><span>◫</span>Sessions</button>
+        <button class="nav-item" data-view="contexts"><span>◎</span>Identities</button>
+        <button class="nav-item" data-view="functions"><span>ƒ</span>Functions</button>
+        <button class="nav-item" data-view="gateway"><span>⇄</span>Model gateway</button>
+        <button class="nav-item" data-view="developers"><span>{ }</span>Developers</button>
+      </nav>
+      <div class="rail-foot">
+        <div class="status-row"><span class="status-dot"></span>All systems ready</div>
+        <button id="settingsButton" class="quiet-button">Project settings</button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">STRATUS DEMO / <span id="sectionName">OVERVIEW</span></p>
+          <h1 id="pageTitle">Browser operations</h1>
+        </div>
+        <div class="top-actions">
+          <button id="copyKey" class="key-chip" title="Copy development API key"><span>API key</span><code>sk_stratus_••••_me</code></button>
+          <button id="newSession" class="primary-button">Launch browser</button>
+        </div>
+      </header>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+      <section id="overview" class="view active" aria-labelledby="pageTitle">
+        <div class="capacity-strip">
+          <div class="capacity-copy">
+            <p class="eyebrow">FLEET CAPACITY</p>
+            <div class="capacity-number"><span id="runningCount">0</span><small>/ 100 live browsers</small></div>
+          </div>
+          <div class="radar" aria-label="Live fleet visualization">
+            <div class="radar-ring r1"></div><div class="radar-ring r2"></div><div class="radar-ring r3"></div>
+            <span class="radar-sweep"></span><span class="blip b1"></span><span class="blip b2"></span><span class="blip b3"></span>
+          </div>
+          <div class="allowance">
+            <div class="allowance-head"><span>Browser allowance</span><strong><span id="hoursRemaining">500</span> hours left</strong></div>
+            <div class="meter"><i id="hoursMeter"></i></div>
+            <p><span id="hoursUsed">0</span> of 500 hours used</p>
+          </div>
+        </div>
+
+        <div class="overview-grid">
+          <article class="panel session-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">LIVE NOW</p><h2>Session river</h2></div>
+              <button class="text-button" data-open-view="sessions">View all sessions</button>
+            </div>
+            <div id="sessionRiver" class="session-river">
+              <div class="empty-inline"><span class="pulse-icon"></span><div><strong>No browsers are running</strong><p>Launch one to watch the event stream come alive.</p></div></div>
+            </div>
+          </article>
+          <article class="panel edge-panel">
+            <div class="panel-head"><div><p class="eyebrow">EDGE MAP</p><h2>Global regions</h2></div><span class="live-label">4 ready</span></div>
+            <div class="world-map" aria-label="Four browser regions ready">
+              <svg viewBox="0 0 520 225" role="img" aria-label="Stylized world map">
+                <path d="M44 73l34-27 52-8 25 15 31 4 6 17-19 15-10 33-30 5-15-18-35-5-15-13-21 3zM168 139l22 5 16 21-4 26-15 29-13-12-6-27-13-17zM248 55l42-14 45 10 25-8 44 12 53 24-12 20-37 3-17 22-35-4-22-24-27 8-19-23-38 1zM342 137l23-6 27 11-2 21-22 7-22-12zM434 170l31-4 21 14-11 19-37-2-15-15z" />
+              </svg>
+              <span class="region west" data-label="Oregon"></span><span class="region east" data-label="Virginia"></span><span class="region eu" data-label="Frankfurt"></span><span class="region ap" data-label="Singapore"></span>
+            </div>
+            <div class="region-list"><span><i></i>us-west-2 <b>ready</b></span><span><i></i>us-east-1 <b>ready</b></span><span><i></i>eu-central-1 <b>ready</b></span><span><i></i>ap-southeast-1 <b>ready</b></span></div>
+          </article>
+          <article class="panel quick-panel">
+            <div class="panel-head"><div><p class="eyebrow">QUICKSTART</p><h2>First browser in 30 seconds</h2></div><span class="step-badge">REST API</span></div>
+            <pre><code><span class="kw">const</span> session = <span class="kw">await</span> fetch(<span class="str">'/v1/sessions'</span>, {
+  method: <span class="str">'POST'</span>,
+  headers: {
+    <span class="str">'X-Stratus-API-Key'</span>: apiKey,
+    <span class="str">'Content-Type'</span>: <span class="str">'application/json'</span>
+  },
+  body: JSON.stringify({
+    region: <span class="str">'us-west-2'</span>,
+    browserSettings: { viewport: { width: <span class="num">1440</span>, height: <span class="num">900</span> } }
+  })
+});</code></pre>
+            <button id="copyQuickstart" class="copy-code">Copy example</button>
+          </article>
+          <article class="panel service-panel">
+            <div class="panel-head"><div><p class="eyebrow">ONE CONTROL PLANE</p><h2>Agent stack</h2></div></div>
+            <div class="service-list">
+              <button data-open-view="playground"><span class="service-icon">◫</span><span><strong>Browser cloud</strong><small>Chromium, live view, replay</small></span><b>Ready</b></button>
+              <button data-open-view="developers"><span class="service-icon">⌕</span><span><strong>Search + fetch</strong><small>Clean content for agents</small></span><b>Ready</b></button>
+              <button data-open-view="functions"><span class="service-icon">ƒ</span><span><strong>Functions</strong><small>Run code beside browsers</small></span><b>Ready</b></button>
+              <button data-open-view="gateway"><span class="service-icon">⇄</span><span><strong>Model gateway</strong><small>One OpenAI-compatible route</small></span><b>Ready</b></button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="playground" class="view">
+        <div class="playground-grid">
+          <article class="panel control-deck">
+            <div class="panel-head"><div><p class="eyebrow">MISSION CONTROL</p><h2>Drive a real browser</h2></div><span id="playStatus" class="live-label muted">offline</span></div>
+            <label>Target URL<input id="targetUrl" value="data:text/html,%3Ctitle%3EStratus%20Verification%3C/title%3E%3Cmain%20style%3D%22font-family%3Asans-serif%3Bpadding%3A60px%3Bbackground%3A%2308111f%3Bcolor%3Awhite%3Bmin-height%3A100vh%22%3E%3Ch1%3EStratus%20browser%20is%20live%3C/h1%3E%3Cp%3EReal%20Chromium%2C%20controlled%20through%20the%20Stratus%20API.%3C/p%3E%3Cbutton%20id%3D%22proof%22%20onclick%3D%22this.textContent%3D%27Interaction%20verified%27%22%3EVerify%20interaction%3C/button%3E%3C/main%3E"></label>
+            <div class="button-row"><button id="launchPlay" class="primary-button">Launch and navigate</button><button id="clickProof" class="secondary-button" disabled>Click proof button</button><button id="stopPlay" class="danger-button" disabled>Stop</button></div>
+            <div class="command-log" id="commandLog"><p><time>ready</time> Waiting for a browser command.</p></div>
+          </article>
+          <article class="panel viewport-panel">
+            <div class="browser-chrome"><div class="traffic"><i></i><i></i><i></i></div><div class="address" id="browserAddress">No active page</div><span class="encrypted">LIVE</span></div>
+            <div class="viewport"><div id="viewportEmpty" class="viewport-empty"><span class="launch-glyph">▷</span><h3>Browser feed is standing by</h3><p>Launch a session to see pixels from the real Chromium worker.</p></div><img id="liveFrame" alt="Live browser session frame"></div>
+          </article>
+          <article class="panel event-panel"><div class="panel-head"><div><p class="eyebrow">EVENT STREAM</p><h2>What the browser sees</h2></div></div><div id="eventStream" class="event-stream"><p class="empty-copy">Console, network, page, and command events appear here.</p></div></article>
+        </div>
+      </section>
+
+      <section id="sessions" class="view">
+        <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">SESSION HISTORY</p><h2>Every browser, one timeline</h2></div><button id="refreshSessions" class="secondary-button">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Session</th><th>Region</th><th>Started</th><th>Duration</th><th>Metadata</th><th></th></tr></thead><tbody id="sessionsTable"></tbody></table></div></article>
+        <article id="inspector" class="panel inspector-panel hidden"><div class="panel-head"><div><p class="eyebrow">SESSION INSPECTOR</p><h2 id="inspectorTitle">Session</h2></div><button id="closeInspector" class="quiet-button">Close</button></div><div class="inspector-grid"><div><h3>Timeline</h3><div id="inspectorEvents" class="event-stream"></div></div><div><h3>Session record</h3><pre id="inspectorJson"></pre></div></div></article>
+      </section>
+
+      <section id="contexts" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">PERSISTENT IDENTITY</p><h2>Browser contexts</h2></div><button id="createContext" class="primary-button">Create identity</button></div><p class="lede">Keep cookies, local storage, locale, and authentication state between isolated browser sessions.</p><div id="contextList" class="card-list"></div></article><article class="panel identity-note"><p class="eyebrow">IDENTITY PROVIDERS</p><h2>Bring the access you trust</h2><p>Attach residential proxies, CAPTCHA providers, browser extensions, and account credentials through project-scoped secrets. Stratus keeps provider integrations explicit and auditable.</p><div class="provider-grid"><span>Proxy adapter</span><span>CAPTCHA adapter</span><span>Extensions</span><span>Context vault</span></div></article></div></section>
+
+      <section id="functions" class="view"><div class="section-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">AGENT RUNTIME</p><h2>Functions beside the browser</h2></div><button id="createFunction" class="primary-button">Deploy example</button></div><div id="functionList" class="card-list"></div></article><article class="panel code-panel"><p class="eyebrow">EXAMPLE FUNCTION</p><h2>Return a typed result</h2><pre><code>console.log('Function started');
+return {
+  ok: true,
+  received: input,
+  runtime: 'stratus-node'
+};</code></pre><button id="invokeLatest" class="secondary-button" disabled>Invoke latest</button><pre id="functionOutput" class="output-box">No run yet.</pre></article></div></section>
+
+      <section id="gateway" class="view"><div class="section-grid"><article class="panel"><p class="eyebrow">MODEL ROUTER</p><h2>One endpoint, any provider</h2><p class="lede">Use the OpenAI chat completion contract. Route by price, latency, capability, or availability. The local deterministic provider keeps tests offline.</p><label>Message<textarea id="modelPrompt" rows="5">Summarize why browser agents need observability in one sentence.</textarea></label><button id="sendModel" class="primary-button">Send through gateway</button><pre id="modelOutput" class="output-box">Waiting for a request.</pre></article><article class="panel"><p class="eyebrow">ROUTING POLICY</p><h2>Fallbacks are visible</h2><div class="route-stack"><div><span>1</span><strong>Local deterministic</strong><b>healthy</b></div><div><span>2</span><strong>OpenAI adapter</strong><b>not configured</b></div><div><span>3</span><strong>Anthropic adapter</strong><b>not configured</b></div></div></article></div></section>
+
+      <section id="developers" class="view"><div class="developer-grid"><article class="panel"><p class="eyebrow">DEVELOPER SURFACE</p><h2>Everything under one key</h2><div class="endpoint-list"><span><b>POST</b>/v1/sessions</span><span><b>POST</b>/v1/search</span><span><b>POST</b>/v1/fetch</span><span><b>POST</b>/v1/functions</span><span><b>POST</b>/v1/chat/completions</span><span><b>GET</b>/openapi.json</span></div></article><article class="panel"><p class="eyebrow">SERVICE HEALTH</p><h2>Deploy with evidence</h2><div id="healthGrid" class="health-grid"><span>API<strong>checking</strong></span><span>Database<strong>checking</strong></span><span>Chromium<strong>checking</strong></span><span>Worker<strong>checking</strong></span></div><div class="button-row"><a class="secondary-button link-button" href="/openapi.json" target="_blank">Open API document</a><a class="secondary-button link-button" href="/metrics" target="_blank">Metrics</a></div></article></div></section>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

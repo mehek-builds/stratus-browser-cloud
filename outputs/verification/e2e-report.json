@@ -1,0 +1,21 @@
+{
+  "startedAt": "2026-07-21T19:39:58.438Z",
+  "base": "http://127.0.0.1:56289",
+  "steps": [
+    "Dashboard overview rendered",
+    "Real Chromium session launched and navigated",
+    "Live browser frame and event stream rendered",
+    "Session released and usage recorded",
+    "Completed session visible in archive",
+    "Function deployment and invocation completed"
+  ],
+  "usage": {
+    "concurrent": 0,
+    "concurrentLimit": 100,
+    "browserHoursUsed": 0.0005,
+    "browserHoursAllowance": 500,
+    "browserHoursRemaining": 499.9995
+  },
+  "status": "PASS",
+  "endedAt": "2026-07-21T19:40:03.335Z"
+}

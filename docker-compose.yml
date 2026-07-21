@@ -1,0 +1,17 @@
+services:
+  stratus:
+    build: .
+    ports:
+      - "4100:4100"
+    environment:
+      STRATUS_API_KEY: ${STRATUS_API_KEY:-sk_stratus_dev_change_me}
+      MAX_CONCURRENT_SESSIONS: 100
+      BROWSER_HOUR_ALLOWANCE: 500
+      PUBLIC_BASE_URL: http://localhost:4100
+    volumes:
+      - stratus-data:/data
+    shm_size: 8gb
+    restart: unless-stopped
+
+volumes:
+  stratus-data:
