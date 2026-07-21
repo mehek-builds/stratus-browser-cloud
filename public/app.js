@@ -22,7 +22,12 @@ function toast(message) {
 const titles = { overview: 'Browser operations', playground: 'Browser playground', sessions: 'Session archive', contexts: 'Persistent identities', functions: 'Agent functions', gateway: 'Model gateway', developers: 'Developer control plane' };
 function showView(name) {
   $$('.view').forEach((view) => view.classList.toggle('active', view.id === name));
-  $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === name));
+  $$('.nav-item').forEach((button) => {
+    const active = button.dataset.view === name;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
   $('#pageTitle').textContent = titles[name];
   $('#sectionName').textContent = name.toUpperCase();
   history.replaceState(null, '', `#${name}`);

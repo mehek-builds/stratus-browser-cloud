@@ -81,4 +81,5 @@ body{font-size:var(--type-body);line-height:1.5}
 .table-action{padding:8px 10px}
 .control-deck input,.view input,.view textarea{font-size:var(--type-ui)}
 @media (max-width:720px){.control-deck input,.view input,.view textarea{font-size:16px}}
+@media (max-width:720px){.rail nav{gap:0}.nav-item{flex:1;min-width:0;min-height:52px;padding:4px 1px;align-content:center;justify-items:center}.nav-item::after{content:attr(data-short);font:700 8px/1 "Avenir Next",Avenir,sans-serif;letter-spacing:.02em;color:var(--mist)}.nav-item.active::after{color:var(--porcelain)}}
 @media (prefers-reduced-motion:reduce){*,*:before,*:after{transition-duration:.001ms!important;transition-delay:0ms!important}}
