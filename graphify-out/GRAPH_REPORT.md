@@ -1,18 +1,18 @@
 # Graph Report - .  (2026-07-21)
 
 ## Corpus Check
-- 12 files · ~61,946 words
+- 12 files · ~64,816 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 88 nodes · 118 edges · 12 communities detected
+- 89 nodes · 120 edges · 12 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
 ## God Nodes (most connected - your core abstractions)
 1. `Store` - 19 edges
-2. `api()` - 9 edges
-3. `BrowserManager` - 9 edges
+2. `BrowserManager` - 10 edges
+3. `api()` - 9 edges
 4. `loadUsage()` - 6 edges
 5. `showView()` - 5 edges
 6. `launchSession()` - 5 edges
@@ -35,7 +35,7 @@ Cohesion: 0.25
 Nodes (17): api(), appendEvent(), connectEvents(), escapeHtml(), inspectSession(), launchSession(), loadContexts(), loadFunctions() (+9 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.29
+Cohesion: 0.27
 Nodes (2): boundedClose(), BrowserManager
 
 ### Community 3 - "Community 3"

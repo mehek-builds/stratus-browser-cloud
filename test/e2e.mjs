@@ -78,7 +78,7 @@ try {
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await mobile.goto(`${base}/#overview`, { waitUntil: 'networkidle' });
   assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
-  await mobile.screenshot({ path: path.join(outputDir, '05-mobile-overview.png'), fullPage: true });
+  await mobile.screenshot({ path: path.join(outputDir, '05-mobile-overview.png') });
   await mobile.close();
   evidence.steps.push('Mobile layout verified without horizontal overflow');
 
