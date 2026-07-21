@@ -176,7 +176,12 @@ export class BrowserManager {
   async liveFrame(sessionId) {
     const runtime = this.sessions.get(sessionId);
     if (!runtime || runtime.simulated) return null;
-    return runtime.page.screenshot({ type: 'jpeg', quality: 68 });
+    try {
+      return await runtime.page.screenshot({ type: 'jpeg', quality: 68 });
+    } catch (error) {
+      if (/closed|target page|browser has been/i.test(error.message)) return null;
+      throw error;
+    }
   }
 
   async release(sessionId, status = 'COMPLETED') {

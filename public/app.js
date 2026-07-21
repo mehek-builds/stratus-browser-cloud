@@ -114,14 +114,15 @@ function logCommand(message) {
 
 async function stopSession() {
   if (!state.sessionId) return;
+  clearInterval(state.frameTimer);
+  $('#liveFrame').classList.remove('visible');
+  $('#liveFrame').removeAttribute('src');
   await api(`/v1/sessions/${state.sessionId}`, { method: 'POST', body: JSON.stringify({ status: 'REQUEST_RELEASE' }) });
   logCommand('session released');
-  clearInterval(state.frameTimer);
   state.eventSocket?.close();
   state.sessionId = null;
   $('#playStatus').textContent = 'offline'; $('#playStatus').classList.add('muted');
   $('#clickProof').disabled = true; $('#stopPlay').disabled = true;
-  $('#liveFrame').classList.remove('visible'); $('#liveFrame').removeAttribute('src');
   $('#viewportEmpty').style.display = ''; $('#browserAddress').textContent = 'No active page';
   await loadUsage(); toast('Browser stopped and usage recorded');
 }
