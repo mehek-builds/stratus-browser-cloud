@@ -17,6 +17,8 @@ The verified flow covers:
 7. Persistent browser identity creation
 8. OpenAI-compatible model gateway invocation
 9. Mobile layout without horizontal overflow
+10. Protection challenge detection, evidence capture, and human handoff without circumvention
+11. Pause policy blocking command and agent automation pending human review
 
 ## Capacity contract
 
@@ -34,6 +36,7 @@ This verifies the control-plane capacity contract. Running 100 live Chrome proce
 - `03-session-history.png`: completed browser session archive
 - `04-session-inspector.png`: replay and event timeline
 - `05-mobile-overview.png`: responsive viewport
+- `06-protection-challenge.png`: detected human-verification challenge
 - `e2e-report.json`: machine-readable E2E result
 
 ## Reproduce

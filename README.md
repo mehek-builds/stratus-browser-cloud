@@ -13,6 +13,7 @@ Stratus is a clean-room, self-hostable browser-agent cloud. It combines managed 
 - Search provider adapter and SSRF-protected fetch endpoint
 - Sandboxed JavaScript functions with logs, timeouts, inputs, outputs, and schedules metadata
 - Agent-native `observe`, `act`, and `extract` primitives on live browser sessions
+- Authorized-site protection policies with host scoping, request pacing, challenge detection, evidence capture, and human review handoff
 - OpenAI-compatible chat completion gateway with an offline deterministic provider
 - Signed webhooks with three bounded delivery attempts
 - Extension metadata upload, audit log, health, readiness, metrics, and OpenAPI endpoints
@@ -65,7 +66,14 @@ const stratus = new Stratus({
 
 const session = await stratus.sessions.create({
   region: 'us-west-2',
-  keepAlive: true
+  keepAlive: true,
+  browserSettings: {
+    protectionPolicy: {
+      allowedHosts: ['example.com'],
+      minNavigationIntervalMs: 1000,
+      challengeBehavior: 'pause'
+    }
+  }
 });
 
 await stratus.sessions.command(session.id, {
@@ -75,6 +83,12 @@ await stratus.sessions.command(session.id, {
 
 await stratus.sessions.release(session.id);
 ```
+
+## Site protection policy
+
+Protection policies are designed for authorized automation. `allowedHosts` restricts navigation to owned or approved domains, `minNavigationIntervalMs` prevents burst navigation, and `challengeBehavior: "pause"` stops API commands and agent actions when Stratus detects CAPTCHA, human verification, access-denied, rate-limit, or managed-challenge signals. Evidence is captured to the session artifacts and exposed through `GET /v1/sessions/:id/protection`. After a person resolves the challenge through the live browser connection, send `{ "action": "resume" }` to the command endpoint. Stratus rechecks the page before continuing.
+
+Stratus reports protection challenges and supports a human handoff. It does not solve CAPTCHAs, forge fingerprints, suppress automation indicators, or circumvent third-party access controls.
 
 ## CLI
 

@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { chromium } from 'playwright-core';
 import { config } from './config.js';
 import { now } from './utils.js';
+import { assertAuthorizedNavigation, detectProtectionChallenge, normalizeProtectionPolicy } from './protection-policy.js';
 
 export class BrowserManager {
   constructor(store, publish = () => {}) {
@@ -29,6 +30,7 @@ export class BrowserManager {
     try {
       const context = session.contextId ? this.store.getContext(session.contextId) : null;
       const settings = session.browserSettings || {};
+      const protectionPolicy = normalizeProtectionPolicy(settings.protectionPolicy);
       browserServer = await chromium.launchServer({
         executablePath: config.chromePath,
         headless: true,
@@ -54,8 +56,12 @@ export class BrowserManager {
         seleniumRemoteUrl: `${config.publicBaseUrl}/selenium/${session.id}`
       });
       const timer = setTimeout(() => this.release(session.id, 'TIMED_OUT'), Math.max(1, new Date(session.expiresAt).getTime() - Date.now()));
-      this.sessions.set(session.id, { browser, browserServer, context: browserContext, page, timer, signingKey });
+      this.sessions.set(session.id, {
+        browser, browserServer, context: browserContext, page, timer, signingKey,
+        protectionPolicy, lastNavigationAt: 0, protectionStatus: { state: 'clear', challenge: null }
+      });
       this.emit(session.id, 'session.started', { region: session.region, viewport: settings.viewport || { width: 1440, height: 900 } });
+      this.emit(session.id, 'protection.policy', protectionPolicy);
       return running;
     } catch (error) {
       if (browserServer) await boundedClose(() => browserServer.close());
@@ -88,13 +94,26 @@ export class BrowserManager {
     const runtime = this.sessions.get(sessionId);
     if (!runtime || runtime.simulated) throw Object.assign(new Error('Real browser runtime is not active'), { status: 409 });
     const { page } = runtime;
+    if (runtime.protectionStatus.state === 'paused' && !['protection', 'resume'].includes(command.action)) {
+      throw Object.assign(new Error('Session is paused for human review'), { status: 409, code: 'HUMAN_REVIEW_REQUIRED' });
+    }
     const started = Date.now();
     let result;
     switch (command.action) {
-      case 'navigate':
-        await page.goto(command.url, { waitUntil: 'domcontentloaded', timeout: command.timeout || 30_000 });
-        result = { url: page.url(), title: await page.title() };
+      case 'navigate': {
+        assertAuthorizedNavigation(command.url, runtime.protectionPolicy);
+        await this.paceNavigation(runtime);
+        const response = await page.goto(command.url, { waitUntil: 'domcontentloaded', timeout: command.timeout || 30_000 });
+        runtime.lastNavigationAt = Date.now();
+        const challenge = await this.inspectProtection(sessionId, runtime, response?.status());
+        if (challenge.detected && runtime.protectionPolicy.challengeBehavior === 'pause') {
+          throw Object.assign(new Error('A site protection challenge requires human review'), {
+            status: 409, code: 'HUMAN_REVIEW_REQUIRED', challenge
+          });
+        }
+        result = { url: page.url(), title: await page.title(), protection: runtime.protectionStatus };
         break;
+      }
       case 'click':
         await page.locator(command.selector).click();
         result = { clicked: command.selector };
@@ -116,6 +135,18 @@ export class BrowserManager {
         result = { filename, url: `/artifacts/${filename}` };
         break;
       }
+      case 'protection':
+        result = runtime.protectionStatus;
+        break;
+      case 'resume': {
+        const challenge = await this.inspectProtection(sessionId, runtime);
+        if (challenge.detected) {
+          throw Object.assign(new Error('Protection challenge is still present'), { status: 409, code: 'HUMAN_REVIEW_REQUIRED' });
+        }
+        result = runtime.protectionStatus;
+        this.emit(sessionId, 'protection.resumed', { resumedAt: now() });
+        break;
+      }
       default:
         throw Object.assign(new Error(`Unknown browser action: ${command.action}`), { status: 400 });
     }
@@ -123,9 +154,56 @@ export class BrowserManager {
     return result;
   }
 
+  async paceNavigation(runtime) {
+    const remaining = runtime.protectionPolicy.minNavigationIntervalMs - (Date.now() - runtime.lastNavigationAt);
+    if (runtime.lastNavigationAt && remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
+
+  async inspectProtection(sessionId, runtime, status) {
+    if (!runtime.protectionPolicy.enabled) return { detected: false };
+    const page = runtime.page;
+    const challenge = detectProtectionChallenge({
+      title: await page.title().catch(() => ''),
+      text: await page.locator('body').innerText({ timeout: 2000 }).catch(() => ''),
+      status,
+      url: page.url()
+    });
+    if (!challenge.detected) {
+      runtime.protectionStatus = { state: 'clear', challenge: null, checkedAt: now() };
+      return challenge;
+    }
+    let evidenceUrl;
+    if (runtime.protectionPolicy.captureEvidence) {
+      const filename = `${sessionId}-challenge-${Date.now()}.png`;
+      await page.screenshot({ path: path.join(config.dataDir, 'artifacts', filename), fullPage: true }).catch(() => {});
+      evidenceUrl = `/artifacts/${filename}`;
+    }
+    const detail = {
+      ...challenge,
+      evidenceUrl,
+      detectedAt: now(),
+      action: runtime.protectionPolicy.challengeBehavior === 'pause' ? 'human_review' : 'reported'
+    };
+    runtime.protectionStatus = {
+      state: runtime.protectionPolicy.challengeBehavior === 'pause' ? 'paused' : 'challenge_detected',
+      challenge: detail
+    };
+    this.emit(sessionId, 'protection.challenge_detected', detail);
+    return detail;
+  }
+
+  protectionStatus(sessionId) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime || runtime.simulated) throw Object.assign(new Error('Real browser runtime is not active'), { status: 409 });
+    return runtime.protectionStatus;
+  }
+
   async agent(sessionId, operation, input = {}) {
     const runtime = this.sessions.get(sessionId);
     if (!runtime || runtime.simulated) throw Object.assign(new Error('Real browser runtime is not active'), { status: 409 });
+    if (runtime.protectionStatus.state === 'paused') {
+      throw Object.assign(new Error('Session is paused for human review'), { status: 409, code: 'HUMAN_REVIEW_REQUIRED' });
+    }
     const { page } = runtime;
     const started = Date.now();
     let result;

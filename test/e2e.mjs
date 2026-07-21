@@ -41,6 +41,51 @@ try {
   await page.screenshot({ path: path.join(outputDir, '02-live-browser.png'), fullPage: true });
   evidence.steps.push('Live browser frame plus observe, act, extract, and event stream verified');
 
+  const challengeNavigation = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/commands`, {
+    method: 'POST',
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'navigate', url: 'data:text/html,<title>Human verification</title><main><h1>Verify you are human</h1><p>Security check</p></main>' })
+  }).then((response) => response.json());
+  assert.equal(challengeNavigation.protection.state, 'challenge_detected');
+  const protection = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/protection`, {
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' }
+  }).then((response) => response.json());
+  assert.equal(protection.challenge.type, 'human_verification');
+  const challengeFrame = await fetch(`${base}/v1/sessions/${sessionsDuringRun[0].id}/live-frame`, {
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' }
+  });
+  fs.writeFileSync(path.join(outputDir, '06-protection-challenge.png'), Buffer.from(await challengeFrame.arrayBuffer()));
+  evidence.steps.push('Protection challenge detected, recorded, and handed off without circumvention');
+
+  const pausedSession = await fetch(`${base}/v1/sessions`, {
+    method: 'POST',
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ browserSettings: { protectionPolicy: { challengeBehavior: 'pause' } } })
+  }).then((response) => response.json());
+  const pausedNavigation = await fetch(`${base}/v1/sessions/${pausedSession.id}/commands`, {
+    method: 'POST',
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'navigate', url: 'data:text/html,<title>Human verification</title><h1>Verify you are human</h1>' })
+  });
+  assert.equal(pausedNavigation.status, 409);
+  assert.equal((await pausedNavigation.json()).error.code, 'HUMAN_REVIEW_REQUIRED');
+  const pausedProtection = await fetch(`${base}/v1/sessions/${pausedSession.id}/protection`, {
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me' }
+  }).then((response) => response.json());
+  assert.equal(pausedProtection.state, 'paused');
+  const blockedAgent = await fetch(`${base}/v1/sessions/${pausedSession.id}/observe`, {
+    method: 'POST',
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(blockedAgent.status, 409);
+  await fetch(`${base}/v1/sessions/${pausedSession.id}`, {
+    method: 'POST',
+    headers: { 'X-Stratus-API-Key': 'sk_stratus_dev_change_me', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'REQUEST_RELEASE' })
+  });
+  evidence.steps.push('Pause policy blocked API and agent automation pending human review');
+
   const sessionId = await page.evaluate(() => window.location.hash && document.querySelector('#commandLog p')?.textContent);
   assert.ok(sessionId);
   await page.getByRole('button', { name: 'Stop' }).click();
@@ -53,9 +98,9 @@ try {
   await page.screenshot({ path: path.join(outputDir, '03-session-history.png'), fullPage: true });
   assert.match(await page.locator('#sessionsTable').textContent(), /COMPLETED/);
   evidence.steps.push('Completed session visible in archive');
-  await page.getByRole('button', { name: 'Inspect' }).click();
+  await page.locator(`[data-inspect="${sessionsDuringRun[0].id}"]`).click();
   await page.waitForTimeout(250);
-  assert.match(await page.locator('#inspectorEvents').textContent(), /command.completed/);
+  assert.match(await page.locator('#inspectorEvents').textContent(), /protection.challenge_detected/);
   await page.screenshot({ path: path.join(outputDir, '04-session-inspector.png'), fullPage: true });
   evidence.steps.push('Session Inspector replay and event timeline verified');
 

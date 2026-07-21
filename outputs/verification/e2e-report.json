@@ -1,10 +1,12 @@
 {
-  "startedAt": "2026-07-21T19:51:17.971Z",
-  "base": "http://127.0.0.1:57030",
+  "startedAt": "2026-07-21T20:02:43.454Z",
+  "base": "http://127.0.0.1:57372",
   "steps": [
     "Dashboard overview rendered",
     "Real Chromium session launched and navigated",
     "Live browser frame plus observe, act, extract, and event stream verified",
+    "Protection challenge detected, recorded, and handed off without circumvention",
+    "Pause policy blocked API and agent automation pending human review",
     "Session released and usage recorded",
     "Completed session visible in archive",
     "Session Inspector replay and event timeline verified",
@@ -16,10 +18,10 @@
   "usage": {
     "concurrent": 0,
     "concurrentLimit": 100,
-    "browserHoursUsed": 0.0005,
+    "browserHoursUsed": 0.0013,
     "browserHoursAllowance": 500,
-    "browserHoursRemaining": 499.9995
+    "browserHoursRemaining": 499.9987
   },
   "status": "PASS",
-  "endedAt": "2026-07-21T19:51:24.858Z"
+  "endedAt": "2026-07-21T20:02:53.313Z"
 }

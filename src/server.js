@@ -100,6 +100,8 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
         return res.end(frame);
       }
+      const protectionMatch = route.match(/^\/v1\/sessions\/([^/]+)\/protection$/);
+      if (protectionMatch && req.method === 'GET') return json(res, 200, browsers.protectionStatus(protectionMatch[1]));
 
       if (route === '/v1/contexts' && req.method === 'GET') return json(res, 200, store.listContexts());
       if (route === '/v1/contexts' && req.method === 'POST') return json(res, 201, store.createContext((await readJson(req)).name));
@@ -259,6 +261,7 @@ function openApi(baseUrl) {
       '/v1/sessions/{id}/observe': { post: { summary: 'Observe interactive page elements' } },
       '/v1/sessions/{id}/act': { post: { summary: 'Act from a natural-language instruction' } },
       '/v1/sessions/{id}/extract': { post: { summary: 'Extract page content' } },
+      '/v1/sessions/{id}/protection': { get: { summary: 'Inspect detected protection challenges' } },
       '/v1/contexts': { get: { summary: 'List contexts' }, post: { summary: 'Create a context' } },
       '/v1/search': { post: { summary: 'Search the web' } }, '/v1/fetch': { post: { summary: 'Fetch a page' } },
       '/v1/functions': { get: { summary: 'List functions' }, post: { summary: 'Create a function' } },
