@@ -1,0 +1,38 @@
+app = "stratus-browser-cloud-mehek"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4100"
+  PUBLIC_BASE_URL = "https://stratus-browser-cloud-mehek.fly.dev"
+  STRATUS_DATA_DIR = "/data"
+  CHROME_EXECUTABLE_PATH = "/usr/bin/google-chrome"
+  CHROME_NO_SANDBOX = "true"
+  MAX_CONCURRENT_SESSIONS = "100"
+  BROWSER_HOUR_ALLOWANCE = "500"
+
+[[mounts]]
+  source = "stratus_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 4100
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "45s"
+    method = "GET"
+    path = "/ready"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

@@ -34,7 +34,10 @@ export class BrowserManager {
       browserServer = await chromium.launchServer({
         executablePath: config.chromePath,
         headless: true,
-        args: ['--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check']
+        args: [
+          '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
+          ...(process.env.CHROME_NO_SANDBOX === 'true' ? ['--no-sandbox'] : [])
+        ]
       });
       browser = await chromium.connect(browserServer.wsEndpoint());
       const browserContext = await browser.newContext({
