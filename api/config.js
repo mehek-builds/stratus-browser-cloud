@@ -6,8 +6,9 @@ export default function handler(request, response) {
   if (!requireMethod(request, response, ['GET'])) return;
   const authenticationConfigured = Boolean(process.env.STRATUS_API_KEY?.trim());
   response.status(200).json({
-    name: 'Stratus', mode: 'managed-free', provider: 'stratus-sandbox', configured: process.env.VERCEL_ENV !== 'production' || authenticationConfigured,
+    name: 'Stratus', mode: 'managed-free', provider: 'stratus-sandbox', configured: true,
     authenticationRequired: process.env.VERCEL_ENV === 'production' || authenticationConfigured, limits: FREE_MANAGED_LIMITS,
+    authenticationMode: authenticationConfigured ? 'api-key-or-vercel-oidc' : 'vercel-oidc',
     capabilities: ['navigate', 'click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'extract', 'screenshot'],
     localMode: { command: 'npm start', concurrentBrowsers: 100, monthlyBrowserHours: 500 },
     runtime: { isolation: 'firecracker-microvm', engine: 'chromium', orchestration: 'stratus' }

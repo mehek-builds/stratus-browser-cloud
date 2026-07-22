@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-22)
 
 ## Corpus Check
-- 23 files · ~97,137 words
+- 23 files · ~97,301 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 157 nodes · 216 edges · 22 communities detected
+- 158 nodes · 217 edges · 22 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -56,15 +56,15 @@ Nodes (6): ensureSandboxTemplate(), executeSandboxRun(), inputError(), normalize
 
 ### Community 7 - "Community 7"
 Cohesion: 0.33
-Nodes (1): FunctionRuntime
+Nodes (0):
 
 ### Community 8 - "Community 8"
-Cohesion: 0.4
-Nodes (1): Stratus
+Cohesion: 0.33
+Nodes (1): FunctionRuntime
 
 ### Community 9 - "Community 9"
 Cohesion: 0.4
-Nodes (0):
+Nodes (1): Stratus
 
 ### Community 10 - "Community 10"
 Cohesion: 0.4

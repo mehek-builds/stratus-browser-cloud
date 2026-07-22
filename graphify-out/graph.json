@@ -289,7 +289,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L1",
       "id": "index",
-      "community": 8
+      "community": 9
     },
     {
       "label": "Stratus",
@@ -297,7 +297,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L1",
       "id": "index_stratus",
-      "community": 8
+      "community": 9
     },
     {
       "label": ".constructor()",
@@ -305,7 +305,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L2",
       "id": "index_stratus_constructor",
-      "community": 8
+      "community": 9
     },
     {
       "label": ".request()",
@@ -313,7 +313,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L53",
       "id": "index_stratus_request",
-      "community": 8
+      "community": 9
     },
     {
       "label": "toBase64()",
@@ -321,7 +321,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L65",
       "id": "index_tobase64",
-      "community": 8
+      "community": 9
     },
     {
       "label": "_http.js",
@@ -329,7 +329,7 @@
       "source_file": "api/_http.js",
       "source_location": "L1",
       "id": "http",
-      "community": 9
+      "community": 7
     },
     {
       "label": "applyApiHeaders()",
@@ -337,7 +337,7 @@
       "source_file": "api/_http.js",
       "source_location": "L1",
       "id": "http_applyapiheaders",
-      "community": 9
+      "community": 7
     },
     {
       "label": "requireMethod()",
@@ -345,7 +345,7 @@
       "source_file": "api/_http.js",
       "source_location": "L8",
       "id": "http_requiremethod",
-      "community": 9
+      "community": 7
     },
     {
       "label": "authorize()",
@@ -353,15 +353,23 @@
       "source_file": "api/_http.js",
       "source_location": "L15",
       "id": "http_authorize",
-      "community": 9
+      "community": 7
     },
     {
       "label": "sendError()",
       "file_type": "code",
       "source_file": "api/_http.js",
-      "source_location": "L27",
+      "source_location": "L35",
       "id": "http_senderror",
-      "community": 9
+      "community": 7
+    },
+    {
+      "label": "verifyLitosOidcToken()",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L46",
+      "id": "http_verifylitosoidctoken",
+      "community": 7
     },
     {
       "label": "health.js",
@@ -929,7 +937,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L1",
       "id": "function_runtime",
-      "community": 7
+      "community": 8
     },
     {
       "label": "FunctionRuntime",
@@ -937,7 +945,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L4",
       "id": "function_runtime_functionruntime",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".constructor()",
@@ -945,7 +953,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L5",
       "id": "function_runtime_functionruntime_constructor",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".create()",
@@ -953,7 +961,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L10",
       "id": "function_runtime_functionruntime_create",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".list()",
@@ -961,7 +969,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L23",
       "id": "function_runtime_functionruntime_list",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".invoke()",
@@ -969,7 +977,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L28",
       "id": "function_runtime_functionruntime_invoke",
-      "community": 7
+      "community": 8
     },
     {
       "label": "browser-manager.js",
@@ -2033,12 +2041,24 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "api/_http.js",
-      "source_location": "L27",
+      "source_location": "L35",
       "weight": 1.0,
       "_src": "http",
       "_tgt": "http_senderror",
       "source": "http",
       "target": "http_senderror",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/_http.js",
+      "source_location": "L46",
+      "weight": 1.0,
+      "_src": "http",
+      "_tgt": "http_verifylitosoidctoken",
+      "source": "http",
+      "target": "http_verifylitosoidctoken",
       "confidence_score": 1.0
     },
     {
