@@ -6,3 +6,4 @@ node_modules/
 .stratus/
 npm-debug.log*
 work/
+.env*

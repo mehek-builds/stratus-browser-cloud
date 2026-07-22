@@ -4,14 +4,13 @@ Stratus is a clean-room browser-agent cloud with self-hosted and free managed de
 
 ## Free managed mode
 
-Vercel hosts a stateless Stratus control plane while Browserless runs each bounded browser task. The current free allowance is 2 concurrent browsers, 1,000 units per month, and 60 seconds per task. Free infrastructure does not supply 100 concurrent browsers or 500 browser hours. Those remain configurable self-hosted capacity targets and require paid compute.
+Vercel hosts a stateless Stratus control plane while Vercel Sandbox runs each bounded browser task in an isolated Chromium microVM. The current Hobby allowance supports up to 10 concurrent sandboxes, 5 active CPU hours per month, and 60 seconds per Stratus task. Free infrastructure does not supply 100 concurrent browsers or 500 browser hours. Those remain configurable self-hosted capacity targets and require paid compute.
 
-1. Create a free token at [Browserless](https://cloud.browserless.io/signup).
-2. Import this repository into Vercel or run `vercel link`.
-3. Add `BROWSERLESS_TOKEN` as a sensitive Vercel environment variable.
-4. Run `vercel --prod`.
+1. Import this repository into Vercel or run `vercel link`.
+2. Run `vercel env pull .env.local` for local Sandbox authentication.
+3. Run `vercel --prod`.
 
-The managed UI calls `POST /api/run` with declarative actions. Provider credentials never enter the browser. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header.
+Production authentication uses Vercel OIDC automatically, so no external browser-provider token is required. The managed UI calls `POST /api/run` with declarative actions. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header. If `BROWSERLESS_TOKEN` is configured, Stratus uses Browserless as an optional provider override.
 
 ```json
 {

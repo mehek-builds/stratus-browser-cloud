@@ -15,11 +15,11 @@
   </header>
   <main>
     <section class="hero">
-      <div><p class="eyebrow">VERCEL CONTROL PLANE / MANAGED CHROMIUM</p><h1>Run browser tasks without operating browser infrastructure.</h1><p class="hero-copy">Stratus sends a bounded, one-shot workflow to Browserless, returns structured page data and a screenshot, then closes the browser. Your provider token stays server-side.</p></div>
-      <div class="architecture" aria-label="Execution architecture"><span>YOUR APP</span><b>→</b><span>STRATUS API</span><b>→</b><span>BROWSERLESS</span></div>
+      <div><p class="eyebrow">VERCEL CONTROL PLANE / SANDBOXED CHROMIUM</p><h1>Run browser tasks without operating browser infrastructure.</h1><p class="hero-copy">Stratus forks an isolated Vercel Sandbox, runs a bounded Chromium workflow, returns structured page data and a screenshot, then destroys the worker.</p></div>
+      <div class="architecture" aria-label="Execution architecture"><span>YOUR APP</span><b>→</b><span>STRATUS API</span><b>→</b><span>VERCEL SANDBOX</span></div>
     </section>
     <section class="limit-grid" aria-label="Free plan limits">
-      <article><strong id="concurrency">2</strong><span>concurrent browsers</span></article><article><strong id="monthlyUnits">1,000</strong><span>units per month</span></article><article><strong id="runSeconds">60s</strong><span>maximum task</span></article><article><strong>$0</strong><span>card required</span></article>
+      <article><strong id="concurrency">10</strong><span>concurrent browsers</span></article><article><strong id="monthlyUnits">5</strong><span id="allowanceLabel">CPU hours per month</span></article><article><strong id="runSeconds">60s</strong><span>maximum task</span></article><article><strong>$0</strong><span>monthly base cost</span></article>
     </section>
     <section id="setupPanel" class="setup hidden">
       <div><p class="eyebrow">ONE-TIME SETUP</p><h2>Connect the free Browserless provider</h2><p>Create a free Browserless account, then add its token as <code>BROWSERLESS_TOKEN</code> in the Vercel project. Redeploying is automatic after an environment change.</p></div>

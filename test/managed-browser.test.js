@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { browserlessConfiguration, executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions } from '../src/managed-browser.js';
+import { browserlessConfiguration, executeManagedRun, FREE_MANAGED_LIMITS, managedProvider, normalizeManagedActions } from '../src/managed-browser.js';
 
 test('managed free limits are explicit and do not claim paid capacity', () => {
-  assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 2, monthlyUnits: 1000, maxRunSeconds: 60, persistedDays: 1 });
+  assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 10, monthlyCpuHours: 5, maxRunSeconds: 60, persistedDays: 30 });
 });
 
 test('managed actions accept bounded declarative operations', () => {
@@ -23,6 +23,8 @@ test('managed actions accept bounded declarative operations', () => {
 test('provider configuration stays server-side', () => {
   assert.deepEqual(browserlessConfiguration({}), { configured: false, token: undefined, endpoint: 'https://production-sfo.browserless.io' });
   assert.equal(browserlessConfiguration({ BROWSERLESS_TOKEN: 'secret' }).configured, true);
+  assert.equal(managedProvider({}), 'vercel-sandbox');
+  assert.equal(managedProvider({ BROWSERLESS_TOKEN: 'secret' }), 'browserless');
 });
 
 test('managed run sends trusted function code and returns provider data', async () => {
@@ -40,6 +42,9 @@ test('managed run sends trusted function code and returns provider data', async 
   assert.match(captured.body.code, /export default async function/);
 });
 
-test('managed run reports missing provider configuration clearly', async () => {
-  await assert.rejects(executeManagedRun({ url: 'https://example.com' }, { env: {} }), (error) => error.status === 503 && error.code === 'PROVIDER_NOT_CONFIGURED');
+test('managed run falls back to Vercel Sandbox without a provider token', async () => {
+  const sandboxExecutor = async (input) => ({ title: 'Sandbox', url: input.url, screenshot: 'sandbox-image' });
+  const result = await executeManagedRun({ url: 'https://example.com' }, { env: {}, sandboxExecutor });
+  assert.equal(result.title, 'Sandbox');
+  assert.equal(result.screenshot, 'sandbox-image');
 });

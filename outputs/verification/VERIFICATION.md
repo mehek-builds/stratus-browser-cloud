@@ -24,6 +24,8 @@ The verified flow covers:
 14. Browserless Function API request and response contract using an isolated provider double
 15. Production Vercel UI rendering with no browser console errors
 16. Authenticated public CDP relay connection to the running self-hosted browser
+17. Real Vercel Sandbox microVM fork, Chromium launch, navigation, extraction, screenshot, and worker cleanup
+18. Local dashboard trial through UI, `/api/run`, Sandbox Chromium, API response, and screenshot rendering
 
 ## Capacity contract
 
@@ -36,12 +38,12 @@ This verifies the control-plane capacity contract. Running 100 live Chrome proce
 
 ## Free managed capacity
 
-- Concurrent browsers: 2
-- Monthly Browserless units: 1,000
+- Concurrent sandboxes: 10
+- Monthly active CPU allowance: 5 hours
 - Maximum task duration: 60 seconds
 - Vercel production URL: `https://stratus-browser-cloud.vercel.app`
 
-The Vercel control plane is live. The production provider status remains intentionally disabled until a Browserless free-tier token is added as `BROWSERLESS_TOKEN`. Tokens are server-only and are never exposed to the dashboard.
+The default managed provider is Vercel Sandbox with automatic OIDC authentication. A persistent template snapshot contains Playwright, Chromium, and the required Amazon Linux browser libraries. Every task forks an isolated disposable worker from that snapshot and destroys it after returning the result.
 
 ## Evidence
 
@@ -53,6 +55,9 @@ The Vercel control plane is live. The production provider status remains intenti
 - `06-protection-challenge.png`: detected human-verification challenge
 - `09-vercel-free-local.png`: local Vercel managed-mode rendering
 - `10-vercel-free-production.png`: live production managed-mode rendering
+- `11-sandbox-runtime-probe.png`: direct Sandbox adapter Chromium result
+- `12-local-api-sandbox-run.png`: local HTTP API to Sandbox Chromium result
+- `13-local-ui-sandbox-complete.png`: completed dashboard trial with rendered result
 - `e2e-report.json`: machine-readable E2E result
 
 ## Reproduce

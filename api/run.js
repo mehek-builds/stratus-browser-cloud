@@ -1,7 +1,7 @@
 import { applyApiHeaders, authorize, requireMethod, sendError } from './_http.js';
 import { executeManagedRun } from '../src/managed-browser.js';
 
-export const config = { maxDuration: 60 };
+export const config = { maxDuration: 300 };
 
 export default async function handler(request, response) {
   applyApiHeaders(response);

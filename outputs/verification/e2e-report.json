@@ -1,6 +1,6 @@
 {
-  "startedAt": "2026-07-22T09:19:36.166Z",
-  "base": "http://127.0.0.1:50780",
+  "startedAt": "2026-07-22T09:32:44.836Z",
+  "base": "http://127.0.0.1:51378",
   "steps": [
     "Dashboard overview rendered",
     "Real Chromium session launched and navigated",
@@ -21,10 +21,10 @@
   "usage": {
     "concurrent": 0,
     "concurrentLimit": 100,
-    "browserHoursUsed": 0.0008,
+    "browserHoursUsed": 0.001,
     "browserHoursAllowance": 500,
-    "browserHoursRemaining": 499.9992
+    "browserHoursRemaining": 499.999
   },
   "status": "PASS",
-  "endedAt": "2026-07-22T09:19:46.053Z"
+  "endedAt": "2026-07-22T09:32:55.808Z"
 }
