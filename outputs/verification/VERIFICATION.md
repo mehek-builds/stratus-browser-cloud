@@ -23,6 +23,7 @@ The verified flow covers:
 13. Managed action validation and rejection of arbitrary caller code
 14. Browserless Function API request and response contract using an isolated provider double
 15. Production Vercel UI rendering with no browser console errors
+16. Authenticated public CDP relay connection to the running self-hosted browser
 
 ## Capacity contract
 

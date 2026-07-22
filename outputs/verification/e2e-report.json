@@ -1,9 +1,10 @@
 {
-  "startedAt": "2026-07-22T09:17:10.154Z",
-  "base": "http://127.0.0.1:50677",
+  "startedAt": "2026-07-22T09:19:36.166Z",
+  "base": "http://127.0.0.1:50780",
   "steps": [
     "Dashboard overview rendered",
     "Real Chromium session launched and navigated",
+    "Public authenticated CDP relay connected to the running browser",
     "Live browser frame plus observe, act, extract, and event stream verified",
     "Protection challenge detected, recorded, and handed off without circumvention",
     "Pause policy blocked API and agent automation pending human review",
@@ -25,5 +26,5 @@
     "browserHoursRemaining": 499.9992
   },
   "status": "PASS",
-  "endedAt": "2026-07-22T09:17:20.042Z"
+  "endedAt": "2026-07-22T09:19:46.053Z"
 }

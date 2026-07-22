@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { config, regions } from './config.js';
 import { Store } from './store.js';
 import { BrowserManager } from './browser-manager.js';
@@ -103,7 +103,10 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         const body = await readJson(req);
         if (body.region && !regions.includes(body.region)) throw Object.assign(new Error(`region must be one of ${regions.join(', ')}`), { status: 400 });
         const session = store.reserveSession(body);
-        const launched = await browsers.launch(session, { simulated: Boolean(body.simulated && config.testMode) });
+        const requestBaseUrl = config.testMode
+          ? `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`
+          : config.publicBaseUrl;
+        const launched = await browsers.launch(session, { simulated: Boolean(body.simulated && config.testMode), publicBaseUrl: requestBaseUrl });
         await dispatchWebhooks(store, 'session.started', launched).catch(() => {});
         return json(res, 201, launched);
       }
@@ -308,13 +311,25 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
   });
 
   const wss = new WebSocketServer({ noServer: true });
+  const cdpWss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, config.publicBaseUrl);
-    const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/live$/);
-    if (!match) return socket.destroy();
     const apiKey = url.searchParams.get('apiKey');
+    const cdpMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/cdp$/);
+    if (cdpMatch) {
+      if (!browsers.authenticateTransport(cdpMatch[1], apiKey)) return socket.destroy();
+      let endpoint;
+      try {
+        endpoint = browsers.cdpEndpoint(cdpMatch[1]);
+      } catch {
+        return socket.destroy();
+      }
+      return cdpWss.handleUpgrade(req, socket, head, (ws) => cdpWss.emit('connection', ws, endpoint));
+    }
     if (!store.authenticate(apiKey)) return socket.destroy();
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, match[1]));
+    const liveMatch = url.pathname.match(/^\/v1\/sessions\/([^/]+)\/live$/);
+    if (liveMatch) return wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, liveMatch[1]));
+    return socket.destroy();
   });
   wss.on('connection', (ws, sessionId) => {
     if (!subscribers.has(sessionId)) subscribers.set(sessionId, new Set());
@@ -322,11 +337,36 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
     ws.send(JSON.stringify({ type: 'connected', sessionId }));
     ws.on('close', () => subscribers.get(sessionId)?.delete(ws));
   });
+  cdpWss.on('connection', (client, endpoint) => {
+    const upstream = new WebSocket(endpoint);
+    const pending = [];
+    client.on('message', (data, isBinary) => {
+      if (upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+      else if (upstream.readyState === WebSocket.CONNECTING) pending.push([data, isBinary]);
+    });
+    upstream.on('open', () => {
+      for (const [data, isBinary] of pending.splice(0)) upstream.send(data, { binary: isBinary });
+    });
+    upstream.on('message', (data, isBinary) => {
+      if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+    });
+    const closeUpstream = () => {
+      if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
+    };
+    const closeClient = () => {
+      if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) client.close();
+    };
+    client.on('close', closeUpstream);
+    client.on('error', closeUpstream);
+    upstream.on('close', closeClient);
+    upstream.on('error', closeClient);
+  });
 
   async function close() {
     await browsers.closeAll();
     await new Promise((resolve) => server.close(resolve));
     wss.close();
+    cdpWss.close();
     store.db.close();
   }
 

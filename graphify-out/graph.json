@@ -495,7 +495,7 @@
       "label": "requirePermission()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L342",
+      "source_location": "L382",
       "id": "server_requirepermission",
       "community": 4
     },
@@ -503,7 +503,7 @@
       "label": "mapSettings()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L350",
+      "source_location": "L390",
       "id": "server_mapsettings",
       "community": 4
     },
@@ -511,7 +511,7 @@
       "label": "serveStatic()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L358",
+      "source_location": "L398",
       "id": "server_servestatic",
       "community": 4
     },
@@ -519,7 +519,7 @@
       "label": "serveArtifact()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L372",
+      "source_location": "L412",
       "id": "server_serveartifact",
       "community": 4
     },
@@ -527,7 +527,7 @@
       "label": "searchWeb()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L380",
+      "source_location": "L420",
       "id": "server_searchweb",
       "community": 4
     },
@@ -535,7 +535,7 @@
       "label": "dispatchWebhooks()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L394",
+      "source_location": "L434",
       "id": "server_dispatchwebhooks",
       "community": 4
     },
@@ -543,7 +543,7 @@
       "label": "openApi()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L410",
+      "source_location": "L450",
       "id": "server_openapi",
       "community": 4
     },
@@ -551,7 +551,7 @@
       "label": "shutdown()",
       "file_type": "code",
       "source_file": "src/server.js",
-      "source_location": "L440",
+      "source_location": "L480",
       "id": "server_shutdown",
       "community": 4
     },
@@ -785,7 +785,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L1",
       "id": "agent_runtime",
-      "community": 2
+      "community": 3
     },
     {
       "label": "AgentRuntime",
@@ -793,7 +793,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L3",
       "id": "agent_runtime_agentruntime",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".constructor()",
@@ -801,7 +801,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L4",
       "id": "agent_runtime_agentruntime_constructor",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".list()",
@@ -809,7 +809,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L9",
       "id": "agent_runtime_agentruntime_list",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".get()",
@@ -817,7 +817,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L13",
       "id": "agent_runtime_agentruntime_get",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".create()",
@@ -825,7 +825,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L18",
       "id": "agent_runtime_agentruntime_create",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".update()",
@@ -833,7 +833,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L34",
       "id": "agent_runtime_agentruntime_update",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".delete()",
@@ -841,7 +841,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L43",
       "id": "agent_runtime_agentruntime_delete",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".runs()",
@@ -849,7 +849,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L48",
       "id": "agent_runtime_agentruntime_runs",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".getRun()",
@@ -857,7 +857,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L52",
       "id": "agent_runtime_agentruntime_getrun",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".messages()",
@@ -865,7 +865,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L57",
       "id": "agent_runtime_agentruntime_messages",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".run()",
@@ -873,7 +873,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L62",
       "id": "agent_runtime_agentruntime_run",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".stop()",
@@ -881,7 +881,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L91",
       "id": "agent_runtime_agentruntime_stop",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".complete()",
@@ -889,7 +889,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L100",
       "id": "agent_runtime_agentruntime_complete",
-      "community": 2
+      "community": 3
     },
     {
       "label": ".addMessage()",
@@ -897,7 +897,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L106",
       "id": "agent_runtime_agentruntime_addmessage",
-      "community": 2
+      "community": 3
     },
     {
       "label": "mapAgent()",
@@ -905,7 +905,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L112",
       "id": "agent_runtime_mapagent",
-      "community": 2
+      "community": 3
     },
     {
       "label": "mapRun()",
@@ -913,7 +913,7 @@
       "source_file": "src/agent-runtime.js",
       "source_location": "L120",
       "id": "agent_runtime_maprun",
-      "community": 2
+      "community": 3
     },
     {
       "label": "function-runtime.js",
@@ -969,119 +969,151 @@
       "source_file": "src/browser-manager.js",
       "source_location": "L1",
       "id": "browser_manager",
-      "community": 3
+      "community": 2
     },
     {
       "label": "BrowserManager",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L9",
+      "source_location": "L10",
       "id": "browser_manager_browsermanager",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".constructor()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L10",
+      "source_location": "L11",
       "id": "browser_manager_browsermanager_constructor",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".launch()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L16",
+      "source_location": "L17",
       "id": "browser_manager_browsermanager_launch",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".wirePage()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L78",
+      "source_location": "L83",
       "id": "browser_manager_browsermanager_wirepage",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".emit()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L93",
+      "source_location": "L98",
       "id": "browser_manager_browsermanager_emit",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".command()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L99",
+      "source_location": "L104",
       "id": "browser_manager_browsermanager_command",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".paceNavigation()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L170",
+      "source_location": "L175",
       "id": "browser_manager_browsermanager_pacenavigation",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".inspectProtection()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L175",
+      "source_location": "L180",
       "id": "browser_manager_browsermanager_inspectprotection",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".protectionStatus()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L208",
+      "source_location": "L213",
       "id": "browser_manager_browsermanager_protectionstatus",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".agent()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L214",
+      "source_location": "L219",
       "id": "browser_manager_browsermanager_agent",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".liveFrame()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L267",
+      "source_location": "L272",
       "id": "browser_manager_browsermanager_liveframe",
-      "community": 3
+      "community": 2
+    },
+    {
+      "label": ".cdpEndpoint()",
+      "file_type": "code",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L283",
+      "id": "browser_manager_browsermanager_cdpendpoint",
+      "community": 2
+    },
+    {
+      "label": ".authenticateTransport()",
+      "file_type": "code",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L291",
+      "id": "browser_manager_browsermanager_authenticatetransport",
+      "community": 2
     },
     {
       "label": ".release()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L278",
+      "source_location": "L299",
       "id": "browser_manager_browsermanager_release",
-      "community": 3
+      "community": 2
     },
     {
       "label": ".closeAll()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L296",
+      "source_location": "L317",
       "id": "browser_manager_browsermanager_closeall",
-      "community": 3
+      "community": 2
     },
     {
       "label": "boundedClose()",
       "file_type": "code",
       "source_file": "src/browser-manager.js",
-      "source_location": "L301",
+      "source_location": "L322",
       "id": "browser_manager_boundedclose",
-      "community": 3
+      "community": 2
+    },
+    {
+      "label": "availablePort()",
+      "file_type": "code",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L329",
+      "id": "browser_manager_availableport",
+      "community": 2
+    },
+    {
+      "label": "readCdpEndpoint()",
+      "file_type": "code",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L341",
+      "id": "browser_manager_readcdpendpoint",
+      "community": 2
     },
     {
       "label": "managed-browser.js",
@@ -2129,7 +2161,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L342",
+      "source_location": "L382",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_requirepermission",
@@ -2141,7 +2173,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L350",
+      "source_location": "L390",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_mapsettings",
@@ -2153,7 +2185,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L358",
+      "source_location": "L398",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_servestatic",
@@ -2165,7 +2197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L372",
+      "source_location": "L412",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_serveartifact",
@@ -2177,7 +2209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L380",
+      "source_location": "L420",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_searchweb",
@@ -2189,7 +2221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L394",
+      "source_location": "L434",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_dispatchwebhooks",
@@ -2201,7 +2233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L410",
+      "source_location": "L450",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_openapi",
@@ -2213,7 +2245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/server.js",
-      "source_location": "L440",
+      "source_location": "L480",
       "weight": 1.0,
       "_src": "server",
       "_tgt": "server_shutdown",
@@ -3197,7 +3229,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L9",
+      "source_location": "L10",
       "weight": 1.0,
       "_src": "browser_manager",
       "_tgt": "browser_manager_browsermanager",
@@ -3209,7 +3241,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L301",
+      "source_location": "L322",
       "weight": 1.0,
       "_src": "browser_manager",
       "_tgt": "browser_manager_boundedclose",
@@ -3218,10 +3250,34 @@
       "confidence_score": 1.0
     },
     {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L329",
+      "weight": 1.0,
+      "_src": "browser_manager",
+      "_tgt": "browser_manager_availableport",
+      "source": "browser_manager",
+      "target": "browser_manager_availableport",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L341",
+      "weight": 1.0,
+      "_src": "browser_manager",
+      "_tgt": "browser_manager_readcdpendpoint",
+      "source": "browser_manager",
+      "target": "browser_manager_readcdpendpoint",
+      "confidence_score": 1.0
+    },
+    {
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L10",
+      "source_location": "L11",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_constructor",
@@ -3233,7 +3289,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L16",
+      "source_location": "L17",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_launch",
@@ -3245,7 +3301,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L78",
+      "source_location": "L83",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_wirepage",
@@ -3257,7 +3313,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L93",
+      "source_location": "L98",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3269,7 +3325,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L99",
+      "source_location": "L104",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_command",
@@ -3281,7 +3337,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L170",
+      "source_location": "L175",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_pacenavigation",
@@ -3293,7 +3349,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L175",
+      "source_location": "L180",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_inspectprotection",
@@ -3305,7 +3361,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L208",
+      "source_location": "L213",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_protectionstatus",
@@ -3317,7 +3373,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L214",
+      "source_location": "L219",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_agent",
@@ -3329,7 +3385,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L267",
+      "source_location": "L272",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_liveframe",
@@ -3341,7 +3397,31 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L278",
+      "source_location": "L283",
+      "weight": 1.0,
+      "_src": "browser_manager_browsermanager",
+      "_tgt": "browser_manager_browsermanager_cdpendpoint",
+      "source": "browser_manager_browsermanager",
+      "target": "browser_manager_browsermanager_cdpendpoint",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L291",
+      "weight": 1.0,
+      "_src": "browser_manager_browsermanager",
+      "_tgt": "browser_manager_browsermanager_authenticatetransport",
+      "source": "browser_manager_browsermanager",
+      "target": "browser_manager_browsermanager_authenticatetransport",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L299",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_release",
@@ -3353,7 +3433,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L296",
+      "source_location": "L317",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager",
       "_tgt": "browser_manager_browsermanager_closeall",
@@ -3365,7 +3445,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L24",
+      "source_location": "L25",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_launch",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3377,7 +3457,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L54",
+      "source_location": "L35",
+      "weight": 1.0,
+      "_src": "browser_manager_browsermanager_launch",
+      "_tgt": "browser_manager_availableport",
+      "source": "browser_manager_browsermanager_launch",
+      "target": "browser_manager_availableport",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L57",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_launch",
       "_tgt": "browser_manager_browsermanager_wirepage",
@@ -3389,7 +3481,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L70",
+      "source_location": "L59",
+      "weight": 1.0,
+      "_src": "browser_manager_browsermanager_launch",
+      "_tgt": "browser_manager_readcdpendpoint",
+      "source": "browser_manager_browsermanager_launch",
+      "target": "browser_manager_readcdpendpoint",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/browser-manager.js",
+      "source_location": "L75",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_launch",
       "_tgt": "browser_manager_boundedclose",
@@ -3401,7 +3505,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L160",
+      "source_location": "L165",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_command",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3413,7 +3517,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L204",
+      "source_location": "L209",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_inspectprotection",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3425,7 +3529,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L263",
+      "source_location": "L268",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_agent",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3437,7 +3541,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L292",
+      "source_location": "L313",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_release",
       "_tgt": "browser_manager_browsermanager_emit",
@@ -3449,7 +3553,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L111",
+      "source_location": "L116",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_command",
       "_tgt": "browser_manager_browsermanager_pacenavigation",
@@ -3461,7 +3565,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L114",
+      "source_location": "L119",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_command",
       "_tgt": "browser_manager_browsermanager_inspectprotection",
@@ -3473,7 +3577,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/browser-manager.js",
-      "source_location": "L288",
+      "source_location": "L309",
       "weight": 1.0,
       "_src": "browser_manager_browsermanager_release",
       "_tgt": "browser_manager_boundedclose",

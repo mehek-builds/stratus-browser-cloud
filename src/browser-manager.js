@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { chromium } from 'playwright-core';
 import { config } from './config.js';
 import { now } from './utils.js';
@@ -13,7 +14,7 @@ export class BrowserManager {
     this.sessions = new Map();
   }
 
-  async launch(session, { simulated = false } = {}) {
+  async launch(session, { simulated = false, publicBaseUrl = config.publicBaseUrl } = {}) {
     if (simulated) {
       const running = this.store.updateSession(session.id, {
         status: 'RUNNING', startedAt: now(), signingKey: crypto.randomBytes(18).toString('hex'),
@@ -31,11 +32,13 @@ export class BrowserManager {
       const context = session.contextId ? this.store.getContext(session.contextId) : null;
       const settings = session.browserSettings || {};
       const protectionPolicy = normalizeProtectionPolicy(settings.protectionPolicy);
+      const cdpPort = await availablePort();
       browserServer = await chromium.launchServer({
         executablePath: config.chromePath,
         headless: true,
         args: [
           '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
+          `--remote-debugging-port=${cdpPort}`,
           ...(process.env.CHROME_NO_SANDBOX === 'true' ? ['--no-sandbox'] : [])
         ]
       });
@@ -53,14 +56,16 @@ export class BrowserManager {
       const page = await browserContext.newPage();
       this.wirePage(session.id, page);
       const signingKey = crypto.randomBytes(18).toString('hex');
+      const cdpEndpoint = await readCdpEndpoint(cdpPort);
       const running = this.store.updateSession(session.id, {
         status: 'RUNNING', startedAt: now(), signingKey,
-        connectUrl: browserServer.wsEndpoint(),
+        connectUrl: `${publicBaseUrl.replace(/^http/, 'ws')}/v1/sessions/${session.id}/cdp?apiKey=${encodeURIComponent(signingKey)}`,
         seleniumRemoteUrl: `${config.publicBaseUrl}/selenium/${session.id}`
       });
       const timer = setTimeout(() => this.release(session.id, 'TIMED_OUT'), Math.max(1, new Date(session.expiresAt).getTime() - Date.now()));
       this.sessions.set(session.id, {
         browser, browserServer, context: browserContext, page, timer, signingKey,
+        cdpEndpoint,
         protectionPolicy, lastNavigationAt: 0, protectionStatus: { state: 'clear', challenge: null }
       });
       this.emit(session.id, 'session.started', { region: session.region, viewport: settings.viewport || { width: 1440, height: 900 } });
@@ -275,6 +280,22 @@ export class BrowserManager {
     }
   }
 
+  cdpEndpoint(sessionId) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime || runtime.simulated || !runtime.cdpEndpoint) {
+      throw Object.assign(new Error('Real browser runtime is not active'), { status: 409 });
+    }
+    return runtime.cdpEndpoint;
+  }
+
+  authenticateTransport(sessionId, token) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime?.signingKey || typeof token !== 'string') return false;
+    const expected = Buffer.from(runtime.signingKey);
+    const received = Buffer.from(token);
+    return expected.length === received.length && crypto.timingSafeEqual(expected, received);
+  }
+
   async release(sessionId, status = 'COMPLETED') {
     const runtime = this.sessions.get(sessionId);
     const session = this.store.getSession(sessionId);
@@ -303,4 +324,33 @@ async function boundedClose(close) {
     Promise.resolve().then(close).catch(() => {}),
     new Promise((resolve) => setTimeout(resolve, 3000))
   ]);
+}
+
+async function availablePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  if (!address || typeof address === 'string') throw new Error('Could not allocate a CDP port');
+  return address.port;
+}
+
+async function readCdpEndpoint(port) {
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) {
+        const version = await response.json();
+        if (version.webSocketDebuggerUrl) return version.webSocketDebuggerUrl;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Chromium CDP endpoint was not ready${lastError instanceof Error ? `: ${lastError.message}` : ''}`);
 }
