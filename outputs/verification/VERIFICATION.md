@@ -26,6 +26,8 @@ The verified flow covers:
 16. Authenticated public CDP relay connection to the running self-hosted browser
 17. Real Vercel Sandbox microVM fork, Chromium launch, navigation, extraction, screenshot, and worker cleanup
 18. Local dashboard trial through UI, `/api/run`, Sandbox Chromium, API response, and screenshot rendering
+19. Production API trial through Vercel Function, Sandbox fork, Chromium, extraction, and screenshot response
+20. Production dashboard click-through with completed task rendering and zero browser console errors
 
 ## Capacity contract
 
@@ -58,6 +60,8 @@ The default managed provider is Vercel Sandbox with automatic OIDC authenticatio
 - `11-sandbox-runtime-probe.png`: direct Sandbox adapter Chromium result
 - `12-local-api-sandbox-run.png`: local HTTP API to Sandbox Chromium result
 - `13-local-ui-sandbox-complete.png`: completed dashboard trial with rendered result
+- `14-production-api-sandbox-run.png`: screenshot returned by the live production API
+- `15-production-ui-sandbox-complete.png`: completed live production dashboard trial
 - `e2e-report.json`: machine-readable E2E result
 
 ## Reproduce
