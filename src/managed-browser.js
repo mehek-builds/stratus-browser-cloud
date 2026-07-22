@@ -8,9 +8,10 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
-const ALLOWED_ACTIONS = new Set(['click', 'fill', 'waitForSelector', 'press', 'select', 'extract']);
-const MAX_ACTIONS = 20;
+const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract']);
+const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
+const MAX_FILE_BASE64_LENGTH = 6_000_000;
 
 const SANDBOX_NAME = 'stratus-browser-runtime';
 const SANDBOX_DEPENDENCIES = [
@@ -33,23 +34,72 @@ const { chromium } = require('playwright');
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
     const extracted = [];
+    const filledFields = [];
     for (const action of input.actions || []) {
-      if (action.type === 'click') await page.click(action.selector);
-      if (action.type === 'fill') await page.fill(action.selector, action.value || '');
+      const locator = action.selector ? page.locator(action.selector).first() : null;
+      if (locator && action.optional && await locator.count() === 0) continue;
+      if (action.type === 'click') {
+        await locator.click();
+        await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+      }
+      if (action.type === 'fill') {
+        await locator.fill(action.value || '');
+        if (action.label) filledFields.push(action.label);
+      }
+      if (action.type === 'fillByLabelText') {
+        const label = page.getByText(action.text, { exact: false }).first();
+        if (await label.count() === 0) continue;
+        const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
+        const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
+        if (await field.count() === 0) continue;
+        if (await field.evaluate((element) => element.tagName.toLowerCase()) === 'select') {
+          await field.selectOption({ label: action.value }).catch(() => field.selectOption(action.value));
+        } else {
+          await field.fill(action.value || '');
+        }
+        if (action.label) filledFields.push(action.label);
+      }
+      if (action.type === 'upload') {
+        await locator.setInputFiles({
+          name: action.file.name,
+          mimeType: action.file.mimeType,
+          buffer: Buffer.from(action.file.base64, 'base64')
+        });
+        if (action.label) filledFields.push(action.label);
+      }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
       if (action.type === 'press') await page.keyboard.press(action.value);
-      if (action.type === 'select') await page.selectOption(action.selector, action.value);
+      if (action.type === 'select') {
+        await locator.selectOption(action.value);
+        if (action.label) filledFields.push(action.label);
+      }
       if (action.type === 'extract') {
-        const value = await page.locator(action.selector).evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
+        const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
         extracted.push({ selector: action.selector, value });
       }
+    }
+    const blockers = [];
+    if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
+      blockers.push('CAPTCHA requires your attention');
+    }
+    const required = page.locator('input[required], textarea[required], select[required]');
+    for (let index = 0; index < await required.count(); index += 1) {
+      const field = required.nth(index);
+      if (!await field.isVisible().catch(() => false)) continue;
+      const state = await field.evaluate((element) => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'filled' : '';
+        return 'value' in element ? String(element.value || '') : '';
+      });
+      if (state) continue;
+      const name = await field.getAttribute('aria-label') || await field.getAttribute('name') || 'required field';
+      blockers.push(String(name).slice(0, 120) + ' is required');
     }
     const title = await page.title();
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
     const links = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map((link) => ({ text: (link.innerText || link.textContent || '').trim().slice(0, 500), href: link.href })));
     if (input.screenshot) await page.screenshot({ path: 'stratus-screenshot.png', fullPage: Boolean(input.fullPage) });
-    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], elapsedMs: Date.now() - startedAt }));
   } finally {
     await browser.close();
   }
@@ -78,12 +128,34 @@ export function normalizeManagedActions(actions = []) {
       throw inputError(`Action ${index + 1} has an unsupported type`, 'INVALID_ACTION');
     }
     const normalized = { type: action.type };
-    if (action.type !== 'press') normalized.selector = validateSelector(action.selector);
+    if (!['press', 'fillByLabelText'].includes(action.type)) normalized.selector = validateSelector(action.selector);
+    if (action.optional != null) normalized.optional = Boolean(action.optional);
+    if (action.label != null) {
+      if (typeof action.label !== 'string' || action.label.length > 200) throw inputError('Action labels must be strings no longer than 200 characters', 'INVALID_ACTION_LABEL');
+      normalized.label = action.label;
+    }
     if (['fill', 'press', 'select'].includes(action.type)) {
       if (typeof action.value !== 'string' || action.value.length > MAX_VALUE_LENGTH) {
         throw inputError(`Action ${index + 1} requires a string value no longer than ${MAX_VALUE_LENGTH} characters`, 'INVALID_ACTION_VALUE');
       }
       normalized.value = action.value;
+    }
+    if (action.type === 'fillByLabelText') {
+      if (typeof action.text !== 'string' || !action.text.trim() || action.text.length > 500) throw inputError('Question text must be a non-empty string no longer than 500 characters', 'INVALID_ACTION_TEXT');
+      if (typeof action.value !== 'string' || action.value.length > MAX_VALUE_LENGTH) throw inputError('Question answers must be strings no longer than 10000 characters', 'INVALID_ACTION_VALUE');
+      normalized.text = action.text.trim();
+      normalized.value = action.value;
+    }
+    if (action.type === 'upload') {
+      const file = action.file;
+      if (!file || typeof file !== 'object') throw inputError('Upload actions require a file', 'INVALID_UPLOAD');
+      if (typeof file.name !== 'string' || !file.name.trim() || file.name.length > 255) throw inputError('Upload file names must be non-empty strings no longer than 255 characters', 'INVALID_UPLOAD');
+      if (typeof file.mimeType !== 'string' || !file.mimeType.trim() || file.mimeType.length > 200) throw inputError('Upload MIME types must be non-empty strings no longer than 200 characters', 'INVALID_UPLOAD');
+      if (
+        typeof file.base64 !== 'string' || !file.base64 || file.base64.length > MAX_FILE_BASE64_LENGTH ||
+        file.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(file.base64)
+      ) throw inputError('Upload file data must be valid non-empty base64 no longer than 6000000 characters', 'INVALID_UPLOAD');
+      normalized.file = { name: file.name.trim(), mimeType: file.mimeType.trim(), base64: file.base64 };
     }
     if (action.type === 'waitForSelector') normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     if (action.type === 'extract' && action.attribute != null) {
