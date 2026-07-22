@@ -1,11 +1,11 @@
 # Graph Report - .  (2026-07-22)
 
 ## Corpus Check
-- 22 files · ~96,951 words
+- 23 files · ~97,137 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 155 nodes · 215 edges · 21 communities detected
+- 157 nodes · 216 edges · 22 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -110,20 +110,26 @@ Nodes (0):
 Cohesion: 1.0
 Nodes (0):
 
+### Community 21 - "Community 21"
+Cohesion: 1.0
+Nodes (0):
+
 ## Knowledge Gaps
 - **Thin community `Community 14`** (2 nodes): `managed-browser.test.js`, `sandboxExecutor()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 15`** (2 nodes): `health.js`, `handler()`
+- **Thin community `Community 15`** (2 nodes): `http-auth.test.js`, `responseRecorder()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 16`** (2 nodes): `run.js`, `handler()`
+- **Thin community `Community 16`** (2 nodes): `health.js`, `handler()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 17`** (2 nodes): `config.js`, `handler()`
+- **Thin community `Community 17`** (2 nodes): `run.js`, `handler()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 18`** (1 nodes): `protection-policy.test.js`
+- **Thin community `Community 18`** (2 nodes): `config.js`, `handler()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 19`** (1 nodes): `store.test.js`
+- **Thin community `Community 19`** (1 nodes): `protection-policy.test.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 20`** (1 nodes): `stratus.js`
+- **Thin community `Community 20`** (1 nodes): `store.test.js`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 21`** (1 nodes): `stratus.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions

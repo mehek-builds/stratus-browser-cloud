@@ -14,7 +14,11 @@ export function requireMethod(request, response, methods) {
 
 export function authorize(request, response, env = process.env) {
   const expected = env.STRATUS_API_KEY?.trim();
-  if (!expected) return true;
+  if (!expected) {
+    if (env.VERCEL_ENV !== 'production') return true;
+    response.status(503).json({ error: { code: 'AUTH_NOT_CONFIGURED', message: 'Stratus production authentication is not configured' } });
+    return false;
+  }
   if (request.headers['x-stratus-api-key'] === expected) return true;
   response.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'A valid X-Stratus-API-Key header is required' } });
   return false;

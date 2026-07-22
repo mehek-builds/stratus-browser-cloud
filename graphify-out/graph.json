@@ -49,7 +49,7 @@
       "source_file": "test/protection-policy.test.js",
       "source_location": "L1",
       "id": "protection_policy_test",
-      "community": 18
+      "community": 19
     },
     {
       "label": "store.test.js",
@@ -57,7 +57,23 @@
       "source_file": "test/store.test.js",
       "source_location": "L1",
       "id": "store_test",
-      "community": 19
+      "community": 20
+    },
+    {
+      "label": "http-auth.test.js",
+      "file_type": "code",
+      "source_file": "test/http-auth.test.js",
+      "source_location": "L1",
+      "id": "http_auth_test",
+      "community": 15
+    },
+    {
+      "label": "responseRecorder()",
+      "file_type": "code",
+      "source_file": "test/http-auth.test.js",
+      "source_location": "L5",
+      "id": "http_auth_test_responserecorder",
+      "community": 15
     },
     {
       "label": "stratus.js",
@@ -65,7 +81,7 @@
       "source_file": "bin/stratus.js",
       "source_location": "L1",
       "id": "stratus",
-      "community": 20
+      "community": 21
     },
     {
       "label": "free.js",
@@ -343,7 +359,7 @@
       "label": "sendError()",
       "file_type": "code",
       "source_file": "api/_http.js",
-      "source_location": "L23",
+      "source_location": "L27",
       "id": "http_senderror",
       "community": 9
     },
@@ -353,7 +369,7 @@
       "source_file": "api/health.js",
       "source_location": "L1",
       "id": "health",
-      "community": 15
+      "community": 16
     },
     {
       "label": "handler()",
@@ -361,7 +377,7 @@
       "source_file": "api/health.js",
       "source_location": "L3",
       "id": "health_handler",
-      "community": 15
+      "community": 16
     },
     {
       "label": "run.js",
@@ -369,7 +385,7 @@
       "source_file": "api/run.js",
       "source_location": "L1",
       "id": "run",
-      "community": 16
+      "community": 17
     },
     {
       "label": "handler()",
@@ -377,7 +393,7 @@
       "source_file": "api/run.js",
       "source_location": "L6",
       "id": "run_handler",
-      "community": 16
+      "community": 17
     },
     {
       "label": "config.js",
@@ -385,7 +401,7 @@
       "source_file": "src/config.js",
       "source_location": "L1",
       "id": "config",
-      "community": 17
+      "community": 18
     },
     {
       "label": "handler()",
@@ -393,7 +409,7 @@
       "source_file": "api/config.js",
       "source_location": "L4",
       "id": "config_handler",
-      "community": 17
+      "community": 18
     },
     {
       "label": "security.js",
@@ -1284,6 +1300,18 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "test/http-auth.test.js",
+      "source_location": "L5",
+      "weight": 1.0,
+      "_src": "http_auth_test",
+      "_tgt": "http_auth_test_responserecorder",
+      "source": "http_auth_test",
+      "target": "http_auth_test_responserecorder",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "public/free.js",
       "source_location": "L3",
       "weight": 1.0,
@@ -2005,7 +2033,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "api/_http.js",
-      "source_location": "L23",
+      "source_location": "L27",
       "weight": 1.0,
       "_src": "http",
       "_tgt": "http_senderror",
