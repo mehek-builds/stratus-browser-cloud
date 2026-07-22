@@ -1,6 +1,28 @@
 # Stratus
 
-Stratus is a clean-room, self-hostable browser-agent cloud. It combines managed Chromium sessions, persistent identities, live view, session recordings, search and fetch, agent functions, an OpenAI-compatible model gateway, usage metering, SDK access, and an operations dashboard under one API key.
+Stratus is a clean-room browser-agent cloud with self-hosted and free managed deployment modes. It combines Chromium automation, persistent identities, live view, session recordings, search and fetch, agent functions, an OpenAI-compatible model gateway, usage metering, SDK access, and an operations dashboard under one API key.
+
+## Free managed mode
+
+Vercel hosts a stateless Stratus control plane while Browserless runs each bounded browser task. The current free allowance is 2 concurrent browsers, 1,000 units per month, and 60 seconds per task. Free infrastructure does not supply 100 concurrent browsers or 500 browser hours. Those remain configurable self-hosted capacity targets and require paid compute.
+
+1. Create a free token at [Browserless](https://cloud.browserless.io/signup).
+2. Import this repository into Vercel or run `vercel link`.
+3. Add `BROWSERLESS_TOKEN` as a sensitive Vercel environment variable.
+4. Run `vercel --prod`.
+
+The managed UI calls `POST /api/run` with declarative actions. Provider credentials never enter the browser. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header.
+
+```json
+{
+  "url": "https://example.com",
+  "actions": [{ "type": "extract", "selector": "h1" }],
+  "screenshot": true,
+  "fullPage": true
+}
+```
+
+Supported actions are `click`, `fill`, `waitForSelector`, `press`, `select`, and `extract`. Arbitrary caller-supplied JavaScript is rejected.
 
 ## What works
 

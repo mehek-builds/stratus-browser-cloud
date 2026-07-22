@@ -4,12 +4,36 @@
   "graph": {},
   "nodes": [
     {
+      "label": "managed-browser.test.js",
+      "file_type": "code",
+      "source_file": "test/managed-browser.test.js",
+      "source_location": "L1",
+      "id": "managed_browser_test",
+      "community": 13
+    },
+    {
+      "label": "fetchImpl()",
+      "file_type": "code",
+      "source_file": "test/managed-browser.test.js",
+      "source_location": "L30",
+      "id": "managed_browser_test_fetchimpl",
+      "community": 13
+    },
+    {
+      "label": "urlValidator()",
+      "file_type": "code",
+      "source_file": "test/managed-browser.test.js",
+      "source_location": "L34",
+      "id": "managed_browser_test_urlvalidator",
+      "community": 13
+    },
+    {
       "label": "api.test.js",
       "file_type": "code",
       "source_file": "test/api.test.js",
       "source_location": "L1",
       "id": "api_test",
-      "community": 10
+      "community": 14
     },
     {
       "label": "withApp()",
@@ -17,7 +41,7 @@
       "source_file": "test/api.test.js",
       "source_location": "L6",
       "id": "api_test_withapp",
-      "community": 10
+      "community": 14
     },
     {
       "label": "request()",
@@ -25,7 +49,7 @@
       "source_file": "test/api.test.js",
       "source_location": "L14",
       "id": "api_test_request",
-      "community": 10
+      "community": 14
     },
     {
       "label": "protection-policy.test.js",
@@ -33,7 +57,7 @@
       "source_file": "test/protection-policy.test.js",
       "source_location": "L1",
       "id": "protection_policy_test",
-      "community": 11
+      "community": 18
     },
     {
       "label": "store.test.js",
@@ -41,7 +65,7 @@
       "source_file": "test/store.test.js",
       "source_location": "L1",
       "id": "store_test",
-      "community": 12
+      "community": 19
     },
     {
       "label": "stratus.js",
@@ -49,7 +73,39 @@
       "source_file": "bin/stratus.js",
       "source_location": "L1",
       "id": "stratus",
-      "community": 13
+      "community": 20
+    },
+    {
+      "label": "free.js",
+      "file_type": "code",
+      "source_file": "public/free.js",
+      "source_location": "L1",
+      "id": "free",
+      "community": 11
+    },
+    {
+      "label": "setMessage()",
+      "file_type": "code",
+      "source_file": "public/free.js",
+      "source_location": "L3",
+      "id": "free_setmessage",
+      "community": 11
+    },
+    {
+      "label": "setBusy()",
+      "file_type": "code",
+      "source_file": "public/free.js",
+      "source_location": "L4",
+      "id": "free_setbusy",
+      "community": 11
+    },
+    {
+      "label": "loadConfiguration()",
+      "file_type": "code",
+      "source_file": "public/free.js",
+      "source_location": "L6",
+      "id": "free_loadconfiguration",
+      "community": 11
     },
     {
       "label": "app.js",
@@ -225,7 +281,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L1",
       "id": "index",
-      "community": 7
+      "community": 8
     },
     {
       "label": "Stratus",
@@ -233,7 +289,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L1",
       "id": "index_stratus",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".constructor()",
@@ -241,7 +297,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L2",
       "id": "index_stratus_constructor",
-      "community": 7
+      "community": 8
     },
     {
       "label": ".request()",
@@ -249,7 +305,7 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L53",
       "id": "index_stratus_request",
-      "community": 7
+      "community": 8
     },
     {
       "label": "toBase64()",
@@ -257,7 +313,95 @@
       "source_file": "packages/sdk/index.js",
       "source_location": "L65",
       "id": "index_tobase64",
-      "community": 7
+      "community": 8
+    },
+    {
+      "label": "_http.js",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L1",
+      "id": "http",
+      "community": 9
+    },
+    {
+      "label": "applyApiHeaders()",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L1",
+      "id": "http_applyapiheaders",
+      "community": 9
+    },
+    {
+      "label": "requireMethod()",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L8",
+      "id": "http_requiremethod",
+      "community": 9
+    },
+    {
+      "label": "authorize()",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L15",
+      "id": "http_authorize",
+      "community": 9
+    },
+    {
+      "label": "sendError()",
+      "file_type": "code",
+      "source_file": "api/_http.js",
+      "source_location": "L23",
+      "id": "http_senderror",
+      "community": 9
+    },
+    {
+      "label": "health.js",
+      "file_type": "code",
+      "source_file": "api/health.js",
+      "source_location": "L1",
+      "id": "health",
+      "community": 15
+    },
+    {
+      "label": "handler()",
+      "file_type": "code",
+      "source_file": "api/health.js",
+      "source_location": "L4",
+      "id": "health_handler",
+      "community": 15
+    },
+    {
+      "label": "run.js",
+      "file_type": "code",
+      "source_file": "api/run.js",
+      "source_location": "L1",
+      "id": "run",
+      "community": 16
+    },
+    {
+      "label": "handler()",
+      "file_type": "code",
+      "source_file": "api/run.js",
+      "source_location": "L6",
+      "id": "run_handler",
+      "community": 16
+    },
+    {
+      "label": "config.js",
+      "file_type": "code",
+      "source_file": "src/config.js",
+      "source_location": "L1",
+      "id": "config",
+      "community": 17
+    },
+    {
+      "label": "handler()",
+      "file_type": "code",
+      "source_file": "api/config.js",
+      "source_location": "L4",
+      "id": "config_handler",
+      "community": 17
     },
     {
       "label": "security.js",
@@ -265,7 +409,7 @@
       "source_file": "src/security.js",
       "source_location": "L1",
       "id": "security",
-      "community": 8
+      "community": 10
     },
     {
       "label": "isPrivateIp()",
@@ -273,7 +417,7 @@
       "source_file": "src/security.js",
       "source_location": "L4",
       "id": "security_isprivateip",
-      "community": 8
+      "community": 10
     },
     {
       "label": "assertPublicUrl()",
@@ -281,7 +425,7 @@
       "source_file": "src/security.js",
       "source_location": "L15",
       "id": "security_assertpublicurl",
-      "community": 8
+      "community": 10
     },
     {
       "label": "htmlToText()",
@@ -289,7 +433,7 @@
       "source_file": "src/security.js",
       "source_location": "L33",
       "id": "security_htmltotext",
-      "community": 8
+      "community": 10
     },
     {
       "label": "textToMarkdown()",
@@ -297,7 +441,7 @@
       "source_file": "src/security.js",
       "source_location": "L44",
       "id": "security_texttomarkdown",
-      "community": 8
+      "community": 10
     },
     {
       "label": "protection-policy.js",
@@ -305,7 +449,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L1",
       "id": "protection_policy",
-      "community": 9
+      "community": 12
     },
     {
       "label": "normalizeProtectionPolicy()",
@@ -313,7 +457,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L9",
       "id": "protection_policy_normalizeprotectionpolicy",
-      "community": 9
+      "community": 12
     },
     {
       "label": "assertAuthorizedNavigation()",
@@ -321,7 +465,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L23",
       "id": "protection_policy_assertauthorizednavigation",
-      "community": 9
+      "community": 12
     },
     {
       "label": "detectProtectionChallenge()",
@@ -329,7 +473,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L45",
       "id": "protection_policy_detectprotectionchallenge",
-      "community": 9
+      "community": 12
     },
     {
       "label": "server.js",
@@ -772,20 +916,12 @@
       "community": 2
     },
     {
-      "label": "config.js",
-      "file_type": "code",
-      "source_file": "src/config.js",
-      "source_location": "L1",
-      "id": "config",
-      "community": 14
-    },
-    {
       "label": "function-runtime.js",
       "file_type": "code",
       "source_file": "src/function-runtime.js",
       "source_location": "L1",
       "id": "function_runtime",
-      "community": 6
+      "community": 7
     },
     {
       "label": "FunctionRuntime",
@@ -793,7 +929,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L4",
       "id": "function_runtime_functionruntime",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".constructor()",
@@ -801,7 +937,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L5",
       "id": "function_runtime_functionruntime_constructor",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".create()",
@@ -809,7 +945,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L10",
       "id": "function_runtime_functionruntime_create",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".list()",
@@ -817,7 +953,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L23",
       "id": "function_runtime_functionruntime_list",
-      "community": 6
+      "community": 7
     },
     {
       "label": ".invoke()",
@@ -825,7 +961,7 @@
       "source_file": "src/function-runtime.js",
       "source_location": "L28",
       "id": "function_runtime_functionruntime_invoke",
-      "community": 6
+      "community": 7
     },
     {
       "label": "browser-manager.js",
@@ -948,6 +1084,62 @@
       "community": 3
     },
     {
+      "label": "managed-browser.js",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L1",
+      "id": "managed_browser",
+      "community": 6
+    },
+    {
+      "label": "inputError()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L58",
+      "id": "managed_browser_inputerror",
+      "community": 6
+    },
+    {
+      "label": "validateSelector()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L62",
+      "id": "managed_browser_validateselector",
+      "community": 6
+    },
+    {
+      "label": "normalizeManagedActions()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L69",
+      "id": "managed_browser_normalizemanagedactions",
+      "community": 6
+    },
+    {
+      "label": "normalizeManagedRun()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L95",
+      "id": "managed_browser_normalizemanagedrun",
+      "community": 6
+    },
+    {
+      "label": "browserlessConfiguration()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L111",
+      "id": "managed_browser_browserlessconfiguration",
+      "community": 6
+    },
+    {
+      "label": "executeManagedRun()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L117",
+      "id": "managed_browser_executemanagedrun",
+      "community": 6
+    },
+    {
       "label": "utils.js",
       "file_type": "code",
       "source_file": "src/utils.js",
@@ -1024,6 +1216,30 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "test/managed-browser.test.js",
+      "source_location": "L30",
+      "weight": 1.0,
+      "_src": "managed_browser_test",
+      "_tgt": "managed_browser_test_fetchimpl",
+      "source": "managed_browser_test",
+      "target": "managed_browser_test_fetchimpl",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "test/managed-browser.test.js",
+      "source_location": "L34",
+      "weight": 1.0,
+      "_src": "managed_browser_test",
+      "_tgt": "managed_browser_test_urlvalidator",
+      "source": "managed_browser_test",
+      "target": "managed_browser_test_urlvalidator",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "test/api.test.js",
       "source_location": "L6",
       "weight": 1.0,
@@ -1043,6 +1259,54 @@
       "_tgt": "api_test_request",
       "source": "api_test",
       "target": "api_test_request",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "public/free.js",
+      "source_location": "L3",
+      "weight": 1.0,
+      "_src": "free",
+      "_tgt": "free_setmessage",
+      "source": "free",
+      "target": "free_setmessage",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "public/free.js",
+      "source_location": "L4",
+      "weight": 1.0,
+      "_src": "free",
+      "_tgt": "free_setbusy",
+      "source": "free",
+      "target": "free_setbusy",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "public/free.js",
+      "source_location": "L6",
+      "weight": 1.0,
+      "_src": "free",
+      "_tgt": "free_loadconfiguration",
+      "source": "free",
+      "target": "free_loadconfiguration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "public/free.js",
+      "source_location": "L19",
+      "weight": 1.0,
+      "_src": "free_loadconfiguration",
+      "_tgt": "free_setmessage",
+      "source": "free_setmessage",
+      "target": "free_loadconfiguration",
       "confidence_score": 1.0
     },
     {
@@ -1679,6 +1943,90 @@
       "_tgt": "index_stratus_request",
       "source": "index_stratus",
       "target": "index_stratus_request",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/_http.js",
+      "source_location": "L1",
+      "weight": 1.0,
+      "_src": "http",
+      "_tgt": "http_applyapiheaders",
+      "source": "http",
+      "target": "http_applyapiheaders",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/_http.js",
+      "source_location": "L8",
+      "weight": 1.0,
+      "_src": "http",
+      "_tgt": "http_requiremethod",
+      "source": "http",
+      "target": "http_requiremethod",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/_http.js",
+      "source_location": "L15",
+      "weight": 1.0,
+      "_src": "http",
+      "_tgt": "http_authorize",
+      "source": "http",
+      "target": "http_authorize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/_http.js",
+      "source_location": "L23",
+      "weight": 1.0,
+      "_src": "http",
+      "_tgt": "http_senderror",
+      "source": "http",
+      "target": "http_senderror",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/health.js",
+      "source_location": "L4",
+      "weight": 1.0,
+      "_src": "health",
+      "_tgt": "health_handler",
+      "source": "health",
+      "target": "health_handler",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/run.js",
+      "source_location": "L6",
+      "weight": 1.0,
+      "_src": "run",
+      "_tgt": "run_handler",
+      "source": "run",
+      "target": "run_handler",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "api/config.js",
+      "source_location": "L4",
+      "weight": 1.0,
+      "_src": "config",
+      "_tgt": "config_handler",
+      "source": "config",
+      "target": "config_handler",
       "confidence_score": 1.0
     },
     {
@@ -3131,6 +3479,150 @@
       "_tgt": "browser_manager_boundedclose",
       "source": "browser_manager_browsermanager_release",
       "target": "browser_manager_boundedclose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L58",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_inputerror",
+      "source": "managed_browser",
+      "target": "managed_browser_inputerror",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L62",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_validateselector",
+      "source": "managed_browser",
+      "target": "managed_browser_validateselector",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L69",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_normalizemanagedactions",
+      "source": "managed_browser",
+      "target": "managed_browser_normalizemanagedactions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L95",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_normalizemanagedrun",
+      "source": "managed_browser",
+      "target": "managed_browser_normalizemanagedrun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L111",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_browserlessconfiguration",
+      "source": "managed_browser",
+      "target": "managed_browser_browserlessconfiguration",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L117",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_executemanagedrun",
+      "source": "managed_browser",
+      "target": "managed_browser_executemanagedrun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L64",
+      "weight": 1.0,
+      "_src": "managed_browser_validateselector",
+      "_tgt": "managed_browser_inputerror",
+      "source": "managed_browser_inputerror",
+      "target": "managed_browser_validateselector",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L70",
+      "weight": 1.0,
+      "_src": "managed_browser_normalizemanagedactions",
+      "_tgt": "managed_browser_inputerror",
+      "source": "managed_browser_inputerror",
+      "target": "managed_browser_normalizemanagedactions",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L96",
+      "weight": 1.0,
+      "_src": "managed_browser_normalizemanagedrun",
+      "_tgt": "managed_browser_inputerror",
+      "source": "managed_browser_inputerror",
+      "target": "managed_browser_normalizemanagedrun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L103",
+      "weight": 1.0,
+      "_src": "managed_browser_normalizemanagedrun",
+      "_tgt": "managed_browser_normalizemanagedactions",
+      "source": "managed_browser_normalizemanagedactions",
+      "target": "managed_browser_normalizemanagedrun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L125",
+      "weight": 1.0,
+      "_src": "managed_browser_executemanagedrun",
+      "_tgt": "managed_browser_normalizemanagedrun",
+      "source": "managed_browser_normalizemanagedrun",
+      "target": "managed_browser_executemanagedrun",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L118",
+      "weight": 1.0,
+      "_src": "managed_browser_executemanagedrun",
+      "_tgt": "managed_browser_browserlessconfiguration",
+      "source": "managed_browser_browserlessconfiguration",
+      "target": "managed_browser_executemanagedrun",
       "confidence_score": 1.0
     },
     {

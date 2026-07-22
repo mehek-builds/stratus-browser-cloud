@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <meta name="description" content="Stratus free managed browser control plane on Vercel and Browserless.">
+  <title>Stratus Free Managed Browser</title>
+  <link rel="stylesheet" href="/free.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Stratus home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span><strong>STRATUS</strong><small>Free managed mode</small></span></a>
+    <div class="status"><i id="statusDot"></i><span id="statusText">Checking provider</span></div>
+  </header>
+  <main>
+    <section class="hero">
+      <div><p class="eyebrow">VERCEL CONTROL PLANE / MANAGED CHROMIUM</p><h1>Run browser tasks without operating browser infrastructure.</h1><p class="hero-copy">Stratus sends a bounded, one-shot workflow to Browserless, returns structured page data and a screenshot, then closes the browser. Your provider token stays server-side.</p></div>
+      <div class="architecture" aria-label="Execution architecture"><span>YOUR APP</span><b>→</b><span>STRATUS API</span><b>→</b><span>BROWSERLESS</span></div>
+    </section>
+    <section class="limit-grid" aria-label="Free plan limits">
+      <article><strong id="concurrency">2</strong><span>concurrent browsers</span></article><article><strong id="monthlyUnits">1,000</strong><span>units per month</span></article><article><strong id="runSeconds">60s</strong><span>maximum task</span></article><article><strong>$0</strong><span>card required</span></article>
+    </section>
+    <section id="setupPanel" class="setup hidden">
+      <div><p class="eyebrow">ONE-TIME SETUP</p><h2>Connect the free Browserless provider</h2><p>Create a free Browserless account, then add its token as <code>BROWSERLESS_TOKEN</code> in the Vercel project. Redeploying is automatic after an environment change.</p></div>
+      <a id="signupLink" class="secondary-button" href="https://cloud.browserless.io/signup" target="_blank" rel="noreferrer">Create free provider account</a>
+    </section>
+    <section class="workspace">
+      <article class="control-panel">
+        <div class="panel-head"><div><p class="eyebrow">TASK BUILDER</p><h2>Drive a browser</h2></div><span class="badge">STATELESS RUN</span></div>
+        <form id="runForm">
+          <label>Target URL<input id="targetUrl" name="url" type="url" value="https://example.com" required></label>
+          <label>API key, only if configured<input id="apiKey" name="apiKey" type="password" autocomplete="off" placeholder="Stored in this browser only"></label>
+          <label>Actions, JSON array<textarea id="actions" name="actions" rows="9" spellcheck="false">[
+  {
+    "type": "extract",
+    "selector": "h1"
+  }
+]</textarea></label>
+          <div class="options"><label><input id="fullPage" type="checkbox" checked> Full-page screenshot</label></div>
+          <button id="runButton" class="primary-button" type="submit">Run managed browser</button>
+        </form>
+        <div id="message" class="message" role="status" aria-live="polite">Ready for a browser task.</div>
+      </article>
+      <article class="result-panel">
+        <div class="browser-chrome"><div class="traffic"><i></i><i></i><i></i></div><div id="browserAddress" class="address">No completed run</div><span>PNG</span></div>
+        <div id="viewport" class="viewport"><div id="emptyState" class="empty-state"><span>▷</span><h2>Screenshot appears here</h2><p>Each task runs in a clean managed browser.</p></div><img id="screenshot" alt="Screenshot returned by the managed browser"></div>
+        <div class="result-data"><div><span>Page title</span><strong id="pageTitle">Waiting</strong></div><div><span>Elapsed</span><strong id="elapsed">0 ms</strong></div><pre id="resultJson">No result yet.</pre></div>
+      </article>
+    </section>
+    <section class="truth-panel"><div><p class="eyebrow">CAPACITY CONTRACT</p><h2>Free mode is intentionally bounded.</h2></div><p>The original self-hosted Stratus mode still supports a configurable 100-browser fleet and a 500-hour quota. Those targets require paid compute. This deployment uses free managed limits and makes no claim that free infrastructure provides paid-plan capacity.</p></section>
+  </main>
+  <script type="module" src="/free.js"></script>
+</body>
+</html>
