@@ -21,7 +21,7 @@ Production authentication uses Vercel OIDC automatically, so no external browser
 }
 ```
 
-Supported actions are `click`, `fill`, `waitForSelector`, `press`, `select`, and `extract`. Arbitrary caller-supplied JavaScript is rejected.
+Supported actions are `click`, `fill`, `fillByLabelText`, `upload`, `waitForSelector`, `press`, `select`, and `extract`. Arbitrary caller-supplied JavaScript is rejected.
 
 ## What works
 
