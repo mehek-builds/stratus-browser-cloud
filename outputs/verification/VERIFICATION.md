@@ -4,7 +4,7 @@ Verified on 2026-07-22 with Node.js 22, a locally installed Chrome browser, and 
 
 ## Result
 
-PASS. The complete automated test suite passed with 18 tests, including the real-browser self-hosted workflow and the managed-provider adapter contract.
+PASS. The complete automated test suite passed with 16 tests, including the real-browser self-hosted workflow and the Stratus-managed Sandbox execution contract.
 
 The verified flow covers:
 
@@ -21,13 +21,12 @@ The verified flow covers:
 11. Pause policy blocking command and agent automation pending human review
 12. Vercel stateless control-plane health and configuration routes
 13. Managed action validation and rejection of arbitrary caller code
-14. Browserless Function API request and response contract using an isolated provider double
-15. Production Vercel UI rendering with no browser console errors
-16. Authenticated public CDP relay connection to the running self-hosted browser
-17. Real Vercel Sandbox microVM fork, Chromium launch, navigation, extraction, screenshot, and worker cleanup
-18. Local dashboard trial through UI, `/api/run`, Sandbox Chromium, API response, and screenshot rendering
-19. Production API trial through Vercel Function, Sandbox fork, Chromium, extraction, and screenshot response
-20. Production dashboard click-through with completed task rendering and zero browser console errors
+14. Production Vercel UI rendering with no browser console errors
+15. Authenticated public CDP relay connection to the running self-hosted browser
+16. Real Stratus Sandbox microVM fork, Chromium launch, navigation, extraction, screenshot, and worker cleanup
+17. Local dashboard trial through UI, `/api/run`, Stratus Chromium, API response, and screenshot rendering
+18. Production API trial through Vercel Function, Stratus worker fork, Chromium, extraction, and screenshot response
+19. Production dashboard click-through with completed task rendering and zero browser console errors
 
 ## Capacity contract
 
@@ -55,8 +54,6 @@ The default managed provider is Vercel Sandbox with automatic OIDC authenticatio
 - `04-session-inspector.png`: replay and event timeline
 - `05-mobile-overview.png`: responsive viewport
 - `06-protection-challenge.png`: detected human-verification challenge
-- `09-vercel-free-local.png`: local Vercel managed-mode rendering
-- `10-vercel-free-production.png`: live production managed-mode rendering
 - `11-sandbox-runtime-probe.png`: direct Sandbox adapter Chromium result
 - `12-local-api-sandbox-run.png`: local HTTP API to Sandbox Chromium result
 - `13-local-ui-sandbox-complete.png`: completed dashboard trial with rendered result

@@ -9,31 +9,15 @@
       "source_file": "test/managed-browser.test.js",
       "source_location": "L1",
       "id": "managed_browser_test",
-      "community": 11
-    },
-    {
-      "label": "fetchImpl()",
-      "file_type": "code",
-      "source_file": "test/managed-browser.test.js",
-      "source_location": "L32",
-      "id": "managed_browser_test_fetchimpl",
-      "community": 11
-    },
-    {
-      "label": "urlValidator()",
-      "file_type": "code",
-      "source_file": "test/managed-browser.test.js",
-      "source_location": "L36",
-      "id": "managed_browser_test_urlvalidator",
-      "community": 11
+      "community": 14
     },
     {
       "label": "sandboxExecutor()",
       "file_type": "code",
       "source_file": "test/managed-browser.test.js",
-      "source_location": "L46",
+      "source_location": "L24",
       "id": "managed_browser_test_sandboxexecutor",
-      "community": 11
+      "community": 14
     },
     {
       "label": "api.test.js",
@@ -41,7 +25,7 @@
       "source_file": "test/api.test.js",
       "source_location": "L1",
       "id": "api_test",
-      "community": 14
+      "community": 13
     },
     {
       "label": "withApp()",
@@ -49,7 +33,7 @@
       "source_file": "test/api.test.js",
       "source_location": "L6",
       "id": "api_test_withapp",
-      "community": 14
+      "community": 13
     },
     {
       "label": "request()",
@@ -57,7 +41,7 @@
       "source_file": "test/api.test.js",
       "source_location": "L14",
       "id": "api_test_request",
-      "community": 14
+      "community": 13
     },
     {
       "label": "protection-policy.test.js",
@@ -89,7 +73,7 @@
       "source_file": "public/free.js",
       "source_location": "L1",
       "id": "free",
-      "community": 12
+      "community": 11
     },
     {
       "label": "setMessage()",
@@ -97,7 +81,7 @@
       "source_file": "public/free.js",
       "source_location": "L3",
       "id": "free_setmessage",
-      "community": 12
+      "community": 11
     },
     {
       "label": "setBusy()",
@@ -105,7 +89,7 @@
       "source_file": "public/free.js",
       "source_location": "L4",
       "id": "free_setbusy",
-      "community": 12
+      "community": 11
     },
     {
       "label": "loadConfiguration()",
@@ -113,7 +97,7 @@
       "source_file": "public/free.js",
       "source_location": "L6",
       "id": "free_loadconfiguration",
-      "community": 12
+      "community": 11
     },
     {
       "label": "app.js",
@@ -375,7 +359,7 @@
       "label": "handler()",
       "file_type": "code",
       "source_file": "api/health.js",
-      "source_location": "L4",
+      "source_location": "L3",
       "id": "health_handler",
       "community": 15
     },
@@ -457,7 +441,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L1",
       "id": "protection_policy",
-      "community": 13
+      "community": 12
     },
     {
       "label": "normalizeProtectionPolicy()",
@@ -465,7 +449,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L9",
       "id": "protection_policy_normalizeprotectionpolicy",
-      "community": 13
+      "community": 12
     },
     {
       "label": "assertAuthorizedNavigation()",
@@ -473,7 +457,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L23",
       "id": "protection_policy_assertauthorizednavigation",
-      "community": 13
+      "community": 12
     },
     {
       "label": "detectProtectionChallenge()",
@@ -481,7 +465,7 @@
       "source_file": "src/protection-policy.js",
       "source_location": "L45",
       "id": "protection_policy_detectprotectionchallenge",
-      "community": 13
+      "community": 12
     },
     {
       "label": "server.js",
@@ -1129,79 +1113,63 @@
       "source_file": "src/managed-browser.js",
       "source_location": "L1",
       "id": "managed_browser",
-      "community": 5
+      "community": 6
     },
     {
       "label": "inputError()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L113",
+      "source_location": "L62",
       "id": "managed_browser_inputerror",
-      "community": 5
+      "community": 6
     },
     {
       "label": "validateSelector()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L117",
+      "source_location": "L66",
       "id": "managed_browser_validateselector",
-      "community": 5
+      "community": 6
     },
     {
       "label": "normalizeManagedActions()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L124",
+      "source_location": "L73",
       "id": "managed_browser_normalizemanagedactions",
-      "community": 5
+      "community": 6
     },
     {
       "label": "normalizeManagedRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L150",
+      "source_location": "L99",
       "id": "managed_browser_normalizemanagedrun",
-      "community": 5
-    },
-    {
-      "label": "browserlessConfiguration()",
-      "file_type": "code",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L166",
-      "id": "managed_browser_browserlessconfiguration",
-      "community": 5
-    },
-    {
-      "label": "managedProvider()",
-      "file_type": "code",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L172",
-      "id": "managed_browser_managedprovider",
-      "community": 5
+      "community": 6
     },
     {
       "label": "ensureSandboxTemplate()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L176",
+      "source_location": "L115",
       "id": "managed_browser_ensuresandboxtemplate",
-      "community": 5
+      "community": 6
     },
     {
       "label": "executeSandboxRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L200",
+      "source_location": "L139",
       "id": "managed_browser_executesandboxrun",
-      "community": 5
+      "community": 6
     },
     {
       "label": "executeManagedRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L238",
+      "source_location": "L177",
       "id": "managed_browser_executemanagedrun",
-      "community": 5
+      "community": 6
     },
     {
       "label": "utils.js",
@@ -1209,7 +1177,7 @@
       "source_file": "src/utils.js",
       "source_location": "L1",
       "id": "utils",
-      "community": 6
+      "community": 5
     },
     {
       "label": "id()",
@@ -1217,7 +1185,7 @@
       "source_file": "src/utils.js",
       "source_location": "L3",
       "id": "utils_id",
-      "community": 6
+      "community": 5
     },
     {
       "label": "now()",
@@ -1225,7 +1193,7 @@
       "source_file": "src/utils.js",
       "source_location": "L4",
       "id": "utils_now",
-      "community": 6
+      "community": 5
     },
     {
       "label": "sha256()",
@@ -1233,7 +1201,7 @@
       "source_file": "src/utils.js",
       "source_location": "L5",
       "id": "utils_sha256",
-      "community": 6
+      "community": 5
     },
     {
       "label": "json()",
@@ -1241,7 +1209,7 @@
       "source_file": "src/utils.js",
       "source_location": "L7",
       "id": "utils_json",
-      "community": 6
+      "community": 5
     },
     {
       "label": "readJson()",
@@ -1249,7 +1217,7 @@
       "source_file": "src/utils.js",
       "source_location": "L17",
       "id": "utils_readjson",
-      "community": 6
+      "community": 5
     },
     {
       "label": "redact()",
@@ -1257,7 +1225,7 @@
       "source_file": "src/utils.js",
       "source_location": "L33",
       "id": "utils_redact",
-      "community": 6
+      "community": 5
     },
     {
       "label": "hmac()",
@@ -1265,7 +1233,7 @@
       "source_file": "src/utils.js",
       "source_location": "L49",
       "id": "utils_hmac",
-      "community": 6
+      "community": 5
     },
     {
       "label": "clamp()",
@@ -1273,7 +1241,7 @@
       "source_file": "src/utils.js",
       "source_location": "L53",
       "id": "utils_clamp",
-      "community": 6
+      "community": 5
     }
   ],
   "links": [
@@ -1281,31 +1249,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "test/managed-browser.test.js",
-      "source_location": "L32",
-      "weight": 1.0,
-      "_src": "managed_browser_test",
-      "_tgt": "managed_browser_test_fetchimpl",
-      "source": "managed_browser_test",
-      "target": "managed_browser_test_fetchimpl",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "test/managed-browser.test.js",
-      "source_location": "L36",
-      "weight": 1.0,
-      "_src": "managed_browser_test",
-      "_tgt": "managed_browser_test_urlvalidator",
-      "source": "managed_browser_test",
-      "target": "managed_browser_test_urlvalidator",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "test/managed-browser.test.js",
-      "source_location": "L46",
+      "source_location": "L24",
       "weight": 1.0,
       "_src": "managed_browser_test",
       "_tgt": "managed_browser_test_sandboxexecutor",
@@ -1377,7 +1321,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "public/free.js",
-      "source_location": "L20",
+      "source_location": "L18",
       "weight": 1.0,
       "_src": "free_loadconfiguration",
       "_tgt": "free_setmessage",
@@ -2073,7 +2017,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "api/health.js",
-      "source_location": "L4",
+      "source_location": "L3",
       "weight": 1.0,
       "_src": "health",
       "_tgt": "health_handler",
@@ -3633,7 +3577,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L113",
+      "source_location": "L62",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_inputerror",
@@ -3645,7 +3589,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L117",
+      "source_location": "L66",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_validateselector",
@@ -3657,7 +3601,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L124",
+      "source_location": "L73",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_normalizemanagedactions",
@@ -3669,7 +3613,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L150",
+      "source_location": "L99",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_normalizemanagedrun",
@@ -3681,31 +3625,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L166",
-      "weight": 1.0,
-      "_src": "managed_browser",
-      "_tgt": "managed_browser_browserlessconfiguration",
-      "source": "managed_browser",
-      "target": "managed_browser_browserlessconfiguration",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L172",
-      "weight": 1.0,
-      "_src": "managed_browser",
-      "_tgt": "managed_browser_managedprovider",
-      "source": "managed_browser",
-      "target": "managed_browser_managedprovider",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "contains",
-      "confidence": "EXTRACTED",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L176",
+      "source_location": "L115",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_ensuresandboxtemplate",
@@ -3717,7 +3637,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L200",
+      "source_location": "L139",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_executesandboxrun",
@@ -3729,7 +3649,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L238",
+      "source_location": "L177",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_executemanagedrun",
@@ -3741,7 +3661,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L119",
+      "source_location": "L68",
       "weight": 1.0,
       "_src": "managed_browser_validateselector",
       "_tgt": "managed_browser_inputerror",
@@ -3753,7 +3673,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L125",
+      "source_location": "L74",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedactions",
       "_tgt": "managed_browser_inputerror",
@@ -3765,7 +3685,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L151",
+      "source_location": "L100",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedrun",
       "_tgt": "managed_browser_inputerror",
@@ -3777,7 +3697,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L158",
+      "source_location": "L107",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedrun",
       "_tgt": "managed_browser_normalizemanagedactions",
@@ -3789,7 +3709,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L201",
+      "source_location": "L140",
       "weight": 1.0,
       "_src": "managed_browser_executesandboxrun",
       "_tgt": "managed_browser_normalizemanagedrun",
@@ -3801,43 +3721,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L243",
-      "weight": 1.0,
-      "_src": "managed_browser_executemanagedrun",
-      "_tgt": "managed_browser_normalizemanagedrun",
-      "source": "managed_browser_normalizemanagedrun",
-      "target": "managed_browser_executemanagedrun",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L173",
-      "weight": 1.0,
-      "_src": "managed_browser_managedprovider",
-      "_tgt": "managed_browser_browserlessconfiguration",
-      "source": "managed_browser_browserlessconfiguration",
-      "target": "managed_browser_managedprovider",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L239",
-      "weight": 1.0,
-      "_src": "managed_browser_executemanagedrun",
-      "_tgt": "managed_browser_browserlessconfiguration",
-      "source": "managed_browser_browserlessconfiguration",
-      "target": "managed_browser_executemanagedrun",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "src/managed-browser.js",
-      "source_location": "L205",
+      "source_location": "L144",
       "weight": 1.0,
       "_src": "managed_browser_executesandboxrun",
       "_tgt": "managed_browser_ensuresandboxtemplate",

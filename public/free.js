@@ -1,4 +1,4 @@
-const elements = Object.fromEntries(['statusDot','statusText','setupPanel','signupLink','concurrency','monthlyUnits','allowanceLabel','runSeconds','runForm','runButton','targetUrl','apiKey','actions','fullPage','message','browserAddress','emptyState','screenshot','pageTitle','elapsed','resultJson'].map((id) => [id, document.getElementById(id)]));
+const elements = Object.fromEntries(['statusDot','statusText','concurrency','monthlyUnits','allowanceLabel','runSeconds','runForm','runButton','targetUrl','apiKey','actions','fullPage','message','browserAddress','emptyState','screenshot','pageTitle','elapsed','resultJson'].map((id) => [id, document.getElementById(id)]));
 
 function setMessage(text, state = '') { elements.message.textContent = text; elements.message.dataset.state = state; }
 function setBusy(busy) { elements.runButton.disabled = busy; elements.runButton.textContent = busy ? 'Browser running…' : 'Run managed browser'; }
@@ -13,11 +13,9 @@ async function loadConfiguration() {
     elements.allowanceLabel.textContent = config.limits.monthlyUnits ? 'units per month' : 'CPU hours per month';
     elements.runSeconds.textContent = `${config.limits.maxRunSeconds}s`;
     elements.statusDot.dataset.ready = String(config.configured);
-    elements.statusText.textContent = config.configured ? `${config.provider} ready` : 'Provider setup needed';
-    elements.setupPanel.classList.toggle('hidden', config.configured);
-    elements.signupLink.href = config.setupUrl;
+    elements.statusText.textContent = config.configured ? 'Stratus browser cloud ready' : 'Browser runtime unavailable';
     elements.runButton.disabled = !config.configured;
-    if (!config.configured) setMessage('Add BROWSERLESS_TOKEN in Vercel to enable real browser runs.', 'warning');
+    if (!config.configured) setMessage('The Stratus browser runtime is unavailable.', 'warning');
   } catch (error) {
     elements.statusText.textContent = 'Control plane unavailable'; elements.statusDot.dataset.ready = 'false'; elements.runButton.disabled = true; setMessage(error.message, 'error');
   }

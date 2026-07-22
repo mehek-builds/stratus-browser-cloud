@@ -10,7 +10,7 @@ Vercel hosts a stateless Stratus control plane while Vercel Sandbox runs each bo
 2. Run `vercel env pull .env.local` for local Sandbox authentication.
 3. Run `vercel --prod`.
 
-Production authentication uses Vercel OIDC automatically, so no external browser-provider token is required. The managed UI calls `POST /api/run` with declarative actions. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header. If `BROWSERLESS_TOKEN` is configured, Stratus uses Browserless as an optional provider override.
+Production authentication uses Vercel OIDC automatically, so no external browser provider or token is required. The browser execution system is owned by Stratus: it provisions the Chromium runtime, maintains the template snapshot, validates declarative actions, forks isolated workers, collects results, and destroys workers after every task. The managed UI calls `POST /api/run`. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header.
 
 ```json
 {
