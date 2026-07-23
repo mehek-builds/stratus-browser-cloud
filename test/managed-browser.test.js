@@ -93,3 +93,12 @@ test('blockers name a human label and never a machine identifier', () => {
   assert.match(SANDBOX_RUNNER, /no label Litos can read/);
   assert.doesNotMatch(SANDBOX_RUNNER, /\|\| 'required field';/);
 });
+
+test('a choice group is reported once, by its question, not once per option', () => {
+  // Aquatic's Greenhouse form turned three unanswered questions into seventeen blockers, each
+  // naming an option ("Statistics", "Putnam", "Handshake") rather than the question to answer.
+  assert.match(SANDBOX_RUNNER, /const reportedGroups = new Set\(\)/);
+  assert.match(SANDBOX_RUNNER, /if \(reportedGroups\.has\(groupName\)\) continue;/);
+  // And the label for a choice control prefers the group's question over the option text.
+  assert.match(SANDBOX_RUNNER, /const groupSources = isChoice/);
+});

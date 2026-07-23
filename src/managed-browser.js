@@ -132,9 +132,23 @@ const { chromium } = require('playwright');
       blockers.push('CAPTCHA requires your attention');
     }
     const required = page.locator('input[required], textarea[required], select[required]');
+    // A checkbox or radio GROUP is one question wearing many required inputs. Reporting each input
+    // separately turned three unanswered Greenhouse questions into seventeen blockers, every one of
+    // them naming an option ("Statistics", "Putnam", "Handshake") rather than the question the
+    // applicant actually has to answer. One entry per group, named by the question.
+    const reportedGroups = new Set();
     for (let index = 0; index < await required.count(); index += 1) {
       const field = required.nth(index);
       if (!await field.isVisible().catch(() => false)) continue;
+      const groupName = await field.evaluate((element) => (
+        element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')
+          ? element.name || ''
+          : ''
+      )).catch(() => '');
+      if (groupName) {
+        if (reportedGroups.has(groupName)) continue;
+        reportedGroups.add(groupName);
+      }
       const state = await field.evaluate((element) => {
         if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'filled' : '';
         if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
@@ -160,7 +174,15 @@ const { chromium } = require('playwright');
         const referenced = describedBy && document.getElementById(describedBy.split(/\s+/)[0]);
         const wrapping = element.closest('label');
         const legend = element.closest('fieldset') && element.closest('fieldset').querySelector('legend');
+        // For a checkbox or radio, the per-option sources describe the OPTION ("Statistics",
+        // "Putnam"), not the question the applicant has to answer. Ask the group for its question
+        // first, and only fall back to the option text if the form gives nothing better.
+        const isChoice = element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio');
+        const groupSources = isChoice
+          ? [legend && legend.textContent, element.getAttribute('description'), referenced && referenced.textContent]
+          : [];
         for (const candidate of [
+          ...groupSources,
           byFor && byFor.textContent,
           referenced && referenced.textContent,
           wrapping && wrapping.textContent,
