@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions } from '../src/managed-browser.js';
+import { executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 test('managed free limits are explicit and do not claim paid capacity', () => {
   assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 10, monthlyCpuHours: 5, maxRunSeconds: 60, persistedDays: 30 });
@@ -39,4 +39,57 @@ test('managed run always uses the Stratus Sandbox execution system', async () =>
   const result = await executeManagedRun({ url: 'https://example.com' }, { sandboxExecutor });
   assert.equal(result.title, 'Sandbox');
   assert.equal(result.screenshot, 'sandbox-image');
+});
+
+// The runner ships to the sandbox as a string, so nothing type-checks it and a regression only
+// shows up when a real application fails on a real portal. These pin the branches that cost three
+// deploys to find, against a live Greenhouse form (Aquatic Capital Management, 2026-07-23).
+
+test('an optional action that THROWS is stepped over, not fatal to the run', () => {
+  // The old guard was `if (locator && action.optional && count === 0) continue`, which only covered
+  // a MISSING element and never applied to fillByLabelText at all (no selector, so locator is null).
+  // One unfillable checkbox therefore discarded the name, email, phone and resume already entered.
+  assert.match(SANDBOX_RUNNER, /catch \(actionError\)/);
+  assert.match(SANDBOX_RUNNER, /if \(!action\.optional\) throw actionError;/);
+  assert.match(SANDBOX_RUNNER, /skipped\.push\(/);
+});
+
+test('a skipped action is reported rather than swallowed', () => {
+  // A silent skip is how a half-filled form starts looking like a fully-filled one.
+  assert.match(SANDBOX_RUNNER, /skipped: \[\.\.\.new Set\(skipped\)\]/);
+});
+
+test('fillByLabelText dispatches on the control type', () => {
+  // Everything used to fall through to fill(), which throws on a checkbox or radio.
+  assert.match(SANDBOX_RUNNER, /shape\.tag === 'select'/);
+  assert.match(SANDBOX_RUNNER, /shape\.type === 'checkbox' \|\| shape\.type === 'radio'/);
+  assert.match(SANDBOX_RUNNER, /await option\.check\(\)/);
+});
+
+test('choice matching is scoped to the question container, never the page', () => {
+  // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
+  // on the form, which the applicant cannot undo.
+  assert.match(SANDBOX_RUNNER, /const choices = container\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
+  // And an answer that matches no option leaves the control alone rather than guessing.
+  assert.match(SANDBOX_RUNNER, /if \(!matched\) continue;/);
+});
+
+test('an unticked required checkbox is reported as a blocker', () => {
+  // A checkbox reports value "on" whether or not it is ticked, so the old value check treated every
+  // unticked required checkbox as already satisfied and never reported it.
+  assert.match(SANDBOX_RUNNER, /element\.type === 'checkbox' \|\| element\.type === 'radio'/);
+  assert.match(SANDBOX_RUNNER, /some\(\(member\) => member\.checked\)/);
+});
+
+test('blockers name a human label and never a machine identifier', () => {
+  // The old fallback chain was aria-label -> name attribute -> the literal 'required field', which
+  // produced the two strings applicants actually saw:
+  //   "5a326a1d-1a9e-42b1-a918-ca74022064dc is required"   (Greenhouse names questions with UUIDs)
+  //   "required field is required"                          (literal fallback, doubled)
+  assert.match(SANDBOX_RUNNER, /label\[for="/);
+  assert.match(SANDBOX_RUNNER, /aria-labelledby/);
+  assert.match(SANDBOX_RUNNER, /\[0-9a-f\]\{8\}-/); // UUID rejection
+  assert.match(SANDBOX_RUNNER, /is required and is still empty/);
+  assert.match(SANDBOX_RUNNER, /no label Litos can read/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /\|\| 'required field';/);
 });

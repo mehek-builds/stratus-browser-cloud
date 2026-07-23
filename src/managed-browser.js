@@ -20,7 +20,9 @@ const SANDBOX_DEPENDENCIES = [
   'libXrandr', 'mesa-libgbm', 'cairo', 'pango', 'alsa-lib'
 ];
 
-const SANDBOX_RUNNER = String.raw`
+// Exported so tests can pin the load-bearing branches of the runner. It ships to the sandbox as a
+// string, so a regression here is invisible until a real portal run fails on a real application.
+export const SANDBOX_RUNNER = String.raw`
 const fs = require('node:fs');
 const { chromium } = require('playwright');
 
@@ -35,7 +37,9 @@ const { chromium } = require('playwright');
     await page.goto(input.url, { waitUntil, timeout: 45000 });
     const extracted = [];
     const filledFields = [];
+    const skipped = [];
     for (const action of input.actions || []) {
+     try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
       if (locator && action.optional && await locator.count() === 0) continue;
       if (action.type === 'click') {
@@ -52,8 +56,42 @@ const { chromium } = require('playwright');
         const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) continue;
-        if (await field.evaluate((element) => element.tagName.toLowerCase()) === 'select') {
+        // Dispatch on the CONTROL, not on the question. Everything used to fall through to fill(),
+        // which throws on a checkbox or radio ("Input of type checkbox cannot be filled") and, before
+        // the try/catch above, took the entire run with it. Callers cannot predict the control type
+        // either: on a real Greenhouse form "How did you hear about this job?" reads like free text
+        // and is a checkbox group.
+        const shape = await field.evaluate((element) => ({
+          tag: element.tagName.toLowerCase(),
+          type: (element.getAttribute('type') || '').toLowerCase()
+        }));
+        if (shape.tag === 'select') {
           await field.selectOption({ label: action.value }).catch(() => field.selectOption(action.value));
+        } else if (shape.type === 'checkbox' || shape.type === 'radio') {
+          // Scoped to THIS question's container, never the whole page. That scoping is what makes
+          // matching an answer as short as "Yes" safe: an unscoped label match could tick a consent
+          // or legal acknowledgement elsewhere on the form, which the applicant cannot undo.
+          const wanted = String(action.value || '').trim();
+          const choices = container.locator('input[type=checkbox], input[type=radio]');
+          const total = await choices.count();
+          let matched = false;
+          for (let choice = 0; choice < total; choice += 1) {
+            const option = choices.nth(choice);
+            const optionText = await option.evaluate((element) => {
+              const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+              const wrapping = element.closest('label');
+              return ((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || element.getAttribute('aria-label') || element.value || '').trim();
+            });
+            if (optionText && optionText.toLowerCase() === wanted.toLowerCase()) {
+              await option.check();
+              matched = true;
+              break;
+            }
+          }
+          // No exact option match means the answer does not belong to this control. Leaving it
+          // unticked is correct: it surfaces as a required-field blocker for the applicant, which is
+          // far cheaper than guessing a checkbox on their behalf.
+          if (!matched) continue;
         } else {
           await field.fill(action.value || '');
         }
@@ -77,6 +115,17 @@ const { chromium } = require('playwright');
         const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
         extracted.push({ selector: action.selector, value });
       }
+     } catch (actionError) {
+      // 'optional' previously meant only "skip if the element is missing", and it was checked via
+      // 'locator', which is null for fillByLabelText. So a fillByLabelText could never be optional,
+      // and any throw from ANY action aborted the whole run. A single unfillable checkbox on a
+      // Greenhouse form therefore discarded the name, email, phone and resume already entered, and
+      // returned the caller a raw Playwright stack trace instead of a filled form.
+      // An optional action that fails is now recorded and stepped over; a required one still stops
+      // the run, because the caller marked it as something the run cannot proceed without.
+      if (!action.optional) throw actionError;
+      skipped.push((action.label || action.type) + ': ' + String(actionError?.message || actionError).split('\n')[0].slice(0, 200));
+     }
     }
     const blockers = [];
     if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
@@ -88,18 +137,59 @@ const { chromium } = require('playwright');
       if (!await field.isVisible().catch(() => false)) continue;
       const state = await field.evaluate((element) => {
         if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'filled' : '';
+        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
+          // A checkbox reports value "on" whether or not it is ticked, so the old check treated
+          // every unticked required checkbox as already satisfied and never reported it.
+          const group = element.name ? document.getElementsByName(element.name) : [element];
+          return Array.from(group).some((member) => member.checked) ? 'checked' : '';
+        }
         return 'value' in element ? String(element.value || '') : '';
       });
       if (state) continue;
-      const name = await field.getAttribute('aria-label') || await field.getAttribute('name') || 'required field';
-      blockers.push(String(name).slice(0, 120) + ' is required');
+      // Resolve a HUMAN label. The old line fell back to the name attribute and then to the
+      // literal string 'required field', which produced the two blocker texts the dashboard was
+      // actually showing applicants:
+      //   "5a326a1d-1a9e-42b1-a918-ca74022064dc is required"  (Greenhouse names custom questions
+      //                                                        with UUIDs, so the name attr is a token)
+      //   "required field is required"                        (the literal fallback, doubled)
+      // Neither tells the applicant which field to go and fix, which is the entire job of a blocker.
+      const label = await field.evaluate((element) => {
+        const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+        const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+        const describedBy = element.getAttribute('aria-labelledby');
+        const referenced = describedBy && document.getElementById(describedBy.split(/\s+/)[0]);
+        const wrapping = element.closest('label');
+        const legend = element.closest('fieldset') && element.closest('fieldset').querySelector('legend');
+        for (const candidate of [
+          byFor && byFor.textContent,
+          referenced && referenced.textContent,
+          wrapping && wrapping.textContent,
+          element.getAttribute('aria-label'),
+          element.getAttribute('description'),
+          legend && legend.textContent,
+          element.getAttribute('placeholder')
+        ]) {
+          const text = clean(candidate);
+          // Reject machine identifiers rather than dressing one up as a label.
+          if (!text) continue;
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
+          if (!/[a-z]/i.test(text)) continue;
+          return text.slice(0, 120);
+        }
+        return '';
+      }).catch(() => '');
+      blockers.push(label ? '"' + label + '" is required and is still empty'
+                          : 'A required field on the form has no label Litos can read, and is still empty');
     }
     const title = await page.title();
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
     const links = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map((link) => ({ text: (link.innerText || link.textContent || '').trim().slice(0, 500), href: link.href })));
     if (input.screenshot) await page.screenshot({ path: 'stratus-screenshot.png', fullPage: Boolean(input.fullPage) });
-    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], elapsedMs: Date.now() - startedAt }));
+    // 'skipped' is reported, never swallowed: an optional action that failed is something the
+    // caller should be able to see and act on, and a silent skip is how a half-filled form starts
+    // looking like a fully-filled one.
+    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], elapsedMs: Date.now() - startedAt }));
   } finally {
     await browser.close();
   }
