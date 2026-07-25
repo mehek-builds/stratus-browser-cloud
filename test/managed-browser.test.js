@@ -102,3 +102,31 @@ test('a choice group is reported once, by its question, not once per option', ()
   // And the label for a choice control prefers the group's question over the option text.
   assert.match(SANDBOX_RUNNER, /const groupSources = isChoice/);
 });
+
+// R-055 on the managed path: /api/run is otherwise stateless (navigate, act, return), so this
+// runner is the only place that ever has a live Page mid-run. The 'discover' action lets a caller
+// (student-outreach-backend) scan the page for custom questions in the SAME sandboxed session it
+// already pays for, resolve them server-side (Node, not this sandbox), and fill them in a second
+// call - mirroring the direct-Playwright path's discoverPageQuestions(), not new logic.
+
+test('discover is an allowed action and needs no selector', () => {
+  assert.deepEqual(normalizeManagedActions([{ type: 'discover' }]), [{ type: 'discover' }]);
+  assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
+});
+
+test('discover scans text-shaped controls only, matching the fill scope', () => {
+  // Never select/radio/checkbox: this runner (see fillByLabelText above) already refuses to click
+  // a choice control by matching an answer to option text on discovered fields, so there is nothing
+  // safe to do with a discovered choice question either - it stays a blocker, same as today.
+  assert.match(
+    SANDBOX_RUNNER,
+    /input\[type="text"\], input\[type="email"\], input\[type="tel"\], input\[type="url"\], input\[type="number"\], input\[type="date"\], input:not\(\[type\]\), textarea/,
+  );
+  assert.match(SANDBOX_RUNNER, /const discovered = \[\];/);
+  assert.match(SANDBOX_RUNNER, /discovered, filledFields:/);
+});
+
+test('discover never surfaces a honeypot field', () => {
+  assert.match(SANDBOX_RUNNER, /function isHoneypot\(el\)/);
+  assert.match(SANDBOX_RUNNER, /!isHoneypot\(el\)/);
+});
