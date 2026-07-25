@@ -8,7 +8,7 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
-const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract']);
+const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
@@ -38,10 +38,76 @@ const { chromium } = require('playwright');
     const extracted = [];
     const filledFields = [];
     const skipped = [];
+    const discovered = [];
     for (const action of input.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
       if (locator && action.optional && await locator.count() === 0) continue;
+      if (action.type === 'discover') {
+        // Scans the LIVE page for text-shaped custom questions (R-055 on the managed path: this
+        // runner is the only place with an actual Page object mid-run, since /api/run is otherwise
+        // stateless and one-shot). Ported from student-outreach-backend's DISCOVER_QUESTIONS_SCRIPT
+        // and the extension's own candidateInputs()/questionLabel() - keep the three in sync by
+        // hand. Deliberately excludes select/radio/checkbox, matching the caller's own fill scope:
+        // it never clicks a choice control, so there is nothing useful to discover there either.
+        const found = await page.evaluate(() => {
+          function clean(s) {
+            return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
+          }
+          function isVisible(el) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) return false;
+            const style = getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          }
+          function isHoneypot(el) {
+            const name = (el.getAttribute('name') || '').toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            if (/\b(honeypot|hp_|bot[-_]?field|hidden[-_]?field)\b/.test(name + ' ' + id)) return true;
+            const style = getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.opacity === '0' || (rect.width <= 1 && rect.height <= 1);
+          }
+          function questionLabel(el) {
+            const fieldset = el.closest('fieldset');
+            const legend = fieldset ? fieldset.querySelector('legend') : null;
+            const legendText = legend && legend.textContent ? legend.textContent.trim() : '';
+            if (legendText) return legendText.toLowerCase();
+            const group = el.closest('[role="group"], [role="radiogroup"]');
+            const groupLabel = group ? group.getAttribute('aria-label') : null;
+            if (groupLabel) return groupLabel.toLowerCase();
+            const labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
+            const labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
+            const parts = [labelText || '', el.getAttribute('aria-label') || '', el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
+            const own = clean(parts.join(' ')).toLowerCase();
+            if (own) return own;
+            const block = el.closest('div, section, li');
+            const fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
+            return ((fallback && fallback.textContent) || '').toLowerCase().trim();
+          }
+          const els = Array.prototype.slice
+            .call(document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea'))
+            .filter((el) => !el.closest('[id*="litos"]') && !el.disabled && !el.readOnly && isVisible(el) && !isHoneypot(el));
+          const out = [];
+          let counter = 0;
+          for (let i = 0; i < els.length; i += 1) {
+            const el = els[i];
+            const label = clean(questionLabel(el));
+            if (!label) continue;
+            counter += 1;
+            const marker = 'data-litos-discovered-' + counter;
+            el.setAttribute(marker, '1');
+            out.push({
+              label: label,
+              selector: '[' + marker + ']',
+              inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
+              maxLength: el.maxLength > 0 ? el.maxLength : null
+            });
+          }
+          return out;
+        });
+        discovered.push(...found);
+      }
       if (action.type === 'click') {
         await locator.click();
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
@@ -211,7 +277,7 @@ const { chromium } = require('playwright');
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
     // caller should be able to see and act on, and a silent skip is how a half-filled form starts
     // looking like a fully-filled one.
-    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], elapsedMs: Date.now() - startedAt }));
   } finally {
     await browser.close();
   }
@@ -240,7 +306,7 @@ export function normalizeManagedActions(actions = []) {
       throw inputError(`Action ${index + 1} has an unsupported type`, 'INVALID_ACTION');
     }
     const normalized = { type: action.type };
-    if (!['press', 'fillByLabelText'].includes(action.type)) normalized.selector = validateSelector(action.selector);
+    if (!['press', 'fillByLabelText', 'discover'].includes(action.type)) normalized.selector = validateSelector(action.selector);
     if (action.optional != null) normalized.optional = Boolean(action.optional);
     if (action.label != null) {
       if (typeof action.label !== 'string' || action.label.length > 200) throw inputError('Action labels must be strings no longer than 200 characters', 'INVALID_ACTION_LABEL');
