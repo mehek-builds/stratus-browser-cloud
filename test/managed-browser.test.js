@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions, SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { clickWithCaptchaGuard, executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 test('managed free limits are explicit and do not claim paid capacity', () => {
   assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 10, monthlyCpuHours: 5, maxRunSeconds: 60, persistedDays: 30 });
@@ -129,4 +129,24 @@ test('discover scans text-shaped controls only, matching the fill scope', () => 
 test('discover never surfaces a honeypot field', () => {
   assert.match(SANDBOX_RUNNER, /function isHoneypot\(el\)/);
   assert.match(SANDBOX_RUNNER, /!isHoneypot\(el\)/);
+});
+
+test('final submit is never clicked while a CAPTCHA is unresolved', async () => {
+  assert.match(SANDBOX_RUNNER, /CAPTCHA_UNRESOLVED: final submit was not clicked/);
+  let clickCount = 0;
+  const responseFields = {
+    count: async () => 2,
+    nth: (index) => ({ inputValue: async () => index === 0 ? 'solved-token' : '' })
+  };
+  const challengeFields = {
+    count: async () => 2,
+    nth: () => ({ isVisible: async () => true })
+  };
+  const page = {
+    locator: (selector) => selector.includes('response') ? responseFields : challengeFields
+  };
+  const locator = { click: async () => { clickCount += 1; } };
+  await assert.rejects(clickWithCaptchaGuard(page, locator), /CAPTCHA_UNRESOLVED/);
+  assert.equal(clickCount, 0);
+  assert.match(SANDBOX_RUNNER, /captchaVisible && !captchaSolved/);
 });

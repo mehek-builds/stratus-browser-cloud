@@ -20,11 +20,32 @@ const SANDBOX_DEPENDENCIES = [
   'libXrandr', 'mesa-libgbm', 'cairo', 'pango', 'alsa-lib'
 ];
 
+export async function clickWithCaptchaGuard(page, locator) {
+  const responseFields = page.locator('textarea[name*="captcha-response" i], input[name*="captcha-response" i], textarea[id*="captcha-response" i], input[id*="captcha-response" i], textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"]');
+  const responseTokens = [];
+  for (let responseIndex = 0; responseIndex < await responseFields.count(); responseIndex += 1) {
+    responseTokens.push(await responseFields.nth(responseIndex).inputValue().catch(() => ''));
+  }
+  const challenges = page.locator('iframe[src*="captcha" i], iframe[src*="challenges.cloudflare.com" i], [class*="captcha" i], [id*="captcha" i], [data-sitekey]');
+  let visibleChallenge = false;
+  for (let challengeIndex = 0; challengeIndex < await challenges.count(); challengeIndex += 1) {
+    if (await challenges.nth(challengeIndex).isVisible().catch(() => false)) {
+      visibleChallenge = true;
+      break;
+    }
+  }
+  if (visibleChallenge && (responseTokens.length === 0 || responseTokens.some((token) => !token.trim()))) {
+    throw new Error('CAPTCHA_UNRESOLVED: final submit was not clicked');
+  }
+  await locator.click();
+}
+
 // Exported so tests can pin the load-bearing branches of the runner. It ships to the sandbox as a
 // string, so a regression here is invisible until a real portal run fails on a real application.
 export const SANDBOX_RUNNER = String.raw`
 const fs = require('node:fs');
 const { chromium } = require('playwright');
+const clickWithCaptchaGuard = ${clickWithCaptchaGuard.toString()};
 
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
@@ -109,7 +130,13 @@ const { chromium } = require('playwright');
         discovered.push(...found);
       }
       if (action.type === 'click') {
-        await locator.click();
+        // A final submit click is irreversible. Scan immediately before it because a challenge can
+        // appear or reset after the form was filled. Managed Stratus has no solver, so it stops.
+        if (/submit/i.test(action.selector || '')) {
+          await clickWithCaptchaGuard(page, locator);
+        } else {
+          await locator.click();
+        }
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
       }
       if (action.type === 'fill') {
@@ -194,7 +221,17 @@ const { chromium } = require('playwright');
      }
     }
     const blockers = [];
-    if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
+    const captchaResponses = page.locator('textarea[name*="captcha-response" i], input[name*="captcha-response" i], textarea[id*="captcha-response" i], input[id*="captcha-response" i], textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"]');
+    let captchaSolved = false;
+    for (let responseIndex = 0; responseIndex < await captchaResponses.count(); responseIndex += 1) {
+      if ((await captchaResponses.nth(responseIndex).inputValue().catch(() => '')).trim()) captchaSolved = true;
+    }
+    const captchaChallenges = page.locator('iframe[src*="captcha" i], iframe[src*="challenges.cloudflare.com" i], [class*="captcha" i], [id*="captcha" i], [data-sitekey]');
+    let captchaVisible = false;
+    for (let challengeIndex = 0; challengeIndex < await captchaChallenges.count(); challengeIndex += 1) {
+      if (await captchaChallenges.nth(challengeIndex).isVisible().catch(() => false)) captchaVisible = true;
+    }
+    if (captchaVisible && !captchaSolved) {
       blockers.push('CAPTCHA requires your attention');
     }
     const required = page.locator('input[required], textarea[required], select[required]');

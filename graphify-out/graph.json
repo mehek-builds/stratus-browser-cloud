@@ -1137,63 +1137,71 @@
       "source_file": "src/managed-browser.js",
       "source_location": "L1",
       "id": "managed_browser",
-      "community": 6
+      "community": 5
+    },
+    {
+      "label": "clickWithCaptchaGuard()",
+      "file_type": "code",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L23",
+      "id": "managed_browser_clickwithcaptchaguard",
+      "community": 5
     },
     {
       "label": "inputError()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L112",
+      "source_location": "L327",
       "id": "managed_browser_inputerror",
-      "community": 6
+      "community": 5
     },
     {
       "label": "validateSelector()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L116",
+      "source_location": "L331",
       "id": "managed_browser_validateselector",
-      "community": 6
+      "community": 5
     },
     {
       "label": "normalizeManagedActions()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L123",
+      "source_location": "L338",
       "id": "managed_browser_normalizemanagedactions",
-      "community": 6
+      "community": 5
     },
     {
       "label": "normalizeManagedRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L171",
+      "source_location": "L386",
       "id": "managed_browser_normalizemanagedrun",
-      "community": 6
+      "community": 5
     },
     {
       "label": "ensureSandboxTemplate()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L187",
+      "source_location": "L402",
       "id": "managed_browser_ensuresandboxtemplate",
-      "community": 6
+      "community": 5
     },
     {
       "label": "executeSandboxRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L211",
+      "source_location": "L426",
       "id": "managed_browser_executesandboxrun",
-      "community": 6
+      "community": 5
     },
     {
       "label": "executeManagedRun()",
       "file_type": "code",
       "source_file": "src/managed-browser.js",
-      "source_location": "L249",
+      "source_location": "L464",
       "id": "managed_browser_executemanagedrun",
-      "community": 6
+      "community": 5
     },
     {
       "label": "utils.js",
@@ -1201,7 +1209,7 @@
       "source_file": "src/utils.js",
       "source_location": "L1",
       "id": "utils",
-      "community": 5
+      "community": 6
     },
     {
       "label": "id()",
@@ -1209,7 +1217,7 @@
       "source_file": "src/utils.js",
       "source_location": "L3",
       "id": "utils_id",
-      "community": 5
+      "community": 6
     },
     {
       "label": "now()",
@@ -1217,7 +1225,7 @@
       "source_file": "src/utils.js",
       "source_location": "L4",
       "id": "utils_now",
-      "community": 5
+      "community": 6
     },
     {
       "label": "sha256()",
@@ -1225,7 +1233,7 @@
       "source_file": "src/utils.js",
       "source_location": "L5",
       "id": "utils_sha256",
-      "community": 5
+      "community": 6
     },
     {
       "label": "json()",
@@ -1233,7 +1241,7 @@
       "source_file": "src/utils.js",
       "source_location": "L7",
       "id": "utils_json",
-      "community": 5
+      "community": 6
     },
     {
       "label": "readJson()",
@@ -1241,7 +1249,7 @@
       "source_file": "src/utils.js",
       "source_location": "L17",
       "id": "utils_readjson",
-      "community": 5
+      "community": 6
     },
     {
       "label": "redact()",
@@ -1249,7 +1257,7 @@
       "source_file": "src/utils.js",
       "source_location": "L33",
       "id": "utils_redact",
-      "community": 5
+      "community": 6
     },
     {
       "label": "hmac()",
@@ -1257,7 +1265,7 @@
       "source_file": "src/utils.js",
       "source_location": "L49",
       "id": "utils_hmac",
-      "community": 5
+      "community": 6
     },
     {
       "label": "clamp()",
@@ -1265,7 +1273,7 @@
       "source_file": "src/utils.js",
       "source_location": "L53",
       "id": "utils_clamp",
-      "community": 5
+      "community": 6
     }
   ],
   "links": [
@@ -3625,7 +3633,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L112",
+      "source_location": "L23",
+      "weight": 1.0,
+      "_src": "managed_browser",
+      "_tgt": "managed_browser_clickwithcaptchaguard",
+      "source": "managed_browser",
+      "target": "managed_browser_clickwithcaptchaguard",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/managed-browser.js",
+      "source_location": "L327",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_inputerror",
@@ -3637,7 +3657,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L116",
+      "source_location": "L331",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_validateselector",
@@ -3649,7 +3669,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L123",
+      "source_location": "L338",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_normalizemanagedactions",
@@ -3661,7 +3681,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L171",
+      "source_location": "L386",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_normalizemanagedrun",
@@ -3673,7 +3693,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L187",
+      "source_location": "L402",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_ensuresandboxtemplate",
@@ -3685,7 +3705,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L211",
+      "source_location": "L426",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_executesandboxrun",
@@ -3697,7 +3717,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L249",
+      "source_location": "L464",
       "weight": 1.0,
       "_src": "managed_browser",
       "_tgt": "managed_browser_executemanagedrun",
@@ -3709,7 +3729,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L118",
+      "source_location": "L333",
       "weight": 1.0,
       "_src": "managed_browser_validateselector",
       "_tgt": "managed_browser_inputerror",
@@ -3721,7 +3741,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L124",
+      "source_location": "L339",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedactions",
       "_tgt": "managed_browser_inputerror",
@@ -3733,7 +3753,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L172",
+      "source_location": "L387",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedrun",
       "_tgt": "managed_browser_inputerror",
@@ -3745,7 +3765,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L179",
+      "source_location": "L394",
       "weight": 1.0,
       "_src": "managed_browser_normalizemanagedrun",
       "_tgt": "managed_browser_normalizemanagedactions",
@@ -3757,7 +3777,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L212",
+      "source_location": "L427",
       "weight": 1.0,
       "_src": "managed_browser_executesandboxrun",
       "_tgt": "managed_browser_normalizemanagedrun",
@@ -3769,7 +3789,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/managed-browser.js",
-      "source_location": "L216",
+      "source_location": "L431",
       "weight": 1.0,
       "_src": "managed_browser_executesandboxrun",
       "_tgt": "managed_browser_ensuresandboxtemplate",

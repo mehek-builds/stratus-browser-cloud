@@ -1,11 +1,11 @@
-# Graph Report - .  (2026-07-22)
+# Graph Report - .  (2026-07-26)
 
 ## Corpus Check
-- 23 files · ~97,301 words
+- 23 files · ~91,504 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 158 nodes · 217 edges · 22 communities detected
+- 159 nodes · 218 edges · 22 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
@@ -44,19 +44,19 @@ Nodes (3): AgentRuntime, mapAgent(), mapRun()
 
 ### Community 4 - "Community 4"
 Cohesion: 0.2
-Nodes (0):
+Nodes (0): 
 
 ### Community 5 - "Community 5"
-Cohesion: 0.22
-Nodes (0):
+Cohesion: 0.39
+Nodes (6): ensureSandboxTemplate(), executeSandboxRun(), inputError(), normalizeManagedActions(), normalizeManagedRun(), validateSelector()
 
 ### Community 6 - "Community 6"
-Cohesion: 0.46
-Nodes (6): ensureSandboxTemplate(), executeSandboxRun(), inputError(), normalizeManagedActions(), normalizeManagedRun(), validateSelector()
+Cohesion: 0.22
+Nodes (0): 
 
 ### Community 7 - "Community 7"
 Cohesion: 0.33
-Nodes (0):
+Nodes (0): 
 
 ### Community 8 - "Community 8"
 Cohesion: 0.33
@@ -68,7 +68,7 @@ Nodes (1): Stratus
 
 ### Community 10 - "Community 10"
 Cohesion: 0.4
-Nodes (0):
+Nodes (0): 
 
 ### Community 11 - "Community 11"
 Cohesion: 0.67
@@ -76,43 +76,43 @@ Nodes (2): loadConfiguration(), setMessage()
 
 ### Community 12 - "Community 12"
 Cohesion: 0.5
-Nodes (0):
+Nodes (0): 
 
 ### Community 13 - "Community 13"
 Cohesion: 0.67
-Nodes (0):
+Nodes (0): 
 
 ### Community 14 - "Community 14"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 15 - "Community 15"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 16 - "Community 16"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 17 - "Community 17"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 18 - "Community 18"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 19 - "Community 19"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 20 - "Community 20"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ### Community 21 - "Community 21"
 Cohesion: 1.0
-Nodes (0):
+Nodes (0): 
 
 ## Knowledge Gaps
 - **Thin community `Community 14`** (2 nodes): `managed-browser.test.js`, `sandboxExecutor()`
