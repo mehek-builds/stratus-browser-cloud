@@ -39,6 +39,75 @@ const { chromium } = require('playwright');
     const filledFields = [];
     const skipped = [];
     const discovered = [];
+    const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const answerOptions = (value) => {
+      const base = clean(value);
+      const lower = base.toLowerCase();
+      const options = [base];
+      if (/^yes$/.test(lower)) options.push('yes', 'i agree', 'agree', 'true');
+      if (/^no$/.test(lower)) options.push('no', 'false');
+      if (/decline|self-identify|prefer not|do not wish|don't wish|not wish/i.test(base)) {
+        options.push(
+          'decline to self-identify',
+          'i do not wish to answer',
+          "i don't wish to answer",
+          'i do not wish to disclose',
+          'prefer not to answer',
+          'prefer not to say'
+        );
+      }
+      return [...new Set(options.filter(Boolean))];
+    };
+    const optionMatches = (candidate, wanted) => {
+      const a = normalized(candidate);
+      if (!a) return false;
+      return answerOptions(wanted).some((option) => {
+        const b = normalized(option);
+        return a === b || (b.length > 6 && a.includes(b)) || (a.length > 6 && b.includes(a));
+      });
+    };
+    const verifyFilled = async (field, expected) => {
+      const actual = await field.evaluate((element) => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'file' : '';
+        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return element.checked ? 'checked' : '';
+        if (element instanceof HTMLSelectElement) {
+          const selected = element.selectedOptions && element.selectedOptions[0];
+          return selected ? (selected.textContent || selected.value || '') : element.value || '';
+        }
+        return 'value' in element ? String(element.value || '') : (element.textContent || '');
+      }).catch(() => '');
+      if (!clean(expected)) return Boolean(clean(actual));
+      if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
+      return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
+    };
+    const fillCustomChoice = async (container, wanted) => {
+      const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], button, [role="button"]');
+      const total = await controls.count();
+      for (let index = 0; index < total; index += 1) {
+        const control = controls.nth(index);
+        if (!await control.isVisible().catch(() => false)) continue;
+        await control.click().catch(() => undefined);
+        await page.waitForTimeout(150).catch(() => undefined);
+        for (const option of answerOptions(wanted)) {
+          const optionLocator = page.getByRole('option', { name: option, exact: false }).first();
+          if ((await optionLocator.count()) > 0 && await optionLocator.isVisible().catch(() => false)) {
+            await optionLocator.click();
+            return true;
+          }
+          const textLocator = page
+            .locator('[role="option"], [role="listbox"] *, li, [data-value]')
+            .filter({ hasText: option })
+            .first();
+          if ((await textLocator.count()) > 0 && await textLocator.isVisible().catch(() => false)) {
+            await textLocator.click();
+            return true;
+          }
+        }
+        await page.keyboard.press('Escape').catch(() => undefined);
+      }
+      return false;
+    };
     for (const action of input.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
@@ -126,7 +195,12 @@ const { chromium } = require('playwright');
       }
       if (action.type === 'fill') {
         await locator.fill(action.value || '');
-        if (action.label) filledFields.push(action.label);
+        await locator.evaluate((element) => {
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(() => undefined);
+        if (action.label && await verifyFilled(locator, action.value || '')) filledFields.push(action.label);
+        else if (action.label) skipped.push(action.label + ': value did not persist after fill');
       }
       if (action.type === 'fillByLabelText') {
         const label = page.getByText(action.text, { exact: false }).first();
@@ -139,10 +213,14 @@ const { chromium } = require('playwright');
           throw new Error(message);
         }
         const container = label.locator(
-          'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select)][1]'
+          'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select or .//*[@role="combobox"] or .//*[@aria-haspopup="listbox"])][1]'
         );
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
+          if (await fillCustomChoice(container, action.value || '')) {
+            if (action.label) filledFields.push(action.label);
+            continue;
+          }
           const message = 'fillByLabelText: field not found';
           if (action.optional) {
             skipped.push((action.label || action.type) + ': ' + message);
@@ -163,7 +241,21 @@ const { chromium } = require('playwright');
         const dateLikeAnswer = /^\d{4}-\d{2}-\d{2}$/.test(String(action.value || '').trim());
         const dateLikeField = /date|pick date/i.test(shape.placeholder);
         if (shape.tag === 'select') {
-          await field.selectOption({ label: action.value }).catch(() => field.selectOption(action.value));
+          let selected = false;
+          for (const option of answerOptions(action.value || '')) {
+            try {
+              await field.selectOption({ label: option });
+              selected = true;
+              break;
+            } catch {}
+            try {
+              await field.selectOption(option);
+              selected = true;
+              break;
+            } catch {}
+          }
+          if (!selected) selected = await fillCustomChoice(container, action.value || '');
+          if (!selected) continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
           // Scoped to THIS question's container, never the whole page. That scoping is what makes
           // matching an answer as short as "Yes" safe: an unscoped label match could tick a consent
@@ -179,11 +271,15 @@ const { chromium } = require('playwright');
               const wrapping = element.closest('label');
               return ((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || element.getAttribute('aria-label') || element.value || '').trim();
             });
-            if (optionText && optionText.toLowerCase() === wanted.toLowerCase()) {
+            if (optionText && optionMatches(optionText, wanted)) {
               await option.check();
               matched = true;
               break;
             }
+          }
+          if (!matched && total === 1 && /^yes$/i.test(wanted)) {
+            await choices.first().check();
+            matched = true;
           }
           // No exact option match means the answer does not belong to this control. Leaving it
           // unticked is correct: it surfaces as a required-field blocker for the applicant, which is
@@ -200,8 +296,13 @@ const { chromium } = require('playwright');
           if (!committed) await field.fill(action.value || '');
         } else {
           await field.fill(action.value || '');
+          await field.evaluate((element) => {
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+          }).catch(() => undefined);
         }
-        if (action.label) filledFields.push(action.label);
+        if (action.label && await verifyFilled(field, action.value || '')) filledFields.push(action.label);
+        else if (action.label) skipped.push(action.label + ': value did not persist after fillByLabelText');
       }
       if (action.type === 'upload') {
         await locator.setInputFiles({

@@ -112,18 +112,42 @@ test('fillByLabelText dispatches on the control type', () => {
   assert.match(SANDBOX_RUNNER, /await option\.check\(\)/);
 });
 
+test('fills are reported only after the page keeps the value', () => {
+  assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
+  assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
+  assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
+  assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
+});
+
+test('fillByLabelText can use scoped custom listbox controls', () => {
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) =>/);
+  assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
+  assert.match(SANDBOX_RUNNER, /page\.getByRole\('option', \{ name: option, exact: false \}\)/);
+  assert.match(SANDBOX_RUNNER, /\[role="option"\], \[role="listbox"\] \*, li, \[data-value\]/);
+  assert.match(SANDBOX_RUNNER, /selected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+});
+
+test('decline style EEO answers can match common portal option text', () => {
+  assert.match(SANDBOX_RUNNER, /const answerOptions = \(value\) =>/);
+  assert.match(SANDBOX_RUNNER, /i do not wish to answer/);
+  assert.match(SANDBOX_RUNNER, /prefer not to answer/);
+  assert.match(SANDBOX_RUNNER, /optionMatches\(optionText, wanted\)/);
+});
+
 test('choice matching is scoped to the question container, never the page', () => {
   // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
   // on the form, which the applicant cannot undo.
   assert.match(SANDBOX_RUNNER, /const choices = container\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing.
   assert.match(SANDBOX_RUNNER, /if \(!matched\) continue;/);
+  assert.match(SANDBOX_RUNNER, /total === 1 && \/\^yes\$\/i\.test\(wanted\)/);
+  assert.match(SANDBOX_RUNNER, /actual === 'checked' && \/\^yes\$\/i\.test\(clean\(expected\)\)/);
 });
 
 test('fillByLabelText climbs to a container that actually owns controls', () => {
   assert.match(
     SANDBOX_RUNNER,
-    /ancestor::\*\[\(self::div or self::fieldset\) and \(\.\/\/textarea or \.\/\/input\[not\(@type="file"\) and not\(@type="hidden"\)\] or \.\/\/select\)\]\[1\]/,
+    /ancestor::\*\[\(self::div or self::fieldset\) and \(\.\/\/textarea or \.\/\/input\[not\(@type="file"\) and not\(@type="hidden"\)\] or \.\/\/select or \.\/\/\*\[@role="combobox"\] or \.\/\/\*\[@aria-haspopup="listbox"\]\)\]\[1\]/,
   );
 });
 
