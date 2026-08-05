@@ -87,12 +87,7 @@ const { chromium } = require('playwright');
     };
     const fillCustomChoice = async (container, wanted) => {
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
-      const total = await controls.count();
-      for (let index = 0; index < total; index += 1) {
-        const control = controls.nth(index);
-        if (!await control.isVisible().catch(() => false)) continue;
-        await control.click().catch(() => undefined);
-        await page.waitForTimeout(150).catch(() => undefined);
+      const clickMatchingOption = async () => {
         for (const option of answerOptions(wanted)) {
           const optionLocator = page.getByRole('option', { name: option, exact: false }).first();
           if ((await optionLocator.count()) > 0 && await optionLocator.isVisible().catch(() => false)) {
@@ -107,6 +102,25 @@ const { chromium } = require('playwright');
             await textLocator.click();
             return true;
           }
+        }
+        return false;
+      };
+      const total = await controls.count();
+      for (let index = 0; index < total; index += 1) {
+        const control = controls.nth(index);
+        if (!await control.isVisible().catch(() => false)) continue;
+        await control.click().catch(() => undefined);
+        await page.waitForTimeout(150).catch(() => undefined);
+        if (await clickMatchingOption()) return true;
+        for (const option of answerOptions(wanted)) {
+          await control.fill('').catch(() => undefined);
+          await control.fill(option).catch(async () => {
+            await page.keyboard.press('Control+A').catch(() => undefined);
+            await page.keyboard.press('Backspace').catch(() => undefined);
+            await page.keyboard.type(option, { delay: 5 }).catch(() => undefined);
+          });
+          await page.waitForTimeout(200).catch(() => undefined);
+          if (await clickMatchingOption()) return true;
         }
         await page.keyboard.press('Escape').catch(() => undefined);
       }
