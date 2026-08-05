@@ -138,7 +138,9 @@ const { chromium } = require('playwright');
           }
           throw new Error(message);
         }
-        const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
+        const container = label.locator(
+          'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select)][1]'
+        );
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
           const message = 'fillByLabelText: field not found';
