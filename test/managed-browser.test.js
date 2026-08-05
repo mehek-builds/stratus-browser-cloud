@@ -57,6 +57,8 @@ test('an optional action that THROWS is stepped over, not fatal to the run', () 
 test('a skipped action is reported rather than swallowed', () => {
   // A silent skip is how a half-filled form starts looking like a fully-filled one.
   assert.match(SANDBOX_RUNNER, /skipped: \[\.\.\.new Set\(skipped\)\]/);
+  assert.match(SANDBOX_RUNNER, /fillByLabelText: label not found/);
+  assert.match(SANDBOX_RUNNER, /fillByLabelText: field not found/);
 });
 
 test('fillByLabelText dispatches on the control type', () => {
@@ -72,6 +74,20 @@ test('choice matching is scoped to the question container, never the page', () =
   assert.match(SANDBOX_RUNNER, /const choices = container\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing.
   assert.match(SANDBOX_RUNNER, /if \(!matched\) continue;/);
+});
+
+test('fillByLabelText commits date-like answers before generic text fill', () => {
+  // Ashby date pickers can expose a visible "Pick date..." text control while the required date
+  // state remains empty. Date answers need the native date/input events and blur path, not only
+  // a plain fill against the first input in the question container.
+  assert.ok(SANDBOX_RUNNER.includes("const dateLikeAnswer = /^\\d{4}-\\d{2}-\\d{2}$/.test"));
+  assert.ok(SANDBOX_RUNNER.includes("const dateLikeField = /date|pick date/i.test"));
+  assert.match(SANDBOX_RUNNER, /shape\.type === 'date' \|\| \(dateLikeAnswer && dateLikeField\)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /container\.locator\('input\[type=date\]/);
+  assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('input', \{ bubbles: true \}\)\)/);
+  assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
+  assert.match(SANDBOX_RUNNER, /field\.press\('Tab'\)/);
+  assert.match(SANDBOX_RUNNER, /const committed = await field\.evaluate/);
 });
 
 test('an unticked required checkbox is reported as a blocker', () => {

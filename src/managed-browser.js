@@ -118,10 +118,24 @@ const { chromium } = require('playwright');
       }
       if (action.type === 'fillByLabelText') {
         const label = page.getByText(action.text, { exact: false }).first();
-        if (await label.count() === 0) continue;
+        if (await label.count() === 0) {
+          const message = 'fillByLabelText: label not found';
+          if (action.optional) {
+            skipped.push((action.label || action.type) + ': ' + message);
+            continue;
+          }
+          throw new Error(message);
+        }
         const container = label.locator('xpath=ancestor::*[self::div or self::fieldset][1]');
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
-        if (await field.count() === 0) continue;
+        if (await field.count() === 0) {
+          const message = 'fillByLabelText: field not found';
+          if (action.optional) {
+            skipped.push((action.label || action.type) + ': ' + message);
+            continue;
+          }
+          throw new Error(message);
+        }
         // Dispatch on the CONTROL, not on the question. Everything used to fall through to fill(),
         // which throws on a checkbox or radio ("Input of type checkbox cannot be filled") and, before
         // the try/catch above, took the entire run with it. Callers cannot predict the control type
@@ -129,8 +143,11 @@ const { chromium } = require('playwright');
         // and is a checkbox group.
         const shape = await field.evaluate((element) => ({
           tag: element.tagName.toLowerCase(),
-          type: (element.getAttribute('type') || '').toLowerCase()
+          type: (element.getAttribute('type') || '').toLowerCase(),
+          placeholder: element.getAttribute('placeholder') || ''
         }));
+        const dateLikeAnswer = /^\d{4}-\d{2}-\d{2}$/.test(String(action.value || '').trim());
+        const dateLikeField = /date|pick date/i.test(shape.placeholder);
         if (shape.tag === 'select') {
           await field.selectOption({ label: action.value }).catch(() => field.selectOption(action.value));
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
@@ -158,6 +175,15 @@ const { chromium } = require('playwright');
           // unticked is correct: it surfaces as a required-field blocker for the applicant, which is
           // far cheaper than guessing a checkbox on their behalf.
           if (!matched) continue;
+        } else if (shape.type === 'date' || (dateLikeAnswer && dateLikeField)) {
+          await field.fill(action.value || '');
+          await field.evaluate((element) => {
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+          await field.press('Tab').catch(() => field.evaluate((element) => element.blur()));
+          const committed = await field.evaluate((element) => String(element.value || '').trim()).catch(() => '');
+          if (!committed) await field.fill(action.value || '');
         } else {
           await field.fill(action.value || '');
         }
