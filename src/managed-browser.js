@@ -82,7 +82,7 @@ const { chromium } = require('playwright');
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
     const fillCustomChoice = async (container, wanted) => {
-      const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], button, [role="button"]');
+      const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
@@ -96,7 +96,7 @@ const { chromium } = require('playwright');
             return true;
           }
           const textLocator = page
-            .locator('[role="option"], [role="listbox"] *, li, [data-value]')
+            .locator('[role="option"], [role="listbox"] *, .select2-result, .select2-results li, [class*="select2-result"], li, [data-value]')
             .filter({ hasText: option })
             .first();
           if ((await textLocator.count()) > 0 && await textLocator.isVisible().catch(() => false)) {
@@ -241,20 +241,23 @@ const { chromium } = require('playwright');
         const dateLikeAnswer = /^\d{4}-\d{2}-\d{2}$/.test(String(action.value || '').trim());
         const dateLikeField = /date|pick date/i.test(shape.placeholder);
         if (shape.tag === 'select') {
+          const customSelected = await fillCustomChoice(container, action.value || '');
           let selected = false;
-          for (const option of answerOptions(action.value || '')) {
-            try {
-              await field.selectOption({ label: option });
-              selected = true;
-              break;
-            } catch {}
-            try {
-              await field.selectOption(option);
-              selected = true;
-              break;
-            } catch {}
+          if (!customSelected) {
+            for (const option of answerOptions(action.value || '')) {
+              try {
+                await field.selectOption({ label: option });
+                selected = true;
+                break;
+              } catch {}
+              try {
+                await field.selectOption(option);
+                selected = true;
+                break;
+              } catch {}
+            }
           }
-          if (!selected) selected = await fillCustomChoice(container, action.value || '');
+          if (customSelected) selected = true;
           if (!selected) continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
           // Scoped to THIS question's container, never the whole page. That scoping is what makes
