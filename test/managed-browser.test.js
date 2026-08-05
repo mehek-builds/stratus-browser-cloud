@@ -140,6 +140,9 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /shape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /ariaAutocomplete === 'list'/);
+  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(\) =>/);
+  assert.match(SANDBOX_RUNNER, /await control\.fill\(option\)/);
+  assert.match(SANDBOX_RUNNER, /await page\.keyboard\.type\(option, \{ delay: 5 \}\)/);
   assert.match(SANDBOX_RUNNER, /choice value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /choice value did not persist after fillByLabelText/);
 });
