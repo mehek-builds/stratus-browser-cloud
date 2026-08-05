@@ -2,6 +2,50 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
+function extractFunctionSource(name) {
+  const start = SANDBOX_RUNNER.indexOf(`function ${name}`);
+  assert.notEqual(start, -1, `${name} must exist in the sandbox runner`);
+  const open = SANDBOX_RUNNER.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < SANDBOX_RUNNER.length; index += 1) {
+    if (SANDBOX_RUNNER[index] === '{') depth += 1;
+    if (SANDBOX_RUNNER[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return SANDBOX_RUNNER.slice(start, index + 1);
+    }
+  }
+  throw new Error(`Could not extract ${name}`);
+}
+
+function sandboxQuestionLabel() {
+  const source = extractFunctionSource('questionLabel');
+  const clean = (value) => (value == null ? '' : value).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const fakeDocument = { querySelector: () => null };
+  const fakeCss = { escape: (value) => String(value) };
+  return Function('clean', 'document', 'CSS', `return (${source});`)(clean, fakeDocument, fakeCss);
+}
+
+function mockElement({ attrs = {}, textContent = '', parentElement = null, queryResult = null } = {}) {
+  return {
+    id: attrs.id || '',
+    labels: [],
+    parentElement,
+    textContent,
+    getAttribute(name) {
+      return attrs[name] ?? null;
+    },
+    closest() {
+      return null;
+    },
+    matches(selector) {
+      return /div|section|li|fieldset/.test(selector);
+    },
+    querySelector() {
+      return queryResult;
+    }
+  };
+}
+
 test('managed free limits are explicit and do not claim paid capacity', () => {
   assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 10, monthlyCpuHours: 5, maxRunSeconds: 60, persistedDays: 30 });
 });
@@ -142,7 +186,33 @@ test('discover scans text-shaped controls only, matching the fill scope', () => 
   assert.match(SANDBOX_RUNNER, /discovered, filledFields:/);
 });
 
+test('discover prefers the question text over generic Ashby date placeholders', () => {
+  assert.match(SANDBOX_RUNNER, /function genericControlText\(value\)/);
+  assert.match(SANDBOX_RUNNER, /if \(own && !genericControlText\(own\)\) return own;/);
+  assert.match(SANDBOX_RUNNER, /return fallbackText \|\| own;/);
+});
+
+test('discover walks nested datepicker parents to find the Ashby question label', () => {
+  const label = mockElement({ textContent: 'Are you currently enrolled in a degree program? If so, expected graduation date?' });
+  const outer = mockElement({ queryResult: label });
+  const middle = mockElement({ parentElement: outer });
+  const dateWidget = mockElement({ parentElement: middle });
+  const input = mockElement({ attrs: { placeholder: 'Pick date...' }, parentElement: dateWidget });
+  assert.equal(sandboxQuestionLabel()(input), 'are you currently enrolled in a degree program? if so, expected graduation date?');
+});
+
+test('discover still returns placeholder-only fields when no outer question exists', () => {
+  const wrapper = mockElement();
+  const input = mockElement({ attrs: { placeholder: 'Enter your answer here' }, parentElement: wrapper });
+  assert.equal(sandboxQuestionLabel()(input), 'enter your answer here');
+});
+
 test('discover never surfaces a honeypot field', () => {
   assert.match(SANDBOX_RUNNER, /function isHoneypot\(el\)/);
   assert.match(SANDBOX_RUNNER, /!isHoneypot\(el\)/);
+});
+
+test('required date blockers can use the enclosing question instead of Pick date', () => {
+  assert.match(SANDBOX_RUNNER, /const nearestQuestionText = \(start\) =>/);
+  assert.match(SANDBOX_RUNNER, /nearestQuestionText\(element\)/);
 });

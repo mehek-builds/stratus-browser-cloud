@@ -69,6 +69,19 @@ const { chromium } = require('playwright');
             return style.opacity === '0' || (rect.width <= 1 && rect.height <= 1);
           }
           function questionLabel(el) {
+            function genericControlText(value) {
+              return /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/.test(clean(value).toLowerCase());
+            }
+            function nearestQuestionText(start) {
+              let block = start.parentElement;
+              for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
+                if (!block.matches('div, section, li, fieldset')) continue;
+                const candidate = block.querySelector('label, legend, .question, h3, h4');
+                const text = clean((candidate && candidate.textContent) || '').toLowerCase();
+                if (text && !genericControlText(text)) return text;
+              }
+              return '';
+            }
             const fieldset = el.closest('fieldset');
             const legend = fieldset ? fieldset.querySelector('legend') : null;
             const legendText = legend && legend.textContent ? legend.textContent.trim() : '';
@@ -80,10 +93,9 @@ const { chromium } = require('playwright');
             const labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
             const parts = [labelText || '', el.getAttribute('aria-label') || '', el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
-            if (own) return own;
-            const block = el.closest('div, section, li');
-            const fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
-            return ((fallback && fallback.textContent) || '').toLowerCase().trim();
+            const fallbackText = nearestQuestionText(el);
+            if (own && !genericControlText(own)) return own;
+            return fallbackText || own;
           }
           const els = Array.prototype.slice
             .call(document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea'))
@@ -266,6 +278,17 @@ const { chromium } = require('playwright');
         const referenced = describedBy && document.getElementById(describedBy.split(/\s+/)[0]);
         const wrapping = element.closest('label');
         const legend = element.closest('fieldset') && element.closest('fieldset').querySelector('legend');
+        const genericControlText = (value) => /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+        const nearestQuestionText = (start) => {
+          let block = start.parentElement;
+          for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
+            if (!block.matches('div, section, li, fieldset')) continue;
+            const candidate = block.querySelector('label, legend, .question, h3, h4');
+            const text = clean((candidate && candidate.textContent) || '');
+            if (text && !genericControlText(text)) return text;
+          }
+          return '';
+        };
         // For a checkbox or radio, the per-option sources describe the OPTION ("Statistics",
         // "Putnam"), not the question the applicant has to answer. Ask the group for its question
         // first, and only fall back to the option text if the form gives nothing better.
@@ -281,11 +304,13 @@ const { chromium } = require('playwright');
           element.getAttribute('aria-label'),
           element.getAttribute('description'),
           legend && legend.textContent,
+          nearestQuestionText(element),
           element.getAttribute('placeholder')
         ]) {
           const text = clean(candidate);
           // Reject machine identifiers rather than dressing one up as a label.
           if (!text) continue;
+          if (genericControlText(text) && candidate !== element.getAttribute('placeholder')) continue;
           if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
           if (!/[a-z]/i.test(text)) continue;
           return text.slice(0, 120);
