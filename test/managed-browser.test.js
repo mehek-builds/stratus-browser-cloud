@@ -114,6 +114,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -133,6 +134,14 @@ test('fillByLabelText handles Greenhouse Select2 controls before hidden native s
   assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
   assert.match(SANDBOX_RUNNER, /if \(!customSelected\) \{/);
   assert.match(SANDBOX_RUNNER, /if \(customSelected\) selected = true;/);
+});
+
+test('React Select comboboxes are filled as choices, not plain text', () => {
+  assert.match(SANDBOX_RUNNER, /fillShape\.role === 'combobox'/);
+  assert.match(SANDBOX_RUNNER, /shape\.role === 'combobox'/);
+  assert.match(SANDBOX_RUNNER, /ariaAutocomplete === 'list'/);
+  assert.match(SANDBOX_RUNNER, /choice value did not persist after fill/);
+  assert.match(SANDBOX_RUNNER, /choice value did not persist after fillByLabelText/);
 });
 
 test('decline style EEO answers can match common portal option text', () => {

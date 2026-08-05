@@ -81,6 +81,10 @@ const { chromium } = require('playwright');
       if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
+    const verifyChoiceInContainer = async (container, expected) => {
+      const text = await container.evaluate((element) => element.textContent || '').catch(() => '');
+      return optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)));
+    };
     const fillCustomChoice = async (container, wanted) => {
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
       const total = await controls.count();
@@ -194,6 +198,21 @@ const { chromium } = require('playwright');
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
       }
       if (action.type === 'fill') {
+        const fillShape = await locator.evaluate((element) => ({
+          role: element.getAttribute('role') || '',
+          ariaHaspopup: element.getAttribute('aria-haspopup') || '',
+          ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
+        })).catch(() => ({ role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
+        if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true' || fillShape.ariaAutocomplete === 'list') {
+          const container = locator.locator(
+            'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
+          );
+          if (await fillCustomChoice(container, action.value || '')) {
+            if (action.label && await verifyChoiceInContainer(container, action.value || '')) filledFields.push(action.label);
+            else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
+            continue;
+          }
+        }
         await locator.fill(action.value || '');
         await locator.evaluate((element) => {
           element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -236,7 +255,10 @@ const { chromium } = require('playwright');
         const shape = await field.evaluate((element) => ({
           tag: element.tagName.toLowerCase(),
           type: (element.getAttribute('type') || '').toLowerCase(),
-          placeholder: element.getAttribute('placeholder') || ''
+          placeholder: element.getAttribute('placeholder') || '',
+          role: element.getAttribute('role') || '',
+          ariaHaspopup: element.getAttribute('aria-haspopup') || '',
+          ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         }));
         const dateLikeAnswer = /^\d{4}-\d{2}-\d{2}$/.test(String(action.value || '').trim());
         const dateLikeField = /date|pick date/i.test(shape.placeholder);
@@ -259,6 +281,14 @@ const { chromium } = require('playwright');
           }
           if (customSelected) selected = true;
           if (!selected) continue;
+        } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
+          if (await fillCustomChoice(container, action.value || '')) {
+            if (action.label && await verifyChoiceInContainer(container, action.value || '')) filledFields.push(action.label);
+            else if (action.label) skipped.push(action.label + ': choice value did not persist after fillByLabelText');
+            continue;
+          }
+          if (action.label) skipped.push(action.label + ': choice option not found');
+          continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
           // Scoped to THIS question's container, never the whole page. That scoping is what makes
           // matching an answer as short as "Yes" safe: an unscoped label match could tick a consent
