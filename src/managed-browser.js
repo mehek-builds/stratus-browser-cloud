@@ -119,7 +119,7 @@ const { chromium } = require('playwright');
             await page.keyboard.press('Backspace').catch(() => undefined);
             await page.keyboard.type(option, { delay: 5 }).catch(() => undefined);
           });
-          await page.waitForTimeout(200).catch(() => undefined);
+          await page.waitForTimeout(1200).catch(() => undefined);
           if (await clickMatchingOption()) return true;
         }
         await page.keyboard.press('Escape').catch(() => undefined);
