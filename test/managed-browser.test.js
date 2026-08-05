@@ -120,6 +120,13 @@ test('choice matching is scoped to the question container, never the page', () =
   assert.match(SANDBOX_RUNNER, /if \(!matched\) continue;/);
 });
 
+test('fillByLabelText climbs to a container that actually owns controls', () => {
+  assert.match(
+    SANDBOX_RUNNER,
+    /ancestor::\*\[\(self::div or self::fieldset\) and \(\.\/\/textarea or \.\/\/input\[not\(@type="file"\) and not\(@type="hidden"\)\] or \.\/\/select\)\]\[1\]/,
+  );
+});
+
 test('fillByLabelText commits date-like answers before generic text fill', () => {
   // Ashby date pickers can expose a visible "Pick date..." text control while the required date
   // state remains empty. Date answers need the native date/input events and blur path, not only
