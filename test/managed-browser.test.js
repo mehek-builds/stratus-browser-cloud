@@ -123,8 +123,16 @@ test('fillByLabelText can use scoped custom listbox controls', () => {
   assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) =>/);
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
   assert.match(SANDBOX_RUNNER, /page\.getByRole\('option', \{ name: option, exact: false \}\)/);
-  assert.match(SANDBOX_RUNNER, /\[role="option"\], \[role="listbox"\] \*, li, \[data-value\]/);
-  assert.match(SANDBOX_RUNNER, /selected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /\[role="option"\], \[role="listbox"\] \*, .*li, \[data-value\]/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+});
+
+test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
+  assert.match(SANDBOX_RUNNER, /\.select2-choice, \.select2-container/);
+  assert.match(SANDBOX_RUNNER, /\.select2-result, \.select2-results li/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /if \(!customSelected\) \{/);
+  assert.match(SANDBOX_RUNNER, /if \(customSelected\) selected = true;/);
 });
 
 test('decline style EEO answers can match common portal option text', () => {
