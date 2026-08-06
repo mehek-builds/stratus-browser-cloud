@@ -367,7 +367,7 @@ const { chromium } = require('playwright');
       }
       if (action.type === 'extract') {
         const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
-        extracted.push({ selector: action.selector, value });
+        extracted.push({ selector: action.selector, label: action.label, value });
       }
      } catch (actionError) {
       // 'optional' previously meant only "skip if the element is missing", and it was checked via
@@ -528,7 +528,10 @@ export function normalizeManagedActions(actions = []) {
     if (action.type === 'upload') {
       const file = action.file;
       if (!file || typeof file !== 'object') throw inputError('Upload actions require a file', 'INVALID_UPLOAD');
-      if (typeof file.name !== 'string' || !file.name.trim() || file.name.length > 255) throw inputError('Upload file names must be non-empty strings no longer than 255 characters', 'INVALID_UPLOAD');
+      if (
+        typeof file.name !== 'string' || !file.name.trim() || file.name.length > 255 ||
+        /[\/\\\0-\x1f\x7f]/.test(file.name) || file.name.trim() === '.' || file.name.trim() === '..'
+      ) throw inputError('Upload file names must be safe non-empty basenames no longer than 255 characters', 'INVALID_UPLOAD');
       if (typeof file.mimeType !== 'string' || !file.mimeType.trim() || file.mimeType.length > 200) throw inputError('Upload MIME types must be non-empty strings no longer than 200 characters', 'INVALID_UPLOAD');
       if (
         typeof file.base64 !== 'string' || !file.base64 || file.base64.length > MAX_FILE_BASE64_LENGTH ||

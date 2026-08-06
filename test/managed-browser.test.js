@@ -54,11 +54,11 @@ test('managed actions accept bounded declarative operations', () => {
   assert.deepEqual(normalizeManagedActions([
     { type: 'fill', selector: '#email', value: 'person@example.com' },
     { type: 'press', value: 'Enter' },
-    { type: 'extract', selector: 'h1' }
+    { type: 'extract', selector: 'h1', label: 'filled_field:title' }
   ]), [
     { type: 'fill', selector: '#email', value: 'person@example.com' },
     { type: 'press', value: 'Enter' },
-    { type: 'extract', selector: 'h1' }
+    { type: 'extract', selector: 'h1', label: 'filled_field:title' }
   ]);
   assert.throws(() => normalizeManagedActions([{ type: 'evaluate', value: 'process.exit()' }]), (error) => error.code === 'INVALID_ACTION');
   assert.throws(() => normalizeManagedActions(Array.from({ length: 121 }, () => ({ type: 'click', selector: 'button' }))), (error) => error.code === 'TOO_MANY_ACTIONS');
@@ -76,6 +76,15 @@ test('managed actions accept reviewed questions and bounded resume uploads', () 
     () => normalizeManagedActions([{ type: 'upload', selector: '#resume', file: { name: 'resume.pdf', mimeType: 'application/pdf', base64: 'x'.repeat(6_000_001) } }]),
     (error) => error.code === 'INVALID_UPLOAD'
   );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'upload', selector: '#resume', file: { name: '../resume.pdf', mimeType: 'application/pdf', base64: 'cGRm' } }]),
+    (error) => error.code === 'INVALID_UPLOAD'
+  );
+});
+
+test('sandbox runner is syntactically valid and returns labelled extracts', () => {
+  assert.doesNotThrow(() => new Function(SANDBOX_RUNNER));
+  assert.match(SANDBOX_RUNNER, /extracted\.push\(\{ selector: action\.selector, label: action\.label, value \}\)/);
 });
 
 test('managed run always uses the Stratus Sandbox execution system', async () => {
