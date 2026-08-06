@@ -224,6 +224,15 @@ test('a choice group is reported once, by its question, not once per option', ()
   assert.match(SANDBOX_RUNNER, /const groupSources = isChoice/);
 });
 
+test('required file-upload groups are reported even when the hidden input is not required', () => {
+  // Greenhouse marks transcript uploads as aria-required on the file-upload group while leaving the
+  // hidden input itself without a required attribute, so the generic input[required] scan misses it.
+  assert.match(SANDBOX_RUNNER, /\[role="group"\]\[aria-required="true"\]:has\(input\[type="file"\]\)/);
+  assert.match(SANDBOX_RUNNER, /reportedFileGroups/);
+  assert.match(SANDBOX_RUNNER, /input\.files\?\.length/);
+  assert.match(SANDBOX_RUNNER, /A required file upload on the form has no label Litos can read/);
+});
+
 // R-055 on the managed path: /api/run is otherwise stateless (navigate, act, return), so this
 // runner is the only place that ever has a live Page mid-run. The 'discover' action lets a caller
 // (student-outreach-backend) scan the page for custom questions in the SAME sandboxed session it

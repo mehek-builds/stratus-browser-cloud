@@ -470,6 +470,38 @@ const { chromium } = require('playwright');
       blockers.push(label ? '"' + label + '" is required and is still empty'
                           : 'A required field on the form has no label Litos can read, and is still empty');
     }
+    const requiredFileGroups = page.locator('[role="group"][aria-required="true"]:has(input[type="file"])');
+    const reportedFileGroups = new Set();
+    for (let index = 0; index < await requiredFileGroups.count(); index += 1) {
+      const group = requiredFileGroups.nth(index);
+      if (!await group.isVisible().catch(() => false)) continue;
+      const groupKey = await group.evaluate((element) => element.getAttribute('aria-labelledby') || element.id || '').catch(() => '');
+      if (groupKey && reportedFileGroups.has(groupKey)) continue;
+      if (groupKey) reportedFileGroups.add(groupKey);
+      const hasFile = await group.locator('input[type="file"]').evaluateAll((inputs) => (
+        inputs.some((input) => input instanceof HTMLInputElement && (input.files?.length || 0) > 0)
+      )).catch(() => false);
+      if (hasFile) continue;
+      const label = await group.evaluate((element) => {
+        const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+        const labelledBy = element.getAttribute('aria-labelledby');
+        const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+        const label = element.querySelector('.upload-label, label, legend, .question, h3, h4');
+        for (const candidate of [
+          referenced && referenced.textContent,
+          label && label.textContent,
+          element.getAttribute('aria-label')
+        ]) {
+          const text = clean(candidate);
+          if (!text) continue;
+          if (!/[a-z]/i.test(text)) continue;
+          return text.slice(0, 120);
+        }
+        return '';
+      }).catch(() => '');
+      blockers.push(label ? '"' + label + '" is required and is still empty'
+                          : 'A required file upload on the form has no label Litos can read, and is still empty');
+    }
     const title = await page.title();
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
