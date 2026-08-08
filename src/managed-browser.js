@@ -39,6 +39,10 @@ const { chromium } = require('playwright');
     const filledFields = [];
     const skipped = [];
     const discovered = [];
+    // Filled by the pre-submit gate, and merged into 'blockers' after the loop. It has to be
+    // declared up here because the gate runs mid-loop, before the final click, while 'blockers' is
+    // only assembled once every action has run.
+    const submitGateBlockers = [];
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const answerOptions = (value) => {
@@ -81,10 +85,42 @@ const { chromium } = require('playwright');
       if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
+    // READS THE ANSWER THE EMPLOYER WOULD SEE, not the container the fill happened to be scoped to.
+    // The container handed in by the 'fill' branch is resolved as the nearest ancestor holding a
+    // combobox, and on a React Select that is '.select__input-container' - a div whose only child is
+    // the invisible search input. Its textContent is the empty string no matter how correctly the
+    // control was answered, so this reported "choice value did not persist after fill" for controls
+    // that were visibly and correctly set. Measured on the live Redwood Materials Greenhouse form
+    // (2026-08-08): four questions answered No/Yes/Yes/Yes, all four verified false.
+    // A verification that reads a different place from the one the value lands in is worse than no
+    // verification, because it turns a good fill into a reported failure and a real failure into
+    // noise indistinguishable from it.
     const verifyChoiceInContainer = async (container, expected) => {
-      const text = await container.evaluate((element) => element.textContent || '').catch(() => '');
+      const text = await container.evaluate((element) => {
+        const widget = element.closest('[class*="select__container"], [class*="select-shell"]')
+          || (element.closest('[class*="select__control"]') || {}).parentElement
+          || element;
+        // The chosen value is rendered as its own node, and reading it beats reading the widget:
+        // the widget's textContent also carries the question label, and a label is quite capable of
+        // containing the answer word ("...currently enrolled in a degree program?" contains "no").
+        const chosen = widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]');
+        if (chosen) return chosen.textContent || '';
+        // Still showing "Select...", so nothing was chosen. Returning empty rather than falling
+        // through to textContent stops the label from being mistaken for an answer.
+        if (widget.querySelector('[class*="select__placeholder"]')) return '';
+        return element.textContent || '';
+      }).catch(() => '');
       return optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)));
     };
+    // Whether a keystroke aimed at this element can still do the job it was queued for. Only ever
+    // asked about Enter on a choice control: see the press branch below.
+    const choiceControlIsClosed = async (target) => await target.evaluate((element) => {
+      const combobox = element.getAttribute('role') === 'combobox'
+        ? element
+        : (element.closest('[role="combobox"]') || element.querySelector('[role="combobox"]'));
+      if (!combobox) return false;
+      return combobox.getAttribute('aria-expanded') !== 'true';
+    }).catch(() => false);
     const fillCustomChoice = async (container, wanted) => {
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
       const clickMatchingOption = async () => {
@@ -126,6 +162,161 @@ const { chromium } = require('playwright');
       }
       return false;
     };
+    // THE PRE-SUBMIT GATE.
+    //
+    // Reads the form the way the EMPLOYER's own validator reads it, immediately before the final
+    // click, and separates two things that look identical in a screenshot:
+    //
+    //   1. a required control that is genuinely still empty. This must stop the submit. Pressing
+    //      submit here either bounces off client-side validation or, worse, sends an application
+    //      with blank answers under the applicant's name.
+    //   2. error text left over from an EARLIER validation pass. Measured on the live Redwood
+    //      Materials Greenhouse form on 2026-08-08: one stray Enter ran the employer's validator
+    //      while the form was half filled, six "is required" messages rendered, and not one of them
+    //      cleared when the fields were subsequently filled correctly - "Phone is required." was
+    //      still on screen underneath a filled phone number, and the four React Selects still said
+    //      "This field is required." underneath their correct answers. Submitting that form then
+    //      passed validation cleanly with zero errors.
+    //
+    // So error TEXT alone is never a reason to refuse. A message blocks only when the control it
+    // belongs to is also empty. Refusing on text alone would have thrown away a complete, correct
+    // application, which is the same harm as sending a broken one and harder to notice.
+    const readSubmitReadiness = () => page.evaluate(() => {
+      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      // The block that owns one question: its label, its control, and its error line.
+      const widgetOf = (element) => element.closest(
+        '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"]'
+      ) || element.parentElement || element;
+      const labelOf = (widget, element) => {
+        const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
+          || (element && element.getAttribute('aria-labelledby'));
+        const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+        const byFor = element && element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+        const legend = widget && widget.querySelector('legend');
+        const own = widget && widget.querySelector('label, .label, .upload-label, legend');
+        for (const candidate of [
+          referenced && referenced.textContent,
+          byFor && byFor.textContent,
+          legend && legend.textContent,
+          own && own.textContent,
+          element && element.getAttribute('aria-label'),
+          widget && widget.getAttribute('aria-label')
+        ]) {
+          const text = clean(candidate);
+          if (!text) continue;
+          // A machine identifier is not a label. Greenhouse names custom questions with UUIDs and
+          // numeric tokens, and "question_19302464004 is required" tells the applicant nothing.
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
+          if (!/[a-z]/i.test(text)) continue;
+          return text.slice(0, 120);
+        }
+        return '';
+      };
+      // Does this question have an answer? Asked of the WIDGET, because on the two control families
+      // that matter here the answer does not live in an input's value at all:
+      //   - a React Select renders its answer as '.select__single-value' text and shows
+      //     '.select__placeholder' when it has none;
+      //   - Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it
+      //     with a filename chip, so "no input[type=file] with files" is true of a widget that has
+      //     already been given a file.
+      const widgetHasAnswer = (widget) => {
+        if (!widget) return false;
+        if (widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
+        if (widget.querySelector('[class*="select__placeholder"]')) return false;
+        if (widget.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+        for (const control of widget.querySelectorAll('input, textarea, select')) {
+          if (control.type === 'hidden') continue;
+          if (control.type === 'file') {
+            if (control.files && control.files.length > 0) return true;
+            continue;
+          }
+          if (control.type === 'checkbox' || control.type === 'radio') {
+            if (control.checked) return true;
+            continue;
+          }
+          // A combobox input holds the SEARCH text, which react-select clears on selection. Its
+          // emptiness says nothing about whether an option was chosen.
+          if (control.getAttribute('role') === 'combobox') continue;
+          if (clean(control.value)) return true;
+        }
+        return false;
+      };
+      const required = [];
+      const seen = new Set();
+      const note = (widget, element, why) => {
+        if (!widget || seen.has(widget)) return;
+        seen.add(widget);
+        if (!isVisible(widget)) return;
+        if (widgetHasAnswer(widget)) return;
+        const label = labelOf(widget, element);
+        required.push({
+          label,
+          why,
+          message: label
+            ? '"' + label + '" is required and is still empty'
+            : 'A required field on the form has no label Litos can read, and is still empty'
+        });
+      };
+      // Native required, plus aria-required. React Select's input carries aria-required="true" and
+      // no a "required" attribute at all, so a gate built only on [required] cannot see an unanswered
+      // Greenhouse screener question - which is precisely the control this gate exists to catch.
+      for (const element of document.querySelectorAll(
+        'input[required], textarea[required], select[required], [aria-required="true"]'
+      )) {
+        if (element.disabled) continue;
+        if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
+        note(widgetOf(element), element, 'required');
+      }
+      // Visible validation messages, matched back to the control they accuse. An unmatched message,
+      // or one over an empty control, blocks; one over a filled control is stale and is only
+      // reported.
+      const stale = [];
+      const unmatched = [];
+      const ERROR_TEXT = /\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i;
+      // A form's own legend says "* indicates a required field", and it matched the line above.
+      // Measured on the live Redwood Materials form: that legend was the ONLY thing the gate found
+      // on a completely and correctly filled application, so the gate would have refused to submit
+      // every Greenhouse application there is. A gate that blocks everything is not caution.
+      const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
+      for (const element of document.querySelectorAll('*')) {
+        if (element.children.length > 0) continue;
+        const text = clean(element.textContent);
+        if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
+        if (!isVisible(element)) continue;
+        // The label of a required question reads "... *", never "is required", so this does not pick
+        // up labels. It picks up the error line the form renders under the control.
+        const widget = widgetOf(element);
+        if (!widget || widget === element) { unmatched.push(text); continue; }
+        // A message sitting in a block that holds no control at all is not a field error. It is the
+        // form's legend or a page-level notice, and attributing it to a field invents a blocker.
+        const control = widget.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
+        if (!control) continue;
+        if (widgetHasAnswer(widget)) { stale.push(text); continue; }
+        // note() dedupes on the widget itself, so a field already reported by the required scan is
+        // not reported twice for carrying the matching error line.
+        note(widget, control, 'error');
+      }
+      return {
+        blocking: required.map((entry) => entry.message),
+        stale: [...new Set(stale)],
+        unmatched: [...new Set(unmatched.filter((text) => !stale.includes(text)))]
+      };
+    }).catch(() => ({ blocking: [], stale: [], unmatched: [] }));
+    // A click is the final submit when the caller says so, or when it targets a submit control.
+    // Both, rather than either, because the label is the caller's declared intent and the selector
+    // is what actually gets pressed, and a gate that can be walked around by omitting a label is
+    // not a gate.
+    const isFinalSubmitAction = (action) => action.type === 'click' && (
+      action.label === 'final_submit'
+      || /\[\s*type\s*[~^$*|]?=\s*["']?submit/i.test(action.selector || '')
+    );
     // R-100. The optional pre-check below used to be a bare 'await locator.count() === 0', an
     // instantaneous DOM snapshot with no auto-wait. Everything an ATS renders asynchronously was
     // therefore tested at the one instant it could not possibly be there:
@@ -182,6 +373,27 @@ const { chromium } = require('playwright');
           // means nothing had happened that could have made it appear. A skip that says neither is
           // how several deploys went by with fields quietly left empty.
           skipped.push((action.label || action.type) + ': nothing matched ' + action.selector + ' after ' + settleMs + 'ms');
+          precedingActionCouldChangeDom = false;
+          continue;
+        }
+      }
+      if (isFinalSubmitAction(action)) {
+        const readiness = await readSubmitReadiness();
+        const blocking = [...readiness.blocking, ...readiness.unmatched.map(
+          (text) => 'The form is still showing "' + text + '" and Litos could not tell which field it belongs to'
+        )];
+        if (readiness.stale.length > 0) {
+          // Recorded, never acted on. This is the line that explains a preview screenshot covered in
+          // red over a form that is actually complete.
+          skipped.push('pre_submit_gate: ignored ' + readiness.stale.length
+            + ' stale validation message(s) left over from an earlier pass, over fields that are now filled');
+        }
+        if (blocking.length > 0) {
+          // NOT pressed, and the run says why. Sending here is the one failure that cannot be
+          // undone: an employer keeps the first application it receives.
+          submitGateBlockers.push(...blocking);
+          skipped.push((action.label || 'final_submit')
+            + ': submit withheld, ' + blocking.length + ' required field(s) on the form are still empty');
           precedingActionCouldChangeDom = false;
           continue;
         }
@@ -416,7 +628,39 @@ const { chromium } = require('playwright');
         if (action.label) filledFields.push(action.label);
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
-      if (action.type === 'press') await page.keyboard.press(action.value);
+      if (action.type === 'press') {
+        // A PRESS LANDS ON THE ELEMENT IT NAMES. It used to be page.keyboard.press(), which types
+        // into whatever happens to hold focus, and normalizeManagedActions dropped the selector on
+        // the floor so the runner could not have aimed it even if it wanted to. Two consequences,
+        // both measured:
+        //   - an OPTIONAL press whose target is not on the page fired anyway, because the optional
+        //     pre-check is guarded on the locator, and the locator was always null for a press. A keystroke
+        //     queued for a control that does not exist was still delivered to the form.
+        //   - the caller queues { press Enter, selector '#country' } to commit the phone-country
+        //     React Select. On the live Redwood Materials Greenhouse form that Enter reached the
+        //     form itself and ran the employer's validator with the phone, the resume and all four
+        //     screener questions still empty. Six "is required" messages rendered, none of them
+        //     cleared when those fields were filled a moment later, and the preview screenshot the
+        //     applicant is asked to approve showed a correctly filled form covered in red.
+        if (!locator) {
+          await page.keyboard.press(action.value);
+        } else if (/^enter$/i.test(String(action.value || '')) && await choiceControlIsClosed(locator)) {
+          // Enter on a choice control means "take the highlighted option". With the menu shut there
+          // is no highlighted option, so the keystroke cannot do the job it was queued for, and the
+          // only thing left for it to do is trigger the form's implicit submission. Withheld, and
+          // said out loud.
+          skipped.push((action.label || 'press')
+            + ': Enter withheld, ' + action.selector + ' is a choice control with no menu open, so the keystroke could only have submitted the form');
+          // A withheld keystroke did nothing, so it cannot have made the NEXT optional selector
+          // appear. Without this the settle grace below would be granted on the strength of an
+          // action that never ran, and the backend queues an optional 'question_confirm' press
+          // after every custom-question fill, so this is the common case, not a corner one.
+          precedingActionCouldChangeDom = false;
+          continue;
+        } else {
+          await locator.press(action.value);
+        }
+      }
       if (action.type === 'select') {
         await locator.selectOption(action.value);
         if (action.label) filledFields.push(action.label);
@@ -441,7 +685,9 @@ const { chromium } = require('playwright');
       skipped.push((action.label || action.type) + ': ' + String(actionError?.message || actionError).split('\n')[0].slice(0, 200));
      }
     }
-    const blockers = [];
+    // The gate's findings lead, because "we did not send this" is the first thing the caller needs
+    // to know and the reason has to travel with it.
+    const blockers = [...submitGateBlockers];
     if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
       blockers.push('CAPTCHA requires your attention');
     }
@@ -600,6 +846,11 @@ export function normalizeManagedActions(actions = []) {
     }
     const normalized = { type: action.type };
     if (!['press', 'fillByLabelText', 'discover'].includes(action.type)) normalized.selector = validateSelector(action.selector);
+    // A press keeps the selector it was given. It stays OPTIONAL - a caller may legitimately mean
+    // "send this key wherever focus already is" and omit it - but when one is supplied, dropping it
+    // here is what turned an aimed keystroke into a page-wide one, and made the optional pre-check
+    // (which is guarded on the locator) unreachable for every press ever queued.
+    else if (action.type === 'press' && action.selector != null) normalized.selector = validateSelector(action.selector);
     if (action.optional != null) normalized.optional = Boolean(action.optional);
     if (action.label != null) {
       if (typeof action.label !== 'string' || action.label.length > 200) throw inputError('Action labels must be strings no longer than 200 characters', 'INVALID_ACTION_LABEL');

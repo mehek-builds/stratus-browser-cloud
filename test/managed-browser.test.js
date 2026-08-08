@@ -335,3 +335,209 @@ test('an optional element that never arrived is reported, and says how long it w
   // quietly left empty.
   assert.match(SANDBOX_RUNNER, /skipped\.push\(\(action\.label \|\| action\.type\) \+ ': nothing matched ' \+ action\.selector \+ ' after ' \+ settleMs \+ 'ms'\)/);
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * The Redwood Materials incident, 2026-08-08.
+ *
+ * A packet reached ready_for_final_approval with every question answered. Its stored preview
+ * screenshot showed the form correctly filled AND five red "is required" messages under the very
+ * controls that were visibly answered - which reads, to whoever approves it, as a form that is
+ * about to be submitted blank.
+ *
+ * Measured on the live form, the messages were STALE. Action 14 of the run was
+ * { press, value 'Enter', selector '#country' }, queued to commit the phone-country React Select.
+ * normalizeManagedActions dropped the selector, the runner called page.keyboard.press(), the
+ * keystroke reached the FORM, and the employer's validator ran while the phone, the resume and all
+ * four screener questions were still empty. Greenhouse renders those errors once and does not clear
+ * them when the fields are subsequently filled: "Phone is required." stayed on screen underneath a
+ * filled phone number. Submitting the completed form passed validation with zero errors.
+ *
+ * Two failures, opposite directions, same root: a keystroke that went somewhere it was not aimed.
+ * ------------------------------------------------------------------------------------------- */
+
+// The runner ships as a string, so these pull the real declarations out of it and run them, rather
+// than asserting that some text is present and hoping it still means what it used to.
+function extractConstSource(name, indent = 4) {
+  const pad = ' '.repeat(indent);
+  const start = SANDBOX_RUNNER.indexOf(`\n${pad}const ${name} = `);
+  assert.notEqual(start, -1, `${name} must exist in the sandbox runner`);
+  const rest = SANDBOX_RUNNER.slice(start + 1);
+  const next = rest.search(new RegExp(`\\n${pad}(?:const|let|var|for|if|return|await|fs\\.)`));
+  return rest.slice(0, next === -1 ? rest.length : next);
+}
+
+function sandboxScope(names, indent = 4) {
+  const sources = names.map((name) => extractConstSource(name, indent)).join('\n');
+  return Function(`${sources}\nreturn { ${names.join(', ')} };`)();
+}
+
+const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'answerOptions', 'optionMatches', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
+
+function reactSelectContainer({ chosen = '', placeholder = false, ownText = '', widgetText = '' } = {}) {
+  const widget = {
+    textContent: widgetText,
+    querySelector(selector) {
+      if (/single-value|multi-value__label/.test(selector)) return chosen ? { textContent: chosen } : null;
+      if (/placeholder/.test(selector)) return placeholder ? { textContent: 'Select...' } : null;
+      return null;
+    }
+  };
+  const element = {
+    textContent: ownText,
+    closest: (selector) => (/select__container|select-shell/.test(selector) ? widget : null),
+    querySelector: () => null
+  };
+  return { evaluate: async (fn) => fn(element) };
+}
+
+test('an answered React Select verifies even though the fill container is empty', async () => {
+  // THE REGRESSION. The 'fill' branch scopes its container to the nearest ancestor holding a
+  // combobox, which on a React Select is '.select__input-container' - a div whose textContent is
+  // always ''. Reading that reported "choice value did not persist after fill" for four questions
+  // that were answered No/Yes/Yes/Yes and would have submitted correctly.
+  const { verifyChoiceInContainer } = choiceHelpers();
+  assert.equal(await verifyChoiceInContainer(reactSelectContainer({ chosen: 'No', ownText: '' }), 'No'), true);
+  assert.equal(await verifyChoiceInContainer(reactSelectContainer({ chosen: 'Yes', ownText: '' }), 'Yes'), true);
+});
+
+test('an unanswered React Select does not borrow its answer from the question label', async () => {
+  // The widget's textContent carries the label, and a label is quite capable of containing the
+  // answer word. Falling back to it would report an untouched control as filled, which is the one
+  // mistake that puts a blank answer on a real application.
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const untouched = reactSelectContainer({
+    placeholder: true,
+    widgetText: 'Have you ever worked for Redwood Materials? Select...',
+    ownText: ''
+  });
+  assert.equal(await verifyChoiceInContainer(untouched, 'No'), false);
+});
+
+test('Enter is withheld from a choice control whose menu is shut', async () => {
+  const { choiceControlIsClosed } = choiceHelpers();
+  const combobox = (expanded) => ({
+    evaluate: async (fn) => fn({
+      getAttribute: (name) => (name === 'role' ? 'combobox' : (name === 'aria-expanded' ? expanded : null)),
+      closest: () => null,
+      querySelector: () => null
+    })
+  });
+  assert.equal(await choiceControlIsClosed(combobox('false')), true);
+  // Menu open: Enter has a highlighted option to take, so it still has a job to do.
+  assert.equal(await choiceControlIsClosed(combobox('true')), false);
+  // Not a choice control at all: leave the press alone, this guard has no opinion.
+  const plainInput = { evaluate: async (fn) => fn({ getAttribute: () => null, closest: () => null, querySelector: () => null }) };
+  assert.equal(await choiceControlIsClosed(plainInput), false);
+});
+
+test('a press keeps the selector it was given', () => {
+  // Dropping it here is what turned every aimed keystroke into a page-wide one, and made the
+  // optional pre-check - which is guarded on the locator - unreachable for every press ever queued.
+  const [aimed, unaimed] = normalizeManagedActions([
+    { type: 'press', value: 'Enter', selector: '#country', label: 'phone_country_select', optional: true },
+    { type: 'press', value: 'Enter' }
+  ]);
+  assert.equal(aimed.selector, '#country');
+  assert.equal(aimed.optional, true);
+  // Still optional to supply one: a caller may legitimately mean "send this key wherever focus is".
+  assert.equal(unaimed.selector, undefined);
+  assert.equal(unaimed.value, 'Enter');
+});
+
+test('a press lands on the element it names, and is skipped when that element is absent', () => {
+  assert.match(SANDBOX_RUNNER, /await locator\.press\(action\.value\)/);
+  assert.match(SANDBOX_RUNNER, /if \(!locator\) \{\n\s+await page\.keyboard\.press\(action\.value\);/);
+  assert.match(SANDBOX_RUNNER, /Enter withheld/);
+  assert.match(SANDBOX_RUNNER, /could only have submitted the form/);
+});
+
+const gateScope = () => sandboxScope(['clean', 'widgetHasAnswer'], 6);
+
+function widget({ chosen = '', placeholder = false, filename = false, controls = [] } = {}) {
+  return {
+    querySelector(selector) {
+      if (/single-value|multi-value__label/.test(selector)) return chosen ? { textContent: chosen } : null;
+      if (/placeholder/.test(selector)) return placeholder ? {} : null;
+      if (/file-upload__filename|Remove file/.test(selector)) return filename ? {} : null;
+      return null;
+    },
+    querySelectorAll: () => controls
+  };
+}
+
+test('the pre-submit gate reads an answer where the control actually keeps it', () => {
+  const { widgetHasAnswer } = gateScope();
+  // React Select: the answer is rendered text, and the combobox input's value is search text that
+  // react-select CLEARS on selection. Reading the input would call every answered question empty.
+  assert.equal(widgetHasAnswer(widget({ chosen: 'No', controls: [{ type: 'text', value: '', getAttribute: () => 'combobox' }] })), true);
+  assert.equal(widgetHasAnswer(widget({ placeholder: true, controls: [{ type: 'text', value: '', getAttribute: () => 'combobox' }] })), false);
+  // Greenhouse REMOVES the file input once the upload finishes and leaves a filename chip, so
+  // "no input[type=file] holding a file" is true of a widget that has already been given one.
+  assert.equal(widgetHasAnswer(widget({ filename: true, controls: [] })), true);
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'file', files: [], getAttribute: () => null }] })), false);
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'file', files: [{}], getAttribute: () => null }] })), true);
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'text', value: 'Mehek', getAttribute: () => null }] })), true);
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'checkbox', checked: false, getAttribute: () => null }] })), false);
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'checkbox', checked: true, getAttribute: () => null }] })), true);
+  // A hidden input is not an answer the applicant gave.
+  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'hidden', value: 'x', getAttribute: () => null }] })), false);
+});
+
+test('the pre-submit gate runs before the final click and can stop it', () => {
+  assert.match(SANDBOX_RUNNER, /const isFinalSubmitAction = \(action\) =>/);
+  assert.match(SANDBOX_RUNNER, /if \(isFinalSubmitAction\(action\)\) \{/);
+  assert.match(SANDBOX_RUNNER, /submitGateBlockers\.push\(\.\.\.blocking\)/);
+  assert.match(SANDBOX_RUNNER, /submit withheld/);
+  // The gate has to be able to see a control the old blocker scan could not: React Select's input
+  // carries aria-required and no required attribute, so [required] alone never sees an unanswered
+  // Greenhouse screener question.
+  assert.match(SANDBOX_RUNNER, /\[aria-required="true"\]/);
+  // And its findings have to reach the caller.
+  assert.match(SANDBOX_RUNNER, /const blockers = \[\.\.\.submitGateBlockers\]/);
+});
+
+test('the final submit is recognised by intent and by target, not one or the other', () => {
+  const { isFinalSubmitAction } = sandboxScope(['isFinalSubmitAction']);
+  // What the backend actually appends today.
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' }), true);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: "button[type='submit']" }), true);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: '#send', label: 'final_submit' }), true);
+  // A gate that can be walked around by omitting the label is not a gate; one that fires on every
+  // click is not usable. Ordinary clicks pass through.
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: '#onetrust-accept-btn-handler' }), false);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'a:has-text("Apply for this job")' }), false);
+  assert.equal(isFinalSubmitAction({ type: 'fill', selector: 'button[type="submit"]' }), false);
+});
+
+test('stale validation text is reported but never blocks a complete form', () => {
+  // Measured: filling the Redwood form correctly left six "is required" messages on screen, and
+  // submitting it then passed validation with zero errors. Refusing on error TEXT would have thrown
+  // away a complete, correct application - the same harm as sending a broken one, and harder to see.
+  assert.match(SANDBOX_RUNNER, /if \(widgetHasAnswer\(widget\)\) \{ stale\.push\(text\); continue; \}/);
+  assert.match(SANDBOX_RUNNER, /pre_submit_gate: ignored /);
+  assert.match(SANDBOX_RUNNER, /stale validation message\(s\) left over from an earlier pass/);
+  // An error nobody can tie back to a control is the one case where text alone is enough, because
+  // "we cannot tell" is not a reason to send.
+  assert.match(SANDBOX_RUNNER, /could not tell which field it belongs to/);
+});
+
+test('the form\'s own "* indicates a required field" legend is not a blocker', () => {
+  // Measured on the live Redwood Materials form: this legend was the ONLY thing the gate found on a
+  // completely and correctly filled application. Left in, the gate would have refused to submit
+  // every Greenhouse application there is, which is not caution, it is an outage with a good excuse.
+  const { LEGEND_TEXT, ERROR_TEXT } = sandboxScope(['ERROR_TEXT', 'LEGEND_TEXT'], 6);
+  const isFieldError = (text) => ERROR_TEXT.test(text) && !LEGEND_TEXT.test(text);
+  assert.equal(isFieldError('indicates a required field'), false);
+  assert.equal(isFieldError('* indicates a required field'), false);
+  assert.equal(isFieldError('All fields are required'), false);
+  // and the real messages still are errors
+  assert.equal(isFieldError('This field is required.'), true);
+  assert.equal(isFieldError('Resume/CV is required.'), true);
+  assert.equal(isFieldError('Phone is required.'), true);
+  assert.equal(isFieldError('Please select an option'), true);
+});
+
+test('a message in a block holding no control is not attributed to a field', () => {
+  assert.match(SANDBOX_RUNNER, /const control = widget\.querySelector\('input:not\(\[type="hidden"\]\), textarea, select, \[role="combobox"\]'\);/);
+  assert.match(SANDBOX_RUNNER, /if \(!control\) continue;/);
+});

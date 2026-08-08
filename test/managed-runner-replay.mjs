@@ -46,12 +46,33 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <label for="start_month">Start month</label>
 <select id="start_month"><option value=""></option><option value="5">May</option></select>
 <input id="plain" type="text">
+<input id="aimed" type="text">
+<div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
+<div id="keytarget"></div>
+<form id="app-form">
+  <div class="field"><label for="req_name">Full name</label><input id="req_name" type="text" required></div>
+  <div class="field"><label for="req_email">Email</label><input id="req_email" type="text" required></div>
+  <p class="legend">* indicates a required field</p>
+  <button id="submit-btn" type="submit">Submit application</button>
+</form>
+<div id="submitted"></div>
 <script>
   // fill() sets the value PROPERTY, which no attribute read can see, so the page echoes it into a
   // node the runner's own 'extract' can read back.
   document.addEventListener('input', function (event) {
     var echo = document.getElementById(event.target.id + '-echo');
     if (echo) echo.textContent = event.target.value;
+  });
+  // Where a keystroke actually LANDED. An unaimed page.keyboard.press() with nothing focused reports
+  // BODY; a press aimed at an element reports that element's id.
+  document.addEventListener('keydown', function (event) {
+    document.getElementById('keytarget').textContent = event.target.id || event.target.tagName;
+  });
+  // The fixture form never leaves the page, so a replay can prove the gate let a click THROUGH
+  // without anything being submitted anywhere.
+  document.getElementById('app-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    document.getElementById('submitted').textContent = 'yes';
   });
   document.getElementById('apply').addEventListener('click', function () {
     setTimeout(function () {
@@ -179,6 +200,68 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.ok(result.elapsedMs < 10000, `optional waiting must stay inside its run-wide budget, took ${result.elapsedMs}ms`);
 }
 
+// 5. THE MERGE ITSELF. Two branches rewrote this loop for different reasons and both intents have
+//    to survive together, so one run exercises both: an optional waitForSelector that must hold the
+//    run open, and a press that must land on the element it names rather than on the form. Checked
+//    in one run because the failure mode being guarded against is a resolution that keeps one side's
+//    behaviour and silently drops the other's.
+{
+  const result = await replay([
+    { type: 'click', selector: '#apply-slow', label: 'open_application_form', optional: true },
+    { type: 'waitForSelector', selector: '#slow-email', label: 'application_form_ready', optional: true, timeout: 8000 },
+    { type: 'fill', selector: '#slow-email', value: 'person@example.com', label: 'email', optional: true },
+    { type: 'press', selector: '#aimed', value: 'Enter', label: 'aimed_press' },
+    { type: 'extract', selector: '#slow-email-echo' },
+    { type: 'extract', selector: '#keytarget' }
+  ]);
+  assert.equal(valueOf(result, '#slow-email-echo'), 'person@example.com',
+    'the optional waitForSelector must still hold the run open after the merge');
+  assert.equal(valueOf(result, '#keytarget'), 'aimed',
+    'the press must still land on the element it names after the merge, not on the page');
+}
+
+// 6. An optional press keeps its selector now, so for the first time it reaches the pre-check above.
+//    An Enter aimed at a shut choice control is withheld, and a withheld keystroke must not then
+//    buy the NEXT optional action a settle grace: nothing happened, so nothing can have appeared.
+{
+  const result = await replay([
+    { type: 'press', selector: '#combo', value: 'Enter', label: 'question_confirm', optional: true },
+    { type: 'click', selector: '#never-present-after-withheld', label: 'absent', optional: true },
+    { type: 'extract', selector: '#keytarget' }
+  ]);
+  assert.equal(valueOf(result, '#keytarget'), '',
+    'Enter on a choice control with no menu open must not reach the page at all');
+  assert.ok(result.skipped.some((entry) => /question_confirm: Enter withheld/.test(entry)),
+    'the withheld keystroke must be reported, got ' + JSON.stringify(result.skipped));
+  assert.ok(result.skipped.some((entry) => / after 0ms$/.test(entry)),
+    'a withheld press must not buy the next optional action a grace, got ' + JSON.stringify(result.skipped));
+}
+
+// 7. The pre-submit gate, both directions, against the merged loop. An incomplete form must not be
+//    submitted and must say which fields are empty; a complete one must go through untouched. The
+//    fixture carries the form's own "* indicates a required field" legend on purpose: an early
+//    version of the gate matched it and would have refused every Greenhouse submission there is.
+{
+  const blocked = await replay([
+    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'extract', selector: '#submitted' }
+  ]);
+  assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
+  assert.deepEqual(blocked.blockers.sort(), [
+    '"Email" is required and is still empty',
+    '"Full name" is required and is still empty'
+  ], 'the gate must name the empty fields, got ' + JSON.stringify(blocked.blockers));
+
+  const allowed = await replay([
+    { type: 'fill', selector: '#req_name', value: 'Mehek Mandal', label: 'name' },
+    { type: 'fill', selector: '#req_email', value: 'person@example.com', label: 'email' },
+    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'extract', selector: '#submitted' }
+  ]);
+  assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
+  assert.deepEqual(allowed.blockers, [], 'a complete form must produce no blockers, got ' + JSON.stringify(allowed.blockers));
+}
+
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: optional actions that are meant to wait do wait, and stay bounded');
+console.log('managed runner replay: optional actions wait and stay bounded, a press lands where it is aimed, and the pre-submit gate holds both ways');
