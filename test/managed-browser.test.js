@@ -158,7 +158,10 @@ test('sandbox continuation is project-bound and single-use without exposing a se
       if (typeof command === 'object') {
         const input = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
         this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify({
-          title: 'Security code', url: input.url, text: 'Enter the security code sent to your email'
+          title: 'Continue',
+          url: input.url,
+          text: 'Check your inbox',
+          humanVerification: { kind: 'security_code', fieldCount: 8, sentTo: 'applicant@example.com' }
         })));
         if (input.requestContinuation) this.files.set('stratus-continuation-ready.json', Buffer.from('{}'));
         return { exitCode: null };

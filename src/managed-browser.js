@@ -45,6 +45,53 @@ const { chromium } = require('playwright');
   try {
     const browserContext = await browser.newContext({ viewport: input.viewport || { width: 1440, height: 900 } });
     const page = await browserContext.newPage();
+    // A RUN THAT WAS NOT ASKED TO SUBMIT MUST BE STRUCTURALLY UNABLE TO SUBMIT.
+    //
+    // Measured on 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) reached
+    // 'ready_for_final_approval' with submission_claimed_at, submission_authorization and
+    // browser_session_id all null - so the authorized submit path provably never ran - while
+    // Greenhouse emailed the applicant a security code at the exact minute of each FILL run. The
+    // fill run had submitted a real application to a real employer with nobody's authorization.
+    //
+    // The mechanism at the time was a keystroke: 'press' ignored its selector and fired
+    // page.keyboard.press('Enter'), and an Enter inside a form is implicit submission. PR #19 and
+    // #20 aimed the press and withhold Enter on a closed choice control, which closes that
+    // particular door. This closes the DOORWAY. Aiming a keystroke does not make it safe: an aimed
+    // Enter on a plain text input still submits the form, and so does any click that lands on
+    // something submit-shaped. The caller declares intent once, here, and the page is then
+    // physically incapable of contradicting it.
+    //
+    // addInitScript rather than an evaluate after goto, because a guard installed into one document
+    // dies at the first navigation, and a form post navigates. This one is reinstalled by the
+    // browser into every document the run ever loads.
+    //
+    // WHAT IT DOES NOT COVER, said out loud: a page that posts with fetch/XHR from its own click
+    // handler never dispatches a submit event and never calls form.submit(), so nothing here sees
+    // it. This is a floor, not a proof. 'blockedSubmits' in the result is the measurement that says
+    // whether the floor was ever reached.
+    if (input.allowSubmit !== true) {
+      await page.addInitScript(() => {
+        window.__litosBlockedSubmits = 0;
+        // Capture phase on document, so this runs before any framework handler and before the
+        // browser's own default. stopImmediatePropagation is what stops React's onSubmit, which is
+        // attached lower down the tree and would otherwise still fire its own fetch.
+        document.addEventListener('submit', (event) => {
+          window.__litosBlockedSubmits += 1;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }, true);
+        // form.submit() dispatches no submit event at all, by specification, so the listener above
+        // cannot see it. requestSubmit() does dispatch one and is therefore already covered.
+        const nativeSubmit = HTMLFormElement.prototype.submit;
+        HTMLFormElement.prototype.submit = function litosBlockedSubmit() {
+          window.__litosBlockedSubmits += 1;
+          return undefined;
+        };
+        // Kept referenced so a minifier or a future edit cannot quietly drop the original and leave
+        // no way back for a run that IS allowed to submit.
+        HTMLFormElement.prototype.submit.nativeSubmit = nativeSubmit;
+      }).catch(() => undefined);
+    }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
     // Continuations may keep the exact page and context alive, but they may not turn that context
@@ -71,6 +118,12 @@ const { chromium } = require('playwright');
     // declared up here because the gate runs mid-loop, before the final click, while 'blockers' is
     // only assembled once every action has run.
     const submitGateBlockers = [];
+    // What happened to a code the caller supplied, or null when it never supplied one. Written by
+    // the final-submit branch and reported verbatim: whether the code was typed, whether the form
+    // was sent again, and whether the challenge was still standing afterwards. The caller cannot
+    // work any of that out from the outside, and guessing it is how an application ends up recorded
+    // as sent when it is still sitting behind a human check.
+    let securityCodeAttempt = null;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const answerOptions = (value) => {
@@ -380,6 +433,160 @@ const { chromium } = require('playwright');
     // So error TEXT alone is never a reason to refuse. A message blocks only when the control it
     // belongs to is also empty. Refusing on text alone would have thrown away a complete, correct
     // application, which is the same harm as sending a broken one and harder to notice.
+    /* ─── the emailed security code ───────────────────────────────────────────────────────────
+     *
+     * Greenhouse answers an unauthenticated applicant's submit by emailing an 8-character code and
+     * rendering a code field on the form: "A verification code was sent to <address>. To submit
+     * your application, enter the 8-character code to confirm you're a human." The application is
+     * NOT filed until that code is entered and the form is submitted again. Measured on the Cresta
+     * preview screenshot of 2026-08-08, and against three code emails from
+     * no-reply@us.greenhouse-mail.io timestamped to the same minute as three runs.
+     *
+     * READ OFF THE CONTROL, NEVER OFF PROSE. Two rules, and both are paid for:
+     *   - the trigger is the code INPUT GROUP. A sentence on the page is not evidence: this repo
+     *     already shipped a pre-submit gate that keyed on validation TEXT and, on a form carrying
+     *     stale "is required" messages over filled fields, would have refused a complete
+     *     application. Text is a description of a state, not the state.
+     *   - and it is emphatically not the '* indicates a required field' legend, which is on every
+     *     Greenhouse form ever rendered, including every form with no challenge at all.
+     *
+     * The address IS read from prose, and only from the prose inside the control's own group, and
+     * only once the control has already been found. It is a detail carried by a state that
+     * something else established, never the thing that establishes it.
+     */
+    const readSecurityCodeChallenge = () => page.evaluate(() => {
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const CODE_NAME = /security\s*code|verification\s*code|one[\s-]*time\s*(code|passcode)|passcode|\botp\b/i;
+      const accessibleName = (element) => {
+        const labelledBy = element.getAttribute('aria-labelledby');
+        const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+        const own = element.labels && element.labels[0];
+        const parts = [
+          element.getAttribute('aria-label'),
+          referenced && referenced.textContent,
+          own && own.textContent,
+          element.getAttribute('placeholder'),
+          element.getAttribute('name'),
+          element.id
+        ];
+        return parts.map((part) => (part || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' ');
+      };
+      const typed = [...document.querySelectorAll('input')].filter((element) => (
+        isVisible(element) && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
+      ));
+      // (a) The control says what it is. autocomplete="one-time-code" is the platform's own name for
+      //     this, and it is what assistive technology and password managers key on too.
+      let boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
+      // (b) The boxed pattern: a run of single-character inputs sharing a parent. Four is the
+      //     smallest real code length in the wild; Greenhouse renders eight. maxLength === 1 is the
+      //     structural signature and no ordinary form field carries it.
+      if (boxes.length === 0) {
+        const byParent = new Map();
+        for (const element of typed) {
+          if (element.maxLength !== 1) continue;
+          const parent = element.parentElement;
+          if (!parent) continue;
+          if (!byParent.has(parent)) byParent.set(parent, []);
+          byParent.get(parent).push(element);
+        }
+        for (const group of byParent.values()) {
+          if (group.length >= 4 && group.length > boxes.length) boxes = group;
+        }
+      }
+      // (c) A single field that names itself. Last, because it is the weakest signal: it is the only
+      //     branch that reads words rather than shape, and it reads only the control's OWN
+      //     accessible name, never the page around it.
+      if (boxes.length === 0) {
+        const named = typed.filter((element) => CODE_NAME.test(accessibleName(element)));
+        if (named.length === 1) boxes = named;
+      }
+      if (boxes.length === 0) return null;
+      // Sized off the control when it is a box group, and off its maxlength when it is one field.
+      // Never off the sentence, which says "8-character" on Greenhouse today and is free to stop
+      // saying it tomorrow.
+      const fieldCount = boxes.length > 1 ? boxes.length : (boxes[0].maxLength > 0 ? boxes[0].maxLength : 0);
+      // Where the code went. Scoped to the group the control lives in - the nearest ancestor that
+      // also holds the explanatory sentence - so an unrelated address elsewhere on the page (a
+      // recruiting contact, an anti-fraud notice) cannot be reported as the applicant's.
+      let scope = boxes[0].parentElement;
+      let address = '';
+      for (let depth = 0; depth < 6 && scope; depth += 1) {
+        // The label repeats in groups so the trailing sentence stop cannot be eaten as part of the
+        // domain: "...sent to mehekmandal05@gmail.com." must not yield an address ending in a dot,
+        // which is an address that does not exist and would be shown to the applicant as hers.
+        const match = (scope.innerText || '').match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/);
+        if (match) { address = match[0]; break; }
+        scope = scope.parentElement;
+      }
+      return {
+        kind: 'security_code',
+        fieldCount,
+        sentTo: address || null,
+        // The control's own accessible name, bounded. Diagnostic only: nothing branches on it.
+        label: accessibleName(boxes[0]).slice(0, 120) || null
+      };
+    }).catch(() => null);
+
+    /* Type a code the applicant supplied into the control found above, and say what happened.
+     *
+     * Focus-and-type first, because a boxed group auto-advances on input and typing is the one
+     * thing every implementation of that widget is built to handle. Per-box filling is the fallback
+     * for a group that does not auto-advance, and the whole-value fill is for a single field.
+     *
+     * NEVER GUESSES A CODE. It types the one it was handed or it reports that it could not. */
+    const enterSecurityCode = async (code) => {
+      const marked = await page.evaluate(() => {
+        const isVisible = (element) => {
+          const rect = element.getBoundingClientRect();
+          return (rect.width > 0 || rect.height > 0) && getComputedStyle(element).visibility !== 'hidden';
+        };
+        const typed = [...document.querySelectorAll('input')].filter((element) => (
+          isVisible(element) && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
+        ));
+        let boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
+        if (boxes.length === 0) {
+          const byParent = new Map();
+          for (const element of typed) {
+            if (element.maxLength !== 1) continue;
+            const parent = element.parentElement;
+            if (!parent) continue;
+            if (!byParent.has(parent)) byParent.set(parent, []);
+            byParent.get(parent).push(element);
+          }
+          for (const group of byParent.values()) {
+            if (group.length >= 4 && group.length > boxes.length) boxes = group;
+          }
+        }
+        if (boxes.length === 0) return 0;
+        boxes.forEach((element, index) => element.setAttribute('data-litos-security-code-box', String(index)));
+        return boxes.length;
+      }).catch(() => 0);
+      if (marked === 0) return 'no_control';
+      const first = page.locator('[data-litos-security-code-box="0"]');
+      await first.click().catch(() => undefined);
+      await page.keyboard.type(code, { delay: 30 }).catch(() => undefined);
+      const readBack = () => page.evaluate(() => [...document.querySelectorAll('[data-litos-security-code-box]')]
+        .map((element) => element.value || '').join('')).catch(() => '');
+      if ((await readBack()) !== code) {
+        for (let index = 0; index < marked; index += 1) {
+          const value = marked === 1 ? code : (code[index] || '');
+          const box = page.locator('[data-litos-security-code-box="' + index + '"]');
+          await box.fill(value).catch(() => undefined);
+          await box.evaluate((element) => {
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+          }).catch(() => undefined);
+        }
+      }
+      return (await readBack()) === code ? 'entered' : 'not_entered';
+    };
+
     const readSubmitReadiness = () => page.evaluate(() => {
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
       const isVisible = (element) => {
@@ -1009,6 +1216,51 @@ const { chromium } = require('playwright');
       if (action.type === 'click') {
         await locator.click();
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+        /* THE SECOND HALF OF A GREENHOUSE SUBMIT, and the reason it is HERE rather than in its own
+         * action.
+         *
+         * Greenhouse's answer to submit is not "filed" or "rejected", it is "prove you read this
+         * mailbox": it emails a code and renders a code field, and the form has to be submitted
+         * AGAIN with that code in it. So finishing takes three steps that only exist relative to
+         * each other - click, type, click - and the middle one cannot be queued in advance, because
+         * the control it types into does not exist until the first click has happened.
+         *
+         * The caller therefore hands the code to the submit click it already queues, and the two
+         * extra steps cost ZERO extra actions. That is not a nicety. MANAGED_ACTION_LIMIT is 120 and
+         * a real Greenhouse packet reconstructs to exactly 120, with the trim already having shaved
+         * preferred_first_name and preferred_last_name off the end: every action added here would
+         * have displaced a field the applicant expects to see filled.
+         *
+         * With no code supplied this does nothing at all. The challenge is then still standing when
+         * the post-run scan reads it, and the caller is told what the page is waiting for.
+         */
+        if (action.securityCode && isFinalSubmitAction(action)) {
+          // The control renders after the round trip the click just made, so it is worth one bounded
+          // wait. Same shape as greenhouse_application_form_ready: declared, short, and optional.
+          await page.waitForSelector('input[autocomplete*="one-time-code" i], input[maxlength="1"]', { timeout: 8000 })
+            .catch(() => undefined);
+          const entry = await enterSecurityCode(action.securityCode);
+          if (entry !== 'entered') {
+            securityCodeAttempt = { supplied: true, entered: false, outcome: entry, resubmitted: false };
+            skipped.push('security_code: the code was not typed, ' + entry);
+          } else {
+            // Resubmitting is the whole point: Greenhouse's own email says "After you enter the
+            // code, resubmit your application." A code typed into a form nobody sends changes
+            // nothing.
+            await locator.click().catch(() => undefined);
+            await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+            // Accepted or not is read off the CONTROL, the same way its arrival was: a challenge
+            // still standing after the resubmit means the code did not clear it. Deliberately not
+            // read off any success or error sentence.
+            const still = await readSecurityCodeChallenge();
+            securityCodeAttempt = {
+              supplied: true,
+              entered: true,
+              resubmitted: true,
+              outcome: still ? 'rejected' : 'accepted'
+            };
+          }
+        }
       }
       if (action.type === 'fill') {
         const fillShape = await locator.evaluate((element) => ({
@@ -1265,6 +1517,17 @@ const { chromium } = require('playwright');
      */
     const readiness = await readSubmitReadiness();
     blockers.push(...readiness.blocking);
+    // Read on EVERY run, at zero action cost, because the caller has no other way to find out. A
+    // fill run that has somehow submitted looks exactly like a fill run that has not, right up
+    // until the applicant is asked to approve sending an application that is already half sent.
+    const humanVerification = await readSecurityCodeChallenge();
+    // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
+    // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
+    // action list tried to send a real application without authorization, and this is the only
+    // place that can ever say so.
+    const blockedSubmits = input.allowSubmit === true
+      ? 0
+      : await page.evaluate(() => window.__litosBlockedSubmits || 0).catch(() => 0);
     const title = await page.title();
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
@@ -1273,7 +1536,7 @@ const { chromium } = require('playwright');
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
     // caller should be able to see and act on, and a silent skip is how a half-filled form starts
     // looking like a fully-filled one.
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, blockedSubmits, elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !input.requestContinuation) break;
     fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: input.continuationExpiresAt, host: input.allowedHost }));
     const expiresAt = Date.parse(input.continuationExpiresAt);
@@ -1351,6 +1614,18 @@ export function normalizeManagedActions(actions = []) {
       normalized.file = { name: file.name.trim(), mimeType: file.mimeType.trim(), base64: file.base64 };
     }
     if (action.type === 'waitForSelector') normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
+    // The emailed code that finishes a Greenhouse submit, carried on the submit click itself. Kept
+    // to the shape of a code and nothing else: it is typed into a live employer's form, so a value
+    // that is not plausibly a code is a caller bug and must not reach the page. Greenhouse issues 8
+    // alphanumeric characters; the bound is wider than that and still narrow enough that no
+    // sentence, selector or script fragment can pass through it.
+    if (action.securityCode != null) {
+      if (action.type !== 'click') throw inputError('Only a click may carry a security code', 'INVALID_SECURITY_CODE');
+      if (typeof action.securityCode !== 'string' || !/^[A-Za-z0-9]{4,12}$/.test(action.securityCode)) {
+        throw inputError('A security code must be 4 to 12 letters or digits', 'INVALID_SECURITY_CODE');
+      }
+      normalized.securityCode = action.securityCode;
+    }
     if (action.type === 'extract' && action.attribute != null) {
       if (typeof action.attribute !== 'string' || action.attribute.length > 100) {
         throw inputError('Extract attributes must be strings no longer than 100 characters', 'INVALID_ATTRIBUTE');
@@ -1377,6 +1652,12 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
     url: url.toString(),
     actions: normalizeManagedActions(input.actions),
     screenshot: input.screenshot !== false,
+    // DEFAULT DENY, and the default is the entire safety property. Every existing caller becomes a
+    // run that cannot submit, which is what they all already believed they were, and only a caller
+    // that says the word gets the ability to send a real application to a real employer. Written as
+    // `=== true` rather than Boolean() so a truthy accident ('no', 0 vs '0', an object) cannot open
+    // it: the one value that opens the gate is the literal true.
+    allowSubmit: input.allowSubmit === true,
     fullPage: Boolean(input.fullPage),
     waitUntil: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'].includes(input.waitUntil) ? input.waitUntil : 'networkidle2',
     viewport: { width, height },
@@ -1414,6 +1695,7 @@ function continuationSandboxName(projectBinding, token) {
 
 function continuationEligible(result, checkpoint) {
   if (checkpoint) return true;
+  if (result?.humanVerification?.kind === 'security_code') return true;
   const haystack = `${result?.title || ''}\n${result?.url || ''}\n${result?.text || ''}`;
   return /(?:verification|security|confirmation)\s+code|enter\s+(?:the\s+)?code|check\s+your\s+email/i.test(haystack);
 }

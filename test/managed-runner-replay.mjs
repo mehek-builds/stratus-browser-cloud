@@ -220,13 +220,17 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-replay-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 
-async function replay(actions) {
+// `options` carries whatever the run-level input needs, which today means allowSubmit. It defaults
+// to absent, so every case below that does not ask for it runs under the default-deny submit guard,
+// which is the shape of a real prepare run.
+async function replay(actions, options = {}) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
     url: base,
     actions,
     screenshot: false,
     waitUntil: 'networkidle',
-    viewport: { width: 1440, height: 900 }
+    viewport: { width: 1440, height: 900 },
+    ...options
   }));
   fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
   // spawn, never spawnSync: the fixture server lives in this process, and spawnSync would block the
@@ -364,11 +368,18 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    submitted and must say which fields are empty; a complete one must go through untouched. The
 //    fixture carries the form's own "* indicates a required field" legend on purpose: an early
 //    version of the gate matched it and would have refused every Greenhouse submission there is.
+//
+//    Every case here runs with allowSubmit, and it has to. These are the AUTHORIZED submit run: the
+//    run-level guard that stops a fill run submitting is deliberately not installed on it, which
+//    leaves the pre-submit gate as the only thing between the click and the submission. That is the
+//    same reason the fixture's form is novalidate. Without allowSubmit the two refusal cases below
+//    would still go green, and they would be green because the guard stopped the submit and not
+//    because the gate did - a test passing for the wrong reason is how a gate rots unnoticed.
 {
   const blocked = await replay([
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
     { type: 'extract', selector: '#submitted' }
-  ]);
+  ], { allowSubmit: true });
   assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
   assert.deepEqual(blocked.blockers.sort(), [
     '"Email" is required and is still empty',
@@ -383,7 +394,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_phone', '+971 50 123 4567'),
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
     { type: 'extract', selector: '#submitted' }
-  ]);
+  ], { allowSubmit: true });
   assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
   assert.deepEqual(allowed.blockers, [], 'a complete form must produce no blockers, got ' + JSON.stringify(allowed.blockers));
 
@@ -396,7 +407,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_email', 'person@example.com'),
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
     { type: 'extract', selector: '#submitted' }
-  ]);
+  ], { allowSubmit: true });
   assert.equal(valueOf(phoneEmpty, '#submitted'), '',
     'an empty required control beside an answered choice control must still stop the submit');
   // Asserted on 'skipped', not only on 'blockers': the runner has a SECOND, older required-field
