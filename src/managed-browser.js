@@ -609,18 +609,46 @@ const { chromium } = require('playwright');
         '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"],'
         + ' [data-field-path], [class*="_fieldEntry_"]'
       ) || element.parentElement || element;
+      /* THE LABEL THAT WRAPS ITS CONTROL AND NEVER NAMES IT.
+       *
+       * '<label>First name<input required></label>' is a legal HTML label association and carries no
+       * "for" attribute, so the byFor lookup below finds nothing, widgetOf falls back to the label
+       * itself, and its querySelector('label') then finds no label INSIDE it. Greenhouse's
+       * first-name, last-name and resume fields are all built this way. Without this candidate the
+       * walk below is all that is left, and it answers with the block's FIRST label, so all three
+       * fields came back named "First name" and the message dedupe then collapsed them into one:
+       * two genuinely empty required fields vanished from the blocker list entirely.
+       *
+       * Disqualified when the label wraps MORE than one control, because a label speaking for
+       * several controls speaks for none in particular. The legend and aria-labelledby candidates
+       * already serve that case.
+       */
+      const wrappingLabelTextOf = (element) => {
+        const wrapper = element && element.closest && element.closest('label');
+        if (!wrapper) return '';
+        if (wrapper.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+        return wrapper.textContent;
+      };
       /* The question a control sits under, when the control itself is labelled with nothing useful.
        *
        * Restored here from the end-of-run scan this gate replaced, where it was the only reason an
        * Ashby datepicker blocker read "Are you currently enrolled in a degree program? If so,
        * expected graduation date?" instead of "Pick date...". Losing it would have made the blocker
        * name the widget rather than the question, which is the same defect as naming a UUID.
+       *
+       * A BLOCK HOLDING MORE THAN ONE CONTROL IS REJECTED, because its first label is then somebody
+       * else's. Measured against the SmartRecruiters fixture, whose resume input sits bare inside an
+       * <spl-dropzone> with no label of any kind: without this test the walk reached the form's
+       * field grid and reported the missing resume as "First Name", so the applicant was told a
+       * field she had already filled was empty and never told the resume was missing. A wrong name
+       * is worse than no name, so an ambiguous block yields nothing.
        */
       const genericControlText = (value) => /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
       const nearestQuestionText = (start) => {
         let block = start && start.parentElement;
         for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
           if (!block.matches || !block.matches('div, section, li, fieldset')) continue;
+          if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
           const candidate = block.querySelector('label, legend, .question, h3, h4');
           const text = clean((candidate && candidate.textContent) || '');
           if (text && !genericControlText(text)) return text;
@@ -639,6 +667,7 @@ const { chromium } = require('playwright');
           byFor && byFor.textContent,
           legend && legend.textContent,
           own && own.textContent,
+          wrappingLabelTextOf(element),
           element && element.getAttribute('aria-label'),
           widget && widget.getAttribute('aria-label'),
           nearestQuestionText(element)
@@ -845,20 +874,63 @@ const { chromium } = require('playwright');
        * note() dedupes on the control, so a field caught by BOTH the attribute loop and this one is
        * still reported once.
        */
-      for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+      // Shared by both marker loops: the control a marked label speaks for, handed to note().
+      // 'for=' first, because Ashby sets it even where the input it names has no id of its own (the
+      // location combobox), in which case the lookup misses and the block's first real control is
+      // the right answer. A file input is excluded from the fallback for the same reason hasAnswer
+      // treats uploads specially: the widget, not the input, is what holds the evidence of an
+      // upload. widgetFallback is the block itself, and is passed only by the class arm below.
+      const noteMarkedLabel = (marker, widgetFallback) => {
         const widget = widgetOf(marker);
-        if (!widget || !isVisible(widget)) continue;
-        // The control this label speaks for. 'for=' first, because Ashby sets it even where the input
-        // it names has no id of its own (the location combobox), in which case the lookup misses and
-        // the block's first real control is the right answer. A file input is excluded from the
-        // fallback for the same reason hasAnswer treats uploads specially: the widget, not the input,
-        // is what holds the evidence of an upload.
+        if (!widget || !isVisible(widget)) return;
         const named = marker.getAttribute('for');
         const target = (named && widget.querySelector('#' + CSS.escape(named)))
           || widget.querySelector('input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]')
-          || widget;
-        if (target.disabled) continue;
+          || (widgetFallback ? widget : null);
+        if (!target || target.disabled) return;
         note(widget, target, 'required');
+      };
+      for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+        // An Ashby question block with no readable control still has to block, which is where PR #22
+        // measured this arm.
+        noteMarkedLabel(marker, true);
+      }
+      /* AND THE SAME MARK ON GREENHOUSE, WHERE IT IS A LITERAL ASTERISK IN THE LABEL TEXT.
+       *
+       * Ashby's asterisk is a ':after' pseudo-element and appears in no label text, which is why the
+       * arm above reads a class. Greenhouse prints the character itself: measured read-only on the
+       * live zscaler posting, 19 of its 30 labels carry a standalone "*", and on yugabyte 3 of 23.
+       * So the same employer statement, "this field in particular", is spelled two different ways
+       * and a gate that knows only one of them is blind on the other family. Both are per-control:
+       * this reads the text of ONE <label> or <legend> that speaks for ONE control, never the page.
+       *
+       * THE 2026-08-08 MISTAKE IS THE ONE NOT TO REPEAT. The form's own legend, "* indicates a
+       * required field", was the ONLY thing an early gate found on a complete application, and
+       * refusing there would have blocked every Greenhouse submission there is. A page-level notice
+       * is a <p>, not a label, so it cannot reach this loop at all; ASTERISK_LEGEND excludes the
+       * same sentence a second time for the boards that do print it inside a label block.
+       *
+       * No widget fallback here, because "a <label> somewhere carries a star and I could not find
+       * its control" is not evidence that an application is incomplete.
+       *
+       * The asterisk test is labelMarksRequired's, character for character (the backend's
+       * questionDiscovery.ts), so discovery and this gate cannot disagree about which fields the
+       * employer marked required.
+       *
+       * MEASURED CONTRIBUTION, read-only against live forms on 2026-08-09. On the zscaler and
+       * yugabyte Greenhouse postings this loop adds ZERO blockers: every field it finds already
+       * carries 'required' or aria-required, so the whole gate returns the same 21 and 3 messages it
+       * returned without it. On the Deepgram, Ramp and Linear Ashby forms it matches ZERO labels,
+       * because Ashby prints no asterisk anywhere. It earns its place on the one shape neither
+       * attribute loop can see: a Greenhouse screener question marked with a red asterisk and
+       * nothing else.
+       */
+      const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
+      const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+      for (const marker of document.querySelectorAll('label, legend')) {
+        const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
+        noteMarkedLabel(marker, false);
       }
       // Visible validation messages, matched back to the control they accuse. An unmatched message,
       // or one over an empty control, blocks; one over a filled control is stale and is only
