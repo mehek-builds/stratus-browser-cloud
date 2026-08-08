@@ -286,3 +286,52 @@ test('required date blockers can use the enclosing question instead of Pick date
   assert.match(SANDBOX_RUNNER, /const nearestQuestionText = \(start\) =>/);
   assert.match(SANDBOX_RUNNER, /nearestQuestionText\(element\)/);
 });
+
+// R-100. The optional pre-check was 'await locator.count() === 0', an instantaneous snapshot with
+// no auto-wait, so every asynchronously-rendered control was tested at the one instant it could not
+// be there. It defeated an optional waitForSelector outright, which is how the run could start
+// typing into a Greenhouse application form that had not rendered yet. The grace below is sized off
+// measurement: on a live Greenhouse education form (Five Rings, 2026-08-08) the asynchronously
+// loaded School and Discipline options arrived 563ms and 555ms after the fill.
+// test/managed-runner-replay.mjs proves the behaviour in a real browser; these pin the mechanism.
+
+test('the optional pre-check auto-waits instead of taking one instantaneous snapshot', () => {
+  assert.match(SANDBOX_RUNNER, /locator\.waitFor\(\{ state: 'attached', timeout: settleMs \}\)/);
+  // The bare snapshot survives only as the exhausted-budget fallback, never as the first answer.
+  assert.doesNotMatch(SANDBOX_RUNNER, /action\.optional && await locator\.count\(\) === 0/);
+});
+
+test('an optional waitForSelector is exempt from the pre-check entirely', () => {
+  // It is the one action whose whole job is to wait, and its timeout is already clamped to
+  // 100-20000ms by normalizeManagedActions, so a pre-check can only ever cancel it.
+  assert.match(SANDBOX_RUNNER, /action\.optional && action\.type !== 'waitForSelector'/);
+  assert.match(SANDBOX_RUNNER, /if \(action\.type === 'waitForSelector'\) await page\.waitForSelector\(/);
+});
+
+test('optional waiting is bounded per action and again across the whole run', () => {
+  // A run may carry up to 120 actions and most optional selectors are speculative fallbacks that
+  // genuinely are absent. Without both bounds the fix would trade empty fields for blown budgets.
+  assert.match(SANDBOX_RUNNER, /const OPTIONAL_SETTLE_MS = 1500;/);
+  assert.match(SANDBOX_RUNNER, /let settleBudgetMs = 5000;/);
+  assert.match(SANDBOX_RUNNER, /Math\.min\(OPTIONAL_SETTLE_MS, Math\.max\(settleBudgetMs, 0\)\)/);
+  assert.match(SANDBOX_RUNNER, /settleBudgetMs -= Date\.now\(\) - probeStartedAt;/);
+  // Budget gone means the original instantaneous snapshot, not an unbounded wait.
+  assert.match(SANDBOX_RUNNER, /if \(settleMs <= 0\) \{\s*\n\s*present = await locator\.count\(\) > 0;/);
+});
+
+test('grace is granted only when the previous action could have changed the page', () => {
+  // Greenhouse's preflight fires six cookie-banner selectors in a row that are almost always all
+  // absent. Once a probe comes back empty nothing has happened since, so the next probe is instant:
+  // the preflight pays one grace, not six.
+  assert.match(SANDBOX_RUNNER, /let precedingActionCouldChangeDom = true;/);
+  assert.match(SANDBOX_RUNNER, /precedingActionCouldChangeDom = false;\s*\n\s*continue;/);
+  assert.match(SANDBOX_RUNNER, /precedingActionCouldChangeDom = action\.type !== 'extract' && action\.type !== 'discover';/);
+});
+
+test('an optional element that never arrived is reported, and says how long it was given', () => {
+  // Every absence is reported and the grace is named in the message: 'after 1500ms' means we waited
+  // and it never came, 'after 0ms' means nothing had happened that could have made it appear. The
+  // pre-check used to skip in complete silence, which is how several deploys went by with fields
+  // quietly left empty.
+  assert.match(SANDBOX_RUNNER, /skipped\.push\(\(action\.label \|\| action\.type\) \+ ': nothing matched ' \+ action\.selector \+ ' after ' \+ settleMs \+ 'ms'\)/);
+});

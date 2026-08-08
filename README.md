@@ -23,6 +23,8 @@ Production authentication uses Vercel OIDC automatically, so no external browser
 
 Supported actions are `click`, `fill`, `fillByLabelText`, `upload`, `waitForSelector`, `press`, `select`, and `extract`. Arbitrary caller-supplied JavaScript is rejected.
 
+Any action may carry `optional: true`, which means "step over this rather than fail the run". An optional action waits for its element instead of testing for it once, because the controls worth marking optional are usually the ones a page renders asynchronously. The waiting is bounded on both sides: each optional action gets at most 1.5 seconds, and only when the preceding action actually ran and could have changed the page, so a run of consecutive absent selectors pays one wait rather than one each; and all optional waiting in a run draws down a single 5 second budget, after which the check reverts to an instantaneous one. An optional `waitForSelector` is exempt and honours its own `timeout`, which is clamped to between 100 and 20000 ms. Every optional action that is stepped over is reported in the run's `skipped` array, along with how long it was given.
+
 ## What works
 
 - Real isolated Chromium sessions with Playwright WebSocket endpoints

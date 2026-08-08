@@ -126,10 +126,66 @@ const { chromium } = require('playwright');
       }
       return false;
     };
+    // R-100. The optional pre-check below used to be a bare 'await locator.count() === 0', an
+    // instantaneous DOM snapshot with no auto-wait. Everything an ATS renders asynchronously was
+    // therefore tested at the one instant it could not possibly be there:
+    //   - an optional waitForSelector, the single action whose entire job is to wait, was cancelled
+    //     by a snapshot taken before it ever ran;
+    //   - click's networkidle wait bought nothing, because waitForLoadState resolves immediately
+    //     when the page is idle AT THE MOMENT OF THE CALL, which it is if the XHR the click just
+    //     triggered has not left yet;
+    //   - and on Greenhouse, clicking 'Apply for this job' renders the application form a beat
+    //     later, so 'greenhouse_application_form_ready' (an optional waitForSelector on the email
+    //     and resume fields) returned instantly and the run typed into a form that did not exist
+    //     yet. Runs recording filled_fields: 0 with nothing entered at all are this.
+    // The pre-check still exists and still matters, because a run may carry up to 120 actions and
+    // most optional selectors are speculative fallbacks that genuinely are not on the page. So the
+    // wait is bounded three ways:
+    //   1. waitForSelector is exempt and keeps its own declared timeout. Anything that needs to
+    //      wait longer than a moment is the caller's to declare, not this pre-check's to guess.
+    //   2. Every other optional action gets a short grace, and only when the PREVIOUS action
+    //      actually ran and could have changed the DOM. Six consecutive absent cookie-banner
+    //      selectors pay one grace, not six: once a probe comes back empty, nothing has happened
+    //      since, so the next probe is instant.
+    //   3. Every millisecond spent probing draws down one run-wide budget. When it is gone the
+    //      pre-check reverts to the original instantaneous snapshot for the rest of the run.
+    // A successful probe costs only the time the element actually took to appear, so a page where
+    // everything is present pays close to nothing. The grace is sized off measurement, not a guess:
+    // on a live Greenhouse education form (Five Rings, 2026-08-08) the asynchronously loaded School
+    // and Discipline options arrived 563ms and 555ms after the fill. The budget is sized against
+    // the forked sandbox's 90s lifetime, of which page.goto may already take 45.
+    const OPTIONAL_SETTLE_MS = 1500;
+    let settleBudgetMs = 5000;
+    let precedingActionCouldChangeDom = true; // page.goto just ran
     for (const action of input.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
-      if (locator && action.optional && await locator.count() === 0) continue;
+      // waitForSelector is exempt outright rather than merely given grace: its own timeout is the
+      // caller's declared, already-bounded intent (normalizeManagedActions clamps it to 100-20000ms),
+      // and a pre-check that can answer 'not there' before that timeout starts is the bug itself.
+      // An optional one that times out lands in the catch below and is reported in 'skipped'.
+      if (locator && action.optional && action.type !== 'waitForSelector') {
+        const settleMs = precedingActionCouldChangeDom ? Math.min(OPTIONAL_SETTLE_MS, Math.max(settleBudgetMs, 0)) : 0;
+        let present;
+        if (settleMs <= 0) {
+          present = await locator.count() > 0;
+        } else {
+          const probeStartedAt = Date.now();
+          // 'attached' rather than 'visible', so this stays a strict superset of the count() check
+          // it replaces and cannot start skipping elements the old code would have acted on.
+          present = await locator.waitFor({ state: 'attached', timeout: settleMs }).then(() => true).catch(() => false);
+          settleBudgetMs -= Date.now() - probeStartedAt;
+        }
+        if (!present) {
+          // Always reported, and the grace is named in the message. 'after 1500ms' means we waited
+          // and it never came, which is the diagnostic that cost a local replay to find; 'after 0ms'
+          // means nothing had happened that could have made it appear. A skip that says neither is
+          // how several deploys went by with fields quietly left empty.
+          skipped.push((action.label || action.type) + ': nothing matched ' + action.selector + ' after ' + settleMs + 'ms');
+          precedingActionCouldChangeDom = false;
+          continue;
+        }
+      }
       if (action.type === 'discover') {
         // Scans the LIVE page for text-shaped custom questions (R-055 on the managed path: this
         // runner is the only place with an actual Page object mid-run, since /api/run is otherwise
@@ -369,6 +425,10 @@ const { chromium } = require('playwright');
         const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
         extracted.push({ selector: action.selector, label: action.label, value });
       }
+      // An action that ran to completion earns the NEXT optional action its settle grace. 'extract'
+      // reads only, and the marker attributes 'discover' writes are set synchronously before it
+      // returns, so neither can make an element appear LATER: waiting on their behalf buys nothing.
+      precedingActionCouldChangeDom = action.type !== 'extract' && action.type !== 'discover';
      } catch (actionError) {
       // 'optional' previously meant only "skip if the element is missing", and it was checked via
       // 'locator', which is null for fillByLabelText. So a fillByLabelText could never be optional,
