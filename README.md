@@ -23,6 +23,10 @@ Production authentication uses Vercel OIDC automatically, so no external browser
 
 Supported actions are `click`, `fill`, `fillByLabelText`, `upload`, `waitForSelector`, `press`, `select`, and `extract`. Arbitrary caller-supplied JavaScript is rejected.
 
+Any action may carry `optional: true`, which means "step over this rather than fail the run". Whether the element is there is decided by a single instantaneous check, with one exception: an optional `waitForSelector` is exempt and honours its own `timeout`, which is clamped to between 100 and 20000 ms. That exception matters because `waitForSelector` is the one action whose entire job is to wait, and a check that can answer "not there" before its timeout starts cancels it outright. If a control renders asynchronously, declare a `waitForSelector` for it; the runner will not guess a wait on your behalf, because measured against two live Greenhouse forms a blanket grace changed no outcome and cost about 4.3 seconds a run. Every optional action that is stepped over is reported in the run's `skipped` array.
+
+A `click` that is the final submit, either labelled `final_submit` or targeting a submit control, is gated: the runner reads the form the way the employer's validator would and withholds the click while any required control is still empty, listing them in `blockers`. The check is asked of each required control rather than of the block around it, so an empty required input is not treated as answered because something else in its block was. Validation text left over from an earlier pass, over a control that is now filled, is reported in `skipped` and never blocks.
+
 ## What works
 
 - Real isolated Chromium sessions with Playwright WebSocket endpoints
