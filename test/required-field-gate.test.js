@@ -69,6 +69,23 @@ test('the required scan reads a per-control marker and never page text', () => {
   // one specific field's own label.
   assert.match(gate, /input\[required\], textarea\[required\], select\[required\], \[aria-required="true"\]/);
   assert.match(gate, /label\[class\*="_required_"\], legend\[class\*="_required_"\]/);
+  /* And the Greenhouse spelling of the same mark. Ashby paints its asterisk from a ':after' rule so
+     it appears in no text; Greenhouse prints the character into the label. Measured read-only on
+     2026-08-09: 19 of zscaler's 30 labels carry a standalone "*", 3 of yugabyte's 23, and ZERO on
+     the Deepgram, Ramp and Linear Ashby forms. Still per-control: one <label> speaking for one
+     control, never the page. */
+  assert.match(gate, /const ASTERISK_MARK = /);
+  assert.match(gate, /const ASTERISK_LEGEND = /);
+  // Only the Ashby class arm may fall back to the block itself. A star whose control cannot be
+  // found is not evidence that an application is incomplete.
+  assert.match(gate, /noteMarkedLabel\(marker, true\)/);
+  assert.match(gate, /noteMarkedLabel\(marker, false\)/);
+  /* A label that WRAPS its control carries no "for", so byFor misses and widgetOf falls back to the
+     label itself, whose querySelector('label') finds nothing inside it. Greenhouse's first name,
+     last name and resume are all built that way; without this candidate the block walk names all
+     three "First name" and the message dedupe then collapses two genuinely empty required fields
+     out of the blocker list altogether. */
+  assert.match(gate, /const wrappingLabelTextOf = /);
   // The legend guard survives. It is the whole reason an early version of this gate would have
   // refused every Greenhouse submission there is.
   assert.match(gate, /LEGEND_TEXT/);
