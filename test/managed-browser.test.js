@@ -287,53 +287,34 @@ test('required date blockers can use the enclosing question instead of Pick date
   assert.match(SANDBOX_RUNNER, /nearestQuestionText\(element\)/);
 });
 
-// R-100. The optional pre-check was 'await locator.count() === 0', an instantaneous snapshot with
-// no auto-wait, so every asynchronously-rendered control was tested at the one instant it could not
-// be there. It defeated an optional waitForSelector outright, which is how the run could start
-// typing into a Greenhouse application form that had not rendered yet. The grace below is sized off
-// measurement: on a live Greenhouse education form (Five Rings, 2026-08-08) the asynchronously
-// loaded School and Discipline options arrived 563ms and 555ms after the fill.
+// R-100. The optional pre-check is an instantaneous snapshot with no auto-wait, and it used to
+// apply to waitForSelector too, cancelling the one action whose entire job is to wait. That is the
+// whole of the fix: waitForSelector is exempt and every other optional action keeps the snapshot it
+// always had. An earlier version also gave the others a 1500ms settle grace against a run-wide
+// budget; measured against both branches on two live Greenhouse forms (Redwood Materials and DRW,
+// 2026-08-08) the grace produced identical filled_fields and identical blockers while costing
+// +4336ms and +4298ms, so it is deliberately not here.
 // test/managed-runner-replay.mjs proves the behaviour in a real browser; these pin the mechanism.
-
-test('the optional pre-check auto-waits instead of taking one instantaneous snapshot', () => {
-  assert.match(SANDBOX_RUNNER, /locator\.waitFor\(\{ state: 'attached', timeout: settleMs \}\)/);
-  // The bare snapshot survives only as the exhausted-budget fallback, never as the first answer.
-  assert.doesNotMatch(SANDBOX_RUNNER, /action\.optional && await locator\.count\(\) === 0/);
-});
 
 test('an optional waitForSelector is exempt from the pre-check entirely', () => {
   // It is the one action whose whole job is to wait, and its timeout is already clamped to
   // 100-20000ms by normalizeManagedActions, so a pre-check can only ever cancel it.
-  assert.match(SANDBOX_RUNNER, /action\.optional && action\.type !== 'waitForSelector'/);
+  assert.match(SANDBOX_RUNNER, /action\.optional && action\.type !== 'waitForSelector' && await locator\.count\(\) === 0/);
   assert.match(SANDBOX_RUNNER, /if \(action\.type === 'waitForSelector'\) await page\.waitForSelector\(/);
 });
 
-test('optional waiting is bounded per action and again across the whole run', () => {
-  // A run may carry up to 120 actions and most optional selectors are speculative fallbacks that
-  // genuinely are absent. Without both bounds the fix would trade empty fields for blown budgets.
-  assert.match(SANDBOX_RUNNER, /const OPTIONAL_SETTLE_MS = 1500;/);
-  assert.match(SANDBOX_RUNNER, /let settleBudgetMs = 5000;/);
-  assert.match(SANDBOX_RUNNER, /Math\.min\(OPTIONAL_SETTLE_MS, Math\.max\(settleBudgetMs, 0\)\)/);
-  assert.match(SANDBOX_RUNNER, /settleBudgetMs -= Date\.now\(\) - probeStartedAt;/);
-  // Budget gone means the original instantaneous snapshot, not an unbounded wait.
-  assert.match(SANDBOX_RUNNER, /if \(settleMs <= 0\) \{\s*\n\s*present = await locator\.count\(\) > 0;/);
+test('the pre-check costs nothing beyond the snapshot it always took', () => {
+  // The narrowing is load-bearing, not incidental: these are what a reintroduced grace would trip.
+  assert.doesNotMatch(SANDBOX_RUNNER, /OPTIONAL_SETTLE_MS/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /settleBudgetMs/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /precedingActionCouldChangeDom/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /locator\.waitFor\(\{ state: 'attached'/);
 });
 
-test('grace is granted only when the previous action could have changed the page', () => {
-  // Greenhouse's preflight fires six cookie-banner selectors in a row that are almost always all
-  // absent. Once a probe comes back empty nothing has happened since, so the next probe is instant:
-  // the preflight pays one grace, not six.
-  assert.match(SANDBOX_RUNNER, /let precedingActionCouldChangeDom = true;/);
-  assert.match(SANDBOX_RUNNER, /precedingActionCouldChangeDom = false;\s*\n\s*continue;/);
-  assert.match(SANDBOX_RUNNER, /precedingActionCouldChangeDom = action\.type !== 'extract' && action\.type !== 'discover';/);
-});
-
-test('an optional element that never arrived is reported, and says how long it was given', () => {
-  // Every absence is reported and the grace is named in the message: 'after 1500ms' means we waited
-  // and it never came, 'after 0ms' means nothing had happened that could have made it appear. The
-  // pre-check used to skip in complete silence, which is how several deploys went by with fields
-  // quietly left empty.
-  assert.match(SANDBOX_RUNNER, /skipped\.push\(\(action\.label \|\| action\.type\) \+ ': nothing matched ' \+ action\.selector \+ ' after ' \+ settleMs \+ 'ms'\)/);
+test('an optional element that never arrived is reported rather than skipped in silence', () => {
+  // The pre-check used to skip in complete silence, which is how several deploys went by with
+  // fields quietly left empty and nothing in the run saying so.
+  assert.match(SANDBOX_RUNNER, /skipped\.push\(\(action\.label \|\| action\.type\) \+ ': nothing matched ' \+ action\.selector\)/);
 });
 
 /* ---------------------------------------------------------------------------------------------
@@ -451,36 +432,101 @@ test('a press lands on the element it names, and is skipped when that element is
   assert.match(SANDBOX_RUNNER, /could only have submitted the form/);
 });
 
-const gateScope = () => sandboxScope(['clean', 'widgetHasAnswer'], 6);
+const gateScope = () => sandboxScope(['clean', 'CHOICE_SHELL', 'chosenValueOf', 'uploadHasFile', 'hasAnswer'], 6);
 
-function widget({ chosen = '', placeholder = false, filename = false, controls = [] } = {}) {
+// A React Select's own shell, the thing its chosen value is rendered into.
+function shellOf({ chosen = '', placeholder = false } = {}) {
   return {
     querySelector(selector) {
       if (/single-value|multi-value__label/.test(selector)) return chosen ? { textContent: chosen } : null;
       if (/placeholder/.test(selector)) return placeholder ? {} : null;
-      if (/file-upload__filename|Remove file/.test(selector)) return filename ? {} : null;
       return null;
-    },
-    querySelectorAll: () => controls
+    }
   };
 }
 
+// One form control. 'shell' is the select shell this control is INSIDE, which is the distinction
+// R-103 turns on: a control that merely sits near an answered select is not inside it.
+function control({ tag = 'INPUT', type = 'text', value = '', role = null, checked = null, files = null, name = null, shell = null, block = null } = {}) {
+  return {
+    tagName: tag, type, value, checked, files, name,
+    getAttribute: (attribute) => (attribute === 'role' ? role : null),
+    closest(selector) {
+      if (!shell) return null;
+      if (/select__container|select-shell/.test(selector)) return shell;
+      if (/select__control/.test(selector)) return { parentElement: shell };
+      return null;
+    },
+    parentElement: block || { querySelector: () => null, querySelectorAll: () => [] },
+    querySelector: () => null,
+    querySelectorAll: () => []
+  };
+}
+
+// A block that is itself flagged required: Greenhouse marks its uploader with a
+// <div role="group" aria-required="true"> and leaves the file input unmarked.
+function block({ chip = false, controls = [] } = {}) {
+  return {
+    tagName: 'DIV',
+    closest: () => null,
+    querySelector: (selector) => (/file-upload__filename|Remove file/.test(selector) && chip ? {} : null),
+    querySelectorAll: (selector) => (/type="file"/.test(selector)
+      ? controls.filter((candidate) => candidate.type === 'file')
+      : controls.filter((candidate) => candidate.type !== 'hidden'))
+  };
+}
+
+test('R-103: an empty required control is not answered by a choice control beside it', () => {
+  const { hasAnswer } = gateScope();
+  // THE REGRESSION. Greenhouse puts the phone number input and its country React Select in one
+  // <fieldset class="phone-input">. The answer check used to be asked of that fieldset and returned
+  // true on its first look at the country's rendered "+971", so an empty required #phone was
+  // invisible. Measured live on the Redwood Materials form, 2026-08-08: with the form otherwise
+  // complete, clearing #phone produced ZERO blockers while clearing #first_name or #email was caught
+  // by name. "Phone is required." is one of the six messages from the incident this gate was built
+  // for, so the gate was blind to the very field it exists to catch.
+  const answeredCountry = shellOf({ chosen: '+971' });
+  // The phone input is NOT inside the country's shell, and its own value is the answer.
+  assert.equal(hasAnswer(control({ type: 'tel', value: '', shell: null })), false);
+  assert.equal(hasAnswer(control({ type: 'tel', value: '+971 50 123 4567', shell: null })), true);
+  // The country combobox IS inside it, and reads as answered. Both live in the same fieldset, and
+  // they now give different answers, which is the whole point.
+  assert.equal(hasAnswer(control({ role: 'combobox', value: '', shell: answeredCountry })), true);
+});
+
 test('the pre-submit gate reads an answer where the control actually keeps it', () => {
-  const { widgetHasAnswer } = gateScope();
+  const { hasAnswer } = gateScope();
   // React Select: the answer is rendered text, and the combobox input's value is search text that
   // react-select CLEARS on selection. Reading the input would call every answered question empty.
-  assert.equal(widgetHasAnswer(widget({ chosen: 'No', controls: [{ type: 'text', value: '', getAttribute: () => 'combobox' }] })), true);
-  assert.equal(widgetHasAnswer(widget({ placeholder: true, controls: [{ type: 'text', value: '', getAttribute: () => 'combobox' }] })), false);
-  // Greenhouse REMOVES the file input once the upload finishes and leaves a filename chip, so
-  // "no input[type=file] holding a file" is true of a widget that has already been given one.
-  assert.equal(widgetHasAnswer(widget({ filename: true, controls: [] })), true);
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'file', files: [], getAttribute: () => null }] })), false);
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'file', files: [{}], getAttribute: () => null }] })), true);
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'text', value: 'Mehek', getAttribute: () => null }] })), true);
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'checkbox', checked: false, getAttribute: () => null }] })), false);
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'checkbox', checked: true, getAttribute: () => null }] })), true);
+  assert.equal(hasAnswer(control({ role: 'combobox', value: '', shell: shellOf({ chosen: 'No' }) })), true);
+  assert.equal(hasAnswer(control({ role: 'combobox', value: '', shell: shellOf({ placeholder: true }) })), false);
+  assert.equal(hasAnswer(control({ type: 'text', value: 'Mehek' })), true);
+  assert.equal(hasAnswer(control({ type: 'text', value: '' })), false);
+  assert.equal(hasAnswer(control({ type: 'checkbox', checked: false })), false);
+  assert.equal(hasAnswer(control({ type: 'checkbox', checked: true })), true);
   // A hidden input is not an answer the applicant gave.
-  assert.equal(widgetHasAnswer(widget({ controls: [{ type: 'hidden', value: 'x', getAttribute: () => null }] })), false);
+  assert.equal(hasAnswer(control({ type: 'hidden', value: 'x' })), false);
+  // A file input reads the block it sits in, because Greenhouse REMOVES the input once the upload
+  // finishes and leaves a filename chip, so "this input holds no file" is true of an answered field.
+  const empty = control({ type: 'file', files: [] });
+  empty.parentElement = block({ controls: [empty] });
+  assert.equal(hasAnswer(empty), false);
+  const loaded = control({ type: 'file', files: [{}] });
+  loaded.parentElement = block({ controls: [loaded] });
+  assert.equal(hasAnswer(loaded), true);
+  const chipped = control({ type: 'file', files: [] });
+  chipped.parentElement = block({ chip: true, controls: [chipped] });
+  assert.equal(hasAnswer(chipped), true);
+});
+
+test('a block flagged required is answered by what is inside it, since it holds no value itself', () => {
+  const { hasAnswer } = gateScope();
+  // Greenhouse marks its uploader required with a <div role="group" aria-required="true"> and leaves
+  // the file input unmarked, so the flagged element is a container. This is the one place widening
+  // is right, because a container has no value of its own to read.
+  assert.equal(hasAnswer(block({ controls: [control({ type: 'file', files: [] })] })), false);
+  assert.equal(hasAnswer(block({ controls: [control({ type: 'file', files: [{}] })] })), true);
+  assert.equal(hasAnswer(block({ chip: true, controls: [] })), true);
 });
 
 test('the pre-submit gate runs before the final click and can stop it', () => {
@@ -513,7 +559,7 @@ test('stale validation text is reported but never blocks a complete form', () =>
   // Measured: filling the Redwood form correctly left six "is required" messages on screen, and
   // submitting it then passed validation with zero errors. Refusing on error TEXT would have thrown
   // away a complete, correct application - the same harm as sending a broken one, and harder to see.
-  assert.match(SANDBOX_RUNNER, /if \(widgetHasAnswer\(widget\)\) \{ stale\.push\(text\); continue; \}/);
+  assert.match(SANDBOX_RUNNER, /if \(!culprit\) \{ stale\.push\(text\); continue; \}/);
   assert.match(SANDBOX_RUNNER, /pre_submit_gate: ignored /);
   assert.match(SANDBOX_RUNNER, /stale validation message\(s\) left over from an earlier pass/);
   // An error nobody can tie back to a control is the one case where text alone is enough, because
@@ -538,6 +584,27 @@ test('the form\'s own "* indicates a required field" legend is not a blocker', (
 });
 
 test('a message in a block holding no control is not attributed to a field', () => {
-  assert.match(SANDBOX_RUNNER, /const control = widget\.querySelector\('input:not\(\[type="hidden"\]\), textarea, select, \[role="combobox"\]'\);/);
-  assert.match(SANDBOX_RUNNER, /if \(!control\) continue;/);
+  assert.match(SANDBOX_RUNNER, /const controls = \[\.\.\.widget\.querySelectorAll\('input:not\(\[type="hidden"\]\), textarea, select, \[role="combobox"\]'\)\];/);
+  assert.match(SANDBOX_RUNNER, /if \(controls\.length === 0\) continue;/);
+});
+
+test('a message over a block of several controls accuses the required empty one, not the block', () => {
+  // The same R-103 shape on the error path. Greenhouse's phone field is a fieldset holding the
+  // country select and the number, and its uploader holds the resume and the cover letter. Reading
+  // the block as a whole is wrong in both directions: it hides an empty required phone behind an
+  // answered country, and it can blame an empty OPTIONAL cover letter for the resume's message,
+  // which would refuse a complete application.
+  assert.match(SANDBOX_RUNNER, /const marked = controls\.filter\(\(candidate\) => candidate\.required \|\| candidate\.getAttribute\('aria-required'\) === 'true'\);/);
+  assert.match(SANDBOX_RUNNER, /culprit = marked\.find\(\(candidate\) => !hasAnswer\(candidate\)\) \|\| null;/);
+  // When nothing in the block claims to be required the message is the only signal there is, and it
+  // may block only if NOTHING in the block has been answered.
+  assert.match(SANDBOX_RUNNER, /\} else if \(!controls\.some\(\(candidate\) => hasAnswer\(candidate\)\)\) \{/);
+});
+
+test('one unanswered React Select is not reported twice', () => {
+  // Keying on the control rather than the block lets a fieldset report two empty required controls,
+  // but an unanswered React Select carries aria-required on BOTH its combobox input and the hidden
+  // input beside it, and the two resolve to the same question and the same label. Measured on the
+  // empty live Redwood form: 15 raw entries covering 8 distinct fields.
+  assert.match(SANDBOX_RUNNER, /blocking: \[\.\.\.new Set\(required\.map\(\(entry\) => entry\.message\)\)\]/);
 });

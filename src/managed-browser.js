@@ -219,42 +219,91 @@ const { chromium } = require('playwright');
         }
         return '';
       };
-      // Does this question have an answer? Asked of the WIDGET, because on the two control families
-      // that matter here the answer does not live in an input's value at all:
-      //   - a React Select renders its answer as '.select__single-value' text and shows
-      //     '.select__placeholder' when it has none;
-      //   - Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it
-      //     with a filename chip, so "no input[type=file] with files" is true of a widget that has
-      //     already been given a file.
-      const widgetHasAnswer = (widget) => {
-        if (!widget) return false;
-        if (widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
-        if (widget.querySelector('[class*="select__placeholder"]')) return false;
-        if (widget.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
-        for (const control of widget.querySelectorAll('input, textarea, select')) {
-          if (control.type === 'hidden') continue;
-          if (control.type === 'file') {
-            if (control.files && control.files.length > 0) return true;
-            continue;
-          }
-          if (control.type === 'checkbox' || control.type === 'radio') {
-            if (control.checked) return true;
-            continue;
-          }
+      // Does the control that was flagged required have an answer? Asked of THE CONTROL, and widened
+      // to what surrounds it only where the answer genuinely does not live on the control itself.
+      //
+      // R-103. This used to be asked of the enclosing WIDGET, and its first check was "does anything
+      // inside you render a React Select value". On Greenhouse the phone number input and its
+      // country select share one <fieldset class="phone-input">, so an answered country made the
+      // whole fieldset read as answered and an empty required #phone was invisible to this gate.
+      // Measured live and read-only on the Redwood Materials form, 2026-08-08, with the form
+      // otherwise complete: clearing #first_name or #email was caught by name, and clearing #phone
+      // produced ZERO blockers. "Phone is required." is one of the six messages from the incident
+      // this gate was built for, so the gate was blind to the field it exists to catch. Any required
+      // control sharing a block with an answered choice control has the same shape; Greenhouse's
+      // phone field is simply the one that ships on every form.
+      const CHOICE_SHELL = '[class*="select__container"], [class*="select-shell"]';
+      // The value a React Select renders, scoped to that select's OWN shell rather than to the block
+      // around it, which is the whole of the fix. Returns null when the element is not a choice
+      // control at all, so the caller can fall through rather than treat "not a select" as "empty".
+      const chosenValueOf = (element) => {
+        const shell = element.closest(CHOICE_SHELL)
+          || (element.closest('[class*="select__control"]') || {}).parentElement;
+        if (!shell) return null;
+        if (shell.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
+        // Still showing "Select...", so nothing was chosen. Returning false rather than falling
+        // through stops the question label from being mistaken for an answer.
+        if (shell.querySelector('[class*="select__placeholder"]')) return false;
+        return null;
+      };
+      // Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it with a
+      // filename chip, so "no input[type=file] with files" is true of a block already given a file.
+      // On the embed form the input survives instead and carries the file, so both are checked.
+      const uploadHasFile = (scope) => {
+        if (!scope) return false;
+        if (scope.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+        for (const input of scope.querySelectorAll('input[type="file"]')) {
+          if (input.files && input.files.length > 0) return true;
+        }
+        return false;
+      };
+      const hasAnswer = (element) => {
+        if (!element) return false;
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)) {
           // A combobox input holds the SEARCH text, which react-select clears on selection. Its
-          // emptiness says nothing about whether an option was chosen.
-          if (control.getAttribute('role') === 'combobox') continue;
-          if (clean(control.value)) return true;
+          // emptiness says nothing about whether an option was chosen, so read what the select
+          // renders instead - but only for THIS select.
+          if (element.getAttribute('role') === 'combobox' || element.closest('[class*="select__control"]')) {
+            const chosen = chosenValueOf(element);
+            if (chosen !== null) return chosen;
+          }
+          if (element.type === 'hidden') return false;
+          if (element.type === 'file') return uploadHasFile(element.parentElement);
+          if (element.type === 'checkbox' || element.type === 'radio') {
+            if (element.checked) return true;
+            if (!element.name) return false;
+            // One answered radio answers its whole group, and only the checked member carries it.
+            for (const peer of (element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')) {
+              if (peer.checked) return true;
+            }
+            return false;
+          }
+          return Boolean(clean(element.value));
+        }
+        // Not a form control at all. Greenhouse marks its uploader required with a
+        // <div role="group" aria-required="true"> and leaves the file input itself unmarked, so the
+        // flagged element is a container. This is the one case where widening is the right answer,
+        // because a container has no value of its own to read.
+        if (uploadHasFile(element)) return true;
+        const chosen = chosenValueOf(element);
+        if (chosen !== null) return chosen;
+        for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
+          if (hasAnswer(control)) return true;
         }
         return false;
       };
       const required = [];
       const seen = new Set();
+      // Keyed on the CONTROL, not the block, so a block holding two required controls can report
+      // both. Greenhouse's phone fieldset holds exactly that: the country select and the number.
+      // The error scan below hands back the same element object the required scan flagged, so the
+      // two still do not report one field twice.
       const note = (widget, element, why) => {
-        if (!widget || seen.has(widget)) return;
-        seen.add(widget);
+        const key = element || widget;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
         if (!isVisible(widget)) return;
-        if (widgetHasAnswer(widget)) return;
+        if (hasAnswer(element)) return;
         const label = labelOf(widget, element);
         required.push({
           label,
@@ -296,15 +345,34 @@ const { chromium } = require('playwright');
         if (!widget || widget === element) { unmatched.push(text); continue; }
         // A message sitting in a block that holds no control at all is not a field error. It is the
         // form's legend or a page-level notice, and attributing it to a field invents a blocker.
-        const control = widget.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
-        if (!control) continue;
-        if (widgetHasAnswer(widget)) { stale.push(text); continue; }
-        // note() dedupes on the widget itself, so a field already reported by the required scan is
-        // not reported twice for carrying the matching error line.
-        note(widget, control, 'error');
+        const controls = [...widget.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')];
+        if (controls.length === 0) continue;
+        // WHICH control does the message accuse? A block can hold several: Greenhouse's phone field
+        // is a fieldset holding the country select and the number, and its uploader holds both the
+        // resume and the cover letter. Reading the block as a whole gets this wrong in both
+        // directions, so prefer a control that says it is required and is still empty.
+        const marked = controls.filter((candidate) => candidate.required || candidate.getAttribute('aria-required') === 'true');
+        let culprit = null;
+        if (marked.length > 0) {
+          culprit = marked.find((candidate) => !hasAnswer(candidate)) || null;
+        } else if (!controls.some((candidate) => hasAnswer(candidate))) {
+          // Nothing here claims to be required, so the message is the only signal there is. It may
+          // block, but only when NOTHING in the block has been answered. Blaming an empty OPTIONAL
+          // control (a cover letter sitting beside a filled resume) for someone else's message is
+          // how a complete application gets refused, which is the harm this gate exists to avoid.
+          culprit = controls[0];
+        }
+        if (!culprit) { stale.push(text); continue; }
+        // note() keys on the control, and this is the same element object the required scan flags,
+        // so a field already reported is not reported twice for carrying the matching error line.
+        note(widget, culprit, 'error');
       }
       return {
-        blocking: required.map((entry) => entry.message),
+        // Deduped by message, because keying on the control means one React Select can be flagged
+        // twice: an unanswered one carries aria-required on BOTH its combobox input and the hidden
+        // input react-select keeps beside it, and the two resolve to the same question and the same
+        // label. Measured on the empty live Redwood form: 15 entries covering 8 distinct fields.
+        blocking: [...new Set(required.map((entry) => entry.message))],
         stale: [...new Set(stale)],
         unmatched: [...new Set(unmatched.filter((text) => !stale.includes(text)))]
       };
@@ -317,65 +385,43 @@ const { chromium } = require('playwright');
       action.label === 'final_submit'
       || /\[\s*type\s*[~^$*|]?=\s*["']?submit/i.test(action.selector || '')
     );
-    // R-100. The optional pre-check below used to be a bare 'await locator.count() === 0', an
-    // instantaneous DOM snapshot with no auto-wait. Everything an ATS renders asynchronously was
-    // therefore tested at the one instant it could not possibly be there:
-    //   - an optional waitForSelector, the single action whose entire job is to wait, was cancelled
-    //     by a snapshot taken before it ever ran;
-    //   - click's networkidle wait bought nothing, because waitForLoadState resolves immediately
-    //     when the page is idle AT THE MOMENT OF THE CALL, which it is if the XHR the click just
-    //     triggered has not left yet;
-    //   - and on Greenhouse, clicking 'Apply for this job' renders the application form a beat
-    //     later, so 'greenhouse_application_form_ready' (an optional waitForSelector on the email
-    //     and resume fields) returned instantly and the run typed into a form that did not exist
-    //     yet. Runs recording filled_fields: 0 with nothing entered at all are this.
-    // The pre-check still exists and still matters, because a run may carry up to 120 actions and
-    // most optional selectors are speculative fallbacks that genuinely are not on the page. So the
-    // wait is bounded three ways:
-    //   1. waitForSelector is exempt and keeps its own declared timeout. Anything that needs to
-    //      wait longer than a moment is the caller's to declare, not this pre-check's to guess.
-    //   2. Every other optional action gets a short grace, and only when the PREVIOUS action
-    //      actually ran and could have changed the DOM. Six consecutive absent cookie-banner
-    //      selectors pay one grace, not six: once a probe comes back empty, nothing has happened
-    //      since, so the next probe is instant.
-    //   3. Every millisecond spent probing draws down one run-wide budget. When it is gone the
-    //      pre-check reverts to the original instantaneous snapshot for the rest of the run.
-    // A successful probe costs only the time the element actually took to appear, so a page where
-    // everything is present pays close to nothing. The grace is sized off measurement, not a guess:
-    // on a live Greenhouse education form (Five Rings, 2026-08-08) the asynchronously loaded School
-    // and Discipline options arrived 563ms and 555ms after the fill. The budget is sized against
-    // the forked sandbox's 90s lifetime, of which page.goto may already take 45.
-    const OPTIONAL_SETTLE_MS = 1500;
-    let settleBudgetMs = 5000;
-    let precedingActionCouldChangeDom = true; // page.goto just ran
+    // R-100. The optional pre-check is 'await locator.count() === 0', an instantaneous DOM snapshot
+    // with no auto-wait, and it used to apply to waitForSelector too. That cancelled the one action
+    // whose entire job is to wait, by answering "not there" before its timeout ever started. Two
+    // callers depend on that wait:
+    //   - 'greenhouse_application_form_ready', an optional waitForSelector on the email and resume
+    //     fields, queued right after clicking 'Apply for this job' because Greenhouse renders the
+    //     application form a beat later. Skipped instantly, the run typed into a form that did not
+    //     exist yet, which is what a run recording filled_fields: 0 looks like;
+    //   - jobExtract's render delay, an optional waitForSelector on a selector that can never match,
+    //     deliberately, so the run burns its full 5s and a client-rendered board can paint. Skipped
+    //     instantly, page.goto's 'domcontentloaded' is all the run ever waits for, and 'extract' on
+    //     body falls back from innerText to textContent and returns the inline stylesheet. Measured
+    //     2026-08-08 on three live Ashby postings: 18,547 / 10,989 / 4,970 characters beginning
+    //     "You need to enable JavaScript to run this app. body { overflow: hidden; }", none of them
+    //     containing one word of the posting. Honoured, the same three return the real description.
+    // So waitForSelector is exempt, and nothing else changes. An earlier version of this fix also
+    // gave every OTHER optional action a 1500ms settle grace against a 5000ms run-wide budget, on
+    // the theory that a control rendered a moment late deserved the same courtesy. Measured against
+    // both branches on two live Greenhouse forms (Redwood Materials and DRW, 2026-08-08, the second
+    // chosen because it has the asynchronously loaded education comboboxes the grace was justified
+    // by), the grace produced identical filled_fields and identical blockers to no grace at all, and
+    // cost +4336ms and +4298ms doing it: the whole budget went on speculative fallback selectors
+    // that were never going to be on the page. A wait long enough to matter is the caller's to
+    // declare with waitForSelector, which now works.
     for (const action of input.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
-      // waitForSelector is exempt outright rather than merely given grace: its own timeout is the
-      // caller's declared, already-bounded intent (normalizeManagedActions clamps it to 100-20000ms),
-      // and a pre-check that can answer 'not there' before that timeout starts is the bug itself.
-      // An optional one that times out lands in the catch below and is reported in 'skipped'.
-      if (locator && action.optional && action.type !== 'waitForSelector') {
-        const settleMs = precedingActionCouldChangeDom ? Math.min(OPTIONAL_SETTLE_MS, Math.max(settleBudgetMs, 0)) : 0;
-        let present;
-        if (settleMs <= 0) {
-          present = await locator.count() > 0;
-        } else {
-          const probeStartedAt = Date.now();
-          // 'attached' rather than 'visible', so this stays a strict superset of the count() check
-          // it replaces and cannot start skipping elements the old code would have acted on.
-          present = await locator.waitFor({ state: 'attached', timeout: settleMs }).then(() => true).catch(() => false);
-          settleBudgetMs -= Date.now() - probeStartedAt;
-        }
-        if (!present) {
-          // Always reported, and the grace is named in the message. 'after 1500ms' means we waited
-          // and it never came, which is the diagnostic that cost a local replay to find; 'after 0ms'
-          // means nothing had happened that could have made it appear. A skip that says neither is
-          // how several deploys went by with fields quietly left empty.
-          skipped.push((action.label || action.type) + ': nothing matched ' + action.selector + ' after ' + settleMs + 'ms');
-          precedingActionCouldChangeDom = false;
-          continue;
-        }
+      // waitForSelector is exempt outright: its own timeout is the caller's declared, already-bounded
+      // intent (normalizeManagedActions clamps it to 100-20000ms), and a pre-check that can answer
+      // 'not there' before that timeout starts is the bug itself. An optional one that times out
+      // lands in the catch below and is reported in 'skipped'.
+      if (locator && action.optional && action.type !== 'waitForSelector' && await locator.count() === 0) {
+        // Reported, not silent. The pre-check used to skip in complete silence, which is how several
+        // deploys went by with fields quietly left empty and nothing in the run saying so. On a real
+        // 70-action Greenhouse run this turns 19 reported skips into 63.
+        skipped.push((action.label || action.type) + ': nothing matched ' + action.selector);
+        continue;
       }
       if (isFinalSubmitAction(action)) {
         const readiness = await readSubmitReadiness();
@@ -394,7 +440,6 @@ const { chromium } = require('playwright');
           submitGateBlockers.push(...blocking);
           skipped.push((action.label || 'final_submit')
             + ': submit withheld, ' + blocking.length + ' required field(s) on the form are still empty');
-          precedingActionCouldChangeDom = false;
           continue;
         }
       }
@@ -651,12 +696,6 @@ const { chromium } = require('playwright');
           // said out loud.
           skipped.push((action.label || 'press')
             + ': Enter withheld, ' + action.selector + ' is a choice control with no menu open, so the keystroke could only have submitted the form');
-          // A withheld keystroke did nothing, so it cannot have made the NEXT optional selector
-          // appear. Without this the settle grace below would be granted on the strength of an
-          // action that never ran, and the backend queues an optional 'question_confirm' press
-          // after every custom-question fill, so this is the common case, not a corner one.
-          precedingActionCouldChangeDom = false;
-          continue;
         } else {
           await locator.press(action.value);
         }
@@ -669,10 +708,6 @@ const { chromium } = require('playwright');
         const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
         extracted.push({ selector: action.selector, label: action.label, value });
       }
-      // An action that ran to completion earns the NEXT optional action its settle grace. 'extract'
-      // reads only, and the marker attributes 'discover' writes are set synchronously before it
-      // returns, so neither can make an element appear LATER: waiting on their behalf buys nothing.
-      precedingActionCouldChangeDom = action.type !== 'extract' && action.type !== 'discover';
      } catch (actionError) {
       // 'optional' previously meant only "skip if the element is missing", and it was checked via
       // 'locator', which is null for fillByLabelText. So a fillByLabelText could never be optional,

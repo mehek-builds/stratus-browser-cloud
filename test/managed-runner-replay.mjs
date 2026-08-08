@@ -15,10 +15,12 @@
 // there, so the run typed into a form that did not exist yet, and an optional waitForSelector
 // aimed at the same panel was cancelled before its timeout ever started.
 //
-// Two delays on purpose: one inside the settle grace, one well beyond it. Together they show the
-// division of labour the fix depends on. A short grace catches a control that is merely a moment
-// late; anything slower is the caller's to declare with waitForSelector, which keeps its own
-// timeout and is exempt from the pre-check.
+// Two delays on purpose, and they now show the same thing from both sides: a control that renders
+// late is reached only when the caller DECLARES a wait for it. waitForSelector keeps its own
+// timeout and is exempt from the pre-check; everything else keeps the instantaneous snapshot it
+// always had. An earlier version of the fix also gave every optional action a 1500ms settle grace,
+// which measured identically on two live Greenhouse forms while costing about 4.3s a run, so the
+// grace is gone and case 2 pins what that gives up.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -30,10 +32,11 @@ import { fileURLToPath } from 'node:url';
 import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// Inside the 1500ms grace. Sized on the live measurement the grace itself is sized on: Greenhouse's
-// asynchronously loaded School and Discipline options arrived 563ms and 555ms after the fill.
+// Late enough that the pre-check's snapshot cannot see it, which is the point: without a declared
+// wait this control is skipped. Sized on the live measurement that motivated the dropped grace:
+// Greenhouse's asynchronously loaded School and Discipline options arrived 563ms and 555ms late.
 const QUICK_PANEL_MS = 700;
-// Beyond the grace, so only an honoured waitForSelector can reach it.
+// Slower again, so only an honoured waitForSelector can reach it.
 const SLOW_PANEL_MS = 2500;
 
 const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</title>
@@ -49,9 +52,24 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <input id="aimed" type="text">
 <div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
-<form id="app-form">
+<!-- novalidate deliberately: with the browser's own required-field validation on, an empty required
+     input stops the form submitting all by itself, and a gate that did nothing would look like a
+     gate that worked. Turning it off leaves the gate as the only thing between the click and the
+     submission, which is what is being tested. Greenhouse validates in JavaScript, not natively. -->
+<form id="app-form" novalidate>
   <div class="field"><label for="req_name">Full name</label><input id="req_name" type="text" required></div>
   <div class="field"><label for="req_email">Email</label><input id="req_email" type="text" required></div>
+  <!-- R-103, reproduced: Greenhouse puts the phone number and its country React Select in ONE
+       fieldset, so the country's rendered "+971" used to make the whole block read as answered and
+       an empty required number invisible to the gate. -->
+  <fieldset class="phone-input">
+    <label for="req_phone">Phone</label>
+    <div class="select__container">
+      <div class="select__single-value">+971</div>
+      <input id="req_country" type="text" role="combobox" aria-required="true">
+    </div>
+    <input id="req_phone" type="tel" required>
+  </fieldset>
   <p class="legend">* indicates a required field</p>
   <button id="submit-btn" type="submit">Submit application</button>
 </form>
@@ -140,26 +158,36 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(result.filledFields, ['email'], 'the field must be reported filled, not skipped');
 }
 
-// 2. The settle grace, for a control that is merely a moment late and that no caller thought to
-//    declare a wait for. The inline <select> is the contrast case: its options are in the page from
-//    first paint, so it always worked, and it must keep working.
+// 2. What the narrowing gives up, stated out loud. A control that renders a beat late and that no
+//    caller declared a wait for is now SKIPPED rather than waited for, and reported. Declaring the
+//    wait is what fixes it, and that is the caller's job. The inline <select> is the contrast case:
+//    its options are in the page from first paint, so it always worked and must keep working.
 {
-  const result = await replay([
+  const undeclared = await replay([
     { type: 'click', selector: '#apply', label: 'open_application_form', optional: true },
     { type: 'fill', selector: '#email', value: 'person@example.com', label: 'email', optional: true },
     { type: 'select', selector: '#start_month', value: '5', label: 'start_month', optional: true },
-    { type: 'extract', selector: '#email-echo' },
     { type: 'extract', selector: '#start_month' }
   ]);
-  assert.equal(valueOf(result, '#email-echo'), 'person@example.com',
-    'an optional fill on a control that renders a beat late must wait for it');
-  assert.equal(valueOf(result, '#start_month'), 'May', 'the inline-options contrast case must keep working');
-  assert.deepEqual(result.skipped, [], 'nothing was actually missing, so nothing should be reported skipped');
+  assert.deepEqual(undeclared.skipped, ['email: nothing matched #email'],
+    'a late control with no declared wait is skipped, and says so, got ' + JSON.stringify(undeclared.skipped));
+  assert.equal(valueOf(undeclared, '#start_month'), 'May', 'the inline-options contrast case must keep working');
+
+  const declared = await replay([
+    { type: 'click', selector: '#apply', label: 'open_application_form', optional: true },
+    { type: 'waitForSelector', selector: '#email', label: 'form_ready', optional: true, timeout: 5000 },
+    { type: 'fill', selector: '#email', value: 'person@example.com', label: 'email', optional: true },
+    { type: 'extract', selector: '#email-echo' }
+  ]);
+  assert.equal(valueOf(declared, '#email-echo'), 'person@example.com',
+    'declaring the wait is what fills a late control, and it must work');
+  assert.deepEqual(declared.skipped, [], 'nothing was missing once the wait was declared');
 }
 
-// 3. The cost bound. Six absent optional selectors in a row, exactly Greenhouse's cookie preflight.
-//    Naively giving every optional action a grace would cost six; only the first probe may pay,
-//    because after an empty probe nothing has happened that could make the next one appear.
+// 3. The cost. Six absent optional selectors in a row, exactly Greenhouse's cookie preflight. Each
+//    is one instantaneous snapshot, so six of them cost about as much as none: the measured reason
+//    the settle grace was dropped is that on two live Greenhouse forms it spent its whole 5000ms
+//    budget here and on selectors like these, and changed no filled field and no blocker.
 {
   const selectors = [
     '#onetrust-accept-btn-handler',
@@ -175,29 +203,13 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   ]);
   assert.equal(valueOf(result, 'title'), 'Replay Fixture', 'the run must continue past every absent optional action');
   assert.equal(result.skipped.length, 6, 'every absent optional action is reported');
-  assert.match(result.skipped[0], /greenhouse_cookie_preflight:0: nothing matched .* after 1500ms$/);
-  for (const entry of result.skipped.slice(1)) assert.match(entry, / after 0ms$/);
-  // One 1500ms grace, not six. The slack covers browser startup and page load on a cold machine.
-  assert.ok(result.elapsedMs < 5000, `six absent optional selectors must not cost six graces, took ${result.elapsedMs}ms`);
-}
-
-// 4. The run-wide budget. Absences each preceded by an action that DID run cannot each buy a grace
-//    forever: once the budget is spent the pre-check reverts to an instant snapshot, and the entries
-//    that follow say 'after 0ms' rather than going silent.
-{
-  const pairs = [];
-  for (let index = 0; index < 8; index += 1) {
-    // A plain input, deliberately: filling a combobox runs the react-select path, which has waits
-    // of its own and would measure those instead of the optional-wait budget this case bounds.
-    pairs.push({ type: 'fill', selector: '#plain', value: `probe ${index}`, optional: true });
-    pairs.push({ type: 'click', selector: `#never-present-${index}`, label: `absent:${index}`, optional: true });
+  for (const [index, entry] of result.skipped.entries()) {
+    assert.match(entry, new RegExp(`^greenhouse_cookie_preflight:${index}: nothing matched `));
+    // No grace, so no duration is claimed. A message that says "after 1500ms" is the dropped design.
+    assert.doesNotMatch(entry, /after \d+ms$/);
   }
-  const result = await replay([...pairs, { type: 'extract', selector: 'title' }]);
-  assert.equal(result.skipped.length, 8, 'every absent optional action is still reported');
-  const graced = result.skipped.filter((entry) => !/ after 0ms$/.test(entry));
-  assert.ok(graced.length < 8, `the run-wide budget must stop granting grace, granted ${graced.length}/8`);
-  // Eight graces at 1500ms would be 12s. The 5000ms budget caps the waiting well below that.
-  assert.ok(result.elapsedMs < 10000, `optional waiting must stay inside its run-wide budget, took ${result.elapsedMs}ms`);
+  // The slack covers browser startup and page load on a cold machine, not waiting.
+  assert.ok(result.elapsedMs < 5000, `six absent optional selectors must cost nothing, took ${result.elapsedMs}ms`);
 }
 
 // 5. THE MERGE ITSELF. Two branches rewrote this loop for different reasons and both intents have
@@ -221,20 +233,26 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 }
 
 // 6. An optional press keeps its selector now, so for the first time it reaches the pre-check above.
-//    An Enter aimed at a shut choice control is withheld, and a withheld keystroke must not then
-//    buy the NEXT optional action a settle grace: nothing happened, so nothing can have appeared.
+//    An Enter aimed at a shut choice control is withheld, and an optional press whose target is not
+//    on the page at all is skipped rather than delivered to whatever holds focus.
 {
-  const result = await replay([
+  const withheld = await replay([
     { type: 'press', selector: '#combo', value: 'Enter', label: 'question_confirm', optional: true },
-    { type: 'click', selector: '#never-present-after-withheld', label: 'absent', optional: true },
     { type: 'extract', selector: '#keytarget' }
   ]);
-  assert.equal(valueOf(result, '#keytarget'), '',
+  assert.equal(valueOf(withheld, '#keytarget'), '',
     'Enter on a choice control with no menu open must not reach the page at all');
-  assert.ok(result.skipped.some((entry) => /question_confirm: Enter withheld/.test(entry)),
-    'the withheld keystroke must be reported, got ' + JSON.stringify(result.skipped));
-  assert.ok(result.skipped.some((entry) => / after 0ms$/.test(entry)),
-    'a withheld press must not buy the next optional action a grace, got ' + JSON.stringify(result.skipped));
+  assert.ok(withheld.skipped.some((entry) => /question_confirm: Enter withheld/.test(entry)),
+    'the withheld keystroke must be reported, got ' + JSON.stringify(withheld.skipped));
+
+  const absent = await replay([
+    { type: 'press', selector: '#not-on-this-page', value: 'Enter', label: 'question_confirm', optional: true },
+    { type: 'extract', selector: '#keytarget' }
+  ]);
+  assert.equal(valueOf(absent, '#keytarget'), '',
+    'an optional press whose target is absent must not fire at the page');
+  assert.deepEqual(absent.skipped, ['question_confirm: nothing matched #not-on-this-page'],
+    'and it must say so, got ' + JSON.stringify(absent.skipped));
 }
 
 // 7. The pre-submit gate, both directions, against the merged loop. An incomplete form must not be
@@ -249,19 +267,42 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
   assert.deepEqual(blocked.blockers.sort(), [
     '"Email" is required and is still empty',
-    '"Full name" is required and is still empty'
+    '"Full name" is required and is still empty',
+    '"Phone" is required and is still empty'
   ], 'the gate must name the empty fields, got ' + JSON.stringify(blocked.blockers));
 
+  const fill = (selector, value) => ({ type: 'fill', selector, value, label: selector.slice(1) });
   const allowed = await replay([
-    { type: 'fill', selector: '#req_name', value: 'Mehek Mandal', label: 'name' },
-    { type: 'fill', selector: '#req_email', value: 'person@example.com', label: 'email' },
+    fill('#req_name', 'Mehek Mandal'),
+    fill('#req_email', 'person@example.com'),
+    fill('#req_phone', '+971 50 123 4567'),
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
     { type: 'extract', selector: '#submitted' }
   ]);
   assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
   assert.deepEqual(allowed.blockers, [], 'a complete form must produce no blockers, got ' + JSON.stringify(allowed.blockers));
+
+  // R-103. Everything filled EXCEPT the phone number, which shares its fieldset with an answered
+  // country select. The gate used to read that fieldset as a whole, find the country's "+971", and
+  // let the submit through. "Phone is required." is one of the six messages from the incident that
+  // built this gate, so it was blind to the field it exists to catch.
+  const phoneEmpty = await replay([
+    fill('#req_name', 'Mehek Mandal'),
+    fill('#req_email', 'person@example.com'),
+    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'extract', selector: '#submitted' }
+  ]);
+  assert.equal(valueOf(phoneEmpty, '#submitted'), '',
+    'an empty required control beside an answered choice control must still stop the submit');
+  // Asserted on 'skipped', not only on 'blockers': the runner has a SECOND, older required-field
+  // scan that runs after the loop and reports the same field, so a blockers-only assertion passes
+  // even when the gate saw nothing and let the click through. This line is the gate's alone.
+  assert.ok(phoneEmpty.skipped.some((entry) => /^final_submit: submit withheld, 1 required field/.test(entry)),
+    'the GATE, not the post-loop scan, must be what withheld the click, got ' + JSON.stringify(phoneEmpty.skipped));
+  assert.deepEqual(phoneEmpty.blockers, ['"Phone" is required and is still empty'],
+    'the gate must name the phone, and must not blame the answered country, got ' + JSON.stringify(phoneEmpty.blockers));
 }
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: optional actions wait and stay bounded, a press lands where it is aimed, and the pre-submit gate holds both ways');
+console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, and the pre-submit gate holds in both directions including a required control beside an answered choice control');
