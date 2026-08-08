@@ -1,5 +1,6 @@
 import { assertPublicUrl } from './security.js';
 import { Sandbox } from '@vercel/sandbox';
+import crypto from 'node:crypto';
 
 export const FREE_MANAGED_LIMITS = Object.freeze({
   concurrentBrowsers: 10,
@@ -12,6 +13,17 @@ const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', '
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
+export const MANAGED_CONTINUATION_CONTRACT = Object.freeze({
+  requestField: 'requestContinuation',
+  checkpointField: 'continuationCheckpoint',
+  ttlField: 'continuationTtlSeconds',
+  tokenField: 'continuationToken',
+  expiresAtField: 'continuationExpiresAt',
+  defaultTtlSeconds: 120,
+  minTtlSeconds: 15,
+  maxTtlSeconds: 120,
+  maxContinuations: 1
+});
 
 const SANDBOX_NAME = 'stratus-browser-runtime';
 const SANDBOX_DEPENDENCIES = [
@@ -82,6 +94,22 @@ const { chromium } = require('playwright');
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
+    // Continuations may keep the exact page and context alive, but they may not turn that context
+    // into a general browser. Only main-frame navigations are host locked, so ordinary assets and
+    // employer-owned CDN requests continue to work.
+    if (input.requestContinuation) {
+      await browserContext.route('**/*', async (route) => {
+        const request = route.request();
+        if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return route.continue();
+        try {
+          const targetHost = new URL(request.url()).hostname.toLowerCase();
+          if (targetHost !== input.allowedHost) return route.abort('blockedbyclient');
+        } catch {
+          return route.abort('blockedbyclient');
+        }
+        return route.continue();
+      });
+    }
     const extracted = [];
     const filledFields = [];
     const skipped = [];
@@ -918,7 +946,15 @@ const { chromium } = require('playwright');
     // cost +4336ms and +4298ms doing it: the whole budget went on speculative fallback selectors
     // that were never going to be on the page. A wait long enough to matter is the caller's to
     // declare with waitForSelector, which now works.
-    for (const action of input.actions || []) {
+    let phase = 0;
+    let currentInput = input;
+    while (true) {
+    extracted.length = 0;
+    filledFields.length = 0;
+    skipped.length = 0;
+    discovered.length = 0;
+    submitGateBlockers.length = 0;
+    for (const action of currentInput.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
       // waitForSelector is exempt outright: its own timeout is the caller's declared, already-bounded
@@ -1496,11 +1532,22 @@ const { chromium } = require('playwright');
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
     const links = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map((link) => ({ text: (link.innerText || link.textContent || '').trim().slice(0, 500), href: link.href })));
-    if (input.screenshot) await page.screenshot({ path: 'stratus-screenshot.png', fullPage: Boolean(input.fullPage) });
+    if (currentInput.screenshot) await page.screenshot({ path: 'stratus-screenshot-' + phase + '.png', fullPage: Boolean(currentInput.fullPage) });
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
     // caller should be able to see and act on, and a silent skip is how a half-filled form starts
     // looking like a fully-filled one.
-    fs.writeFileSync('stratus-result.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, blockedSubmits, elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, blockedSubmits, elapsedMs: Date.now() - startedAt }));
+    if (phase > 0 || !input.requestContinuation) break;
+    fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: input.continuationExpiresAt, host: input.allowedHost }));
+    const expiresAt = Date.parse(input.continuationExpiresAt);
+    while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!fs.existsSync('stratus-continuation-input.json')) break;
+    currentInput = JSON.parse(fs.readFileSync('stratus-continuation-input.json', 'utf8'));
+    fs.unlinkSync('stratus-continuation-input.json');
+    phase += 1;
+    }
   } finally {
     await browser.close();
   }
@@ -1591,10 +1638,16 @@ export function normalizeManagedActions(actions = []) {
 
 export async function normalizeManagedRun(input = {}, { urlValidator = assertPublicUrl } = {}) {
   if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
+  if (input.continuationToken != null) throw inputError('A continuation request must not include a URL run payload', 'INVALID_CONTINUATION');
   const url = await urlValidator(input.url);
   const viewport = input.viewport || {};
   const width = Math.min(Math.max(Number(viewport.width) || 1440, 320), 1920);
   const height = Math.min(Math.max(Number(viewport.height) || 900, 240), 1080);
+  const requestContinuation = Boolean(input.requestContinuation);
+  const continuationTtlSeconds = Math.min(
+    Math.max(Number(input.continuationTtlSeconds) || MANAGED_CONTINUATION_CONTRACT.defaultTtlSeconds, MANAGED_CONTINUATION_CONTRACT.minTtlSeconds),
+    MANAGED_CONTINUATION_CONTRACT.maxTtlSeconds
+  );
   return {
     url: url.toString(),
     actions: normalizeManagedActions(input.actions),
@@ -1607,9 +1660,53 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
     allowSubmit: input.allowSubmit === true,
     fullPage: Boolean(input.fullPage),
     waitUntil: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'].includes(input.waitUntil) ? input.waitUntil : 'networkidle2',
-    viewport: { width, height }
+    viewport: { width, height },
+    requestContinuation,
+    continuationCheckpoint: Boolean(input.continuationCheckpoint),
+    continuationTtlSeconds,
+    allowedHost: url.hostname.toLowerCase()
   };
 }
+
+export function normalizeManagedContinuation(input = {}) {
+  if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
+  if (typeof input.continuationToken !== 'string' || !/^[A-Za-z0-9_-]{32,200}$/.test(input.continuationToken)) {
+    throw inputError('A valid continuationToken is required', 'INVALID_CONTINUATION');
+  }
+  if (input.url != null) throw inputError('A continuation must not include url', 'CONTINUATION_URL_FORBIDDEN');
+  if (input.requestContinuation || input.continuationCheckpoint || input.continuationTtlSeconds != null) {
+    throw inputError('A continuation cannot request another continuation', 'CONTINUATION_LIMIT_REACHED');
+  }
+  return {
+    continuationToken: input.continuationToken,
+    actions: normalizeManagedActions(input.actions),
+    screenshot: input.screenshot !== false,
+    fullPage: Boolean(input.fullPage)
+  };
+}
+
+function digest(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function continuationSandboxName(projectBinding, token) {
+  return `stratus-c-${digest(`${projectBinding}:${token}`).slice(0, 40)}`;
+}
+
+function continuationEligible(result, checkpoint) {
+  if (checkpoint) return true;
+  if (result?.humanVerification?.kind === 'security_code') return true;
+  const haystack = `${result?.title || ''}\n${result?.url || ''}\n${result?.text || ''}`;
+  return /(?:verification|security|confirmation)\s+code|enter\s+(?:the\s+)?code|check\s+your\s+email/i.test(haystack);
+}
+
+async function waitForSandboxFile(sandbox, path, timeoutMs) {
+  const script = "const fs=require('node:fs');const p=process.argv[1];const end=Date.now()+Number(process.argv[2]);(async()=>{while(!fs.existsSync(p)&&Date.now()<end)await new Promise(r=>setTimeout(r,100));process.exit(fs.existsSync(p)?0:3)})()";
+  const result = await sandbox.runCommand('node', ['-e', script, path, String(timeoutMs)], { timeoutMs: timeoutMs + 5_000 });
+  if (result.exitCode !== 0) throw Object.assign(new Error('Managed browser continuation timed out'), { status: 410, code: 'CONTINUATION_EXPIRED' });
+}
+
+const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const crypto=require('node:crypto');const [tokenHash,projectHash]=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
@@ -1635,44 +1732,102 @@ async function ensureSandboxTemplate() {
   return template;
 }
 
-export async function executeSandboxRun(input, { urlValidator = assertPublicUrl, sandboxApi = Sandbox } = {}) {
+export async function executeSandboxRun(input, { urlValidator = assertPublicUrl, sandboxApi = Sandbox, projectBinding = 'stratus-managed' } = {}) {
+  if (input?.continuationToken != null) {
+    const continuation = normalizeManagedContinuation(input);
+    const sandboxName = continuationSandboxName(projectBinding, continuation.continuationToken);
+    let sandbox;
+    try {
+      sandbox = await sandboxApi.get({ name: sandboxName, resume: true });
+      const claim = await sandbox.runCommand('node', [
+        '-e', CLAIM_CONTINUATION_SCRIPT, digest(continuation.continuationToken), digest(projectBinding)
+      ]);
+      if (claim.exitCode !== 0) {
+        throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
+      }
+      await sandbox.writeFiles([{ path: 'stratus-continuation-input.json', content: Buffer.from(JSON.stringify(continuation)) }]);
+      await waitForSandboxFile(sandbox, 'stratus-result-1.json', 60_000);
+      const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-1.json' });
+      if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a continuation result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
+      const result = JSON.parse(resultBuffer.toString('utf8'));
+      if (continuation.screenshot) {
+        const screenshot = await sandbox.readFileToBuffer({ path: 'stratus-screenshot-1.png' });
+        result.screenshot = screenshot?.toString('base64') || null;
+      }
+      return result;
+    } catch (error) {
+      if (error?.code) throw error;
+      throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
+    } finally {
+      if (sandbox) await sandbox.stop().catch(() => {});
+    }
+  }
+
   const context = await normalizeManagedRun(input, { urlValidator });
   let sandbox;
+  let keepAlive = false;
   try {
     const template = sandboxApi === Sandbox
       ? await ensureSandboxTemplate()
       : await sandboxApi.get({ name: SANDBOX_NAME, resume: false });
+    const continuationToken = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
+    const continuationExpiresAt = context.requestContinuation
+      ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
+      : null;
+    if (continuationExpiresAt) context.continuationExpiresAt = continuationExpiresAt;
     sandbox = await sandboxApi.fork({
       sourceSandbox: template.name,
-      timeout: 90_000,
+      ...(continuationToken ? { name: continuationSandboxName(projectBinding, continuationToken) } : {}),
+      timeout: context.requestContinuation ? (context.continuationTtlSeconds + 30) * 1000 : 90_000,
       resources: { vcpus: 2 },
       persistent: false,
       networkPolicy: 'allow-all'
     });
-    await sandbox.writeFiles([
+    const files = [
       { path: 'stratus-runner.cjs', content: Buffer.from(SANDBOX_RUNNER) },
       { path: 'stratus-input.json', content: Buffer.from(JSON.stringify(context)) }
-    ]);
-    const command = await sandbox.runCommand('node', ['stratus-runner.cjs']);
-    if (command.exitCode !== 0) {
-      throw Object.assign(new Error((await command.stderr()).trim() || 'Sandbox browser run failed'), { status: 502, code: 'SANDBOX_RUN_FAILED' });
+    ];
+    if (continuationToken) files.push({
+      path: 'stratus-continuation.json',
+      content: Buffer.from(JSON.stringify({
+        tokenHash: digest(continuationToken),
+        projectHash: digest(projectBinding),
+        host: context.allowedHost,
+        expiresAt: continuationExpiresAt,
+        used: false
+      }))
+    });
+    await sandbox.writeFiles(files);
+    if (context.requestContinuation) {
+      await sandbox.runCommand({ cmd: 'node', args: ['stratus-runner.cjs'], detached: true });
+      await waitForSandboxFile(sandbox, 'stratus-result-0.json', 60_000);
+    } else {
+      const command = await sandbox.runCommand('node', ['stratus-runner.cjs']);
+      if (command.exitCode !== 0) {
+        throw Object.assign(new Error((await command.stderr()).trim() || 'Sandbox browser run failed'), { status: 502, code: 'SANDBOX_RUN_FAILED' });
+      }
     }
-    const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result.json' });
+    const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-0.json' });
     if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
     const result = JSON.parse(resultBuffer.toString('utf8'));
     if (context.screenshot) {
-      const screenshot = await sandbox.readFileToBuffer({ path: 'stratus-screenshot.png' });
+      const screenshot = await sandbox.readFileToBuffer({ path: 'stratus-screenshot-0.png' });
       result.screenshot = screenshot?.toString('base64') || null;
+    }
+    if (continuationToken && continuationEligible(result, context.continuationCheckpoint)) {
+      keepAlive = true;
+      result.continuationToken = continuationToken;
+      result.continuationExpiresAt = continuationExpiresAt;
     }
     return result;
   } catch (error) {
     if (error?.code) throw error;
     throw Object.assign(new Error(`Vercel Sandbox browser request failed: ${error.message}`), { status: 502, code: 'SANDBOX_UNAVAILABLE' });
   } finally {
-    if (sandbox) await sandbox.stop().catch(() => {});
+    if (sandbox && !keepAlive) await sandbox.stop().catch(() => {});
   }
 }
 
-export async function executeManagedRun(input, { urlValidator = assertPublicUrl, sandboxExecutor = executeSandboxRun } = {}) {
-  return sandboxExecutor(input, { urlValidator });
+export async function executeManagedRun(input, { urlValidator = assertPublicUrl, sandboxExecutor = executeSandboxRun, projectBinding = 'stratus-managed' } = {}) {
+  return sandboxExecutor(input, { urlValidator, projectBinding });
 }

@@ -8,7 +8,8 @@ export default async function handler(request, response) {
   if (!requireMethod(request, response, ['POST'])) return;
   if (!await authorize(request, response)) return;
   try {
-    response.status(200).json({ run: await executeManagedRun(request.body) });
+    const projectBinding = process.env.VERCEL_PROJECT_ID || process.env.VERCEL_PROJECT_NAME || 'stratus-managed';
+    response.status(200).json({ run: await executeManagedRun(request.body, { projectBinding }) });
   } catch (error) {
     sendError(response, error);
   }

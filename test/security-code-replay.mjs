@@ -109,7 +109,7 @@ async function replay(actions, options = {}) {
     viewport: { width: 1440, height: 900 },
     ...options
   }));
-  fs.rmSync(path.join(workDir, 'stratus-result.json'), { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
   const { status, stderr } = await new Promise((resolve) => {
     const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
       cwd: workDir,
@@ -121,7 +121,7 @@ async function replay(actions, options = {}) {
     child.on('close', (code) => resolve({ status: code, stderr: captured }));
   });
   assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
-  return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result.json'), 'utf8'));
+  return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
 }
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
