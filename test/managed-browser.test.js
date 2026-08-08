@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { executeManagedRun, FREE_MANAGED_LIMITS, normalizeManagedActions, SANDBOX_RUNNER } from '../src/managed-browser.js';
+import {
+  executeManagedRun,
+  executeSandboxRun,
+  FREE_MANAGED_LIMITS,
+  MANAGED_CONTINUATION_CONTRACT,
+  normalizeManagedActions,
+  normalizeManagedContinuation,
+  SANDBOX_RUNNER
+} from '../src/managed-browser.js';
 
 function extractFunctionSource(name) {
   const start = SANDBOX_RUNNER.indexOf(`function ${name}`);
@@ -92,6 +100,110 @@ test('managed run always uses the Stratus Sandbox execution system', async () =>
   const result = await executeManagedRun({ url: 'https://example.com' }, { sandboxExecutor });
   assert.equal(result.title, 'Sandbox');
   assert.equal(result.screenshot, 'sandbox-image');
+});
+
+test('managed continuation contract is bounded and rejects URL or recursion', () => {
+  assert.deepEqual(MANAGED_CONTINUATION_CONTRACT, {
+    requestField: 'requestContinuation',
+    checkpointField: 'continuationCheckpoint',
+    ttlField: 'continuationTtlSeconds',
+    tokenField: 'continuationToken',
+    expiresAtField: 'continuationExpiresAt',
+    defaultTtlSeconds: 120,
+    minTtlSeconds: 15,
+    maxTtlSeconds: 120,
+    maxContinuations: 1
+  });
+  const token = 'a'.repeat(43);
+  assert.deepEqual(normalizeManagedContinuation({
+    continuationToken: token,
+    actions: [{ type: 'click', selector: '#continue' }],
+    screenshot: false
+  }), {
+    continuationToken: token,
+    actions: [{ type: 'click', selector: '#continue' }],
+    screenshot: false,
+    fullPage: false
+  });
+  assert.throws(
+    () => normalizeManagedContinuation({ continuationToken: token, url: 'https://example.com', actions: [] }),
+    (error) => error.code === 'CONTINUATION_URL_FORBIDDEN'
+  );
+  assert.throws(
+    () => normalizeManagedContinuation({ continuationToken: token, requestContinuation: true, actions: [] }),
+    (error) => error.code === 'CONTINUATION_LIMIT_REACHED'
+  );
+});
+
+test('sandbox continuation is project-bound and single-use without exposing a session id', async () => {
+  const sandboxes = new Map();
+  const template = { name: 'stratus-browser-runtime', currentSnapshotId: 'snapshot' };
+  class FakeSandbox {
+    constructor(name) {
+      this.name = name;
+      this.files = new Map();
+      this.stopped = false;
+    }
+    async writeFiles(files) {
+      for (const file of files) this.files.set(file.path, Buffer.from(file.content));
+      if (this.files.has('stratus-continuation-input.json')) {
+        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify({ title: 'Application received', url: 'https://example.com/thanks', text: 'received' })));
+      }
+    }
+    async runCommand(command, args) {
+      if (typeof command === 'object') {
+        const input = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
+        this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify({
+          title: 'Security code', url: input.url, text: 'Enter the security code sent to your email'
+        })));
+        if (input.requestContinuation) this.files.set('stratus-continuation-ready.json', Buffer.from('{}'));
+        return { exitCode: null };
+      }
+      const script = args[1];
+      if (script.includes('stratus-continuation.json')) {
+        if (this.stopped || !this.files.has('stratus-continuation.json') || !this.files.has('stratus-continuation-ready.json')) return { exitCode: 7 };
+        this.files.set('stratus-continuation-used.json', this.files.get('stratus-continuation.json'));
+        this.files.delete('stratus-continuation.json');
+        return { exitCode: 0 };
+      }
+      const file = args[2];
+      return { exitCode: this.files.has(file) ? 0 : 3 };
+    }
+    async readFileToBuffer({ path }) { return this.files.get(path) || null; }
+    async stop() { this.stopped = true; }
+  }
+  const sandboxApi = {
+    async get({ name }) {
+      if (name === template.name) return template;
+      const sandbox = sandboxes.get(name);
+      if (!sandbox) throw new Error('not found');
+      return sandbox;
+    },
+    async fork({ name }) {
+      const sandbox = new FakeSandbox(name);
+      sandboxes.set(name, sandbox);
+      return sandbox;
+    }
+  };
+  const urlValidator = async (value) => new URL(value);
+  const first = await executeSandboxRun({
+    url: 'https://example.com/apply', actions: [], requestContinuation: true
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
+  assert.match(first.continuationToken, /^[A-Za-z0-9_-]+$/);
+  assert.ok(first.continuationExpiresAt);
+  assert.equal('sessionId' in first, false);
+  const second = await executeSandboxRun({
+    continuationToken: first.continuationToken, actions: [{ type: 'click', selector: '#continue' }]
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
+  assert.equal(second.title, 'Application received');
+  await assert.rejects(
+    executeSandboxRun({ continuationToken: first.continuationToken, actions: [] }, { sandboxApi, urlValidator, projectBinding: 'project-a' }),
+    (error) => error.code === 'CONTINUATION_REJECTED'
+  );
+  await assert.rejects(
+    executeSandboxRun({ continuationToken: first.continuationToken, actions: [] }, { sandboxApi, urlValidator, projectBinding: 'project-b' }),
+    (error) => error.code === 'CONTINUATION_REJECTED'
+  );
 });
 
 // The runner ships to the sandbox as a string, so nothing type-checks it and a regression only

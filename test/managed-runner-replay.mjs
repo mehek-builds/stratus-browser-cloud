@@ -54,6 +54,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <label for="start_month">Start month</label>
 <select id="start_month"><option value=""></option><option value="5">May</option></select>
 <input id="plain" type="text">
+<div id="plain-echo"></div>
 <input id="aimed" type="text">
 <div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
@@ -227,7 +228,7 @@ async function replay(actions) {
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
   }));
-  fs.rmSync(path.join(workDir, 'stratus-result.json'), { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
   // spawn, never spawnSync: the fixture server lives in this process, and spawnSync would block the
   // event loop so the page could never load.
   const { status, stderr } = await new Promise((resolve) => {
@@ -241,7 +242,7 @@ async function replay(actions) {
     child.on('close', (code) => resolve({ status: code, stderr: captured }));
   });
   assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
-  return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result.json'), 'utf8'));
+  return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
 }
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
@@ -458,6 +459,51 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(unmatchable.filledFields, [], 'and it must NOT be reported filled, got ' + JSON.stringify(unmatchable.filledFields));
   assert.ok(unmatchable.skipped.some((entry) => /^discipline: no option matched .*left for you to choose$/.test(entry)),
     'and the applicant must be told, got ' + JSON.stringify(unmatchable.skipped));
+}
+
+// A continuation must operate on the same Page and BrowserContext. The first phase writes a value
+// into the fixture without submitting anything. The second phase extracts it without a URL or a
+// reload. A new browser or page would return an empty string.
+{
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-input.json'), { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: base,
+    actions: [{ type: 'fill', selector: '#plain', value: 'same-page-proof', label: 'proof' }],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    requestContinuation: true,
+    continuationExpiresAt: new Date(Date.now() + 15_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const waitForFile = async (file, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  assert.equal(JSON.parse(fs.readFileSync(result0, 'utf8')).filledFields[0], 'proof');
+  fs.writeFileSync(path.join(workDir, 'stratus-continuation-input.json'), JSON.stringify({
+    actions: [{ type: 'extract', selector: '#plain-echo' }],
+    screenshot: false,
+    fullPage: false
+  }));
+  await waitForFile(result1);
+  const continued = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  assert.equal(valueOf(continued, '#plain-echo'), 'same-page-proof', 'continuation must retain page state from phase one');
+  const exitCode = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(exitCode, 0, `continuation runner exited ${exitCode}: ${stderr}`);
 }
 
 server.close();
