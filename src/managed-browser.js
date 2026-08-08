@@ -85,6 +85,24 @@ const { chromium } = require('playwright');
       if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
+    // Three states, not two, and the third one is the point. 'chosen' means the widget is showing an
+    // answer and we can read it; 'empty' means it is positively showing its placeholder, so we KNOW
+    // nothing is answered; 'unknown' means this is not a widget whose answered state can be read, and
+    // no conclusion may be drawn from it either way.
+    const readChoiceState = async (container) => await container.evaluate((element) => {
+      const widget = element.closest('[class*="select__container"], [class*="select-shell"]')
+        || (element.closest('[class*="select__control"]') || {}).parentElement
+        || element;
+      // The chosen value is rendered as its own node, and reading it beats reading the widget:
+      // the widget's textContent also carries the question label, and a label is quite capable of
+      // containing the answer word ("...currently enrolled in a degree program?" contains "no").
+      const chosen = widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]');
+      if (chosen) return { kind: 'chosen', value: chosen.textContent || '' };
+      // Still showing "Select...", so nothing was chosen. Saying so rather than falling through to
+      // textContent stops the label from being mistaken for an answer.
+      if (widget.querySelector('[class*="select__placeholder"]')) return { kind: 'empty', value: '' };
+      return { kind: 'unknown', value: element.textContent || '' };
+    }).catch(() => ({ kind: 'unknown', value: '' }));
     // READS THE ANSWER THE EMPLOYER WOULD SEE, not the container the fill happened to be scoped to.
     // The container handed in by the 'fill' branch is resolved as the nearest ancestor holding a
     // combobox, and on a React Select that is '.select__input-container' - a div whose only child is
@@ -96,20 +114,9 @@ const { chromium } = require('playwright');
     // verification, because it turns a good fill into a reported failure and a real failure into
     // noise indistinguishable from it.
     const verifyChoiceInContainer = async (container, expected) => {
-      const text = await container.evaluate((element) => {
-        const widget = element.closest('[class*="select__container"], [class*="select-shell"]')
-          || (element.closest('[class*="select__control"]') || {}).parentElement
-          || element;
-        // The chosen value is rendered as its own node, and reading it beats reading the widget:
-        // the widget's textContent also carries the question label, and a label is quite capable of
-        // containing the answer word ("...currently enrolled in a degree program?" contains "no").
-        const chosen = widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]');
-        if (chosen) return chosen.textContent || '';
-        // Still showing "Select...", so nothing was chosen. Returning empty rather than falling
-        // through to textContent stops the label from being mistaken for an answer.
-        if (widget.querySelector('[class*="select__placeholder"]')) return '';
-        return element.textContent || '';
-      }).catch(() => '');
+      const state = await readChoiceState(container);
+      if (state.kind === 'empty') return false;
+      const text = state.value;
       return optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)));
     };
     // Whether a keystroke aimed at this element can still do the job it was queued for. Only ever
@@ -121,23 +128,103 @@ const { chromium } = require('playwright');
       if (!combobox) return false;
       return combobox.getAttribute('aria-expanded') !== 'true';
     }).catch(() => false);
+    // A control that already holds a matching answer is left alone, and a control that holds ANY
+    // answer is never emptied on the way to looking for a better one.
+    //
+    // A caller sends several candidate values for one control on purpose: a stored major sentence,
+    // then the individual fields of study inside it, because only the page knows which of them its
+    // taxonomy actually contains. That is only safe if a later, weaker candidate cannot undo an
+    // earlier correct one, and until now it could, in two separate ways. Measured on the live Five
+    // Rings Greenhouse form (2026-08-08), where "Discipline" was correctly set to "Computer Science"
+    // and then emptied again before the run ended:
+    //   1. control.fill(''). On a React Select the search box is empty whenever a value is
+    //      selected, so Playwright's empty fill lands as a backspace on an empty input, and React
+    //      Select's backspaceRemovesValue deletes the selected value. Verified directly: an empty fill
+    //      turned "Computer Science" back into the placeholder; typing the next candidate straight
+    //      in, with no empty fill first, did not.
+    //   2. The clear button. The control list below deliberately includes plain buttons, and a React
+    //      Select renders its "Clear selections" indicator as one, sitting inside the same container
+    //      as the combobox. Clicking it wiped the answer. Verified directly on the same form.
+    // This is one of the two ways '"Discipline" is required and is still empty' was reaching real
+    // applications: the right answer was selected and then thrown away by a candidate that matched
+    // nothing. The other is the unscoped option click documented inside fillCustomChoice below.
+    const CLEAR_CONTROL_RE = /\bclear\b|\bremove\b|\bdeselect\b|\breset\b/;
     const fillCustomChoice = async (container, wanted) => {
+      const alreadyAnswered = await readChoiceState(container);
+      if (alreadyAnswered.kind === 'chosen' && optionMatches(alreadyAnswered.value, wanted)) return true;
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
-      const clickMatchingOption = async () => {
-        for (const option of answerOptions(wanted)) {
-          const optionLocator = page.getByRole('option', { name: option, exact: false }).first();
-          if ((await optionLocator.count()) > 0 && await optionLocator.isVisible().catch(() => false)) {
-            await optionLocator.click();
+      // Wait for the menu THIS control owns, then only ever click inside it.
+      //
+      // The old fallback locator swept the whole page for 'li, [data-value]' and clicked the first
+      // node containing the answer text. Measured live on 2026-08-08, opening Discipline on the DRW
+      // and Virtu Greenhouse forms with the answer "Computer Science":
+      //   DRW   clicked <li>Are pursuing a bachelor's, master's or PhD in mathematics, economics,
+      //         physics, statistics, computer science or any engin...</li>
+      //   Virtu clicked <li>Excellent academic background in Computer Science, Electrical
+      //         Engineering or related field</li>
+      // Both are bullet points in the JOB DESCRIPTION. Both made this function return true, so the
+      // caller recorded the field as answered, and both controls were still showing "Select..." when
+      // the employer's own validator ran. That is where '"Discipline" is required and is still empty'
+      // came from on those two boards, with the right option sitting unclicked in the open menu.
+      //
+      // Two things went wrong together and both are fixed here. The scope was the page rather than
+      // the menu; and the correctly scoped attempt was made as an instantaneous count() 150ms after
+      // the click, before the menu had rendered, so the page-wide sweep was reached every time. The
+      // menu now gets the same bounded grace the optional pre-check already gives asynchronous
+      // controls, and there is no page-wide sweep left to fall through to.
+      const menuScope = container.locator(
+        'xpath=ancestor-or-self::*[contains(@class,"select__container") or contains(@class,"select-shell") or contains(@class,"select2-container")][1]'
+      );
+      const scopedMenu = (await menuScope.count()) > 0 ? menuScope : undefined;
+      // Anything that is genuinely part of an option list. A bare 'li' still qualifies, but only
+      // inside a listbox or a select2 results panel, never loose in the page.
+      const OPTION_NODES = '[role="option"], [class*="select__option"], [role="listbox"] li,'
+        + ' [role="listbox"] [class*="option"], .select2-result, .select2-results li, [class*="select2-result"]';
+      const optionsRoot = () => (scopedMenu ?? page).locator(OPTION_NODES);
+      // Bounded, and only spent where it can buy something. With a recognisable widget the wait is
+      // for THAT widget's own menu and ends the moment it renders. With no recognisable widget there
+      // is nothing specific to wait for, so this keeps the old flat pause rather than charging every
+      // control on the form the full timeout for a menu that was never coming.
+      const waitForMenu = async (timeout) => {
+        if (!scopedMenu) {
+          await page.waitForTimeout(150).catch(() => undefined);
+          return;
+        }
+        await optionsRoot().first().waitFor({ state: 'visible', timeout }).catch(() => undefined);
+      };
+      const clickMatchingOption = async (target) => {
+        for (const option of answerOptions(target)) {
+          const byRole = scopedMenu
+            ? scopedMenu.getByRole('option', { name: option, exact: false }).first()
+            : page.getByRole('option', { name: option, exact: false }).first();
+          if ((await byRole.count()) > 0 && await byRole.isVisible().catch(() => false)) {
+            await byRole.click();
             return true;
           }
-          const textLocator = page
-            .locator('[role="option"], [role="listbox"] *, .select2-result, .select2-results li, [class*="select2-result"], li, [data-value]')
-            .filter({ hasText: option })
-            .first();
-          if ((await textLocator.count()) > 0 && await textLocator.isVisible().catch(() => false)) {
-            await textLocator.click();
+          const byText = optionsRoot().filter({ hasText: option }).first();
+          if ((await byText.count()) > 0 && await byText.isVisible().catch(() => false)) {
+            await byText.click();
             return true;
           }
+        }
+        return false;
+      };
+      const searchFor = async (control, target) => {
+        for (const option of answerOptions(target)) {
+          // Only blank the search box when the widget is holding nothing. See (1) above.
+          if ((await readChoiceState(container)).kind !== 'chosen') {
+            await control.fill('').catch(() => undefined);
+          }
+          await control.fill(option).catch(async () => {
+            await page.keyboard.press('Control+A').catch(() => undefined);
+            await page.keyboard.press('Backspace').catch(() => undefined);
+            await page.keyboard.type(option, { delay: 5 }).catch(() => undefined);
+          });
+          // A flat settle here rather than waitForMenu: after typing, the menu is usually ALREADY
+          // showing the pre-filter list, so waiting for "a visible option" would return instantly and
+          // match against rows the search is about to replace.
+          await page.waitForTimeout(1200).catch(() => undefined);
+          if (await clickMatchingOption(target)) return true;
         }
         return false;
       };
@@ -145,20 +232,40 @@ const { chromium } = require('playwright');
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
         if (!await control.isVisible().catch(() => false)) continue;
+        // See (2) above. A control whose job is to erase the answer can never be the control that
+        // sets it, so there is nothing to lose by never touching it.
+        const clears = await control.evaluate((element) => {
+          const hay = ['aria-label', 'title', 'class', 'data-testid', 'name']
+            .map((attribute) => element.getAttribute(attribute) || '')
+            .join(' ')
+            .toLowerCase();
+          return hay;
+        }).catch(() => '');
+        if (CLEAR_CONTROL_RE.test(clears)) continue;
         await control.click().catch(() => undefined);
-        await page.waitForTimeout(150).catch(() => undefined);
-        if (await clickMatchingOption()) return true;
-        for (const option of answerOptions(wanted)) {
-          await control.fill('').catch(() => undefined);
-          await control.fill(option).catch(async () => {
-            await page.keyboard.press('Control+A').catch(() => undefined);
-            await page.keyboard.press('Backspace').catch(() => undefined);
-            await page.keyboard.type(option, { delay: 5 }).catch(() => undefined);
-          });
-          await page.waitForTimeout(1200).catch(() => undefined);
-          if (await clickMatchingOption()) return true;
-        }
+        // Sized on measurement, not a guess: on a live Greenhouse education form the asynchronously
+        // loaded School and Discipline menus arrived 563ms and 555ms after the control was touched.
+        // The old flat 150ms expired before either, which is how the page-wide sweep was reached.
+        await waitForMenu(1200);
+        if (await clickMatchingOption(wanted)) return true;
+        if (await searchFor(control, wanted)) return true;
         await page.keyboard.press('Escape').catch(() => undefined);
+      }
+      // Belt and braces for anything the two rules above did not anticipate: if this control was
+      // answered when we arrived and is not answered now, put the answer back. A candidate that
+      // matched nothing must leave the form exactly as it found it.
+      if (alreadyAnswered.kind === 'chosen') {
+        const now = await readChoiceState(container);
+        if (now.kind !== 'chosen') {
+          for (let index = 0; index < total; index += 1) {
+            const control = controls.nth(index);
+            if (!await control.isVisible().catch(() => false)) continue;
+            await control.click().catch(() => undefined);
+            await page.waitForTimeout(150).catch(() => undefined);
+            if (await searchFor(control, alreadyAnswered.value)) break;
+            await page.keyboard.press('Escape').catch(() => undefined);
+          }
+        }
       }
       return false;
     };
@@ -537,6 +644,21 @@ const { chromium } = require('playwright');
           if (await fillCustomChoice(container, action.value || '')) {
             if (action.label && await verifyChoiceInContainer(container, action.value || '')) filledFields.push(action.label);
             else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
+            continue;
+          }
+          // No option matched, and this is a widget whose answered state can be read. Falling
+          // through to the plain fill below would type the answer into the widget's SEARCH box and
+          // then read it straight back out of that same box, so verifyFilled agreed and the field
+          // was reported filled while the control still said "Select...". On the live Five Rings
+          // form both Discipline candidates were reported filled and the employer's own validator
+          // then called the field empty. A choice we could not make belongs to the applicant.
+          const state = await readChoiceState(container);
+          if (state.kind !== 'unknown') {
+            if (action.label) {
+              skipped.push(state.kind === 'chosen'
+                ? action.label + ': left the answer already on the form, "' + clean(state.value) + '"'
+                : action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+            }
             continue;
           }
         }

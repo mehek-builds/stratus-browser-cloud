@@ -132,9 +132,55 @@ test('fills are reported only after the page keeps the value', () => {
 test('fillByLabelText can use scoped custom listbox controls', () => {
   assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) =>/);
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
-  assert.match(SANDBOX_RUNNER, /page\.getByRole\('option', \{ name: option, exact: false \}\)/);
-  assert.match(SANDBOX_RUNNER, /\[role="option"\], \[role="listbox"\] \*, .*li, \[data-value\]/);
+  assert.match(SANDBOX_RUNNER, /getByRole\('option', \{ name: option, exact: false \}\)/);
   assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+});
+
+test('an option is only ever clicked inside an option list, never loose in the page', () => {
+  // THE REGRESSION, measured live on 2026-08-08. The fallback swept the whole document for
+  // 'li, [data-value]' containing the answer, so opening Discipline on the DRW and Virtu Greenhouse
+  // forms with the answer "Computer Science" clicked a bullet point in the JOB DESCRIPTION
+  // ("Are pursuing a bachelor's ... computer science or any engineering discipline"), reported the
+  // field answered, and left the control on "Select...". Both boards then said
+  // '"Discipline" is required and is still empty' with the right option unclicked in the open menu.
+  assert.doesNotMatch(SANDBOX_RUNNER, /\[role="listbox"\] \*/, 'no page-wide descendant sweep');
+  assert.doesNotMatch(SANDBOX_RUNNER, /\[class\*="select2-result"\], li, \[data-value\]/, 'no bare li or [data-value]');
+  // A bare li still qualifies, but only inside a listbox or a select2 results panel.
+  assert.match(SANDBOX_RUNNER, /\[role="listbox"\] li/);
+  assert.match(SANDBOX_RUNNER, /const OPTION_NODES =/);
+  assert.match(SANDBOX_RUNNER, /const optionsRoot = \(\) => \(scopedMenu \?\? page\)\.locator\(OPTION_NODES\)/);
+  // And the correctly scoped attempt gets a bounded wait, because it used to be made as an instant
+  // count() 150ms after the click - before the menu rendered - which is what made the page-wide
+  // sweep reachable in the first place. Measured: menus arrived 555-563ms after the control was hit.
+  assert.match(SANDBOX_RUNNER, /const waitForMenu = async \(timeout\) =>/);
+  assert.match(SANDBOX_RUNNER, /await waitForMenu\(1200\)/);
+});
+
+test('a choice control that already holds an answer is never emptied to look for a better one', () => {
+  // Litos sends several candidate values for one control on purpose (a stored major sentence, then
+  // the fields of study inside it). Measured live on the Five Rings Greenhouse form: Discipline was
+  // correctly set to "Computer Science" by one candidate and emptied by the next, in two ways.
+  // 1. An empty fill is a backspace on a React Select's always-empty search box, and
+  //    backspaceRemovesValue then deletes the selection.
+  assert.match(SANDBOX_RUNNER, /if \(\(await readChoiceState\(container\)\)\.kind !== 'chosen'\) \{\n\s+await control\.fill\(''\)/);
+  // 2. React Select renders its "Clear selections" indicator as a <button> inside the same
+  //    container, and the control list includes buttons.
+  assert.match(SANDBOX_RUNNER, /const CLEAR_CONTROL_RE =/);
+  assert.match(SANDBOX_RUNNER, /if \(CLEAR_CONTROL_RE\.test\(clears\)\) continue;/);
+  // An answer that already matches is left exactly as it is, with no click at all.
+  assert.match(SANDBOX_RUNNER, /if \(alreadyAnswered\.kind === 'chosen' && optionMatches\(alreadyAnswered\.value, wanted\)\) return true;/);
+  // And if it was somehow lost anyway, it goes back.
+  assert.match(SANDBOX_RUNNER, /if \(await searchFor\(control, alreadyAnswered\.value\)\) break;/);
+});
+
+test('a choice we could not make is reported as the applicant\'s, not as filled', () => {
+  // The plain fill after a failed choice typed the answer into the widget's SEARCH box, and
+  // verifyFilled then read it straight back out of that same box and called the field filled while
+  // the control still said "Select...". A wrong "filled" is worse than a blank: it is the reason a
+  // required-and-empty blocker arrived alongside a filled_fields list that claimed the opposite.
+  assert.match(SANDBOX_RUNNER, /const state = await readChoiceState\(container\);/);
+  assert.match(SANDBOX_RUNNER, /if \(state\.kind !== 'unknown'\) \{/);
+  assert.match(SANDBOX_RUNNER, /left for you to choose/);
 });
 
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
@@ -149,7 +195,7 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /shape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /ariaAutocomplete === 'list'/);
-  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(\) =>/);
+  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(target\) =>/);
   assert.match(SANDBOX_RUNNER, /await control\.fill\(option\)/);
   assert.match(SANDBOX_RUNNER, /await page\.keyboard\.type\(option, \{ delay: 5 \}\)/);
   assert.match(SANDBOX_RUNNER, /waitForTimeout\(1200\)/);
@@ -352,7 +398,7 @@ function sandboxScope(names, indent = 4) {
   return Function(`${sources}\nreturn { ${names.join(', ')} };`)();
 }
 
-const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'answerOptions', 'optionMatches', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
+const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'answerOptions', 'optionMatches', 'readChoiceState', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
 
 function reactSelectContainer({ chosen = '', placeholder = false, ownText = '', widgetText = '' } = {}) {
   const widget = {
