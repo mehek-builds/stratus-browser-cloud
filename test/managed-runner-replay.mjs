@@ -39,6 +39,11 @@ const QUICK_PANEL_MS = 700;
 // Slower again, so only an honoured waitForSelector can reach it.
 const SLOW_PANEL_MS = 2500;
 
+// How late the discipline menu renders. Past the old flat 150ms, inside the new bounded wait, and
+// sized on the live measurement: Greenhouse's asynchronously loaded menus arrived 555-563ms after
+// the control was touched.
+const MENU_RENDER_MS = 600;
+
 const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</title>
 <button id="apply">Apply for this job</button>
 <button id="apply-slow">Apply for this job (slow board)</button>
@@ -52,6 +57,25 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <input id="aimed" type="text">
 <div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
+<!-- A job description, copied in shape from the live DRW and Virtu Greenhouse postings. The bullet
+     contains the answer text and is a plain <li> loose in the page. Sweeping the document for
+     'li' containing the answer clicked exactly this and called the Discipline field answered. -->
+<ul id="jd">
+  <li>Are pursuing a bachelor's, master's or PhD in mathematics, economics, physics, statistics, computer science or any engineering discipline</li>
+</ul>
+<!-- A React Select, reproduced down to the parts that bite: the answer lives in a
+     .select__single-value node and not on the input; the menu renders LATE; and the container holds
+     a "Clear selections" <button> alongside the combobox. -->
+<div class="select__container" id="discipline-shell">
+  <div class="select__control">
+    <div class="select__value-container">
+      <div class="select__placeholder" id="discipline-placeholder">Select...</div>
+      <div class="select__input-container"><input id="discipline" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
+    </div>
+    <button type="button" class="select__clear-indicator" aria-label="Clear selections">x</button>
+    <button type="button" class="select__dropdown-indicator" aria-label="Toggle flyout">v</button>
+  </div>
+</div>
 <!-- novalidate deliberately: with the browser's own required-field validation on, an empty required
      input stops the form submitting all by itself, and a gate that did nothing would look like a
      gate that worked. Turning it off leaves the gate as the only thing between the click and the
@@ -101,6 +125,86 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     setTimeout(function () {
       document.getElementById('slow-panel').innerHTML = '<input id="slow-email" type="text">';
     }, ${SLOW_PANEL_MS});
+  });
+
+  // ---- React Select, faithfully enough to reproduce the two ways an answer was destroyed ----
+  var TAXONOMY = ['Business Administration', 'Computer Engineering', 'Computer Science', 'Economics', 'Finance', 'Mathematics'];
+  var shell = document.getElementById('discipline-shell');
+  var input = document.getElementById('discipline');
+  var control = shell.querySelector('.select__control');
+  var chosen = '';
+  var menuTimer = null;
+  var suppressInput = false;
+  function renderChosen() {
+    var existing = shell.querySelector('.select__single-value');
+    if (existing) existing.remove();
+    var placeholder = document.getElementById('discipline-placeholder');
+    if (chosen) {
+      if (placeholder) placeholder.style.display = 'none';
+      var node = document.createElement('div');
+      node.className = 'select__single-value';
+      node.textContent = chosen;
+      shell.querySelector('.select__value-container').prepend(node);
+    } else if (placeholder) {
+      placeholder.style.display = '';
+    }
+  }
+  function closeMenu() {
+    if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
+    var menu = shell.querySelector('.select__menu');
+    if (menu) menu.remove();
+    input.setAttribute('aria-expanded', 'false');
+  }
+  function openMenu() {
+    closeMenu();
+    input.setAttribute('aria-expanded', 'true');
+    // LATE, on purpose. The old code looked for options 150ms after the click and fell through to a
+    // page-wide sweep every single time.
+    menuTimer = setTimeout(function () {
+      menuTimer = null;
+      var query = input.value.trim().toLowerCase();
+      var matches = TAXONOMY.filter(function (entry) { return !query || entry.toLowerCase().indexOf(query) >= 0; });
+      var menu = document.createElement('div');
+      menu.className = 'select__menu';
+      menu.setAttribute('role', 'listbox');
+      matches.forEach(function (entry, index) {
+        var option = document.createElement('div');
+        option.className = 'select__option';
+        option.setAttribute('role', 'option');
+        option.id = 'react-select-discipline-option-' + index;
+        option.textContent = entry;
+        option.addEventListener('mousedown', function (event) {
+          event.preventDefault();
+          chosen = entry;
+          suppressInput = true;
+          input.value = '';
+          suppressInput = false;
+          renderChosen();
+          closeMenu();
+        });
+        menu.appendChild(option);
+      });
+      shell.appendChild(menu);
+    }, ${MENU_RENDER_MS});
+  }
+  control.addEventListener('mousedown', function (event) {
+    if (event.target.classList.contains('select__clear-indicator')) return;
+    if (input.getAttribute('aria-expanded') === 'true') closeMenu(); else openMenu();
+  });
+  shell.querySelector('.select__clear-indicator').addEventListener('click', function () {
+    // What React Select's clear indicator does, and what the old control sweep clicked.
+    chosen = '';
+    renderChosen();
+  });
+  input.addEventListener('input', function () {
+    if (suppressInput) return;
+    // backspaceRemovesValue: emptying the search box of a select that HOLDS a value deletes the
+    // value. Playwright's fill('') arrives here.
+    if (input.value === '' && chosen) { chosen = ''; renderChosen(); }
+    openMenu();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeMenu();
   });
 </script>`;
 
@@ -303,6 +407,59 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'the gate must name the phone, and must not blame the answered country, got ' + JSON.stringify(phoneEmpty.blockers));
 }
 
+// A choice control is answered from its OWN menu, and an answer already on the form survives every
+// later candidate.
+//
+// Both halves were measured on live Greenhouse forms on 2026-08-08, and both reported success while
+// leaving the control on "Select...":
+//   - DRW and Virtu: the fallback locator swept the page for 'li' containing "Computer Science" and
+//     clicked a bullet in the job description, because the properly scoped attempt was made as an
+//     instant count() 150ms after the click, before the menu had rendered.
+//   - Five Rings: Discipline was correctly set to "Computer Science" and then emptied by a later
+//     candidate, twice over - an empty fill lands as a backspace on the always-empty search box, and
+//     the control sweep clicks the "Clear selections" button.
+{
+  const disciplineText = (result) => (valueOf(result, '#discipline-shell') || '').replace(/\s+/g, ' ').trim();
+
+  const answered = await replay([
+    { type: 'click', selector: '#discipline', label: 'discipline_open', optional: true },
+    { type: 'fill', selector: '#discipline', value: 'Computer Science', label: 'discipline', optional: true },
+    { type: 'extract', selector: '#discipline-shell' }
+  ]);
+  assert.match(disciplineText(answered), /Computer Science/,
+    'the option must be taken from the control\'s own menu once it renders, got ' + JSON.stringify(disciplineText(answered)));
+  assert.ok(!/Are pursuing a bachelor/.test(disciplineText(answered)), 'the job description must not end up in the control');
+  assert.deepEqual(answered.filledFields, ['discipline'], 'and it must be reported filled, got ' + JSON.stringify(answered));
+
+  // A second candidate that matches nothing. It must leave the first answer exactly where it was,
+  // and must say so rather than claiming a fill.
+  const survives = await replay([
+    { type: 'click', selector: '#discipline', label: 'discipline:0_open', optional: true },
+    { type: 'fill', selector: '#discipline', value: 'Computer Science', label: 'discipline:0', optional: true },
+    { type: 'click', selector: '#discipline', label: 'discipline:1_open', optional: true },
+    { type: 'fill', selector: '#discipline', value: 'Astrophysics', label: 'discipline:1', optional: true },
+    { type: 'extract', selector: '#discipline-shell' }
+  ]);
+  assert.match(disciplineText(survives), /Computer Science/,
+    'a later candidate that matches nothing must not clear an answer that matched, got ' + JSON.stringify(disciplineText(survives)));
+  assert.ok(survives.filledFields.includes('discipline:0'), 'the candidate that worked is still reported filled');
+  assert.ok(survives.skipped.some((entry) => /^discipline:1: left the answer already on the form/.test(entry)),
+    'the candidate that missed must be reported honestly, got ' + JSON.stringify(survives.skipped));
+
+  // Nothing on the ladder matches. The control must be left for the applicant and reported as such,
+  // never typed into and then read back out of its own search box.
+  const unmatchable = await replay([
+    { type: 'click', selector: '#discipline', label: 'discipline_open', optional: true },
+    { type: 'fill', selector: '#discipline', value: 'Computer Science & Business Administration, Finance Emphasis', label: 'discipline', optional: true },
+    { type: 'extract', selector: '#discipline-shell' }
+  ]);
+  assert.match(disciplineText(unmatchable), /Select\.\.\./,
+    'an answer that is on no list must leave the control untouched, got ' + JSON.stringify(disciplineText(unmatchable)));
+  assert.deepEqual(unmatchable.filledFields, [], 'and it must NOT be reported filled, got ' + JSON.stringify(unmatchable.filledFields));
+  assert.ok(unmatchable.skipped.some((entry) => /^discipline: no option matched .*left for you to choose$/.test(entry)),
+    'and the applicant must be told, got ' + JSON.stringify(unmatchable.skipped));
+}
+
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, and the pre-submit gate holds in both directions including a required control beside an answered choice control');
+console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, and the pre-submit gate holds in both directions');
