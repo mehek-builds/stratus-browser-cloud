@@ -119,6 +119,70 @@ const { chromium } = require('playwright');
       const text = state.value;
       return optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)));
     };
+    /* AN ANSWER THAT IS A BUTTON, not an input.
+     *
+     * D-01, the fill half. Ashby renders every yes/no question as two plain buttons -
+     * '<button>Yes</button><button>No</button>' - beside one input[type=checkbox] that is
+     * display:none and holds the value. Nothing about that markup is an option: the buttons have no
+     * role, no value and no aria-checked, and the checkbox's label is the QUESTION rather than an
+     * answer. So the checkbox arm of fillByLabelText read the one input in the block, compared the
+     * whole question text against "Yes", found no match, and left the control untouched. Measured on
+     * production packet 245c827a: both work-eligibility questions had answers resolved from the
+     * stored profile and neither reached the page. The extension's own Ashby adapter records the
+     * same finding from live testing and answers these by clicking the pill.
+     *
+     * Scoped to ONE question's container, always. Matching a string as short as "Yes" anywhere on a
+     * page is how a legal acknowledgement elsewhere on the form gets agreed to, which is the one
+     * mistake here the applicant cannot undo.
+     *
+     * Pointer events before the click because the pills are React-controlled and a bare click can be
+     * reverted by the next re-render, and the retry is gated on the selected-state signal so a press
+     * that DID take is never pressed a second time and toggled back off.
+     */
+    const SELECTED_PILL_CLASS = /_active_|_selected_|_checked_/;
+    const pickOptionPill = async (container, wanted) => {
+      if (!clean(wanted)) return false;
+      // Not filtered by type. A <button> with no type attribute reports type "submit" by HTML
+      // default, and that is exactly what these pills are; the real submit control is excluded by
+      // the text list instead.
+      const pills = container.locator('button');
+      const total = await pills.count();
+      if (total === 0) return false;
+      const ACTION_TEXT = /upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i;
+      let match = null;
+      for (let index = 0; index < total; index += 1) {
+        const pill = pills.nth(index);
+        if (!await pill.isVisible().catch(() => false)) continue;
+        const text = clean(await pill.textContent().catch(() => ''));
+        if (!text || text.length > 40 || ACTION_TEXT.test(text)) continue;
+        if (optionMatches(text, wanted)) { match = pill; break; }
+      }
+      if (!match) return false;
+      const press = async () => {
+        await match.evaluate((element) => {
+          const options = { bubbles: true, cancelable: true, view: window };
+          try { element.dispatchEvent(new PointerEvent('pointerdown', options)); } catch (error) { /* older engines */ }
+          element.dispatchEvent(new MouseEvent('mousedown', options));
+          element.dispatchEvent(new MouseEvent('mouseup', options));
+          element.click();
+        }).catch(() => undefined);
+        await page.waitForTimeout(200).catch(() => undefined);
+      };
+      await press();
+      const stuck = async () => await match.evaluate((element, source) => {
+        const test = new RegExp(source);
+        return test.test(String(element.className || ''))
+          || element.getAttribute('aria-pressed') === 'true'
+          || element.getAttribute('aria-checked') === 'true'
+          || element.getAttribute('aria-selected') === 'true'
+          || /^(?:on|true|active|selected|checked)$/i.test(element.getAttribute('data-state') || '');
+      }, SELECTED_PILL_CLASS.source).catch(() => false);
+      if (!await stuck()) await press();
+      // The caller records a filled field only on a selection it can still read back, for the same
+      // reason verifyChoiceInContainer exists: a press that did not take must not be reported as an
+      // answer, because the required-field gate is what should then speak for it.
+      return await stuck();
+    };
     // Whether a keystroke aimed at this element can still do the job it was queued for. Only ever
     // asked about Enter on a choice control: see the press branch below.
     const choiceControlIsClosed = async (target) => await target.evaluate((element) => {
@@ -298,9 +362,36 @@ const { chromium } = require('playwright');
         return style.display !== 'none' && style.visibility !== 'hidden';
       };
       // The block that owns one question: its label, its control, and its error line.
+      //
+      // The two Ashby entries are new and are what let this gate see an Ashby question at all. Ashby
+      // renders every question as '<div class="_fieldEntry_<hash> ashby-application-form-field-entry"
+      // data-field-path="...">', which matches none of the classic selectors above, so widgetOf fell
+      // back to element.parentElement - the pill row or the input wrapper - and labelOf then found no
+      // <label> inside it and reported the question as unlabelled. 'data-field-path' is Ashby's own
+      // per-question attribute and is the more durable of the two; the hashed class is kept because a
+      // board serving an older bundle carries the class and not the attribute.
       const widgetOf = (element) => element.closest(
-        '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"]'
+        '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"],'
+        + ' [data-field-path], [class*="_fieldEntry_"]'
       ) || element.parentElement || element;
+      /* The question a control sits under, when the control itself is labelled with nothing useful.
+       *
+       * Restored here from the end-of-run scan this gate replaced, where it was the only reason an
+       * Ashby datepicker blocker read "Are you currently enrolled in a degree program? If so,
+       * expected graduation date?" instead of "Pick date...". Losing it would have made the blocker
+       * name the widget rather than the question, which is the same defect as naming a UUID.
+       */
+      const genericControlText = (value) => /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+      const nearestQuestionText = (start) => {
+        let block = start && start.parentElement;
+        for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
+          if (!block.matches || !block.matches('div, section, li, fieldset')) continue;
+          const candidate = block.querySelector('label, legend, .question, h3, h4');
+          const text = clean((candidate && candidate.textContent) || '');
+          if (text && !genericControlText(text)) return text;
+        }
+        return '';
+      };
       const labelOf = (widget, element) => {
         const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
           || (element && element.getAttribute('aria-labelledby'));
@@ -314,10 +405,12 @@ const { chromium } = require('playwright');
           legend && legend.textContent,
           own && own.textContent,
           element && element.getAttribute('aria-label'),
-          widget && widget.getAttribute('aria-label')
+          widget && widget.getAttribute('aria-label'),
+          nearestQuestionText(element)
         ]) {
           const text = clean(candidate);
           if (!text) continue;
+          if (genericControlText(text)) continue;
           // A machine identifier is not a label. Greenhouse names custom questions with UUIDs and
           // numeric tokens, and "question_19302464004 is required" tells the applicant nothing.
           if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
@@ -364,6 +457,40 @@ const { chromium } = require('playwright');
         }
         return false;
       };
+      /* An option chosen from a row of PLAIN BUTTONS, which is how Ashby renders every yes/no
+       * question: '<button>Yes</button><button>No</button>' plus one 'input[type=checkbox]' that is
+       * 'display:none' and carries the value. Neither the buttons nor the checkbox has a role, a
+       * value or an aria-checked, so nothing above this can tell "No" apart from "unanswered" - the
+       * checkbox is unchecked in both cases.
+       *
+       * The selected pill is marked by a class, and that is the only signal Ashby gives. Verified in
+       * Ashby's own stylesheet, 2026-08-09: '._active_1svni_57{background-color:var(--colorPrimary900)
+       * ...}' sits in the same CSS module as '._option_1svni_32', the pill class, and is the rule
+       * that paints the chosen pill. The hash changes between bundles, so match the module-name
+       * fragment rather than the whole class. '_selected_'/'_checked_' and the ARIA states are
+       * accepted alongside it because other boards spell the same state those ways, and reading a
+       * state that is genuinely set can only make this gate quieter, never louder.
+       *
+       * Returns null - not false - when the block has no pills at all, so a caller falls through to
+       * the real controls instead of treating "not a pill group" as "empty".
+       */
+      const PILL_SELECTED = /_active_|_selected_|_checked_/;
+      const chosenPillOf = (scope) => {
+        if (!scope || !scope.querySelectorAll) return null;
+        const pills = [...scope.querySelectorAll('button')].filter((button) => {
+          const text = clean(button.textContent);
+          // Same exclusion list the extension's own Ashby adapter uses: the block also holds upload,
+          // remove and submit controls, and a "Submit application" button is not an answer.
+          return text.length > 0 && text.length <= 40
+            && !/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text);
+        });
+        if (pills.length === 0) return null;
+        return pills.some((pill) => PILL_SELECTED.test(String(pill.className || ''))
+          || pill.getAttribute('aria-pressed') === 'true'
+          || pill.getAttribute('aria-checked') === 'true'
+          || pill.getAttribute('aria-selected') === 'true'
+          || /^(?:on|true|active|selected|checked)$/i.test(pill.getAttribute('data-state') || ''));
+      };
       const hasAnswer = (element) => {
         if (!element) return false;
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)) {
@@ -378,6 +505,11 @@ const { chromium } = require('playwright');
           if (element.type === 'file') return uploadHasFile(element.parentElement);
           if (element.type === 'checkbox' || element.type === 'radio') {
             if (element.checked) return true;
+            // Ashby's hidden yes/no checkbox is unchecked whether the applicant picked "No" or picked
+            // nothing, so the pills beside it are the only place the answer is legible. Asked before
+            // the peer-group walk because that walk reads the same unchecked inputs.
+            const pill = chosenPillOf(widgetOf(element));
+            if (pill !== null) return pill;
             if (!element.name) return false;
             // One answered radio answers its whole group, and only the checked member carries it.
             for (const peer of (element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')) {
@@ -394,6 +526,8 @@ const { chromium } = require('playwright');
         if (uploadHasFile(element)) return true;
         const chosen = chosenValueOf(element);
         if (chosen !== null) return chosen;
+        const pill = chosenPillOf(element);
+        if (pill !== null) return pill;
         for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
           if (hasAnswer(control)) return true;
         }
@@ -405,11 +539,29 @@ const { chromium } = require('playwright');
       // both. Greenhouse's phone fieldset holds exactly that: the country select and the number.
       // The error scan below hands back the same element object the required scan flagged, so the
       // two still do not report one field twice.
+      // A checkbox or radio GROUP is one question wearing many inputs, and every one of them is
+      // "required and still empty" until one is chosen. Reporting each separately turned three
+      // unanswered Greenhouse questions into seventeen blockers named after their options, and on
+      // Lever's 34-language checkbox list it turns one question into thirty-four. The end-of-run
+      // scan this gate replaced deduped on the group name for exactly that reason; keying 'seen' on
+      // the control alone lost it, so the group name is carried here too.
+      const reportedGroups = new Set();
       const note = (widget, element, why) => {
         const key = element || widget;
         if (!key || seen.has(key)) return;
         seen.add(key);
         if (!isVisible(widget)) return;
+        // After the visibility test, so an invisible member cannot claim the group and silence the
+        // visible one beside it.
+        const groupName = element
+          && (element.type === 'checkbox' || element.type === 'radio')
+          && element.name
+          ? element.name
+          : '';
+        if (groupName) {
+          if (reportedGroups.has(groupName)) return;
+          reportedGroups.add(groupName);
+        }
         if (hasAnswer(element)) return;
         const label = labelOf(widget, element);
         required.push({
@@ -429,6 +581,49 @@ const { chromium } = require('playwright');
         if (element.disabled) continue;
         if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
         note(widgetOf(element), element, 'required');
+      }
+      /* D-01. THE REQUIRED MARKER THAT IS NEITHER AN ATTRIBUTE NOR AN ARIA STATE.
+       *
+       * Measured on the live Deepgram Ashby posting, 2026-08-09, the form behind the packet that
+       * shipped as "Done - 5 checked" with three required fields empty: SIX controls carry the
+       * 'required' attribute and ZERO carry aria-required. The three empty ones - "Current Location",
+       * and the two work-eligibility yes/no questions - carry neither, so both loops above are blind
+       * to them and the run reported no blockers at all.
+       *
+       * Ashby marks a required question with a class on the question's own <label>, and paints the
+       * asterisk from it: '._required_f7cvd_91:after{color:var(--colorNegative600);content:"*"}',
+       * read out of Ashby's stylesheet on the same day. Three hashed variants of that rule ship in
+       * one bundle ('_required_f7cvd_91', '_required_1e3gg_37', '_required_kyg4m_26'), so the match
+       * is on the module-name fragment, not on a whole class name.
+       *
+       * WHY THIS IS NOT THE 2026-08-08 MISTAKE. An earlier pre-submit gate matched the form's own
+       * legend text, "* indicates a required field", and so would have refused EVERY Greenhouse
+       * submission there is (see LEGEND_TEXT below, which is what remains of it). This reads no page
+       * text whatsoever. It reads a class on ONE specific question's label element, which is the same
+       * kind of per-control machine signal as 'required' and 'aria-required' - the employer's own
+       * markup saying "this field, in particular". It cannot fire on a page-level notice because a
+       * page-level notice is not a field label, and it cannot fire on a form that does not use this
+       * convention because the class simply is not there. Greenhouse, Lever, Workable, SmartRecruiters
+       * and the rest render no '_required_' class at all, so on those families this loop finds nothing
+       * and the two above continue to do all the work.
+       *
+       * note() dedupes on the control, so a field caught by BOTH the attribute loop and this one is
+       * still reported once.
+       */
+      for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+        const widget = widgetOf(marker);
+        if (!widget || !isVisible(widget)) continue;
+        // The control this label speaks for. 'for=' first, because Ashby sets it even where the input
+        // it names has no id of its own (the location combobox), in which case the lookup misses and
+        // the block's first real control is the right answer. A file input is excluded from the
+        // fallback for the same reason hasAnswer treats uploads specially: the widget, not the input,
+        // is what holds the evidence of an upload.
+        const named = marker.getAttribute('for');
+        const target = (named && widget.querySelector('#' + CSS.escape(named)))
+          || widget.querySelector('input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]')
+          || widget;
+        if (target.disabled) continue;
+        note(widget, target, 'required');
       }
       // Visible validation messages, matched back to the control they accuse. An unmatched message,
       // or one over an empty control, blocks; one over a filled control is stale and is only
@@ -555,8 +750,21 @@ const { chromium } = require('playwright');
         // runner is the only place with an actual Page object mid-run, since /api/run is otherwise
         // stateless and one-shot). Ported from student-outreach-backend's DISCOVER_QUESTIONS_SCRIPT
         // and the extension's own candidateInputs()/questionLabel() - keep the three in sync by
-        // hand. Deliberately excludes select/radio/checkbox, matching the caller's own fill scope:
-        // it never clicks a choice control, so there is nothing useful to discover there either.
+        // hand.
+        //
+        // D-01. This used to scan text-shaped inputs ONLY, on the reasoning that the caller never
+        // clicks a choice control so there was nothing useful to report. That reasoning was already
+        // stale - the caller does answer choice questions, through fillByLabelText's select, radio
+        // and checkbox arms - and the cost was measured on production packet 245c827a: Deepgram's
+        // two work-eligibility questions render as Ashby pill groups, so discovery never saw them,
+        // no question record was ever written for them, and the resolver was never given the chance
+        // to answer them from the stored work_authorized and needs_sponsorship booleans it holds. A
+        // question that is never discovered cannot be answered and cannot be asked; it is simply
+        // absent, which is how a required field ends up empty with nothing complaining.
+        //
+        // ONE ENTRY PER QUESTION, not per control. A radio or checkbox group is one question wearing
+        // several inputs, and reporting each input separately is what once turned three unanswered
+        // Greenhouse questions into seventeen blockers named after their options.
         const found = await page.evaluate(() => {
           function clean(s) {
             return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -598,28 +806,163 @@ const { chromium } = require('playwright');
             if (groupLabel) return groupLabel.toLowerCase();
             const labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
             const labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
-            const parts = [labelText || '', el.getAttribute('aria-label') || '', el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
+            const ariaLabel = el.getAttribute('aria-label') || '';
+            // A radio or checkbox is labelled with its OPTION - "Male", "Yes", "Hispanic or Latino" -
+            // and the applicant is answering the QUESTION above it. The pre-submit gate already
+            // prefers the group's own text for exactly this reason; discovery has to agree with it,
+            // or the same control is called two different things by two halves of one run.
+            if (el.type === 'radio' || el.type === 'checkbox') {
+              const owner = blockOf(el);
+              // A label that speaks for ONE option is disqualified, however it says so: by wrapping
+              // the input, or by naming a choice input in its "for". What is left is the block's own
+              // heading. Without this test the search finds a SIBLING option's label and calls the
+              // question "Female" - a group of options is full of labels that are not the question.
+              const ownerLabel = owner && [...owner.querySelectorAll('label, legend')].find((candidate) => {
+                if (candidate.querySelector('input, textarea, select')) return false;
+                const named = candidate.getAttribute && candidate.getAttribute('for');
+                if (!named) return true;
+                const target = document.getElementById(named);
+                return !(target && (target.type === 'radio' || target.type === 'checkbox'));
+              });
+              const ownerText = clean((ownerLabel && ownerLabel.textContent) || '').toLowerCase();
+              if (ownerText && !genericControlText(ownerText)) return ownerText;
+            }
+            /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
+             *
+             * The line below joins label + aria-label + placeholder + name + id and takes whatever
+             * comes out, which is right on Greenhouse (real <label for>, so the join opens with the
+             * question and the trailing name and id are how labelMarksRequired reads the employer's
+             * "*" and how the education comboboxes are recognised by their "--0" handles) and wrong
+             * wherever the control is anonymous. Both Ashby cases measured on packet 245c827a are
+             * anonymous: the location combobox has no id, no name and no aria-label, so the join
+             * produced its placeholder, "start typing...", as the question; and the yes/no mirror
+             * input has only a name, so the join produced a bare UUID.
+             *
+             * Applied ONLY when the control has neither a <label for> nor an aria-label, so no form
+             * that labels its inputs properly can be relabelled by this.
+             */
+            if (!clean(labelText) && !clean(ariaLabel)) {
+              const owner = blockOf(el);
+              const ownerLabel = owner && owner.querySelector('label, legend');
+              const ownerText = clean((ownerLabel && ownerLabel.textContent) || '').toLowerCase();
+              if (ownerText && !genericControlText(ownerText)) return ownerText;
+            }
+            const parts = [labelText || '', ariaLabel, el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
             const fallbackText = nearestQuestionText(el);
             if (own && !genericControlText(own)) return own;
             return fallbackText || own;
           }
+          // The block that owns one question. Kept in step with widgetOf in the pre-submit gate: the
+          // two Ashby entries are what make a pill group resolve to its question rather than to the
+          // row of buttons.
+          function blockOf(el) {
+            return el.closest(
+              'fieldset, [role="group"], [role="radiogroup"], [data-field-path],'
+              + ' [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper'
+            ) || el.parentElement || el;
+          }
+          /* Whether the EMPLOYER marks this question required, read three ways because the three
+           * ATS families spell it three different ways and a gate that knows only one of them is
+           * blind to the other two:
+           *   - the HTML attribute, which Greenhouse and Lever set;
+           *   - aria-required, which React Select sets on its own input;
+           *   - a CSS-module class on the question's label, which is all Ashby gives. Verified in
+           *     Ashby's stylesheet on 2026-08-09: ._required_<hash>:after renders the asterisk, and
+           *     the asterisk is therefore a pseudo-element that appears in no label text anywhere.
+           *     That is why the backend's labelMarksRequired, which looks for a literal "*" in the
+           *     reported label, reads every Ashby field as optional - including, on packet 245c827a,
+           *     the three that were required and empty.
+           * No page text is read here. Each signal names one specific control or its own label.
+           */
+          function marksRequired(el, block) {
+            if (el.required || el.getAttribute('aria-required') === 'true') return true;
+            if (block && block.getAttribute && block.getAttribute('aria-required') === 'true') return true;
+            const label = block && block.querySelector('label[class*="_required_"], legend[class*="_required_"]');
+            return Boolean(label);
+          }
+          // A stable way back to this control on a LATER page load. The marker attribute below is
+          // written into this page's DOM and is gone by the time the fill run opens the form again
+          // (the two are separate stateless calls), so the backend refuses it and falls back to
+          // matching by label text. An id, a name, or Ashby's own data-field-path survives the
+          // reload and gives that fallback something better to use.
+          function durableSelectorOf(el, block) {
+            if (el.id && !/^[0-9]/.test(el.id)) return '#' + CSS.escape(el.id);
+            const name = el.getAttribute && el.getAttribute('name');
+            if (name) return '[name="' + name.replace(/["\\]/g, '\\$&') + '"]';
+            const path = block && block.getAttribute && block.getAttribute('data-field-path');
+            if (path) return '[data-field-path="' + path.replace(/["\\]/g, '\\$&') + '"]';
+            return null;
+          }
+          // The choices a closed list actually offers, so the resolver can snap a stored answer onto
+          // one of them instead of typing its own phrasing at a control that does not contain it.
+          function optionsOf(el, block) {
+            if (el.tagName === 'SELECT') {
+              return [...el.options]
+                .map((option) => clean(option.textContent || option.value))
+                .filter((text) => text && !/^(select|choose|please|--)/i.test(text));
+            }
+            if (!block) return [];
+            const texts = [];
+            for (const input of block.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+              const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
+              const wrapping = input.closest('label');
+              const text = clean((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || input.getAttribute('aria-label') || '');
+              // Ashby labels its hidden mirror input with the QUESTION, so a single "option" whose
+              // text is the question is not an option list at all.
+              if (text && text.length <= 80) texts.push(text);
+            }
+            for (const button of block.querySelectorAll('button')) {
+              const text = clean(button.textContent);
+              if (!text || text.length > 40) continue;
+              if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) continue;
+              texts.push(text);
+            }
+            return [...new Set(texts)];
+          }
           const els = Array.prototype.slice
-            .call(document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea'))
-            .filter((el) => !el.closest('[id*="litos"]') && !el.disabled && !el.readOnly && isVisible(el) && !isHoneypot(el));
+            .call(document.querySelectorAll(
+              'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"],'
+              + ' input[type="date"], input[type="radio"], input[type="checkbox"], input:not([type]), textarea, select'
+            ))
+            // A choice input is exempt from the visibility test and from readOnly. Ashby's yes/no
+            // mirror input is display:none by design and is the only DOM node that names the
+            // question; requiring it to be visible is requiring the question not to exist. Its BLOCK
+            // still has to be visible, which is the honest form of the same check.
+            .filter((el) => {
+              if (el.closest('[id*="litos"]') || el.disabled) return false;
+              const choice = el.type === 'radio' || el.type === 'checkbox';
+              if (!choice && (el.readOnly || !isVisible(el))) return false;
+              if (choice && !isVisible(blockOf(el))) return false;
+              return !isHoneypot(el) || choice;
+            });
           const out = [];
+          const seenBlocks = new Set();
           let counter = 0;
           for (let i = 0; i < els.length; i += 1) {
             const el = els[i];
+            const block = blockOf(el);
+            const choice = el.type === 'radio' || el.type === 'checkbox';
+            // One question, one entry. Keyed on the block for a pill or radio group, and on the
+            // group name where several blocks share one; a text input is always its own question.
+            if (choice) {
+              const key = el.name || block;
+              if (seenBlocks.has(key)) continue;
+              seenBlocks.add(key);
+            }
             const label = clean(questionLabel(el));
             if (!label) continue;
             counter += 1;
             const marker = 'data-litos-discovered-' + counter;
             el.setAttribute(marker, '1');
+            const options = optionsOf(el, block);
             out.push({
               label: label,
               selector: '[' + marker + ']',
-              inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
+              durableSelector: durableSelectorOf(el, block),
+              inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.tagName === 'SELECT' ? 'select' : (el.type || 'text')),
+              required: marksRequired(el, block),
+              options: options.length > 0 ? options : null,
               maxLength: el.maxLength > 0 ? el.maxLength : null
             });
           }
@@ -686,6 +1029,13 @@ const { chromium } = require('playwright');
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
           if (await fillCustomChoice(container, action.value || '')) {
+            if (action.label) filledFields.push(action.label);
+            continue;
+          }
+          // A question whose only controls are option buttons has no field to find, by construction.
+          // Asked here as well as in the checkbox arm below because a board that omits the mirror
+          // input entirely never reaches that arm.
+          if (await pickOptionPill(container, action.value || '')) {
             if (action.label) filledFields.push(action.label);
             continue;
           }
@@ -758,6 +1108,12 @@ const { chromium } = require('playwright');
               matched = true;
               break;
             }
+          }
+          // Before the single-checkbox heuristic below, because on Ashby that heuristic is precisely
+          // the wrong move: the one checkbox in the block is the display:none mirror of a pill pair,
+          // so checking it neither drives React nor distinguishes Yes from No. See pickOptionPill.
+          if (!matched && await pickOptionPill(container, wanted)) {
+            matched = true;
           }
           if (!matched && total === 1 && /^yes$/i.test(wanted)) {
             await choices.first().check();
@@ -848,123 +1204,31 @@ const { chromium } = require('playwright');
     if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
       blockers.push('CAPTCHA requires your attention');
     }
-    const required = page.locator('input[required], textarea[required], select[required]');
-    // A checkbox or radio GROUP is one question wearing many required inputs. Reporting each input
-    // separately turned three unanswered Greenhouse questions into seventeen blockers, every one of
-    // them naming an option ("Statistics", "Putnam", "Handshake") rather than the question the
-    // applicant actually has to answer. One entry per group, named by the question.
-    const reportedGroups = new Set();
-    for (let index = 0; index < await required.count(); index += 1) {
-      const field = required.nth(index);
-      if (!await field.isVisible().catch(() => false)) continue;
-      const groupName = await field.evaluate((element) => (
-        element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')
-          ? element.name || ''
-          : ''
-      )).catch(() => '');
-      if (groupName) {
-        if (reportedGroups.has(groupName)) continue;
-        reportedGroups.add(groupName);
-      }
-      const state = await field.evaluate((element) => {
-        if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'filled' : '';
-        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) {
-          // A checkbox reports value "on" whether or not it is ticked, so the old check treated
-          // every unticked required checkbox as already satisfied and never reported it.
-          const group = element.name ? document.getElementsByName(element.name) : [element];
-          return Array.from(group).some((member) => member.checked) ? 'checked' : '';
-        }
-        return 'value' in element ? String(element.value || '') : '';
-      });
-      if (state) continue;
-      // Resolve a HUMAN label. The old line fell back to the name attribute and then to the
-      // literal string 'required field', which produced the two blocker texts the dashboard was
-      // actually showing applicants:
-      //   "5a326a1d-1a9e-42b1-a918-ca74022064dc is required"  (Greenhouse names custom questions
-      //                                                        with UUIDs, so the name attr is a token)
-      //   "required field is required"                        (the literal fallback, doubled)
-      // Neither tells the applicant which field to go and fix, which is the entire job of a blocker.
-      const label = await field.evaluate((element) => {
-        const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
-        const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
-        const describedBy = element.getAttribute('aria-labelledby');
-        const referenced = describedBy && document.getElementById(describedBy.split(/\s+/)[0]);
-        const wrapping = element.closest('label');
-        const legend = element.closest('fieldset') && element.closest('fieldset').querySelector('legend');
-        const genericControlText = (value) => /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
-        const nearestQuestionText = (start) => {
-          let block = start.parentElement;
-          for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
-            if (!block.matches('div, section, li, fieldset')) continue;
-            const candidate = block.querySelector('label, legend, .question, h3, h4');
-            const text = clean((candidate && candidate.textContent) || '');
-            if (text && !genericControlText(text)) return text;
-          }
-          return '';
-        };
-        // For a checkbox or radio, the per-option sources describe the OPTION ("Statistics",
-        // "Putnam"), not the question the applicant has to answer. Ask the group for its question
-        // first, and only fall back to the option text if the form gives nothing better.
-        const isChoice = element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio');
-        const groupSources = isChoice
-          ? [legend && legend.textContent, element.getAttribute('description'), referenced && referenced.textContent]
-          : [];
-        for (const candidate of [
-          ...groupSources,
-          byFor && byFor.textContent,
-          referenced && referenced.textContent,
-          wrapping && wrapping.textContent,
-          element.getAttribute('aria-label'),
-          element.getAttribute('description'),
-          legend && legend.textContent,
-          nearestQuestionText(element),
-          element.getAttribute('placeholder')
-        ]) {
-          const text = clean(candidate);
-          // Reject machine identifiers rather than dressing one up as a label.
-          if (!text) continue;
-          if (genericControlText(text) && candidate !== element.getAttribute('placeholder')) continue;
-          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
-          if (!/[a-z]/i.test(text)) continue;
-          return text.slice(0, 120);
-        }
-        return '';
-      }).catch(() => '');
-      blockers.push(label ? '"' + label + '" is required and is still empty'
-                          : 'A required field on the form has no label Litos can read, and is still empty');
-    }
-    const requiredFileGroups = page.locator('[role="group"][aria-required="true"]:has(input[type="file"])');
-    const reportedFileGroups = new Set();
-    for (let index = 0; index < await requiredFileGroups.count(); index += 1) {
-      const group = requiredFileGroups.nth(index);
-      if (!await group.isVisible().catch(() => false)) continue;
-      const groupKey = await group.evaluate((element) => element.getAttribute('aria-labelledby') || element.id || '').catch(() => '');
-      if (groupKey && reportedFileGroups.has(groupKey)) continue;
-      if (groupKey) reportedFileGroups.add(groupKey);
-      const hasFile = await group.locator('input[type="file"]').evaluateAll((inputs) => (
-        inputs.some((input) => input instanceof HTMLInputElement && (input.files?.length || 0) > 0)
-      )).catch(() => false);
-      if (hasFile) continue;
-      const label = await group.evaluate((element) => {
-        const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
-        const labelledBy = element.getAttribute('aria-labelledby');
-        const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
-        const label = element.querySelector('.upload-label, label, legend, .question, h3, h4');
-        for (const candidate of [
-          referenced && referenced.textContent,
-          label && label.textContent,
-          element.getAttribute('aria-label')
-        ]) {
-          const text = clean(candidate);
-          if (!text) continue;
-          if (!/[a-z]/i.test(text)) continue;
-          return text.slice(0, 120);
-        }
-        return '';
-      }).catch(() => '');
-      blockers.push(label ? '"' + label + '" is required and is still empty'
-                          : 'A required file upload on the form has no label Litos can read, and is still empty');
-    }
+    /* THE SAME READING OF THE FORM THE PRE-SUBMIT GATE MAKES, made on every run.
+     *
+     * D-01. There used to be two separate answers in this file to the question "which required
+     * fields are still empty": readSubmitReadiness above, built for the moment before the final
+     * click, and a weaker pair of scans here whose output is what the CALLER stores and shows. The
+     * weaker pair looked only at the 'required' ATTRIBUTE (plus aria-required on file upload groups),
+     * and a PREPARE run queues no submit action at all, so the better reading never ran on the call
+     * that decides whether a packet is offered to a person as ready to send.
+     *
+     * Measured on production packet 245c827a (Deepgram, Ashby, 2026-08-09): three required fields
+     * empty on the filled form - Current Location, and both work-eligibility questions - and this
+     * scan returned ZERO blockers, because Ashby marks none of the three with the attribute. The
+     * caller read "no blockers" as "safe", wrote ready_for_final_approval, and put a green "Send it"
+     * button in front of a person.
+     *
+     * One reading, used in both places, is the fix: whatever would withhold the click is also what
+     * the run reports. The two can no longer disagree, and a required field this gate can see is now
+     * visible at prepare time instead of only at the last moment.
+     *
+     * 'stale' and 'unmatched' are deliberately NOT folded in here. Both concern validation MESSAGES
+     * rather than empty controls, they are the half of the gate with the false-positive history, and
+     * a stale message over a filled field must never turn a complete application into a blocked one.
+     */
+    const readiness = await readSubmitReadiness();
+    blockers.push(...readiness.blocking);
     const title = await page.title();
     const url = page.url();
     const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));

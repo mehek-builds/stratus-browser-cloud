@@ -18,11 +18,15 @@ function extractFunctionSource(name) {
 }
 
 function sandboxQuestionLabel() {
+  // blockOf as well as questionLabel: an anonymous control (Ashby's location combobox has no id, no
+  // name and no aria-label) now resolves its question from the block that owns it rather than from
+  // its placeholder, so the two are built together.
   const source = extractFunctionSource('questionLabel');
+  const blockOfSource = extractFunctionSource('blockOf');
   const clean = (value) => (value == null ? '' : value).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   const fakeDocument = { querySelector: () => null };
   const fakeCss = { escape: (value) => String(value) };
-  return Function('clean', 'document', 'CSS', `return (${source});`)(clean, fakeDocument, fakeCss);
+  return Function('clean', 'document', 'CSS', `${blockOfSource}\nreturn (${source});`)(clean, fakeDocument, fakeCss);
 }
 
 function mockElement({ attrs = {}, textContent = '', parentElement = null, queryResult = null } = {}) {
@@ -242,10 +246,18 @@ test('fillByLabelText commits date-like answers before generic text fill', () =>
 });
 
 test('an unticked required checkbox is reported as a blocker', () => {
-  // A checkbox reports value "on" whether or not it is ticked, so the old value check treated every
-  // unticked required checkbox as already satisfied and never reported it.
-  assert.match(SANDBOX_RUNNER, /element\.type === 'checkbox' \|\| element\.type === 'radio'/);
-  assert.match(SANDBOX_RUNNER, /some\(\(member\) => member\.checked\)/);
+  // A checkbox reports value "on" whether or not it is ticked, so a value check treats every
+  // unticked required checkbox as already satisfied and never reports it.
+  //
+  // The claim is unchanged; where it is enforced moved. D-01 replaced the end-of-run scan that used
+  // to answer this with readSubmitReadiness, the same reading the pre-submit gate makes, so the run
+  // reports exactly what would withhold the click. hasAnswer is that reading, and it is unit-tested
+  // directly further down this file.
+  const { hasAnswer } = gateScope();
+  assert.equal(hasAnswer(control({ type: 'checkbox', checked: false })), false);
+  assert.equal(hasAnswer(control({ type: 'checkbox', checked: true })), true);
+  // One answered radio answers its whole group, and only the checked member carries it.
+  assert.match(SANDBOX_RUNNER, /for \(const peer of \(element\.form \|\| document\)\.querySelectorAll/);
 });
 
 test('blockers name a human label and never a machine identifier', () => {
@@ -264,19 +276,34 @@ test('blockers name a human label and never a machine identifier', () => {
 test('a choice group is reported once, by its question, not once per option', () => {
   // Aquatic's Greenhouse form turned three unanswered questions into seventeen blockers, each
   // naming an option ("Statistics", "Putnam", "Handshake") rather than the question to answer.
-  assert.match(SANDBOX_RUNNER, /const reportedGroups = new Set\(\)/);
-  assert.match(SANDBOX_RUNNER, /if \(reportedGroups\.has\(groupName\)\) continue;/);
-  // And the label for a choice control prefers the group's question over the option text.
-  assert.match(SANDBOX_RUNNER, /const groupSources = isChoice/);
+  //
+  // Same guarantee, reached differently since D-01 unified the two readings of the form. The scan
+  // keys on the CONTROL rather than the group - Greenhouse's phone fieldset holds two required
+  // controls and both must be reportable - and the blocking list is then deduped by MESSAGE, so
+  // several inputs resolving to one question collapse to one entry. Measured on the empty live
+  // Redwood form: 15 entries covering 8 distinct fields.
+  assert.match(SANDBOX_RUNNER, /blocking: \[\.\.\.new Set\(required\.map\(\(entry\) => entry\.message\)\)\]/);
+  assert.match(SANDBOX_RUNNER, /const seen = new Set\(\);/);
+  // And the label for a choice control prefers the group's question over the option text: labelOf
+  // reads the widget's own legend or label, never the option the input sits beside.
+  assert.match(SANDBOX_RUNNER, /const legend = widget && widget\.querySelector\('legend'\)/);
+  assert.match(SANDBOX_RUNNER, /const own = widget && widget\.querySelector\('label, \.label, \.upload-label, legend'\)/);
 });
 
 test('required file-upload groups are reported even when the hidden input is not required', () => {
-  // Greenhouse marks transcript uploads as aria-required on the file-upload group while leaving the
-  // hidden input itself without a required attribute, so the generic input[required] scan misses it.
-  assert.match(SANDBOX_RUNNER, /\[role="group"\]\[aria-required="true"\]:has\(input\[type="file"\]\)/);
-  assert.match(SANDBOX_RUNNER, /reportedFileGroups/);
-  assert.match(SANDBOX_RUNNER, /input\.files\?\.length/);
-  assert.match(SANDBOX_RUNNER, /A required file upload on the form has no label Litos can read/);
+  // Greenhouse marks transcript uploads as aria-required on the file-upload GROUP while leaving the
+  // hidden input itself without a required attribute, so an input[required] scan misses it.
+  //
+  // D-01 folded the separate file-group pass into the one required scan: [aria-required="true"]
+  // matches the group, and hasAnswer widens to the container because a container has no value of
+  // its own to read. That also has to keep working when the upload finished and Greenhouse REMOVED
+  // the input, leaving only a filename chip.
+  assert.match(SANDBOX_RUNNER, /input\[required\], textarea\[required\], select\[required\], \[aria-required="true"\]/);
+  const { hasAnswer } = gateScope();
+  assert.equal(hasAnswer(block({ controls: [control({ type: 'file', files: [] })] })), false);
+  assert.equal(hasAnswer(block({ controls: [control({ type: 'file', files: [{}] })] })), true);
+  assert.equal(hasAnswer(block({ chip: true, controls: [] })), true);
+  assert.match(SANDBOX_RUNNER, /A required field on the form has no label Litos can read/);
 });
 
 // R-055 on the managed path: /api/run is otherwise stateless (navigate, act, return), so this
@@ -290,14 +317,18 @@ test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
 });
 
-test('discover scans text-shaped controls only, matching the fill scope', () => {
-  // Never select/radio/checkbox: this runner (see fillByLabelText above) already refuses to click
-  // a choice control by matching an answer to option text on discovered fields, so there is nothing
-  // safe to do with a discovered choice question either - it stays a blocker, same as today.
+test('discover scans choice controls as well as text-shaped ones', () => {
+  /* This used to exclude select, radio and checkbox on the reasoning that the caller never clicks a
+     choice control. That reasoning was already stale - fillByLabelText has select, radio and
+     checkbox arms - and D-01 measured what it cost: Deepgram's two work-eligibility questions are
+     Ashby pill groups, so discovery never saw them, no question record was ever written, and the
+     backend never got the chance to answer them from the booleans it had stored. A question that is
+     never discovered can neither be answered nor asked. */
   assert.match(
     SANDBOX_RUNNER,
-    /input\[type="text"\], input\[type="email"\], input\[type="tel"\], input\[type="url"\], input\[type="number"\], input\[type="date"\], input:not\(\[type\]\), textarea/,
+    /input\[type="text"\], input\[type="email"\], input\[type="tel"\], input\[type="url"\], input\[type="number"\],/,
   );
+  assert.match(SANDBOX_RUNNER, /input\[type="date"\], input\[type="radio"\], input\[type="checkbox"\], input:not\(\[type\]\), textarea, select/);
   assert.match(SANDBOX_RUNNER, /const discovered = \[\];/);
   assert.match(SANDBOX_RUNNER, /discovered, filledFields:/);
 });
@@ -478,7 +509,10 @@ test('a press lands on the element it names, and is skipped when that element is
   assert.match(SANDBOX_RUNNER, /could only have submitted the form/);
 });
 
-const gateScope = () => sandboxScope(['clean', 'CHOICE_SHELL', 'chosenValueOf', 'uploadHasFile', 'hasAnswer'], 6);
+const gateScope = () => sandboxScope(
+  ['clean', 'widgetOf', 'CHOICE_SHELL', 'chosenValueOf', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf', 'hasAnswer'],
+  6,
+);
 
 // A React Select's own shell, the thing its chosen value is rendered into.
 function shellOf({ chosen = '', placeholder = false } = {}) {
