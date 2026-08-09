@@ -237,7 +237,10 @@ test('fillByLabelText dispatches on the control type', () => {
   // Everything used to fall through to fill(), which throws on a checkbox or radio.
   assert.match(SANDBOX_RUNNER, /shape\.tag === 'select'/);
   assert.match(SANDBOX_RUNNER, /shape\.type === 'checkbox' \|\| shape\.type === 'radio'/);
-  assert.match(SANDBOX_RUNNER, /await option\.check\(\)/);
+  // The tick itself. check() first because the input is usually actionable, then the label, because
+  // a board that clips the input out of the layout still paints words a person can click.
+  assert.match(SANDBOX_RUNNER, /await match\.check\(\{ timeout: 5000 \}\)/);
+  assert.match(SANDBOX_RUNNER, /\(byFor \|\| element\.closest\('label'\) \|\| element\)\.click\(\)/);
 });
 
 test('fills are reported only after the page keeps the value', () => {
@@ -370,12 +373,79 @@ test('a text fill that does not stick is retried as the choice it turned out to 
 
 test('choice matching is scoped to the question container, never the page', () => {
   // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
-  // on the form, which the applicant cannot undo.
-  assert.match(SANDBOX_RUNNER, /const choices = container\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
-  // And an answer that matches no option leaves the control alone rather than guessing.
-  assert.match(SANDBOX_RUNNER, /if \(!matched\) continue;/);
+  // on the form, which the applicant cannot undo. The scope is now the question's OWN option block
+  // rather than whatever container the anchor happened to land in; see D-02 and the test below.
+  assert.match(SANDBOX_RUNNER, /const scope = await questionOptionBlock\(label, container\);/);
+  assert.match(SANDBOX_RUNNER, /const choices = scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
+  // And an answer that matches no option leaves the control alone rather than guessing - and says
+  // so, which it used to do silently.
+  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(wanted\) \+ '", left for you to choose/);
   assert.match(SANDBOX_RUNNER, /total === 1 && \/\^yes\$\/i\.test\(wanted\)/);
   assert.match(SANDBOX_RUNNER, /actual === 'checked' && \/\^yes\$\/i\.test\(clean\(expected\)\)/);
+});
+
+test('a radio is reported from the radio that was clicked, not from the first one in the block', () => {
+  /* D-02, the reporting half. Measured against the live Skydio Ashby form on 2026-08-09 with the
+   * runner at 41d3095: all four EEO questions came back "value did not persist after
+   * fillByLabelText" and filled_fields was empty, while the gender control was visibly holding an
+   * answer. The branch ticked option n and then fell through to verifyFilled(field), where field is
+   * the FIRST input in the block, so every answer that was not option 0 read back unchecked.
+   *
+   * The option now reports on itself and the arm ends there. Nothing about a choice reaches the
+   * text verification at the bottom of fillByLabelText. */
+  assert.match(SANDBOX_RUNNER, /const isChecked = async \(\) => await match\.evaluate\(\(element\) => element\.checked === true\)/);
+  assert.match(SANDBOX_RUNNER, /return await isChecked\(\) \? 'checked' : 'not-checked';/);
+  assert.match(SANDBOX_RUNNER, /if \(outcome === 'checked'\) \{\n\s+if \(action\.label\) filledFields\.push\(action\.label\);\n\s+continue;/);
+  // A click that did not take is the applicant's to finish, and is named as such.
+  assert.match(SANDBOX_RUNNER, /the option was clicked and did not stay selected/);
+});
+
+test('a question is anchored on the element that names it, not on prose that mentions it', () => {
+  /* D-02, the placement half, and the more damaging of the two. On the live Skydio Ashby form the
+   * first element containing "gender" is the equal-opportunity preamble - "...without regard to
+   * race, color, religion, sex, gender identity..." - three questions above any control. Its
+   * nearest ancestor holding an input is the whole self-identification section, eleven radios
+   * across two questions, so the Race answer "Decline to self-identify" matched GENDER's
+   * "Decline to self-identify" first in DOM order and set it. Measured end to end: the gender
+   * control finished holding a decline on a run whose packet said Female, and Race was left blank.
+   *
+   * A whole-string match is tried first, so an element whose entire text IS the question wins over
+   * prose that merely contains it. Containment stays as the fallback. */
+  assert.match(SANDBOX_RUNNER, /const wholeLabel = wantedLabel/);
+  assert.match(SANDBOX_RUNNER, /const exactLabel = wholeLabel \? page\.getByText\(wholeLabel\)\.first\(\) : null;/);
+  assert.match(SANDBOX_RUNNER, /: page\.getByText\(action\.text, \{ exact: false \}\)\.first\(\);/);
+  // And the option block is walked up from that anchor, through the four ways a board says "these
+  // options belong together".
+  assert.match(SANDBOX_RUNNER, /const questionOptionBlock = async \(anchor, fallback\) =>/);
+  assert.match(SANDBOX_RUNNER, /self::fieldset or @data-field-path or @role="radiogroup" or @role="group"/);
+  // Two named radio groups in one block are two questions, and answering either is a guess.
+  assert.match(SANDBOX_RUNNER, /const radioGroupNames = async \(scope\) =>/);
+  assert.match(SANDBOX_RUNNER, /if \(groups\.length > 1\) \{/);
+  assert.match(SANDBOX_RUNNER, /could have landed on another question, left for you to choose/);
+});
+
+test('the label anchor is a whole-string match, so prose containing the question word loses', () => {
+  // The regex the anchor is built from, exercised directly. "gender" is the stored question text
+  // from packet 13bccb2d; "Gender" is Ashby's capitalisation, and the preamble sentence is the
+  // element that used to win.
+  const wholeLabel = (text) =>
+    new RegExp('^\\s*' + text.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:]?\\s*$', 'i');
+  const gender = wholeLabel('gender');
+  assert.equal(gender.test('Gender'), true, 'the question label, in the board\'s own capitalisation');
+  assert.equal(gender.test('Gender *'), true, 'a required label carries an asterisk');
+  assert.equal(gender.test('Gender:'), true);
+  assert.equal(
+    gender.test('Skydio provides equal employment opportunities to applicants and employees without'
+      + ' regard to race, color, religion, sex, gender identity, sexual orientation'),
+    false,
+    'the preamble that used to be the anchor',
+  );
+  assert.equal(gender.test('Input gender'), false, 'the control description under the label');
+  assert.equal(gender.test('What gender identity do you most closely identify with?'), false);
+  // A question with regex metacharacters in it is matched literally, not compiled.
+  const parens = wholeLabel('Do you live with a disability (as outlined by the ADA)?');
+  assert.equal(parens.test('Do you live with a disability (as outlined by the ADA)?'), true);
+  assert.equal(parens.test('Do you live with a disability as outlined by the ADA?'), false);
 });
 
 test('fillByLabelText climbs to a container that actually owns controls', () => {
