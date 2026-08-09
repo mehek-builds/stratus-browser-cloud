@@ -126,18 +126,42 @@ const { chromium } = require('playwright');
     let securityCodeAttempt = null;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    /* A REFUSAL TO STATE, RECOGNISED BY WHAT IT MEANS RATHER THAN BY HOW IT IS SPELLED.
+     *
+     * Tested against normalized() output, where punctuation is already spaces, so "don't" arrives
+     * as "don t" and "self-identify" as "self identify".
+     *
+     * The enumerated synonym list below could not reach the wording that actually shipped. Both of
+     * the option vocabularies Litos has ever recorded, read out of stored Greenhouse label blobs on
+     * 2026-08-09, word their opt-out their own way:
+     *   "I decline to self-identify for protected veteran status"
+     *   "I do not want to answer"                     <- want, not wish. No synonym on the list.
+     * Enumerating spellings is a losing game on this family: an opt-out is the one entry on an EEO
+     * list an employer can word however it likes, because it means the same thing regardless.
+     */
+    const DECLINE_TO_STATE = new RegExp([
+      'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
+      '(?:do not|do nt|don t|dont|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
+        + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+      'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+      '^(?:declined?|declines|i decline|no answer|not disclosed|not specified|undisclosed)$'
+    ].join('|'));
     const answerOptions = (value) => {
       const base = clean(value);
       const lower = base.toLowerCase();
       const options = [base];
       if (/^yes$/.test(lower)) options.push('yes', 'i agree', 'agree', 'true');
       if (/^no$/.test(lower)) options.push('no', 'false');
-      if (/decline|self-identify|prefer not|do not wish|don't wish|not wish/i.test(base)) {
+      if (DECLINE_TO_STATE.test(normalized(base))) {
         options.push(
           'decline to self-identify',
+          'i decline to self-identify',
           'i do not wish to answer',
           "i don't wish to answer",
+          'i do not want to answer',
+          "i don't want to answer",
           'i do not wish to disclose',
+          'choose not to disclose',
           'prefer not to answer',
           'prefer not to say'
         );
@@ -147,6 +171,11 @@ const { chromium } = require('playwright');
     const optionMatches = (candidate, wanted) => {
       const a = normalized(candidate);
       if (!a) return false;
+      // Intent before spelling, and only ever decline-to-decline. Two texts that both refuse to
+      // state say the same thing however each one is worded, so an option list that offers any
+      // refusal can carry a stored refusal. Nothing else is matched this way: every other answer on
+      // an EEO list is a claim about her, and a claim has to match the words.
+      if (DECLINE_TO_STATE.test(a) && DECLINE_TO_STATE.test(normalized(wanted))) return true;
       return answerOptions(wanted).some((option) => {
         const b = normalized(option);
         return a === b || (b.length > 6 && a.includes(b)) || (a.length > 6 && b.includes(a));
@@ -1670,7 +1699,29 @@ const { chromium } = require('playwright');
             element.dispatchEvent(new Event('change', { bubbles: true }));
           }).catch(() => undefined);
         }
-        if (action.label && await verifyFilled(field, action.value || '')) filledFields.push(action.label);
+        /* A TEXT FILL THAT DOES NOT STICK IS EVIDENCE THE CONTROL IS NOT TEXT.
+         *
+         * Measured on production packet 13bccb2d (Skydio, Ashby, 2026-08-09): "gender" and "veteran
+         * status" were both resolved from the stored profile, both dispatched down this branch, and
+         * both came back "value did not persist after fillByLabelText". A real text input keeps what
+         * you type into it. One that does not is a widget's own search box, or a mirror input behind
+         * a set of option buttons, and this branch was reached only because the shape read gave no
+         * role, no aria-haspopup and no aria-autocomplete to dispatch on - which comment (3) at the
+         * top of the backend's profileFieldResolution already records as routine on this path.
+         *
+         * So the failed verification is the signal, and the two choice fills get their turn before
+         * the field is written off. Ordered most scoped first: pickOptionPill only ever clicks a
+         * button inside THIS question's container, fillCustomChoice is the react-select path that
+         * the same defect class was already fixed in. Nothing here runs on a fill that worked.
+         */
+        let persisted = await verifyFilled(field, action.value || '');
+        if (!persisted) {
+          if (await pickOptionPill(container, action.value || '')) persisted = true;
+          else if (await fillCustomChoice(container, action.value || '')) {
+            persisted = await verifyChoiceInContainer(container, action.value || '');
+          }
+        }
+        if (action.label && persisted) filledFields.push(action.label);
         else if (action.label) skipped.push(action.label + ': value did not persist after fillByLabelText');
       }
       if (action.type === 'upload') {

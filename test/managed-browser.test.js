@@ -329,6 +329,45 @@ test('decline style EEO answers can match common portal option text', () => {
   assert.match(SANDBOX_RUNNER, /optionMatches\(optionText, wanted\)/);
 });
 
+test('an opt-out is matched by what it means, not by how the employer spelled it', () => {
+  // The two option vocabularies Litos has ever recorded, read out of stored Greenhouse label blobs
+  // on 2026-08-09. Both word their opt-out their own way, and the stored answer is the plain
+  // "Decline to self-identify" for both.
+  const { optionMatches } = choiceHelpers();
+  const stored = 'Decline to self-identify';
+  assert.equal(optionMatches('I decline to self-identify for protected veteran status', stored), true);
+  // "want", not "wish". No spelling on the enumerated synonym list could reach it.
+  assert.equal(optionMatches('I do not want to answer', stored), true);
+  assert.equal(optionMatches('I would rather not disclose this', stored), true);
+  assert.equal(optionMatches("I don't wish to answer", stored), true);
+  // And the answers on those same two lists that are CLAIMS about her are never read as refusals.
+  assert.equal(optionMatches('I am not a protected veteran', stored), false);
+  assert.equal(optionMatches('No, I do not have a disability and have not had one in the past', stored), false);
+  assert.equal(optionMatches('Yes, I have a disability, or have had one in the past', stored), false);
+  assert.equal(
+    optionMatches('I identify as one or more of the classifications of protected veteran listed above', stored),
+    false,
+  );
+  // Intent matching is decline-to-decline only: a refusal on the list does not answer a question
+  // she gave a real answer to.
+  assert.equal(optionMatches('I do not want to answer', 'Female'), false);
+  assert.equal(optionMatches('I do not want to answer', 'Yes'), false);
+});
+
+test('a text fill that does not stick is retried as the choice it turned out to be', () => {
+  // Measured on production packet 13bccb2d (Skydio, Ashby): "gender" and "veteran status" were both
+  // resolved from the stored profile, both fell through to the plain text branch because the shape
+  // read gave no role and no aria-haspopup to dispatch on, and both reported "value did not persist
+  // after fillByLabelText". A real text input keeps what you type; one that does not is a widget.
+  assert.match(SANDBOX_RUNNER, /let persisted = await verifyFilled\(field, action\.value \|\| ''\);/);
+  assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n\s+persisted = await verifyChoiceInContainer/);
+  // Still only ever reported as filled once the page can be read back, and still reported as the
+  // applicant's work when it cannot.
+  assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);
+  assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
+});
+
 test('choice matching is scoped to the question container, never the page', () => {
   // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
   // on the form, which the applicant cannot undo.
@@ -544,7 +583,7 @@ function sandboxScope(names, indent = 4) {
   return Function(`${sources}\nreturn { ${names.join(', ')} };`)();
 }
 
-const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'answerOptions', 'optionMatches', 'readChoiceState', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
+const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'readChoiceState', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
 
 function reactSelectContainer({ chosen = '', placeholder = false, ownText = '', widgetText = '' } = {}) {
   const widget = {
