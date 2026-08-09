@@ -103,6 +103,11 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 </div>
 <!-- 'extract' reads text, and an input has none, so what each picker is holding is echoed here the
      same way the phone fields echo theirs. -->
+<!-- The native month control, which demands a month and a year and no day. A day on file loses its
+     day here, which the control asked it to; a bare year is refused here too, because a month
+     control demands a month and a year does not name one. -->
+<label for="grad_month">Expected graduation</label>
+<input id="grad_month" type="month">
 <div id="grad-echo"></div>
 <div id="from-echo"></div>
 <div id="to-echo"></div>
@@ -1018,6 +1023,22 @@ const GRAD_ECHO = '#grad-echo';
   assert.deepEqual(ambiguous.filledFields, [], 'and nothing may be reported filled, got ' + JSON.stringify(ambiguous));
   assert.ok(ambiguous.skipped.some((entry) => /does not name a control Litos can type into/.test(entry)),
     'and the run must say so, got ' + JSON.stringify(ambiguous.skipped));
+
+  // The native month control: a day on file narrows to the month the control asked for, and a bare
+  // year is refused here for the same reason it is refused on a day control.
+  const nativeMonth = await replay([
+    { type: 'fill', selector: '#grad_month', value: '2028-05-15', label: 'graduation', optional: true },
+    { type: 'extract', selector: '#grad_month', attribute: 'value' }
+  ]);
+  assert.deepEqual(nativeMonth.filledFields, ['graduation'],
+    'a month control must accept a full date at its own precision, got ' + JSON.stringify(nativeMonth));
+  const monthYearOnly = await replay([
+    { type: 'fill', selector: '#grad_month', value: '2028', label: 'graduation', optional: true }
+  ]);
+  assert.deepEqual(monthYearOnly.filledFields, [],
+    'a year names no month, got ' + JSON.stringify(monthYearOnly));
+  assert.ok(monthYearOnly.skipped.some((entry) => /needs a full date, but the answer on file is only the year/.test(entry)),
+    'and the run must say so, got ' + JSON.stringify(monthYearOnly.skipped));
 
   // The same control reached by its LABEL rather than by a selector takes the same path, so the two
   // fill branches cannot drift into answering this question two different ways.

@@ -361,7 +361,9 @@ const { chromium } = require('playwright');
       const pad = (value) => String(value).padStart(2, '0');
       const month = MONTH_WORDS[point.month - 1];
       const name = month ? month[0].toUpperCase() + month.slice(1) : '';
-      if (precision === 'month' || (point.precision === 'month' && precision !== 'day')) {
+      // A day on file going into a month control loses the day, which the control asked it to.
+      // Losing detail the control cannot hold is not the same act as inventing detail it demands.
+      if (precision === 'month') {
         return [point.year + '-' + pad(point.month), name ? name + ' ' + point.year : ''].filter(Boolean);
       }
       const day = point.day || 1;
@@ -390,7 +392,9 @@ const { chromium } = require('playwright');
     const fillDateControl = async (field, requested, precision) => {
       const wanted = calendarPointOf(requested);
       if (!wanted) return { outcome: 'unreadable' };
-      if (wanted.precision === 'year' && precision !== 'year') return { outcome: 'too-coarse', wanted };
+      // Refused against a day control AND against a month control, because both of them demand a
+      // month and a year does not name one.
+      if (wanted.precision === 'year') return { outcome: 'too-coarse', wanted };
       for (const form of dateWriteForms(wanted, precision)) {
         await field.fill(form).catch(() => undefined);
         await field.evaluate((element) => {
