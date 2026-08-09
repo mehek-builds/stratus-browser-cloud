@@ -2148,6 +2148,9 @@ const { chromium } = require('playwright');
               selector: '[' + marker + ']',
               durableSelector: durableSelectorOf(el, block),
               inputType: el.tagName === 'TEXTAREA' ? 'textarea' : (el.tagName === 'SELECT' ? 'select' : (el.type || 'text')),
+              // A React-select is still an <input type="text">. Its DOM role is the wire evidence
+              // that distinguishes it from a genuine open text field such as end-year--0.
+              role: el.getAttribute('role') || null,
               required: marksRequired(el, block),
               options: options.length > 0 ? options : null,
               maxLength: el.maxLength > 0 ? el.maxLength : null
@@ -2646,7 +2649,10 @@ const { chromium } = require('playwright');
      */
     const continuationOffered = input.requestContinuation === true
       && (Boolean(humanVerification) || input.continuationCheckpoint === true);
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, elapsedMs: Date.now() - startedAt }));
+    const discoveryCapabilities = currentInput.actions.some((action) => action.type === 'discover')
+      ? ['discovery-control-role-v1']
+      : null;
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(discoveryCapabilities ? { capabilities: discoveryCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
     fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: input.continuationExpiresAt, host: input.allowedHost }));
     /* A FLOOR UNDER THE IDLE, because the TTL is counted from before the run started and phase 0

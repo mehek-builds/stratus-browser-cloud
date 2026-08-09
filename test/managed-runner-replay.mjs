@@ -53,10 +53,10 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <div id="slow-email-echo"></div>
 <label for="start_month">Start month</label>
 <select id="start_month"><option value=""></option><option value="5">May</option></select>
-<input id="plain" type="text">
+<label for="plain">End year</label><input id="plain" type="text">
 <div id="plain-echo"></div>
 <input id="aimed" type="text">
-<div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
+<label for="combo">Overall GPA</label><div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
 <!-- 'Expected Graduation Year' as the live Deepgram Ashby form renders it. Focusing the field opens
      a calendar that does NOT close when the value is committed, and it is absolutely positioned over
@@ -417,6 +417,25 @@ async function replay(actions, options = {}) {
 }
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
+
+// D-009 provider contract. A React Select remains inputType=text at the DOM layer, so the role and
+// the exact capability must travel together. A non-discovery response must not advertise a
+// discovery schema it did not return.
+{
+  const discovery = await replay([{ type: 'discover' }]);
+  const combo = discovery.discovered.find((field) => field.durableSelector === '#combo');
+  assert.ok(combo, 'the combobox fixture must be discovered: ' + JSON.stringify(discovery.discovered));
+  assert.deepEqual(
+    { inputType: combo.inputType, role: combo.role },
+    { inputType: 'text', role: 'combobox' },
+    'the Stratus provider wire must match the backend ManagedDiscoveredQuestion shape'
+  );
+  assert.deepEqual(discovery.capabilities, ['discovery-control-role-v1']);
+
+  const ordinary = await replay([{ type: 'extract', selector: 'title' }]);
+  assert.equal(Object.hasOwn(ordinary, 'capabilities'), false,
+    'capability advertisement belongs only to a result that ran discovery');
+}
 
 // 1. An optional waitForSelector must wait. It is the one action whose entire job is to wait, and
 //    the pre-check used to answer "not there" before its timeout ever started. This is exactly the

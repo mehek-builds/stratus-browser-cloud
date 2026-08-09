@@ -136,6 +136,10 @@ test('discovery reports choice questions, one entry per question, with their opt
   assert.match(discover, /required: marksRequired\(el, block\)/);
   assert.match(discover, /options: options\.length > 0 \? options : null/);
   assert.match(discover, /durableSelector: durableSelectorOf\(el, block\)/);
+  // inputType alone reports React-selects as text. Preserve the live DOM role on the result wire so
+  // the backend can probe only role=combobox controls and leave ordinary text inputs open.
+  assert.match(discover, /role: el\.getAttribute\('role'\) \|\| null/);
+  assert.match(SANDBOX_RUNNER, /\? \['discovery-control-role-v1'\]/);
 });
 
 test('a discovered control reports an identity that survives the next page load', () => {
