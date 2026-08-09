@@ -709,7 +709,11 @@ test('discover scans choice controls as well as text-shaped ones', () => {
   );
   assert.match(SANDBOX_RUNNER, /input\[type="date"\], input\[type="radio"\], input\[type="checkbox"\], input:not\(\[type\]\), textarea, select/);
   assert.match(SANDBOX_RUNNER, /const discovered = \[\];/);
-  assert.match(SANDBOX_RUNNER, /discovered, filledFields:/);
+  assert.match(SANDBOX_RUNNER, /const discoveryCapabilities = currentInput\.actions\.some/);
+  assert.match(SANDBOX_RUNNER, /inputType: el\.tagName === 'TEXTAREA'/);
+  assert.match(SANDBOX_RUNNER, /role: el\.getAttribute\('role'\) \|\| null/);
+  assert.match(SANDBOX_RUNNER, /\? \['discovery-control-role-v1'\]/);
+  assert.match(SANDBOX_RUNNER, /\.\.\.\(discoveryCapabilities \? \{ capabilities: discoveryCapabilities \} : \{\}\)/);
 });
 
 test('discover prefers the question text over generic Ashby date placeholders', () => {
