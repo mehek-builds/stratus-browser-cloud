@@ -84,7 +84,11 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
       }
       return;
     }
-    renderChallenge();
+    // A client-rendered ATS can commit the verification step on a later task. The submit click is
+    // already real at this point, but there is briefly no navigation, receipt, or code control to
+    // observe. The delayed query pins that production shape without slowing the other replay cases.
+    if (location.search.includes('delayed=1')) setTimeout(renderChallenge, 250);
+    else renderChallenge();
   });
   if (location.search.includes('challenge=1')) renderChallenge();
   // A boxed code group that auto-advances, which is what makes focus-and-type the right first
@@ -197,6 +201,20 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
    * class - which is the whole reason this detector reads the control's SHAPE instead. */
   assert.deepEqual(result.blockers, [],
     'the code boxes must not be reported as empty required fields, got ' + JSON.stringify(result.blockers));
+}
+
+// 3b. THE POST-CLICK TRANSITION CAN BE CLIENT-RENDERED. This action is deliberately last, matching
+// a production submit list. A runner that only waits for networkidle sees no network request, reads
+// the old form immediately, and reports neither a challenge nor a receipt.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+  ], { allowSubmit: true, pathSuffix: '?delayed=1' });
+  assert.equal(result.humanVerification?.kind, 'security_code',
+    'the runner must observe a delayed client-rendered verification control');
+  assert.equal(result.continuationOffered, false,
+    'this replay did not request a continuation, so detecting the challenge must not invent one');
 }
 
 // 4. THE CODE FINISHES THE APPLICATION in its own continuation run. That run begins on the changed
