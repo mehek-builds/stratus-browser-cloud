@@ -58,14 +58,16 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <input id="aimed" type="text">
 <label for="combo">Overall GPA</label><div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
-<!-- 'Expected Graduation Year' as the live Deepgram Ashby form renders it. Focusing the field opens
+<!-- The overlay half of the live Deepgram Ashby graduation field, kept as its own block so the
+     dismissal can be measured against a next question. Named differently from the field-entry block
+     below only so getByText has one answer. Focusing it opens
      a calendar that does NOT close when the value is committed, and it is absolutely positioned over
      the question below - over that question's control AND its label. #covers publishes what
      document.elementFromPoint says about the next control, because the runner cannot run
      elementFromPoint itself and a verdict has to come from the run that happened. The calendar
      closes on Escape and on nothing else here, which is what makes the dismissal's aim visible. -->
 <div id="date-block" style="position: relative">
-  <label for="grad_year">Expected Graduation Year</label>
+  <label for="grad_year">Anticipated Completion Date</label>
   <input id="grad_year" type="text" autocomplete="off">
   <div id="calendar" style="display: none; position: absolute; left: 0; top: 100%; z-index: 30; width: 320px; height: 200px; background: #fff; border: 1px solid #ccc">May 2028</div>
 </div>
@@ -73,6 +75,37 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <input id="how_heard" type="text">
 <div id="covers"></div>
 <div id="calendar-dismissed"></div>
+<!-- 'Expected Graduation Year' EXACTLY as the live Deepgram Ashby form serves it, copied out of the
+     page on 2026-08-09. Two things about this markup are the whole point and neither is the date:
+       - the input carries NO id and NO name, which is why the fill action the backend built for it
+         is aimed at the field-entry DIV. locator.fill() throws on a div.
+       - react-datepicker parses on a Tab keydown and on nothing else. fill() plus dispatched input
+         and change events - what every other fill on the page does - leaves it holding raw text and
+         holding no date, which is how a filled-looking field reported "required and is still
+         empty". Measured: fill('2028-05-01') then blur() reads back 2028-05-01 uncommitted; the
+         same write then Tab reads back 05/01/2028.
+     The parse below is the measured behaviour and not a convenience: an unparseable string is left
+     alone, a bare year becomes the FIRST OF JANUARY of that year, and everything else normalises to
+     MM/DD/YYYY. The January is the reason a bare year is refused rather than typed. -->
+<div class="_fieldEntry_1e3gg_28 ashby-application-form-field-entry" data-field-path="407cc864-6d10-4427-bc5e-71598c5e593f">
+  <label class="_heading_f7cvd_52" for="407cc864-6d10-4427-bc5e-71598c5e593f">Expected Graduation Year</label>
+  <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container">
+    <input type="text" placeholder="Pick date..." class="_input_gc9ve_28" required value=""></div></div>
+</div>
+<!-- The same widget with two controls in the block, so a wrapper that speaks for two questions is
+     refused rather than guessed at. -->
+<div data-field-path="two-controls">
+  <label>Enrolment window</label>
+  <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container">
+    <input type="text" placeholder="Pick date..." class="from"></div></div>
+  <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container">
+    <input type="text" placeholder="Pick date..." class="to"></div></div>
+</div>
+<!-- 'extract' reads text, and an input has none, so what each picker is holding is echoed here the
+     same way the phone fields echo theirs. -->
+<div id="grad-echo"></div>
+<div id="from-echo"></div>
+<div id="to-echo"></div>
 <!-- THE CONTRAST CASE for the phone rule, and the reason it is wrapped in its own block: a phone
      field with NO country control anywhere in its group must keep its full international number.
      Loose in the body it would find the country React Select in the application form below, which
@@ -200,6 +233,48 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     calendar.style.display = 'none';
     document.getElementById('calendar-dismissed').textContent = 'yes';
   });
+  // ---- react-datepicker, parsing on Tab and on nothing else ----
+  //
+  // A behavioural model of the measured control, not a copy of the library. Everything it does here
+  // was observed on the live Deepgram form: the raw text stays exactly as typed until a Tab keydown
+  // arrives, and only then is it parsed, normalised to MM/DD/YYYY, or erased.
+  var MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+  function parseTyped(raw) {
+    var text = String(raw || '').trim();
+    if (!text) return null;
+    var iso = text.match(/^((?:19|20)\\d{2})-(\\d{1,2})-(\\d{1,2})$/);
+    if (iso) return { y: +iso[1], m: +iso[2], d: +iso[3] };
+    var named = text.match(/^([a-z]+)\\.?\\s+(\\d{1,2})?,?\\s*((?:19|20)\\d{2})$/i);
+    if (named) {
+      var index = -1;
+      for (var i = 0; i < MONTHS.length; i += 1) if (MONTHS[i].indexOf(named[1].toLowerCase()) === 0) index = i;
+      // 'Spring 2028' is not a month, so this is where the library falls back to the year alone -
+      // and a year alone becomes the first of January.
+      if (index < 0) return null;
+      return { y: +named[3], m: index + 1, d: named[2] ? +named[2] : 1 };
+    }
+    var slash = text.match(/^(\\d{1,2})\\/(\\d{1,2})\\/((?:19|20)\\d{2})$/);
+    if (slash) return { y: +slash[3], m: +slash[1], d: +slash[2] };
+    var year = text.match(/^((?:19|20)\\d{2})$/);
+    if (year) return { y: +year[1], m: 1, d: 1 };
+    return null;
+  }
+  function pad(value) { return value < 10 ? '0' + value : String(value); }
+  var ECHOES = ['grad-echo', 'from-echo', 'to-echo'];
+  Array.prototype.forEach.call(document.querySelectorAll('.react-datepicker__input-container input'), function (input, position) {
+    var echo = document.getElementById(ECHOES[position]);
+    function publish() { if (echo) echo.textContent = input.value; }
+    input.addEventListener('input', publish);
+    input.addEventListener('keydown', function (event) {
+      if (event.key !== 'Tab') return;
+      var point = parseTyped(input.value);
+      // Unparseable text is erased, exactly as the live control erases '05/2028'.
+      input.value = point ? pad(point.m) + '/' + pad(point.d) + '/' + point.y : '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+
   // Polled rather than computed once: the overlay's geometry settles a frame after the style
   // change, and the runner's next action follows a fill by a few milliseconds.
   setInterval(function () {
@@ -861,6 +936,100 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(exitCode, 0, `continuation runner exited ${exitCode}: ${stderr}`);
 }
 
+/* 12. THE ASHBY GRADUATION DATE PICKER, end to end, against the markup the live board serves.
+ *
+ * Production packet 59fb48ae (Deepgram, Ashby, 2026-08-09) filled name, email, phone, resume, both
+ * essays, work authorisation, sponsorship and all three EEO questions, and shipped with one field
+ * empty and the submit withheld for it: '"Expected Graduation Year" is required and is still empty'.
+ *
+ * Every case below fails against the previous runner, and for two different reasons. The write was
+ * aimed at a DIV, because that input has no id and no name and the wrapper is the only thing
+ * discovery could name; and the picker parses on a Tab keydown that the plain fill path never sent.
+ *
+ * The last case is the one that is not about mechanism. A bare year is what this packet actually
+ * carried, and there is no honest way to put it on a control that insists on a day.
+ */
+const GRAD = '[data-field-path="407cc864-6d10-4427-bc5e-71598c5e593f"]';
+const GRAD_ECHO = '#grad-echo';
+{
+  // A full date on file goes on unchanged, and the normalised read-back is not a lost fill.
+  const exact = await replay([
+    { type: 'fill', selector: GRAD, value: '2028-05-15', label: 'graduation', optional: true },
+    { type: 'extract', selector: GRAD_ECHO }
+  ]);
+  assert.equal(valueOf(exact, GRAD_ECHO), '05/15/2028',
+    'a full date must reach the control through a wrapper selector, got ' + JSON.stringify(valueOf(exact, GRAD_ECHO)));
+  assert.deepEqual(exact.filledFields, ['graduation'],
+    'and the picker rewriting it to its own format is not a lost answer, got ' + JSON.stringify(exact));
+
+  /* THE CONVENTION. A month on file, a control that insists on a day, and the day it is given is
+   * the FIRST of that month.
+   *
+   * Stated here because a reader should be able to disagree with it deliberately. The year and the
+   * month are exactly what is on file and neither moves; the first is the canonical widening of a
+   * month-precision date, and it is what ISO 8601, every date library and this picker itself
+   * produce from the same input; and no employer screen can read a different month out of it. The
+   * day is the only invented part and it is the only part nothing is decided on. */
+  const month = await replay([
+    { type: 'fill', selector: GRAD, value: 'May 2028', label: 'graduation', optional: true },
+    { type: 'extract', selector: GRAD_ECHO }
+  ]);
+  assert.equal(valueOf(month, GRAD_ECHO), '05/01/2028',
+    'a month on file is widened to the first of that month, got ' + JSON.stringify(valueOf(month, GRAD_ECHO)));
+  assert.deepEqual(month.filledFields, ['graduation'],
+    'and it must be reported filled, got ' + JSON.stringify(month));
+
+  /* AND THE REFUSAL, which is the case the Deepgram packet is.
+   *
+   * "2028" is what reached the runner. Typing it and tabbing off leaves 01/01/2028 - the picker
+   * picks January by itself - and January is wrong about a person who graduates in May by four
+   * months. That is not a missing day, it is the wrong answer to the question an internship screens
+   * on, so nothing is written and the run says what was missing. The control must be left EMPTY:
+   * a plausible wrong date is worse than a blank, because the blank is reported to her and the date
+   * is not. */
+  const bareYear = await replay([
+    { type: 'fill', selector: GRAD, value: '2028', label: 'graduation', optional: true },
+    { type: 'extract', selector: GRAD_ECHO }
+  ]);
+  assert.equal(valueOf(bareYear, GRAD_ECHO), '',
+    'a year must never be widened into a month nobody stated, got ' + JSON.stringify(valueOf(bareYear, GRAD_ECHO)));
+  assert.deepEqual(bareYear.filledFields, [],
+    'and it must not be reported filled, got ' + JSON.stringify(bareYear.filledFields));
+  assert.ok(bareYear.skipped.some((entry) => /^graduation: this control is a date picker and needs a full date/.test(entry)),
+    'and the run must say exactly what was missing, got ' + JSON.stringify(bareYear.skipped));
+
+  // A term is a year and not a month, for the same reason and with the same outcome. Spring ends in
+  // April, May or June depending on the school, and the picker turns it into the first of January.
+  const term = await replay([
+    { type: 'fill', selector: GRAD, value: 'Spring 2028', label: 'graduation', optional: true },
+    { type: 'extract', selector: GRAD_ECHO }
+  ]);
+  assert.equal(valueOf(term, GRAD_ECHO), '',
+    'a term names no month, got ' + JSON.stringify(valueOf(term, GRAD_ECHO)));
+
+  // A wrapper holding two pickers speaks for two questions, and the answer is written to neither.
+  const ambiguous = await replay([
+    { type: 'fill', selector: '[data-field-path="two-controls"]', value: '2028-05-15', label: 'window', optional: true },
+    { type: 'extract', selector: '#from-echo' },
+    { type: 'extract', selector: '#to-echo' }
+  ]);
+  assert.equal(valueOf(ambiguous, '#from-echo'), '',
+    'a block holding two controls must not be guessed at');
+  assert.deepEqual(ambiguous.filledFields, [], 'and nothing may be reported filled, got ' + JSON.stringify(ambiguous));
+  assert.ok(ambiguous.skipped.some((entry) => /does not name a control Litos can type into/.test(entry)),
+    'and the run must say so, got ' + JSON.stringify(ambiguous.skipped));
+
+  // The same control reached by its LABEL rather than by a selector takes the same path, so the two
+  // fill branches cannot drift into answering this question two different ways.
+  const byLabel = await replay([
+    { type: 'fillByLabelText', text: 'Expected Graduation Year', value: 'May 2028', label: 'graduation', optional: true },
+    { type: 'extract', selector: GRAD_ECHO }
+  ]);
+  assert.equal(valueOf(byLabel, GRAD_ECHO), '05/01/2028',
+    'fillByLabelText must commit the same way, got ' + JSON.stringify(valueOf(byLabel, GRAD_ECHO)));
+  assert.deepEqual(byLabel.filledFields, ['graduation'], 'got ' + JSON.stringify(byLabel));
+}
+
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, and the pre-submit gate holds in both directions');
+console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, a graduation date picker is reached through the wrapper that names it and is never given a month nobody stated, and the pre-submit gate holds in both directions');

@@ -269,7 +269,7 @@ const { chromium } = require('playwright');
       if (element.closest && element.closest(
         '.react-datepicker-wrapper, .react-datepicker__input-container, [class*="datepicker" i], [class*="date-picker" i]'
       )) return 'day';
-      if (/\b(?:pick|choose|select)\b[^a-z]{0,4}date/i.test(element.getAttribute('placeholder') || '')) return 'day';
+      if (/\b(?:pick|choose|select)\b\s*(?:a|an|the)?\s*date\b/i.test(element.getAttribute('placeholder') || '')) return 'day';
       return '';
     }).catch(() => '');
     const MONTH_WORDS = ['january', 'february', 'march', 'april', 'may', 'june',
