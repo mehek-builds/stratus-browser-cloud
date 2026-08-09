@@ -1213,6 +1213,28 @@ const { chromium } = require('playwright');
       return { state: 'unknown', source: null, evidence: null, message: null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
+    /* NETWORK IDLE IS NOT A CLIENT STATE TRANSITION. A React application can accept the physical
+     * submit click, schedule its verification step for a later browser task, and make no request or
+     * navigation that Playwright can wait on. The controlled portal reproduced this exactly: the
+     * authorized click was recorded, then the immediate end-of-run reads saw the old form, no code
+     * control, and no receipt. The caller therefore had neither a continuation token nor a state it
+     * could safely retry.
+     *
+     * Wait only for evidence that can decide the application: a security-code control, a confirmed
+     * receipt, or an explicit refusal. Polling the same typed readers keeps prose from becoming a
+     * trigger, and the short deadline bounds the cost on an employer page that remains genuinely
+     * ambiguous. This is deliberately not a blind sleep: a synchronous receipt returns on the first
+     * pass, while a client-rendered challenge gets the browser tasks it needs to commit. */
+    const waitForPostSubmitApplicationState = async () => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        if (await readSecurityCodeChallenge()) return;
+        const outcome = await readSubmitOutcome();
+        if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
+        await page.waitForTimeout(50).catch(() => undefined);
+      }
+    };
+
     /* Type a code the applicant supplied into the control found above, and say what happened.
      *
      * Focus-and-type first, because a boxed group auto-advances on input and typing is the one
@@ -2410,6 +2432,7 @@ const { chromium } = require('playwright');
           passes.push(application.pass);
           if (application.pass.submissionOutcome === 'clicked') {
             await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+            await waitForPostSubmitApplicationState();
           }
         }
         const confirmed = passes.length === 1 && passes.every((pass) => pass.submissionOutcome === 'clicked' && pass.unresolved.length === 0 && pass.scope.sameNode === true);
