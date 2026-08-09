@@ -9,9 +9,9 @@ import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmation replay</title>
-<form id="newsletter"><div class="field"><label for="newsletter-email">Newsletter email</label><input id="newsletter-email" required value="newsletter@example.com" aria-invalid="true"><span id="newsletter-error">This requires an answer</span></div><button type="submit">Subscribe</button></form>
+<form id="newsletter"><div class="field"><label for="newsletter-email">Newsletter email</label><input id="newsletter-email" required value="newsletter@example.com" aria-invalid="true"><span id="newsletter-error">This requires an answer</span></div><button>Subscribe</button><input type="button" value="Search"><span role="button">Join newsletter</span></form>
 <form id="application" novalidate>
-  <div class="field"><label for="text">Name</label><input id="text" required value="Mehek Mandal" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="text">Name *</label><input id="text" value="Mehek Mandal" aria-invalid="true"><span>This requires an answer</span></div>
   <div class="field"><label for="email-field">Email</label><input id="email-field" type="email" required value="mehek@example.com" aria-invalid="true"><span>This requires an answer</span></div>
   <div class="field"><label for="phone-field">Phone</label><input id="phone-field" type="tel" required value="+971501234567" aria-invalid="true"><span>This requires an answer</span></div>
   <div class="field"><label for="essay">Why this role?</label><textarea id="essay" required aria-invalid="true">Because it fits.</textarea><span>This requires an answer</span></div>
@@ -23,7 +23,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   <fieldset><legend>Work authorized</legend><input id="radio" name="work" type="radio" required checked aria-invalid="true"><label for="radio">Yes</label><span>This requires an answer</span></fieldset>
   <div class="field"><label for="checkbox">I agree</label><input id="checkbox" type="checkbox" required checked aria-invalid="true"><span>This requires an answer</span></div>
   <div id="custom" class="field" role="group" aria-required="true" aria-invalid="true"><label>Schedule</label><button type="button" class="_active_test">Weekdays</button><span>This requires an answer</span></div>
-  <button type="submit">Submit application</button>
+  <button id="application-submit" type="submit">Submit application</button>
 </form>
 <div id="submitted"></div>
 <div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div>
@@ -37,6 +37,12 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   document.getElementById('newsletter-email').addEventListener('blur', function () { clear('newsletter-email'); });
   ['text', 'email-field', 'phone-field', 'essay', 'date'].forEach(function (id) {
     document.getElementById(id).addEventListener('blur', function () { clear(id); });
+  });
+  document.getElementById('text').addEventListener('blur', function () {
+    if (location.search.includes('replace-submit')) {
+      var oldSubmit = document.getElementById('application-submit');
+      oldSubmit.replaceWith(oldSubmit.cloneNode(true));
+    }
   });
   var transfer = new DataTransfer();
   transfer.items.add(new File(['resume'], 'resume.pdf', { type: 'application/pdf' }));
@@ -62,6 +68,32 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
       if (control.querySelector('span')) control.querySelector('span').remove();
     });
   }
+  var submitShape = new URLSearchParams(location.search).get('submit-shape');
+  if (submitShape) {
+    var original = document.getElementById('application-submit');
+    var replacement;
+    if (submitShape === 'button-default') {
+      replacement = document.createElement('button');
+      replacement.textContent = 'Submit application';
+    } else if (submitShape === 'input-image') {
+      replacement = document.createElement('input');
+      replacement.type = 'image';
+      replacement.alt = 'Submit application';
+      replacement.setAttribute('aria-label', 'Submit application');
+    } else if (submitShape === 'input-button') {
+      replacement = document.createElement('input');
+      replacement.type = 'button';
+      replacement.value = 'Submit application';
+      replacement.addEventListener('click', function () { this.form.requestSubmit(); });
+    } else if (submitShape === 'role-button') {
+      replacement = document.createElement('span');
+      replacement.setAttribute('role', 'button');
+      replacement.textContent = 'Submit application';
+      replacement.addEventListener('click', function () { this.closest('form').requestSubmit(); });
+    }
+    replacement.id = 'application-submit';
+    original.replaceWith(replacement);
+  }
   document.getElementById('application').addEventListener('submit', function (event) {
     event.preventDefault();
     document.getElementById('submitted').textContent = 'yes';
@@ -76,9 +108,9 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-confirm-replay-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 const confirmedSubmitActions = [
-  { type: 'confirmRequired', selector: '#application button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-  { type: 'click', selector: '#application button[type="submit"]', label: 'final_submit' },
+  { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
   { type: 'extract', selector: '#submitted' },
+  { type: 'extract', selector: '#text', attribute: 'value' },
   { type: 'extract', selector: '.select__single-value' },
   { type: 'extract', selector: '#custom button' },
   { type: 'extract', selector: '#custom-state' },
@@ -114,22 +146,28 @@ async function replay(suffix = '', actions = confirmedSubmitActions) {
 
 const result = await replay();
 assert.equal(result.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(result.extracted.find((entry) => entry.selector === '#text')?.value, 'Mehek Mandal');
 assert.deepEqual(result.blockers, []);
 assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
-assert.equal(result.requiredFieldConfirmation.version, 1);
-assert.equal(result.requiredFieldConfirmation.requiredControls.length, 12);
-assert.ok(result.requiredFieldConfirmation.requiredControls.every((control) => control.matchCount === 1));
-assert.equal(result.requiredFieldConfirmation.attempts.length, 12);
-assert.deepEqual(result.requiredFieldConfirmation.unresolved, []);
-assert.deepEqual(new Set(result.requiredFieldConfirmation.attempts.map((attempt) => attempt.fieldType)), new Set([
+assert.equal(result.requiredFieldConfirmation.version, 2);
+assert.equal(result.requiredFieldConfirmation.passes.length, 1);
+const applicationPass = result.requiredFieldConfirmation.passes[0];
+assert.equal(applicationPass.scope.requiredControlCount, 12);
+assert.equal(applicationPass.requiredControls.length, 12);
+assert.ok(applicationPass.requiredControls.every((control) => control.matchCount === 1));
+assert.equal(applicationPass.attempts.length, 12);
+assert.deepEqual(applicationPass.unresolved, []);
+assert.equal(applicationPass.scope.sameNode, true);
+assert.equal(applicationPass.submissionOutcome, 'clicked');
+assert.deepEqual(new Set(applicationPass.attempts.map((attempt) => attempt.fieldType)), new Set([
   'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom', 'file'
 ]));
-assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => ['confirmed', 'already_committed'].includes(attempt.outcome)));
-assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => attempt.attemptCount === 1));
-assert.equal(result.requiredFieldConfirmation.retries, 0);
-assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => /^(?:#|\[data-litos-stable-id-v1=)/.test(attempt.selector)));
-const bracketed = result.requiredFieldConfirmation.attempts.find((attempt) => attempt.label === 'Bracket question');
-assert.match(bracketed?.selector || '', /^\[data-litos-stable-id-v1="required-/);
+assert.ok(applicationPass.attempts.every((attempt) => ['confirmed', 'already_committed'].includes(attempt.outcome)));
+assert.ok(applicationPass.attempts.every((attempt) => attempt.attemptCount === 1));
+assert.equal(applicationPass.retries, 0);
+assert.ok(applicationPass.attempts.every((attempt) => /^(?:#|\[data-litos-stable-id-v1=)/.test(attempt.selector)));
+const bracketed = applicationPass.attempts.find((attempt) => attempt.label === 'Bracket question');
+assert.match(bracketed?.selector || '', /^\[data-litos-stable-id-v1="v2-[a-f0-9]{24}-\d+"\]$/);
 assert.equal(bracketed?.outcome, 'already_committed');
 assert.equal(result.extracted.find((entry) => entry.selector === '.select__single-value')?.value, 'Dubai');
 assert.equal(result.extracted.find((entry) => entry.selector === '#custom button')?.value, 'Weekdays');
@@ -138,16 +176,29 @@ assert.equal(result.extracted.find((entry) => entry.selector === '#checkbox-stat
 assert.equal(result.extracted.find((entry) => entry.selector === '#checkbox-clicks')?.value, '0');
 assert.equal(result.extracted.find((entry) => entry.selector === '#newsletter-error')?.value, 'This requires an answer');
 assert.equal(result.extracted.find((entry) => entry.selector === '#file-state')?.value, 'resume.pdf');
-assert.equal(result.requiredFieldConfirmation.attempts.find((attempt) => attempt.selector === '#resume')?.outcome, 'already_committed');
+assert.equal(applicationPass.attempts.find((attempt) => attempt.selector === '#resume')?.outcome, 'already_committed');
 
 const refused = await replay('?leave-custom-invalid');
 assert.equal(refused.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
 assert.equal(refused.requiredFieldConfirmation.status, 'blocked');
-assert.equal(refused.requiredFieldConfirmation.unresolved.length, 1);
-assert.equal(refused.requiredFieldConfirmation.retries, 1);
-assert.equal(refused.requiredFieldConfirmation.attempts.find((attempt) => attempt.selector === '#custom')?.attemptCount, 2);
+assert.equal(refused.requiredFieldConfirmation.passes[0].unresolved.length, 1);
+assert.equal(refused.requiredFieldConfirmation.passes[0].retries, 1);
+assert.equal(refused.requiredFieldConfirmation.passes[0].attempts.find((attempt) => attempt.selector === '#custom')?.attemptCount, 2);
 assert.ok(refused.blockers.some((message) => /Schedule.*could not be confirmed/.test(message)));
-assert.ok(refused.skipped.some((message) => /submit withheld because required-field confirmation failed/.test(message)));
+assert.ok(refused.skipped.some((message) => /atomic confirmation blocked submission/.test(message)));
+
+for (const shape of ['button-default', 'input-image', 'input-button', 'role-button']) {
+  const shaped = await replay('?submit-shape=' + shape);
+  assert.equal(shaped.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes', shape + ' must be selected and clicked atomically');
+  assert.equal(shaped.requiredFieldConfirmation.status, 'confirmed');
+}
+
+const replaced = await replay('?replace-submit');
+assert.equal(replaced.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
+assert.equal(replaced.requiredFieldConfirmation.status, 'blocked');
+assert.equal(replaced.requiredFieldConfirmation.passes[0].scope.sameNode, false);
+assert.equal(replaced.requiredFieldConfirmation.passes[0].blockerReason, 'submit_node_replaced');
+assert.equal(replaced.requiredFieldConfirmation.passes[0].submissionOutcome, 'blocked');
 
 const missingProof = await replay('', [
   { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },

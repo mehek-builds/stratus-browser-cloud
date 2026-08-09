@@ -9,7 +9,8 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
-const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmRequired']);
+const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
@@ -36,6 +37,7 @@ const SANDBOX_DEPENDENCIES = [
 // string, so a regression here is invisible until a real portal run fails on a real application.
 export const SANDBOX_RUNNER = String.raw`
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { chromium } = require('playwright');
 
 (async () => {
@@ -131,7 +133,6 @@ const { chromium } = require('playwright');
      * fact anybody needed, and it was not recorded anywhere. */
     let finalSubmitPressed = false;
     let requiredFieldConfirmation = null;
-    let requiredFieldConfirmationSubmitSelector = null;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     /* A REFUSAL TO STATE, RECOGNISED BY WHAT IT MEANS RATHER THAN BY HOW IT IS SPELLED.
@@ -987,7 +988,8 @@ const { chromium } = require('playwright');
       return (await readBack()) === code ? 'entered' : 'not_entered';
     };
 
-    const readSubmitReadiness = () => page.evaluate(() => {
+    const readSubmitReadiness = (scope = null) => {
+      const scan = (root = document) => {
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
       const isVisible = (element) => {
         if (!element) return false;
@@ -1058,8 +1060,8 @@ const { chromium } = require('playwright');
       const labelOf = (widget, element) => {
         const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
           || (element && element.getAttribute('aria-labelledby'));
-        const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
-        const byFor = element && element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+        const referenced = labelledBy && root.querySelector('#' + CSS.escape(labelledBy.split(/\s+/)[0]));
+        const byFor = element && element.id && root.querySelector('label[for="' + CSS.escape(element.id) + '"]');
         const legend = widget && widget.querySelector('legend');
         const own = widget && widget.querySelector('label, .label, .upload-label, legend');
         for (const candidate of [
@@ -1239,7 +1241,7 @@ const { chromium } = require('playwright');
       // Native required, plus aria-required. React Select's input carries aria-required="true" and
       // no a "required" attribute at all, so a gate built only on [required] cannot see an unanswered
       // Greenhouse screener question - which is precisely the control this gate exists to catch.
-      for (const element of document.querySelectorAll(
+      for (const element of root.querySelectorAll(
         'input[required], textarea[required], select[required], [aria-required="true"]'
       )) {
         if (element.disabled) continue;
@@ -1290,7 +1292,7 @@ const { chromium } = require('playwright');
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
-      for (const marker of document.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+      for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
         // An Ashby question block with no readable control still has to block, which is where PR #22
         // measured this arm.
         noteMarkedLabel(marker, true);
@@ -1327,7 +1329,7 @@ const { chromium } = require('playwright');
        */
       const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
       const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
-      for (const marker of document.querySelectorAll('label, legend')) {
+      for (const marker of root.querySelectorAll('label, legend')) {
         const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
         if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
         noteMarkedLabel(marker, false);
@@ -1343,7 +1345,7 @@ const { chromium } = require('playwright');
       // on a completely and correctly filled application, so the gate would have refused to submit
       // every Greenhouse application there is. A gate that blocks everything is not caution.
       const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
-      for (const element of document.querySelectorAll('*')) {
+      for (const element of root.querySelectorAll('*')) {
         if (element.children.length > 0) continue;
         const text = clean(element.textContent);
         if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
@@ -1385,28 +1387,60 @@ const { chromium } = require('playwright');
         stale: [...new Set(stale)],
         unmatched: [...new Set(unmatched.filter((text) => !stale.includes(text)))]
       };
-    }).catch(() => ({ blocking: [], stale: [], unmatched: [] }));
+      };
+      const failed = { blocking: [], stale: [], unmatched: [] };
+      return scope ? scope.evaluate(scan).catch(() => failed) : page.evaluate(scan).catch(() => failed);
+    };
     /* Commit answers that the page paints as filled while its own validation still calls them
      * unanswered. This action does not search for a convenient place to click. It marks the exact
      * affected control in the current DOM, commits that control using events appropriate to its
      * field type, then reads the same validation state back. An unresolved control is proof of
      * failure and the following submit is withheld. */
-    const confirmRequiredFields = async (action) => {
-      const submitControls = page.locator(action.selector);
-      if (await submitControls.count() !== 1) {
-        return {
-          version: 1, status: 'blocked', requiredControls: [], attempts: [], retries: 0,
-          unresolved: ['Final submit selector did not resolve to exactly one control']
+    const confirmAndSubmitPass = async (action) => {
+      const choices = await page.locator(action.selector).evaluateAll((elements, submitKind) => elements.map((element, index) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const visible = (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
+        const form = element.closest('form');
+        const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        const formText = String((form && (form.id + ' ' + form.className + ' ' + form.getAttribute('action'))) || '').toLowerCase();
+        const normalizedText = text.toLowerCase();
+        let score = 0;
+        if (/submit application|send application|complete application|apply now|apply for/.test(normalizedText)) score += 100;
+        else if (/submit|apply|continue|finish|verify|confirm/.test(normalizedText)) score += 25;
+        if (/application|apply|job|career|greenhouse|lever|ashby/.test(formText)) score += 40;
+        if (/newsletter|subscribe|search|login|sign in|coupon/.test(normalizedText + ' ' + formText)) score -= 100;
+        if (submitKind === 'verification' && /verify|confirm|submit application/.test(normalizedText)) score += 30;
+        element.setAttribute('data-litos-submit-candidate-v2', String(index));
+        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), text, formText, score };
+      }), action.submitKind).catch(() => null);
+      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm) : [];
+      viable.sort((a, b) => b.score - a.score || a.index - b.index);
+      const selected = viable[0];
+      const ambiguous = !selected || selected.score <= 0 || (viable[1] && viable[1].score === selected.score);
+      if (ambiguous) throw new Error('Atomic submit control was missing or ambiguous');
+      const submitLocator = page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
+      const submitHandle = await submitLocator.elementHandle();
+      const scope = submitLocator.locator('xpath=ancestor::form[1]');
+      if (!submitHandle || await scope.count() !== 1) throw new Error('Atomic submit control had no exact application form');
+      const formHandle = await scope.elementHandle();
+      const binding = await submitHandle.evaluate((element) => {
+        const form = element.closest('form');
+        const formShape = {
+          id: form.id || null,
+          action: form.getAttribute('action') || null,
+          method: form.getAttribute('method') || null,
+          controls: [...form.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
+            tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
+            type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
+          }))
         };
-      }
-      const scope = submitControls.first().locator('xpath=ancestor::form[1]');
-      if (await scope.count() !== 1) {
-        return {
-          version: 1, status: 'blocked', requiredControls: [], attempts: [], retries: 0,
-          unresolved: ['Final submit control did not resolve to exactly one application form']
-        };
-      }
-      const candidates = await scope.evaluate((root) => {
+        const submitShape = { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() };
+        return { formShape, submitShape };
+      });
+      const formFingerprint = crypto.createHash('sha256').update(JSON.stringify(binding.formShape)).digest('hex');
+      const submitFingerprint = crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
+      const candidates = await scope.evaluate((root, boundFingerprint) => {
         const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
         const isVisible = (element) => {
           if (!element) return false;
@@ -1477,6 +1511,18 @@ const { chromium } = require('playwright');
             || block;
           if (control && root.contains(control)) controls.add(control);
         }
+        const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
+        const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+        for (const marker of root.querySelectorAll('label, legend')) {
+          const text = clean(marker.textContent);
+          if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
+          const block = widgetOf(marker);
+          const named = marker.getAttribute('for');
+          const control = (named && document.getElementById(named))
+            || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')
+            || block;
+          if (control && root.contains(control)) controls.add(control);
+        }
         const out = [];
         let index = 0;
         const seenGroups = new Set();
@@ -1527,7 +1573,10 @@ const { chromium } = require('playwright');
                 ? pathSelector
                 : null;
           if (!durableSelector) {
-            const stableId = 'required-' + index + '-' + crypto.randomUUID();
+            // The fallback identity is opaque but deterministic for this exact form scan. It is
+            // bound to the form fingerprint and DOM-order index, so it cannot be mistaken for a
+            // portal-owned selector or silently reused after the form shape changes.
+            const stableId = 'v2-' + boundFingerprint.slice(0, 24) + '-' + index;
             element.setAttribute('data-litos-stable-id-v1', stableId);
             const stableSelector = '[data-litos-stable-id-v1="' + stableId + '"]';
             if (root.querySelectorAll(stableSelector).length === 1) durableSelector = stableSelector;
@@ -1542,10 +1591,8 @@ const { chromium } = require('playwright');
           });
         }
         return out;
-      }).catch(() => null);
-      if (!Array.isArray(candidates)) {
-        return { version: 1, status: 'blocked', requiredControls: [], attempts: [], retries: 0, unresolved: ['Required-field confirmation scan failed'] };
-      }
+      }, formFingerprint).catch(() => null);
+      if (!Array.isArray(candidates)) throw new Error('Atomic required-field scan failed');
       const requiredControls = candidates.filter((candidate) => candidate.selector).map((candidate) => ({
         selector: candidate.selector,
         label: candidate.label,
@@ -1661,13 +1708,63 @@ const { chromium } = require('playwright');
           unresolved.push(candidate.label || proofSelector);
         }
       }
+      // The same exhaustive detector used by prepare-time readiness is read again against this
+      // exact bound form. No newsletter, search, or login form can contribute a blocker here.
+      const scopedReadiness = await readSubmitReadiness(scope);
+      unresolved.push(...scopedReadiness.blocking, ...scopedReadiness.unmatched.map(
+        (text) => 'The bound application form still shows an unmatched validation error: ' + text
+      ));
+      const sameNode = Boolean(formHandle) && await submitHandle.evaluate(
+        (element, boundForm) => element.isConnected && element.closest('form') === boundForm,
+        formHandle
+      ).catch(() => false);
+      let blockerReason = null;
+      if (!sameNode) {
+        blockerReason = 'submit_node_replaced';
+        unresolved.push('Bound submit control or application form was replaced before submission');
+      } else {
+        const currentBinding = await submitHandle.evaluate((element) => {
+          const form = element.closest('form');
+          return {
+            formShape: {
+              id: form.id || null,
+              action: form.getAttribute('action') || null,
+              method: form.getAttribute('method') || null,
+              controls: [...form.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
+                tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
+                type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
+              }))
+            },
+            submitShape: { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() }
+          };
+        }).catch(() => null);
+        const currentFormFingerprint = currentBinding && crypto.createHash('sha256').update(JSON.stringify(currentBinding.formShape)).digest('hex');
+        const currentSubmitFingerprint = currentBinding && crypto.createHash('sha256').update(currentFormFingerprint + ':' + JSON.stringify(currentBinding.submitShape)).digest('hex');
+        if (currentFormFingerprint !== formFingerprint || currentSubmitFingerprint !== submitFingerprint) {
+          blockerReason = 'form_identity_changed';
+          unresolved.push('Bound application form or submit identity changed during confirmation');
+        }
+      }
+      const blocked = unresolved.length > 0;
+      if (!blocked) await submitHandle.click({ timeout: action.timeout || 10_000 });
       return {
-        version: 1,
-        status: unresolved.length === 0 ? 'confirmed' : 'blocked',
-        requiredControls,
-        attempts,
-        retries,
-        unresolved: [...new Set(unresolved)]
+        pass: {
+          submitKind: action.submitKind,
+          scope: {
+            formFingerprint,
+            submitFingerprint,
+            formMatchCount: 1,
+            submitMatchCount: 1,
+            requiredControlCount: requiredControls.length,
+            sameNode
+          },
+          requiredControls,
+          attempts,
+          retries,
+          unresolved: [...new Set(unresolved)],
+          ...(blockerReason ? { blockerReason } : {}),
+          submissionOutcome: blocked ? 'blocked' : 'clicked'
+        }
       };
     };
     // A click is the final submit when the caller says so, or when it targets a submit control.
@@ -1711,7 +1808,6 @@ const { chromium } = require('playwright');
     discovered.length = 0;
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
-    requiredFieldConfirmationSubmitSelector = null;
     for (const action of currentInput.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
@@ -1735,7 +1831,6 @@ const { chromium } = require('playwright');
           && Array.isArray(requiredFieldConfirmation.unresolved)
           && requiredFieldConfirmation.requiredControls.length === requiredFieldConfirmation.attempts.length
           && requiredFieldConfirmation.unresolved.length === 0
-          && requiredFieldConfirmationSubmitSelector === action.selector
           && await page.locator(action.selector).count() === 1;
         if (!validConfirmation) {
           const failed = (requiredFieldConfirmation?.attempts || [])
@@ -1991,12 +2086,48 @@ const { chromium } = require('playwright');
         });
         discovered.push(...found);
       }
-      if (action.type === 'confirmRequired') {
-        requiredFieldConfirmation = await confirmRequiredFields(action);
-        requiredFieldConfirmationSubmitSelector = action.selector;
-        if (requiredFieldConfirmation.status !== 'confirmed') {
-          skipped.push('confirm_required: ' + requiredFieldConfirmation.unresolved.length + ' required field(s) could not be confirmed');
+      if (action.type === 'confirmAndSubmit') {
+        const passes = [];
+        if (action.securityCode) {
+          const entry = await enterSecurityCode(action.securityCode);
+          if (entry !== 'entered') {
+            securityCodeAttempt = { supplied: true, entered: false, outcome: entry, resubmitted: false };
+            throw new Error('Security code was not entered before atomic verification');
+          } else {
+            // A continuation already sits on the changed verification DOM. Enter first, bind the
+            // current verification submit second, and click exactly once. Clicking before entry can
+            // reject or rotate the code and must remain structurally impossible.
+            const verification = await confirmAndSubmitPass({ ...action, securityCode: undefined });
+            passes.push(verification.pass);
+            if (verification.pass.submissionOutcome === 'clicked') {
+              await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+            }
+            const still = await readSecurityCodeChallenge();
+            securityCodeAttempt = {
+              supplied: true,
+              entered: true,
+              resubmitted: verification.pass.submissionOutcome === 'clicked',
+              outcome: verification.pass.submissionOutcome !== 'clicked' ? 'not_entered' : (still ? 'rejected' : 'accepted')
+            };
+          }
+        } else {
+          const application = await confirmAndSubmitPass(action);
+          passes.push(application.pass);
+          if (application.pass.submissionOutcome === 'clicked') {
+            await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+          }
         }
+        const confirmed = passes.length === 1 && passes.every((pass) => pass.submissionOutcome === 'clicked' && pass.unresolved.length === 0 && pass.scope.sameNode === true);
+        requiredFieldConfirmation = { version: 2, status: confirmed ? 'confirmed' : 'blocked', passes };
+        if (!confirmed) {
+          const failed = passes.flatMap((pass) => pass.attempts
+            .filter((attempt) => attempt.outcome === 'failed')
+            .map((attempt) => attempt.label ? '"' + attempt.label + '" could not be confirmed' : 'A required field could not be confirmed'));
+          const unresolved = passes.flatMap((pass) => pass.unresolved);
+          submitGateBlockers.push(...(failed.length > 0 ? failed : unresolved));
+          skipped.push('confirm_and_submit: atomic confirmation blocked submission');
+        }
+        continue;
       }
       if (action.type === 'click') {
         await locator.click();
@@ -2378,7 +2509,9 @@ const { chromium } = require('playwright');
      * rather than empty controls, they are the half of the gate with the false-positive history, and
      * a stale message over a filled field must never turn a complete application into a blocked one.
      */
-    const readiness = await readSubmitReadiness();
+    const readiness = requiredFieldConfirmation?.version === 2
+      ? { blocking: [], stale: [], unmatched: [] }
+      : await readSubmitReadiness();
     blockers.push(...readiness.blocking);
     // Read on EVERY run, at zero action cost, because the caller has no other way to find out. A
     // fill run that has somehow submitted looks exactly like a fill run that has not, right up
@@ -2523,7 +2656,7 @@ export function normalizeManagedActions(actions = []) {
     // alphanumeric characters; the bound is wider than that and still narrow enough that no
     // sentence, selector or script fragment can pass through it.
     if (action.securityCode != null) {
-      if (action.type !== 'click') throw inputError('Only a click may carry a security code', 'INVALID_SECURITY_CODE');
+      if (action.type !== 'confirmAndSubmit') throw inputError('Only an atomic submit may carry a security code', 'INVALID_SECURITY_CODE');
       if (typeof action.securityCode !== 'string' || !/^[A-Za-z0-9]{4,12}$/.test(action.securityCode)) {
         throw inputError('A security code must be 4 to 12 letters or digits', 'INVALID_SECURITY_CODE');
       }
@@ -2535,25 +2668,21 @@ export function normalizeManagedActions(actions = []) {
       }
       normalized.attribute = action.attribute;
     }
-    if (action.type === 'confirmRequired') {
+    if (action.type === 'confirmAndSubmit') {
       const maxRetries = Number(action.maxRetries);
       if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 1) {
-        throw inputError('confirmRequired maxRetries must be 0 or 1', 'INVALID_CONFIRM_REQUIRED_RETRIES');
+        throw inputError('confirmAndSubmit maxRetries must be 0 or 1', 'INVALID_CONFIRM_AND_SUBMIT_RETRIES');
       }
+      if (action.contractVersion !== 2) throw inputError('confirmAndSubmit contractVersion must be 2', 'INVALID_CONFIRM_AND_SUBMIT_VERSION');
+      if (!['application', 'verification'].includes(action.submitKind)) throw inputError('confirmAndSubmit submitKind is invalid', 'INVALID_SUBMIT_KIND');
+      if (action.securityCode && action.submitKind !== 'verification') throw inputError('A security code requires a verification atomic submit', 'INVALID_SUBMIT_KIND');
+      if (action.selector !== ATOMIC_SUBMIT_SELECTOR) throw inputError('confirmAndSubmit selector must be the version 2 submit candidate set', 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR');
+      if (typeof action.label !== 'string' || !action.label.trim()) throw inputError('confirmAndSubmit requires a non-empty label', 'INVALID_CONFIRM_AND_SUBMIT_LABEL');
+      if (action.optional !== false) throw inputError('confirmAndSubmit must be non-optional', 'INVALID_CONFIRM_AND_SUBMIT_OPTIONAL');
       normalized.maxRetries = maxRetries;
-      if (action.contractVersion !== 1) {
-        throw inputError('confirmRequired contractVersion must be 1', 'INVALID_CONFIRM_REQUIRED_VERSION');
-      }
-      normalized.contractVersion = 1;
-      const next = actions[index + 1];
-      const nextIsFinalSubmit = next?.type === 'click' && (
-        next.label === 'final_submit'
-        || /\[\s*type\s*[~^$*|]?=\s*["']?submit/i.test(next.selector || '')
-      );
-      if (!nextIsFinalSubmit) throw inputError('confirmRequired must be immediately followed by the final submit click', 'INVALID_CONFIRM_REQUIRED_ORDER');
-      if (next.selector !== action.selector) {
-        throw inputError('confirmRequired must target the exact selector used by the following final submit click', 'INVALID_CONFIRM_REQUIRED_SELECTOR');
-      }
+      normalized.contractVersion = 2;
+      normalized.submitKind = action.submitKind;
+      if (action.timeout != null) normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     }
     return normalized;
   });

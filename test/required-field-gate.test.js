@@ -48,7 +48,8 @@ test('the run reports the same required fields the pre-submit gate would withhol
      caller stores and shows. A PREPARE run queues no submit action, so the better reading never ran
      on the call that decides whether a packet is offered to a person as ready to send. */
   const section = endOfRunSection();
-  assert.match(section, /const readiness = await readSubmitReadiness\(\)/);
+  assert.match(section, /const readiness = requiredFieldConfirmation\?\.version === 2/);
+  assert.match(section, /: await readSubmitReadiness\(\)/);
   assert.match(section, /blockers\.push\(\.\.\.readiness\.blocking\)/);
   // The weaker readers are gone rather than left beside the better one, so the two cannot drift.
   assert.doesNotMatch(section, /page\.locator\('input\[required\], textarea\[required\], select\[required\]'\)/);

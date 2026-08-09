@@ -51,6 +51,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
 </form>
 <div id="submitted">no</div>
 <div id="filed">no</div>
+<div id="empty-code-submits">0</div>
 <script>
   var attempts = 0;
   // What Greenhouse does. The first submit does not file the application: it emails a code and
@@ -63,6 +64,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     if (boxes.length) {
       var typed = '';
       for (var i = 0; i < boxes.length; i += 1) typed += boxes[i].value || '';
+      if (!typed) {
+        document.getElementById('empty-code-submits').textContent = String(Number(document.getElementById('empty-code-submits').textContent) + 1);
+      }
       if (typed === '${CODE}') {
         document.getElementById('challenge').innerHTML = '';
         document.getElementById('filed').textContent = 'yes';
@@ -165,8 +169,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' }
   ], { allowSubmit: true });
@@ -195,16 +198,20 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: CODE },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#submitted' },
-    { type: 'extract', selector: '#filed' }
+    { type: 'extract', selector: '#filed' },
+    { type: 'extract', selector: '#empty-code-submits' }
   ], { allowSubmit: true });
   assert.equal(valueOf(result, '#submitted'), '2', 'the form is submitted again with the code in it');
   assert.equal(valueOf(result, '#filed'), 'yes', 'and this time the employer has the application');
   assert.deepEqual(result.securityCodeAttempt, {
     supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
   });
+  assert.equal(valueOf(result, '#empty-code-submits'), '0', 'verification must never click before the changing code is entered');
+  assert.equal(result.requiredFieldConfirmation.passes.length, 1);
+  assert.equal(result.requiredFieldConfirmation.passes[0].submitKind, 'verification');
   assert.equal(result.humanVerification, null, 'the challenge is gone, which is what accepted means');
 }
 
@@ -213,12 +220,14 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    the same check and a fresh code is in her mailbox.
 {
   const result = await replay([
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: 'AAAAAAAA' },
-    { type: 'extract', selector: '#filed' }
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: 'AAAAAAAA' },
+    { type: 'extract', selector: '#filed' },
+    { type: 'extract', selector: '#empty-code-submits' }
   ], { allowSubmit: true });
   assert.equal(valueOf(result, '#filed'), 'no');
   assert.equal(result.securityCodeAttempt?.outcome, 'rejected');
+  assert.equal(valueOf(result, '#empty-code-submits'), '0');
   assert.equal(result.humanVerification?.kind, 'security_code', 'the challenge is still standing');
 }
 

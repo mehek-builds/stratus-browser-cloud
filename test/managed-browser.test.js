@@ -544,25 +544,25 @@ test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
 });
 
-test('required confirmation has a durable form scope and must sit immediately before final submit', () => {
+test('atomic required confirmation owns the submit and accepts only contract v2', () => {
   const actions = normalizeManagedActions([
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' }
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
   ]);
-  assert.deepEqual(actions[0], { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 });
+  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
   assert.throws(
-    () => normalizeManagedActions([{ type: 'confirmRequired', selector: 'form', maxRetries: 1, contractVersion: 1 }, { type: 'extract', selector: 'body' }]),
-    (error) => error.code === 'INVALID_CONFIRM_REQUIRED_ORDER'
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_VERSION'
   );
   assert.throws(
-    () => normalizeManagedActions([
-      { type: 'confirmRequired', selector: '#application-submit', maxRetries: 1, contractVersion: 1 },
-      { type: 'click', selector: '#newsletter-submit', label: 'final_submit' }
-    ]),
-    (error) => error.code === 'INVALID_CONFIRM_REQUIRED_SELECTOR'
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], submitKind: 'application', securityCode: 'ABCD1234' }]),
+    (error) => error.code === 'INVALID_SUBMIT_KIND'
   );
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
-  assert.match(SANDBOX_RUNNER, /submit withheld because required-field confirmation failed/);
+  assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {

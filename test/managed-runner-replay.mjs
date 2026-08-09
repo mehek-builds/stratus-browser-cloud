@@ -427,18 +427,14 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    because the gate did - a test passing for the wrong reason is how a gate rots unnoticed.
 {
   const blocked = await replay([
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
   assert.deepEqual(blocked.blockers.sort(), [
     '"Email" could not be confirmed',
-    '"Email" is required and is still empty',
     '"Full name" could not be confirmed',
-    '"Full name" is required and is still empty',
-    '"Phone" could not be confirmed',
-    '"Phone" is required and is still empty'
+    '"Phone" could not be confirmed'
   ], 'the gate must name the empty fields, got ' + JSON.stringify(blocked.blockers));
 
   const fill = (selector, value) => ({ type: 'fill', selector, value, label: selector.slice(1) });
@@ -446,8 +442,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
     fill('#req_phone', '+971 50 123 4567'),
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
@@ -460,8 +455,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   const phoneEmpty = await replay([
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
-    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(phoneEmpty, '#submitted'), '',
@@ -469,9 +463,9 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   // Asserted on 'skipped', not only on 'blockers': the runner has a SECOND, older required-field
   // scan that runs after the loop and reports the same field, so a blockers-only assertion passes
   // even when the gate saw nothing and let the click through. This line is the gate's alone.
-  assert.ok(phoneEmpty.skipped.some((entry) => /submit withheld because required-field confirmation failed/.test(entry)),
+  assert.ok(phoneEmpty.skipped.some((entry) => /atomic confirmation blocked submission/.test(entry)),
     'the GATE, not the post-loop scan, must be what withheld the click, got ' + JSON.stringify(phoneEmpty.skipped));
-  assert.deepEqual(phoneEmpty.blockers.sort(), ['"Phone" could not be confirmed', '"Phone" is required and is still empty'],
+  assert.deepEqual(phoneEmpty.blockers.sort(), ['"Phone" could not be confirmed'],
     'the gate must name the phone, and must not blame the answered country, got ' + JSON.stringify(phoneEmpty.blockers));
 }
 
