@@ -580,9 +580,66 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'both fills must be reported filled, got ' + JSON.stringify(result));
 }
 
+/* THE NO-CHALLENGE PATH FINISHES IN ONE PHASE.
+ *
+ * Skydio packet 13bccb2d, 2026-08-09. requestContinuation is set on every managed submit, because
+ * the caller cannot know in advance whether a form will demand an emailed code. This fixture has no
+ * code control and never will, so there is no second phase to run - and the runner used to sit here
+ * anyway until the continuation TTL ran out, while the caller waited on the other side and then
+ * reported "Managed browser continuation timed out" on a submit that had nothing to do with a
+ * continuation.
+ *
+ * The deadline is the assertion. `continuationExpiresAt` is 20 seconds out; a runner that idles for
+ * a continuation cannot exit inside 8, and a runner that knows there is nothing to wait for exits
+ * as soon as it has closed the browser.
+ */
+{
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-result-1.json'), { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-input.json'), { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: base,
+    actions: [{ type: 'fill', selector: '#plain', value: 'one-phase', label: 'proof' }],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    requestContinuation: true,
+    continuationExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const startedAt = Date.now();
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const exitCode = await new Promise((resolve) => {
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve('timeout'); }, 8_000);
+    child.on('close', (code) => { clearTimeout(timer); resolve(code); });
+  });
+  assert.equal(exitCode, 0,
+    `a run with no security-code challenge must finish in one phase and exit, got ${exitCode} after `
+    + `${Date.now() - startedAt}ms: ${stderr}`);
+  const single = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(single.continuationOffered, false,
+    'the runner must report that it is not holding a continuation open, got ' + JSON.stringify(single.continuationOffered));
+  assert.equal(fs.existsSync(path.join(workDir, 'stratus-continuation-ready.json')), false,
+    'no continuation was warranted, so none may be advertised');
+  assert.equal(single.filledFields[0], 'proof', 'the single phase still does the work: ' + JSON.stringify(single.filledFields));
+}
+
 // A continuation must operate on the same Page and BrowserContext. The first phase writes a value
 // into the fixture without submitting anything. The second phase extracts it without a URL or a
 // reload. A new browser or page would return an empty string.
+//
+// `continuationCheckpoint` is what asks for one now. The runner offers a continuation only when the
+// page presents a security-code control or the caller explicitly checkpoints, so this test says
+// which of the two it means rather than relying on requestContinuation alone - which used to hold a
+// continuation open on every form in existence.
 {
   const result0 = path.join(workDir, 'stratus-result-0.json');
   const result1 = path.join(workDir, 'stratus-result-1.json');
@@ -596,6 +653,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
     requestContinuation: true,
+    continuationCheckpoint: true,
     continuationExpiresAt: new Date(Date.now() + 15_000).toISOString(),
     allowedHost: new URL(base).hostname
   }));
