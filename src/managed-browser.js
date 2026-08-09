@@ -456,6 +456,100 @@ const { chromium } = require('playwright');
       // answer, because the required-field gate is what should then speak for it.
       return await stuck();
     };
+    /* AN ANSWER THAT IS A RADIO BUTTON, and the group it is allowed to touch.
+     *
+     * D-02. Measured on the live Skydio Ashby form (jobs.ashbyhq.com/skydio, 2026-08-09), the same
+     * board and the same four questions as production packet 13bccb2d. Ashby renders each EEO
+     * question as a real radio group:
+     *
+     *   <fieldset><label for="_systemfield_eeoc_gender">Gender</label>
+     *     <div><span><input type="radio" id="...-labeled-radio-0" name="...eeoc_gender"></span>
+     *          <label for="...-labeled-radio-0">Male</label></div>
+     *     ... Female, Decline to self-identify
+     *
+     * Two separate things were wrong and both are fixed here, because either one alone still loses
+     * the answer.
+     *
+     *  1. THE BLOCK THE ANSWER LANDED IN WAS NOT THE QUESTION'S BLOCK. The anchor was
+     *     page.getByText(text).first(), and the first element on that page containing the word
+     *     "gender" is the EEO preamble - "Skydio provides equal employment opportunities ... without
+     *     regard to race, color, religion, sex, gender identity ...". Its nearest ancestor holding an
+     *     input is the whole self-identification SECTION, which on the measured form carries eleven
+     *     radios spanning two questions: Gender's three and Race's eight. So the Race answer
+     *     "Decline to self-identify" matched Gender's "Decline to self-identify" first, in DOM order,
+     *     and set the GENDER control - overwriting the gender answer set moments earlier and leaving
+     *     Race untouched. An answer landing on a question it was not written for is the worst outcome
+     *     available here, and it was happening on every Ashby EEO block in the corpus.
+     *
+     *  2. THE ANSWER WAS VERIFIED AGAINST A CONTROL NOBODY HAD TOUCHED. After ticking option n, the
+     *     branch fell through to verifyFilled(field), and that field is the FIRST input in the block.
+     *     For any answer that is not option 0 that reads back unchecked, so a radio that WAS ticked
+     *     was reported "value did not persist after fillByLabelText" - the exact line all four Skydio
+     *     fields came back with. Same defect class as verifyChoiceInContainer: a verification that
+     *     reads a different place from the one the value lands in turns a good fill into a reported
+     *     failure.
+     *
+     * So the option is clicked and read back ON ITSELF, and nothing else is consulted.
+     */
+    const optionTextOf = async (option) => await option.evaluate((element) => {
+      const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+      const wrapping = element.closest('label');
+      return ((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || element.getAttribute('aria-label') || element.value || '').trim();
+    }).catch(() => '');
+    /* Ashby paints the radio with a sibling span and leaves the input itself 24x24 and clickable, so
+     * check() is enough there. The label click is the fallback for boards that clip the input out of
+     * the layout, where check() cannot reach it but a person clicks the words. */
+    const pickRadioOption = async (scope, wanted) => {
+      if (!clean(wanted)) return 'no-answer';
+      const choices = scope.locator('input[type=checkbox], input[type=radio]');
+      const total = await choices.count();
+      let match = null;
+      for (let index = 0; index < total; index += 1) {
+        const option = choices.nth(index);
+        const optionText = await optionTextOf(option);
+        if (optionText && optionMatches(optionText, wanted)) { match = option; break; }
+      }
+      if (!match) return 'no-option';
+      const isChecked = async () => await match.evaluate((element) => element.checked === true).catch(() => false);
+      await match.check({ timeout: 5000 }).catch(() => undefined);
+      if (!await isChecked()) {
+        await match.evaluate((element) => {
+          const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+          (byFor || element.closest('label') || element).click();
+        }).catch(() => undefined);
+        await page.waitForTimeout(150).catch(() => undefined);
+      }
+      return await isChecked() ? 'checked' : 'not-checked';
+    };
+    /* THE BLOCK THAT OWNS ONE QUESTION'S OPTIONS.
+     *
+     * Walked up from the question's own label rather than down from a container, because the
+     * container is exactly what went wrong above. fieldset, data-field-path, role=radiogroup and
+     * role=group are the four ways a board says "these options belong together"; Ashby uses the first
+     * two, Greenhouse and Lever use the last two, and a board that says nothing falls back to the
+     * container the caller already resolved.
+     */
+    const questionOptionBlock = async (anchor, fallback) => {
+      const block = anchor.locator(
+        'xpath=ancestor-or-self::*[(self::fieldset or @data-field-path or @role="radiogroup" or @role="group"'
+        + ' or contains(@class,"_fieldEntry_")) and .//input[@type="radio" or @type="checkbox"]][1]'
+      ).first();
+      if ((await block.count()) > 0) return block;
+      return fallback;
+    };
+    /* Two named radio groups inside one block are TWO QUESTIONS. Radios in one question share a name
+     * - that is what makes them mutually exclusive - so more than one name is proof the block is not
+     * a single question, and an option list read across it can answer the wrong one. Checkboxes are
+     * deliberately not counted: Greenhouse gives every checkbox in a multi-select its own name, so
+     * counting them would refuse a control that is working.
+     */
+    const radioGroupNames = async (scope) => await scope.evaluate((element) => {
+      const names = new Set();
+      for (const input of element.querySelectorAll('input[type="radio"]')) {
+        if (input.name) names.add(input.name);
+      }
+      return [...names];
+    }).catch(() => []);
     // Whether a keystroke aimed at this element can still do the job it was queued for. Only ever
     // asked about Enter on a choice control: see the press branch below.
     const choiceControlIsClosed = async (target) => await target.evaluate((element) => {
@@ -1574,7 +1668,29 @@ const { chromium } = require('playwright');
         await dismissOverlayAfterFill(locator, action.label);
       }
       if (action.type === 'fillByLabelText') {
-        const label = page.getByText(action.text, { exact: false }).first();
+        /* THE ELEMENT THAT NAMES THE QUESTION, ahead of the first prose that mentions it.
+         *
+         * See D-02 above. getByText(text).first() takes the first element in DOM order whose text
+         * merely CONTAINS the question, and on the live Skydio Ashby form that is the EEO preamble
+         * paragraph, three questions above the control. Everything downstream is resolved from this
+         * anchor, so the wrong anchor silently redirects the whole action at another question's
+         * options.
+         *
+         * A whole-string match is tried first: an element whose entire text IS the question is the
+         * question's label, and prose that happens to contain the word is not. Case-insensitive
+         * because the stored question text is not the board's capitalisation ("gender" in packet
+         * 13bccb2d against Ashby's "Gender"), and a trailing asterisk or colon is allowed because
+         * that is how a required field is marked. The old containment search is still the fallback,
+         * so a board whose label carries extra words is no worse off than before.
+         */
+        const wantedLabel = clean(action.text);
+        const wholeLabel = wantedLabel
+          ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:]?\\s*$', 'i')
+          : null;
+        const exactLabel = wholeLabel ? page.getByText(wholeLabel).first() : null;
+        const label = exactLabel && (await exactLabel.count()) > 0
+          ? exactLabel
+          : page.getByText(action.text, { exact: false }).first();
         if (await label.count() === 0) {
           const message = 'fillByLabelText: label not found';
           if (action.optional) {
@@ -1649,40 +1765,61 @@ const { chromium } = require('playwright');
           if (action.label) skipped.push(action.label + ': choice option not found');
           continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
-          // Scoped to THIS question's container, never the whole page. That scoping is what makes
-          // matching an answer as short as "Yes" safe: an unscoped label match could tick a consent
-          // or legal acknowledgement elsewhere on the form, which the applicant cannot undo.
+          /* Scoped to THIS question's own option block, never the whole page and - since D-02 -
+           * never a container that turned out to hold somebody else's options either. That scoping
+           * is what makes matching an answer as short as "Yes" safe: an unscoped label match could
+           * tick a consent or legal acknowledgement elsewhere on the form, which the applicant
+           * cannot undo, and a container-wide match set Gender from the Race answer on every Ashby
+           * EEO block Litos has ever filled.
+           *
+           * Every arm below ends the action. Falling through to the text verification at the bottom
+           * is what reported four correctly ticked Skydio radios as lost, because that verification
+           * reads the first input in the block and not the option that was clicked.
+           */
           const wanted = String(action.value || '').trim();
-          const choices = container.locator('input[type=checkbox], input[type=radio]');
-          const total = await choices.count();
-          let matched = false;
-          for (let choice = 0; choice < total; choice += 1) {
-            const option = choices.nth(choice);
-            const optionText = await option.evaluate((element) => {
-              const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
-              const wrapping = element.closest('label');
-              return ((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || element.getAttribute('aria-label') || element.value || '').trim();
-            });
-            if (optionText && optionMatches(optionText, wanted)) {
-              await option.check();
-              matched = true;
-              break;
+          const scope = await questionOptionBlock(label, container);
+          const groups = await radioGroupNames(scope);
+          if (groups.length > 1) {
+            // Refused rather than guessed. Two groups means two questions, and the only thing worse
+            // than leaving this one for the applicant is answering the other one for her.
+            if (action.label) {
+              skipped.push(action.label + ': this block holds ' + groups.length
+                + ' separate option groups, so an answer here could have landed on another question, left for you to choose');
             }
+            continue;
+          }
+          const outcome = await pickRadioOption(scope, wanted);
+          if (outcome === 'checked') {
+            if (action.label) filledFields.push(action.label);
+            continue;
+          }
+          if (outcome === 'not-checked') {
+            // The option exists, it was clicked, and the page did not keep it. Said plainly, because
+            // the applicant can finish it in one click and nothing else on the run can tell her.
+            if (action.label) skipped.push(action.label + ': the option was clicked and did not stay selected');
+            continue;
           }
           // Before the single-checkbox heuristic below, because on Ashby that heuristic is precisely
           // the wrong move: the one checkbox in the block is the display:none mirror of a pill pair,
           // so checking it neither drives React nor distinguishes Yes from No. See pickOptionPill.
-          if (!matched && await pickOptionPill(container, wanted)) {
-            matched = true;
+          if (await pickOptionPill(scope, wanted)) {
+            if (action.label) filledFields.push(action.label);
+            continue;
           }
-          if (!matched && total === 1 && /^yes$/i.test(wanted)) {
-            await choices.first().check();
-            matched = true;
+          const lone = scope.locator('input[type=checkbox], input[type=radio]');
+          const total = await lone.count();
+          if (total === 1 && /^yes$/i.test(wanted)) {
+            await lone.first().check().catch(() => undefined);
+            if (await lone.first().evaluate((element) => element.checked === true).catch(() => false)) {
+              if (action.label) filledFields.push(action.label);
+              continue;
+            }
           }
           // No exact option match means the answer does not belong to this control. Leaving it
           // unticked is correct: it surfaces as a required-field blocker for the applicant, which is
           // far cheaper than guessing a checkbox on their behalf.
-          if (!matched) continue;
+          if (action.label) skipped.push(action.label + ': no option matched "' + clean(wanted) + '", left for you to choose');
+          continue;
         } else if (shape.type === 'date' || (dateLikeAnswer && dateLikeField)) {
           await field.fill(action.value || '');
           await field.evaluate((element) => {
