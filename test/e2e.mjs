@@ -1,11 +1,13 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { createApp } from '../src/server.js';
 import { config } from '../src/config.js';
 
-const outputDir = path.join(process.cwd(), 'outputs', 'verification');
+const temporaryOutput = !process.env.STRATUS_E2E_OUTPUT_DIR;
+const outputDir = process.env.STRATUS_E2E_OUTPUT_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-e2e-'));
 fs.mkdirSync(outputDir, { recursive: true });
 const app = createApp({ database: ':memory:' });
 await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
@@ -165,6 +167,7 @@ try {
   fs.writeFileSync(path.join(outputDir, 'e2e-report.json'), JSON.stringify(evidence, null, 2));
   await browser.close();
   await app.close();
+  if (temporaryOutput) fs.rmSync(outputDir, { recursive: true, force: true });
 }
 
 console.log(JSON.stringify(evidence, null, 2));

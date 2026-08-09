@@ -27,7 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODE = 'TPHJrFMJ';
@@ -51,8 +51,19 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
 </form>
 <div id="submitted">no</div>
 <div id="filed">no</div>
+<div id="empty-code-submits">0</div>
 <script>
   var attempts = 0;
+  function renderChallenge() {
+    var html = '<p>A verification code was sent to mehekmandal05@gmail.com. To submit your'
+      + ' application, enter the 8-character code to confirm you\\'re a human.</p>'
+      + '<label id="code-label">Security code</label><div id="code-group">';
+    for (var b = 0; b < 8; b += 1) {
+      html += '<input class="code-box" type="text" maxlength="1" autocomplete="one-time-code"'
+        + ' aria-labelledby="code-label">';
+    }
+    document.getElementById('challenge').innerHTML = html + '</div>';
+  }
   // What Greenhouse does. The first submit does not file the application: it emails a code and
   // renders the code field. Only a submit carrying the right code files anything.
   document.getElementById('app-form').addEventListener('submit', function (event) {
@@ -63,6 +74,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     if (boxes.length) {
       var typed = '';
       for (var i = 0; i < boxes.length; i += 1) typed += boxes[i].value || '';
+      if (!typed) {
+        document.getElementById('empty-code-submits').textContent = String(Number(document.getElementById('empty-code-submits').textContent) + 1);
+      }
       if (typed === '${CODE}') {
         document.getElementById('challenge').innerHTML = '';
         document.getElementById('filed').textContent = 'yes';
@@ -70,15 +84,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
       }
       return;
     }
-    var html = '<p>A verification code was sent to mehekmandal05@gmail.com. To submit your'
-      + ' application, enter the 8-character code to confirm you\\'re a human.</p>'
-      + '<label id="code-label">Security code</label><div id="code-group">';
-    for (var b = 0; b < 8; b += 1) {
-      html += '<input class="code-box" type="text" maxlength="1" autocomplete="one-time-code"'
-        + ' aria-labelledby="code-label">';
-    }
-    document.getElementById('challenge').innerHTML = html + '</div>';
+    renderChallenge();
   });
+  if (location.search.includes('challenge=1')) renderChallenge();
   // A boxed code group that auto-advances, which is what makes focus-and-type the right first
   // strategy for entering one.
   document.addEventListener('input', function (event) {
@@ -101,13 +109,16 @@ const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-seccode-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 
 async function replay(actions, options = {}) {
+  const pathSuffix = options.pathSuffix || '';
+  const runOptions = { ...options };
+  delete runOptions.pathSuffix;
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
-    url: base,
+    url: base + pathSuffix,
     actions,
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
-    ...options
+    ...runOptions
   }));
   fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
   const { status, stderr } = await new Promise((resolve) => {
@@ -165,7 +176,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' }
   ], { allowSubmit: true });
@@ -188,21 +199,23 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'the code boxes must not be reported as empty required fields, got ' + JSON.stringify(result.blockers));
 }
 
-// 4. THE CODE FINISHES THE APPLICATION, at zero extra actions. The code rides on the submit click
-//    that was already queued, because the control it types into does not exist until that click has
-//    happened, and because every extra action would displace a field fill.
+// 4. THE CODE FINISHES THE APPLICATION in its own continuation run. That run begins on the changed
+//    challenge DOM and carries exactly one atomic action, one receipt pass, and one physical click.
 {
   const result = await replay([
-    { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: CODE },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#submitted' },
-    { type: 'extract', selector: '#filed' }
-  ], { allowSubmit: true });
-  assert.equal(valueOf(result, '#submitted'), '2', 'the form is submitted again with the code in it');
+    { type: 'extract', selector: '#filed' },
+    { type: 'extract', selector: '#empty-code-submits' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1' });
+  assert.equal(valueOf(result, '#submitted'), '1', 'the continuation makes exactly one submit with the code in it');
   assert.equal(valueOf(result, '#filed'), 'yes', 'and this time the employer has the application');
   assert.deepEqual(result.securityCodeAttempt, {
     supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
   });
+  assert.equal(valueOf(result, '#empty-code-submits'), '0', 'verification must never click before the changing code is entered');
+  assert.equal(result.requiredFieldConfirmation.passes.length, 1);
+  assert.equal(result.requiredFieldConfirmation.passes[0].submitKind, 'verification');
   assert.equal(result.humanVerification, null, 'the challenge is gone, which is what accepted means');
 }
 
@@ -211,11 +224,13 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    the same check and a fresh code is in her mailbox.
 {
   const result = await replay([
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: 'AAAAAAAA' },
-    { type: 'extract', selector: '#filed' }
-  ], { allowSubmit: true });
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: 'AAAAAAAA' },
+    { type: 'extract', selector: '#filed' },
+    { type: 'extract', selector: '#empty-code-submits' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1' });
   assert.equal(valueOf(result, '#filed'), 'no');
   assert.equal(result.securityCodeAttempt?.outcome, 'rejected');
+  assert.equal(valueOf(result, '#empty-code-submits'), '0');
   assert.equal(result.humanVerification?.kind, 'security_code', 'the challenge is still standing');
 }
 

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
+  ATOMIC_SUBMIT_POLICY,
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
@@ -584,6 +586,114 @@ test('required file-upload groups are reported even when the hidden input is not
 test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover' }]), [{ type: 'discover' }]);
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
+});
+
+test('atomic required confirmation owns the submit and accepts only contract v2', () => {
+  const actions = normalizeManagedActions([
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+  ]);
+  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_VERSION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], submitKind: 'application', securityCode: 'ABCD1234' }]),
+    (error) => error.code === 'INVALID_SUBMIT_KIND'
+  );
+  assert.equal(ATOMIC_SUBMIT_POLICY.name, 'litos-final-submit');
+  assert.equal(ATOMIC_SUBMIT_POLICY.version, 2);
+  assert.equal(ATOMIC_SUBMIT_POLICY.grammarHash, '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9');
+  assert.equal(
+    crypto.createHash('sha256').update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`).digest('hex'),
+    ATOMIC_SUBMIT_POLICY.grammarHash
+  );
+  const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.finalPattern, 'i');
+  const excluded = new RegExp(ATOMIC_SUBMIT_POLICY.exclusionPattern, 'i');
+  const chooserCases = [
+    ['Submit', true],
+    ['Apply', true],
+    ['Apply now', true],
+    ['Submit application', true],
+    ['Submit your application', true],
+    ['Submit my application', true],
+    ['Submit the application', true],
+    ['Send this application', true],
+    ['Send your application', true],
+    ['Submit application with attachments', true],
+    ['Submit your application with cover letter', true],
+    ['Send application from your profile', true],
+    ['Send application from your saved details', true],
+    ['Submit application for review', true],
+    ['Finish & apply', true],
+    ['Submit your application - Contact Center Agent', true],
+    ['Submit application - Acme Corp', true],
+    ['Apply with LinkedIn', false],
+    ['Apply With Indeed', false],
+    ['Continue with Google', false],
+    ['Sign in with Apple', false],
+    ['Apply now with our recruiting partner', false],
+    ['Import profile', false],
+    ['Autofill with resume service', false],
+    ['Quick apply', false],
+    ['One-click apply', false],
+    ['Submit feedback', false],
+    ['Submit a support request', false],
+    ['Submit your question', false],
+    ['Submit application via Wellfound', false],
+    ['Submit application with recruiting partner', false],
+    ['Submit application feedback', false],
+    ['Complete application', false],
+    ['Finish application', false],
+    ['Continue', false],
+    ['Next', false],
+    ['Finish', false],
+    ['Sign in with Google', false],
+    ['Start application', false],
+    ['Submit application using Career Services', false],
+    ['Send application from recruiting partner', false]
+  ];
+  for (const [label, expected] of chooserCases) {
+    assert.equal(applicationFinal.test(label) && !excluded.test(label), expected, label);
+  }
+  const score = (label) => {
+    if (!applicationFinal.test(label) || excluded.test(label)) return null;
+    if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(label)) return 3;
+    if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(label)) return 2;
+    return 1;
+  };
+  assert.equal(score('Submit application'), 3);
+  assert.equal(score('Send your application'), 3);
+  assert.equal(score('Finish and apply'), 2);
+  assert.equal(score('Apply now'), 2);
+  assert.equal(score('Submit'), 1);
+  assert.equal(score('Apply'), 1);
+  assert.equal(score('Submit with attachments'), 1);
+  assert.equal(score('Apply with LinkedIn'), null);
+  const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
+  assert.throws(
+    () => normalizeManagedActions([missingPolicy]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY, finalPattern: `${ATOMIC_SUBMIT_POLICY.finalPattern} ` } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY, grammarHash: '0'.repeat(64) } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([actions[0], { ...actions[0], submitKind: 'verification' }]),
+    (error) => error.code === 'MULTIPLE_ATOMIC_SUBMITS'
+  );
+  assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
+  assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
+  assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {

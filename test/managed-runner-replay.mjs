@@ -29,7 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Late enough that the pre-check's snapshot cannot see it, which is the point: without a declared
@@ -544,14 +544,14 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    because the gate did - a test passing for the wrong reason is how a gate rots unnoticed.
 {
   const blocked = await replay([
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
   assert.deepEqual(blocked.blockers.sort(), [
-    '"Email" is required and is still empty',
-    '"Full name" is required and is still empty',
-    '"Phone" is required and is still empty'
+    '"Email" could not be confirmed',
+    '"Full name" could not be confirmed',
+    '"Phone" could not be confirmed'
   ], 'the gate must name the empty fields, got ' + JSON.stringify(blocked.blockers));
 
   const fill = (selector, value) => ({ type: 'fill', selector, value, label: selector.slice(1) });
@@ -559,7 +559,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
     fill('#req_phone', '+971 50 123 4567'),
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
@@ -572,7 +572,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   const phoneEmpty = await replay([
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
-    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(phoneEmpty, '#submitted'), '',
@@ -580,9 +580,9 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   // Asserted on 'skipped', not only on 'blockers': the runner has a SECOND, older required-field
   // scan that runs after the loop and reports the same field, so a blockers-only assertion passes
   // even when the gate saw nothing and let the click through. This line is the gate's alone.
-  assert.ok(phoneEmpty.skipped.some((entry) => /^final_submit: submit withheld, 1 required field/.test(entry)),
+  assert.ok(phoneEmpty.skipped.some((entry) => /atomic confirmation blocked submission/.test(entry)),
     'the GATE, not the post-loop scan, must be what withheld the click, got ' + JSON.stringify(phoneEmpty.skipped));
-  assert.deepEqual(phoneEmpty.blockers, ['"Phone" is required and is still empty'],
+  assert.deepEqual(phoneEmpty.blockers.sort(), ['"Phone" could not be confirmed'],
     'the gate must name the phone, and must not blame the answered country, got ' + JSON.stringify(phoneEmpty.blockers));
 }
 
