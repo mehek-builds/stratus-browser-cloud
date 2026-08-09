@@ -1173,6 +1173,33 @@ const { chromium } = require('playwright');
         const node = visibleOne(selector);
         if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
       }
+      /* GREENHOUSE CONFIRMS BY ROUTING, NOT BY RENDERING A PANEL.
+       *
+       * Read on 2026-08-10 out of the bundle the Cresta board serves live: on an ok response the
+       * application component does window.parent.postMessage('greenhouse.confirmation') and then
+       * window.location.assign(confirmationPath), where confirmationPath is the board's own
+       * '/embed/job_app/confirmation?for=<company>&token=<id>'. So the evidence that a Greenhouse
+       * application was filed is that the browser is standing on Greenhouse's confirmation route
+       * with the form gone. That is the ATS's own state, in the same class as Ashby's published
+       * success container, and it is a far better witness than the sentence on the page: fetched
+       * read-only, the Cresta confirmation route says "Thank you for applying. Your application has
+       * been received.", which the body-text arm below would also match - but it would match it on
+       * any page that happened to carry those words.
+       *
+       * Gated on the form being gone for the same reason every other arm is. A route match with an
+       * application form still on screen is not a confirmation, it is a page mid-navigation. */
+      const greenhouseConfirmation = /(^|\.)(?:job-boards|boards)\.greenhouse\.io$/i.test(location.hostname)
+        && /\/(?:application_)?confirmation\/?$/i.test(location.pathname);
+      if (greenhouseConfirmation && !formStillPresent) {
+        const body = clean(document.body ? document.body.innerText : '');
+        return {
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: 'greenhouse:' + location.pathname,
+          message: body.slice(0, 600) || 'Greenhouse confirmation page',
+          formStillPresent
+        };
+      }
       /* A CONTAINER IS NOT A CONFIRMATION. Ashby's success container is mounted by the same React
        * tree that renders the form, and an empty one over a live form was being read as a filed
        * application: the worst output this system can produce, because she is told it went and never
@@ -1237,9 +1264,29 @@ const { chromium } = require('playwright');
 
     /* Type a code the applicant supplied into the control found above, and say what happened.
      *
-     * Focus-and-type first, because a boxed group auto-advances on input and typing is the one
-     * thing every implementation of that widget is built to handle. Per-box filling is the fallback
-     * for a group that does not auto-advance, and the whole-value fill is for a single field.
+     * WHAT GREENHOUSE'S WIDGET ACTUALLY DOES, read on 2026-08-10 out of the bundle the Cresta board
+     * serves live (job-boards.cdn.greenhouse.io/assets/entry.client-Da_lLnMl.js), not guessed:
+     *
+     *   - eight inputs, a hardcoded count, ids security-input-0 through security-input-7, type=text,
+     *     maxLength 1, aria-required, inside <div class="email-verification__wrapper"> under
+     *     <fieldset id="email-verification">. There is NO autocomplete="one-time-code" on them, so
+     *     the platform-name branch of the detector never fires on Greenhouse and the maxLength-1
+     *     group branch is what finds it. That is why the group branch is not a fallback.
+     *   - it AUTO-ADVANCES. Its onChange writes the character, joins all eight box values, and calls
+     *     select() on the NEXT box's ref. So one focus and eight keystrokes puts one character in
+     *     each box, and typing eight characters is right rather than typing one and moving on.
+     *   - it also DISTRIBUTES A PASTE from the pasted box rightwards, which is a second correct way
+     *     in and needs a real clipboard event to reach; typing needs none, so typing is what this
+     *     does.
+     *   - and the submit button is DISABLED the moment the challenge appears and re-enabled only
+     *     when the joined value is exactly eight characters long. That is the part that made the
+     *     wait below necessary rather than tidy: setFormDisabled(false) is a React state update, so
+     *     the button is still disabled for a render after the last character lands, and
+     *     confirmAndSubmitPass filters its candidates on !disabled and would report the form's own
+     *     submit as missing.
+     *
+     * Focus-and-type first, then per-box filling for a group that does not auto-advance, then the
+     * whole-value fill for a single field.
      *
      * NEVER GUESSES A CODE. It types the one it was handed or it reports that it could not. */
     const enterSecurityCode = async (code) => {
@@ -1286,7 +1333,43 @@ const { chromium } = require('playwright');
           }).catch(() => undefined);
         }
       }
-      return (await readBack()) === code ? 'entered' : 'not_entered';
+      if ((await readBack()) !== code) return 'not_entered';
+      /* THE CHARACTERS ARE IN THE BOXES AND THE FORM IS NOT NECESSARILY READY YET.
+       *
+       * Greenhouse re-enables its submit button from React state, not from the keystroke:
+       * setFormDisabled(false) runs when the joined value reaches eight characters, and the button's
+       * disabled attribute changes when that render commits. Handing confirmAndSubmitPass a button
+       * that is still disabled costs the whole run, because its candidate filter drops disabled
+       * controls and it then raises 'Atomic submit control was missing or ambiguous' over a form
+       * that was about to be perfectly submittable - and a submit is the one thing that cannot be
+       * retried, so there is no second chance to notice.
+       *
+       * A GUARD, AND HONESTLY LABELLED AS ONE. React flushes a discrete input event synchronously,
+       * and the readBack round trip above costs at least one task on the page, so in the measured
+       * case the button is already enabled by the time this runs and the loop exits on its first
+       * check having cost nothing. It is here for the case where it is not, which is silent and
+       * total when it happens. It never decides anything either: a form whose submit stays disabled
+       * still gets its one honest attempt below and fails there with the reason, rather than being
+       * reported from here as a code that was not entered. The code IS entered, which is what
+       * readBack just proved. */
+      const submitReady = async () => page.evaluate(() => {
+        const codeBox = document.querySelector('[data-litos-security-code-box="0"]');
+        const form = codeBox && codeBox.closest('form');
+        if (!form) return true;
+        return [...form.querySelectorAll('button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]')]
+          .some((element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            const visible = (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
+            const disabled = Boolean(element.disabled) || element.getAttribute('aria-disabled') === 'true';
+            return visible && !disabled;
+          });
+      }).catch(() => true);
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline && !(await submitReady())) {
+        await page.waitForTimeout(50).catch(() => undefined);
+      }
+      return 'entered';
     };
 
     const readSubmitReadiness = (scope = null) => {
@@ -1539,6 +1622,44 @@ const { chromium } = require('playwright');
             : 'A required field on the form has no label Litos can read, and is still empty'
         });
       };
+      /* THE HUMAN CHECK IS NOT EIGHT UNANSWERED QUESTIONS.
+       *
+       * Greenhouse's security-code widget renders eight single-character inputs and puts
+       * aria-required="true" on every one of them (read 2026-08-10 out of the bundle the Cresta
+       * board serves live). The attribute loop below therefore claims all eight the moment the
+       * challenge appears, and an applicant waiting on an email would be handed eight blocker
+       * sentences telling her a required field is empty, under the one honest sentence telling her
+       * to go and read her mailbox. She would go looking for form fields to fill.
+       *
+       * A previous fixture asserted this could not happen; it asserted it against markup that
+       * carried no aria-required, so it was proving something about the fixture. Excluded on the
+       * SHAPE of the control - a run of four or more one-character inputs sharing a parent, or the
+       * platform's own autocomplete name - which is the same structural signal
+       * readSecurityCodeChallenge keys on, and not on any word anywhere on the page.
+       *
+       * It is not a hole in the gate. These boxes are not a question the applicant can answer from
+       * her profile, they are answered by the code endpoint, and the challenge itself is reported
+       * separately and much more usefully as humanVerification. */
+      const securityCodeBoxes = new Set();
+      {
+        const typed = [...root.querySelectorAll('input')].filter((element) => (
+          !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
+        ));
+        for (const element of typed) {
+          if (/one-time-code/i.test(element.getAttribute('autocomplete') || '')) securityCodeBoxes.add(element);
+        }
+        const byParent = new Map();
+        for (const element of typed) {
+          if (element.maxLength !== 1) continue;
+          const parent = element.parentElement;
+          if (!parent) continue;
+          if (!byParent.has(parent)) byParent.set(parent, []);
+          byParent.get(parent).push(element);
+        }
+        for (const group of byParent.values()) {
+          if (group.length >= 4) for (const element of group) securityCodeBoxes.add(element);
+        }
+      }
       // Native required, plus aria-required. React Select's input carries aria-required="true" and
       // no a "required" attribute at all, so a gate built only on [required] cannot see an unanswered
       // Greenhouse screener question - which is precisely the control this gate exists to catch.
@@ -1546,6 +1667,7 @@ const { chromium } = require('playwright');
         'input[required], textarea[required], select[required], [aria-required="true"]'
       )) {
         if (element.disabled) continue;
+        if (securityCodeBoxes.has(element)) continue;
         if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
         note(widgetOf(element), element, 'required');
       }
