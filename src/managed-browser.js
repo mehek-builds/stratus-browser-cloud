@@ -13,8 +13,8 @@ export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
   version: 1,
   candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-  applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:my\\s+|this\\s+)?application',
-  verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:my\\s+|this\\s+)?application',
+  applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:(?:your|my|the)\\s+)?application',
+  verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:(?:your|my|the)\\s+)?application',
   hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
 });
 const ATOMIC_SUBMIT_SELECTOR = ATOMIC_SUBMIT_POLICY.candidateSelector;
@@ -1414,8 +1414,8 @@ const { chromium } = require('playwright');
         const formText = String((form && (form.id + ' ' + form.className + ' ' + form.getAttribute('action'))) || '').toLowerCase();
         const normalizedText = text.toLowerCase();
         const handoff = /linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile/.test(normalizedText);
-        const finalApplication = /(?:submit|send|complete|finish)\s+(?:my\s+|this\s+)?application/.test(normalizedText);
-        const finalVerification = /verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|submit\s+(?:my\s+|this\s+)?application/.test(normalizedText);
+        const finalApplication = /(?:submit|send|complete|finish)\s+(?:(?:your|my|the)\s+)?application/.test(normalizedText);
+        const finalVerification = /verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|submit\s+(?:(?:your|my|the)\s+)?application/.test(normalizedText);
         const finalIntent = submitKind === 'verification' ? finalVerification : finalApplication;
         let score = 0;
         if (finalIntent) score += 100;

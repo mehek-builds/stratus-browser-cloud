@@ -565,10 +565,30 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
   assert.deepEqual(ATOMIC_SUBMIT_POLICY, {
     name: 'litos-final-submit', version: 1,
     candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-    applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:my\\s+|this\\s+)?application',
-    verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:my\\s+|this\\s+)?application',
+    applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:(?:your|my|the)\\s+)?application',
+    verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:(?:your|my|the)\\s+)?application',
     hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
   });
+  const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.applicationFinalPattern);
+  const hardExcluded = new RegExp(ATOMIC_SUBMIT_POLICY.hardExclusionPattern);
+  const chooserCases = [
+    ['Submit application', true],
+    ['Submit your application', true],
+    ['Submit my application', true],
+    ['Submit the application', true],
+    ['Send your application', true],
+    ['Continue', false],
+    ['Next', false],
+    ['Finish', false],
+    ['Apply with LinkedIn', false],
+    ['Sign in with Google', false],
+    ['Import profile', false],
+    ['Start application', false]
+  ];
+  for (const [label, expected] of chooserCases) {
+    const normalizedLabel = label.toLowerCase();
+    assert.equal(applicationFinal.test(normalizedLabel) && !hardExcluded.test(normalizedLabel), expected, label);
+  }
   const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
   assert.throws(
     () => normalizeManagedActions([missingPolicy]),

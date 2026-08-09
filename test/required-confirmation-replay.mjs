@@ -72,6 +72,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     });
   }
   var submitShape = new URLSearchParams(location.search).get('submit-shape');
+  var submitLabel = new URLSearchParams(location.search).get('submit-label');
+  if (submitLabel) document.getElementById('application-submit').textContent = submitLabel;
   if (location.search.includes('sole-continue')) document.getElementById('application-submit').textContent = 'Continue';
   if (location.search.includes('sole-linkedin')) document.getElementById('application-submit').textContent = 'Apply with LinkedIn';
   if (submitShape) {
@@ -227,6 +229,12 @@ for (const shape of ['button-default', 'input-image', 'input-button', 'role-butt
   assert.equal(shaped.requiredFieldConfirmation.status, 'confirmed');
 }
 
+for (const label of ['Submit your application', 'Submit the application', 'Send your application']) {
+  const labelled = await replay('?submit-label=' + encodeURIComponent(label));
+  assert.equal(labelled.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes', label + ' must satisfy chooser policy v1');
+  assert.equal(labelled.requiredFieldConfirmation.status, 'confirmed');
+}
+
 const replaced = await replay('?replace-submit');
 assert.equal(replaced.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
 assert.equal(replaced.requiredFieldConfirmation.status, 'blocked');
@@ -239,7 +247,14 @@ assert.equal(scanFailure.extracted.find((entry) => entry.selector === '#submitte
 assert.equal(scanFailure.requiredFieldConfirmation.status, 'blocked');
 assert.ok(scanFailure.requiredFieldConfirmation.passes[0].unresolved.includes('Required-field readiness scan failed'));
 
-for (const handoff of ['?sole-continue', '?sole-linkedin']) {
+for (const handoff of [
+  '?sole-continue',
+  '?sole-linkedin',
+  '?submit-label=Next',
+  '?submit-label=Finish',
+  '?submit-label=' + encodeURIComponent('Sign in with Google'),
+  '?submit-label=' + encodeURIComponent('Import profile')
+]) {
   const before = submissionCount;
   assert.notEqual(await replayFailure(handoff), 0, handoff + ' must fail closed as a non-final control');
   assert.equal(submissionCount, before, handoff + ' must not be clicked');
