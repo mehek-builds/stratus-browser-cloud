@@ -173,8 +173,11 @@ test('sandbox continuation is project-bound and single-use without exposing a se
         this.files.delete('stratus-continuation.json');
         return { exitCode: 0 };
       }
-      const file = args[2];
-      return { exitCode: this.files.has(file) ? 0 : 3 };
+      // The wait now watches SEVERAL paths - a result or a recorded crash - and reports which one
+      // it found on stdout, so the fake answers the same way the sandbox does.
+      const wanted = args.slice(3);
+      const found = wanted.find((path) => this.files.has(path));
+      return found ? { exitCode: 0, stdout: async () => found } : { exitCode: 3, stdout: async () => '' };
     }
     async readFileToBuffer({ path }) { return this.files.get(path) || null; }
     async stop() { this.stopped = true; }
@@ -911,4 +914,118 @@ test('one unanswered React Select is not reported twice', () => {
   // input beside it, and the two resolve to the same question and the same label. Measured on the
   // empty live Redwood form: 15 raw entries covering 8 distinct fields.
   assert.match(SANDBOX_RUNNER, /blocking: \[\.\.\.new Set\(required\.map\(\(entry\) => entry\.message\)\)\]/);
+});
+
+/* THE PHASED-SUBMIT REGRESSION, measured on production packet 13bccb2d (Skydio, Ashby, 2026-08-09).
+ *
+ * A fake sandbox that never produces a phase-0 result, so the only thing under test is what the
+ * caller does about it. On origin/main this waits 60 seconds and reports "Managed browser
+ * continuation timed out" on a run that requested no continuation of anything.
+ */
+function silentSandboxApi({ crash = null, result = null } = {}) {
+  const template = { name: 'stratus-browser-runtime', currentSnapshotId: 'snapshot' };
+  const calls = [];
+  class Fake {
+    constructor(name) { this.name = name; this.files = new Map(); this.stopped = false; }
+    async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
+    async runCommand(command, args) {
+      if (typeof command === 'object') {
+        if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+        if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(result)));
+        return { exitCode: null };
+      }
+      const timeoutMs = Number(args[2]);
+      const wanted = args.slice(3);
+      calls.push({ timeoutMs, wanted });
+      const found = wanted.find((path) => this.files.has(path));
+      return found ? { exitCode: 0, stdout: async () => found } : { exitCode: 3, stdout: async () => '' };
+    }
+    async readFileToBuffer({ path }) { return this.files.get(path) || null; }
+    async stop() { this.stopped = true; }
+  }
+  const sandboxes = [];
+  return {
+    calls,
+    sandboxes,
+    api: {
+      async get({ name }) { return name === template.name ? template : sandboxes.find((entry) => entry.name === name); },
+      async fork({ name }) { const sandbox = new Fake(name); sandboxes.push(sandbox); return sandbox; }
+    }
+  };
+}
+
+const urlOnly = async (value) => new URL(value);
+
+test('a submit run that produces nothing is a RUN timeout, on the run\'s own budget', async () => {
+  const fake = silentSandboxApi();
+  await assert.rejects(
+    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+      { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => {
+      // Not CONTINUATION_EXPIRED. The applicant was told her application had hit a continuation
+      // problem on a form that has never issued a security code in its life.
+      assert.equal(error.code, 'RUN_TIMED_OUT');
+      assert.match(error.message, /run timed out before it produced a result/);
+      return true;
+    }
+  );
+  // Requesting a continuation must not shorten the run. 90_000 is what a managed run gets when it
+  // does not request one; this used to be 60_000, and a 67-second Skydio submit died inside it.
+  assert.equal(fake.calls[0].timeoutMs, 90_000, 'phase 0 gets the full run budget: ' + JSON.stringify(fake.calls));
+  assert.deepEqual(fake.calls[0].wanted, ['stratus-result-0.json', 'stratus-error.json']);
+});
+
+test('a detached runner that crashes reports the crash, not a timeout', async () => {
+  const fake = silentSandboxApi({ crash: 'page.goto: net::ERR_CONNECTION_REFUSED' });
+  await assert.rejects(
+    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+      { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => {
+      // Detaching the run took stderr away from the caller, so every crash arrived as "the run took
+      // too long" after the full budget - a wrong cause and a slow one.
+      assert.equal(error.code, 'SANDBOX_RUN_FAILED');
+      assert.match(error.message, /ERR_CONNECTION_REFUSED/);
+      return true;
+    }
+  );
+});
+
+test('the runner decides whether a continuation is held open, not the caller\'s text sweep', async () => {
+  // An employer's own post-submit confirmation says "check your email", which is exactly what the
+  // caller's regex reads as a security-code challenge. The runner saw the page and said no.
+  const fake = silentSandboxApi({
+    result: {
+      title: 'Skydio',
+      url: 'https://jobs.ashbyhq.com/skydio/x/application',
+      text: 'Success. Thank you for submitting your application. Please check your email for a confirmation code.',
+      humanVerification: null,
+      continuationOffered: false,
+      submitOutcome: { pressed: true, state: 'confirmed', source: 'ats_state', evidence: '.ashby-application-form-success-container' }
+    }
+  });
+  const result = await executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+    { sandboxApi: fake.api, urlValidator: urlOnly });
+  assert.equal('continuationToken' in result, false, 'no challenge means no continuation to offer');
+  assert.equal(fake.sandboxes[0].stopped, true, 'and the sandbox is released rather than left idling');
+  assert.equal(result.submitOutcome.state, 'confirmed');
+});
+
+test('the runner reads the submit outcome off the page and reports it', () => {
+  // Ashby's published state hooks, read out of the live Skydio posting's own bundle on 2026-08-09.
+  // Keying on the container rather than the sentence is the point: the sentence is the employer's
+  // own applicationSubmittedSuccessMessage and differs per org, the container does not.
+  assert.match(SANDBOX_RUNNER, /ashby-application-form-success-container/);
+  assert.match(SANDBOX_RUNNER, /ashby-application-form-failure-container/);
+  // The failure container is checked FIRST. A page that rendered both would otherwise be read as a
+  // submitted application.
+  assert.ok(
+    SANDBOX_RUNNER.indexOf('for (const selector of REJECTED_CONTAINERS)') < SANDBOX_RUNNER.indexOf('for (const selector of CONFIRMED_CONTAINERS)'),
+    'a refusal must outrank a confirmation'
+  );
+  // Only on a run that pressed the button, and the press is recorded before the wait that can lose
+  // it. "Was it pressed" is the fact the applicant's next move depends on.
+  assert.match(SANDBOX_RUNNER, /if \(isFinalSubmitAction\(action\)\) finalSubmitPressed = true;/);
+  assert.match(SANDBOX_RUNNER, /const submitOutcome = finalSubmitPressed/);
+  // Body text alone cannot confirm anything while the form is still sitting there filled.
+  assert.match(SANDBOX_RUNNER, /if \(!formStillPresent && CONFIRMED_TEXT\.test\(body\)\)/);
 });

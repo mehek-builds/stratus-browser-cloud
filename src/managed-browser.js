@@ -124,6 +124,12 @@ const { chromium } = require('playwright');
     // work any of that out from the outside, and guessing it is how an application ends up recorded
     // as sent when it is still sitting behind a human check.
     let securityCodeAttempt = null;
+    /* WAS THE BUTTON PRESSED. Separate from everything the page says afterwards, because the two
+     * answer different questions and the run has to be able to say "pressed, and I do not know what
+     * happened next" without either half contaminating the other. Production packet
+     * 13bccb2d (Skydio, Ashby, 2026-08-09) is the case: the run was killed while this was the only
+     * fact anybody needed, and it was not recorded anywhere. */
+    let finalSubmitPressed = false;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     /* A REFUSAL TO STATE, RECOGNISED BY WHAT IT MEANS RATHER THAN BY HOW IT IS SPELLED.
@@ -818,6 +824,78 @@ const { chromium } = require('playwright');
         label: accessibleName(boxes[0]).slice(0, 120) || null
       };
     }).catch(() => null);
+
+    /* WHAT THE PAGE SAID AFTER THE SUBMIT CLICK, READ OFF THE STATE THE ATS RENDERS.
+     *
+     * Until now nothing in this runner read the answer to "did it go through". The caller scraped
+     * the whole body for a confirmation-ish sentence (RECEIPT_PROOF_RE, which matches the bare word
+     * "success"), and a run that could not scrape one was reported as unverifiable. That is the
+     * wrong instrument twice over: an unsubmitted application page carries plenty of encouraging
+     * prose, and a submitted one can confirm without using any of the words in the list.
+     *
+     * ASHBY, measured 2026-08-09 from the live Skydio posting's own bundle
+     * (cdn.ashbyprd.com/frontend_non_user/87a4960/assets/index-BFELy06m.js). On success Ashby mounts
+     *
+     *     <div class="ashby-application-form-success-container">
+     *       <div role="status" aria-live="polite"> Success <p>{applicationSubmittedSuccessMessage}</p>
+     *
+     * and on refusal the sibling 'ashby-application-form-failure-container', headed "We couldn't
+     * submit your application". Both class names are Ashby's published styling hooks - they are
+     * enumerated in the bundle as a public API for customer CSS - which is what makes them a
+     * legitimate thing to key off rather than a scrape of today's markup. The success SENTENCE is
+     * the org's own 'theme.applicationSubmittedSuccessMessage', which for Skydio is "Thank you for
+     * submitting your application..." and for an org that has not set one is Ashby's default "Your
+     * application was successfully submitted." - so the sentence is per-employer and the CONTAINER
+     * is not. The container is what this keys on; the sentence is carried along as the evidence a
+     * person can read.
+     *
+     * The order is strongest evidence first, and every arm names what it saw. An arm that cannot
+     * see anything returns 'unknown' rather than guessing, because "we do not know" is a state this
+     * system is allowed to be in and a wrong "submitted" is not. */
+    const readSubmitOutcome = () => page.evaluate(() => {
+      const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const visibleOne = (selector) => [...document.querySelectorAll(selector)].find(isVisible) || null;
+      // Published ATS state hooks. One entry per confirmed reading; nothing speculative belongs
+      // here, because a wrong entry here writes 'submitted' onto an application nobody received.
+      const CONFIRMED_CONTAINERS = ['.ashby-application-form-success-container'];
+      const REJECTED_CONTAINERS = ['.ashby-application-form-failure-container'];
+      const CONFIRMED_TEXT = /thank you for (?:submitting|applying)|thanks for (?:applying|your application)|your application (?:has been |was )?(?:successfully )?(?:submitted|received)|application (?:has been )?(?:submitted|received)|we(?:'| ha)ve received your application/i;
+      const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)/i;
+      const formStillPresent = Boolean(visibleOne('input[type=file], input[type=email], textarea'));
+      for (const selector of REJECTED_CONTAINERS) {
+        const node = visibleOne(selector);
+        if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
+      }
+      for (const selector of CONFIRMED_CONTAINERS) {
+        const node = visibleOne(selector);
+        if (node) return { state: 'confirmed', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
+      }
+      // A live region is the page telling assistive technology that something just happened, which
+      // is a far narrower claim than "these words appear somewhere on the page".
+      for (const node of [...document.querySelectorAll('[role=status], [role=alert], [aria-live]')]) {
+        if (!isVisible(node)) continue;
+        const text = clean(node.innerText);
+        if (!text) continue;
+        if (REJECTED_TEXT.test(text)) return { state: 'rejected', source: 'live_region', evidence: node.getAttribute('role') || 'aria-live', message: text.slice(0, 600), formStillPresent };
+        if (CONFIRMED_TEXT.test(text)) return { state: 'confirmed', source: 'live_region', evidence: node.getAttribute('role') || 'aria-live', message: text.slice(0, 600), formStillPresent };
+      }
+      /* THE WEAKEST ARM, AND IT IS GATED ON THE FORM BEING GONE. Body text alone was the old
+       * instrument and it is the one that has to be able to say no: a confirmation sentence over a
+       * form that is still sitting there, still filled, still submittable is not a confirmation. */
+      const body = clean(document.body ? document.body.innerText : '');
+      if (!formStillPresent && CONFIRMED_TEXT.test(body)) {
+        const sentence = (body.match(CONFIRMED_TEXT) || [''])[0];
+        return { state: 'confirmed', source: 'page_text', evidence: 'body', message: clean(body.slice(Math.max(0, body.indexOf(sentence)), body.indexOf(sentence) + 400)), formStillPresent };
+      }
+      return { state: 'unknown', source: null, evidence: null, message: null, formStillPresent };
+    }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
     /* Type a code the applicant supplied into the control found above, and say what happened.
      *
@@ -1573,6 +1651,11 @@ const { chromium } = require('playwright');
       }
       if (action.type === 'click') {
         await locator.click();
+        // RECORDED BEFORE THE WAIT, not after. A submit click that lands and then navigates, times
+        // out, or takes the sandbox down with it has still been pressed, and "was the button
+        // pressed" is the one fact the applicant's next move depends on. Setting it after the wait
+        // would lose it in exactly the case that matters.
+        if (isFinalSubmitAction(action)) finalSubmitPressed = true;
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
         /* THE SECOND HALF OF A GREENHOUSE SUBMIT, and the reason it is HERE rather than in its own
          * action.
@@ -1952,6 +2035,15 @@ const { chromium } = require('playwright');
     // fill run that has somehow submitted looks exactly like a fill run that has not, right up
     // until the applicant is asked to approve sending an application that is already half sent.
     const humanVerification = await readSecurityCodeChallenge();
+    /* THE OUTCOME OF THE CLICK, read from the page rather than inferred by the caller from a body
+     * scrape. Zero actions: it is a page.evaluate inside the run, exactly like the two reads above.
+     *
+     * Only on a run that actually pressed the button. On a fill run there is nothing to confirm, and
+     * a confirmation-shaped sentence already on an unsubmitted page (an employer's "Thank you for
+     * your interest") must not be able to manufacture one. */
+    const submitOutcome = finalSubmitPressed
+      ? { pressed: true, ...(await readSubmitOutcome()) }
+      : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
     // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
     // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
     // action list tried to send a real application without authorization, and this is the only
@@ -1967,10 +2059,31 @@ const { chromium } = require('playwright');
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
     // caller should be able to see and act on, and a silent skip is how a half-filled form starts
     // looking like a fully-filled one.
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, blockedSubmits, elapsedMs: Date.now() - startedAt }));
-    if (phase > 0 || !input.requestContinuation) break;
+    /* A CONTINUATION IS OFFERED ONLY WHEN THERE IS SOMETHING TO CONTINUE.
+     *
+     * This used to be 'input.requestContinuation' alone, and the caller cannot know in advance
+     * whether a form will ask for an emailed code, so it asks for a continuation on EVERY managed
+     * submit. The consequence was that a form with no challenge - which is nearly all of them, and
+     * every Ashby form Litos has ever driven - finished phase 0 and then sat here idling for the
+     * full continuation TTL waiting for a second phase that was never coming, while the caller sat
+     * on the other side waiting too. Nothing about that run involved a security code; it was still
+     * reported as "Managed browser continuation timed out".
+     *
+     * The runner is the only party that can answer this, because the answer is a property of the
+     * page in front of it. 'continuationOffered' travels in the result so the caller does not have
+     * to re-derive it from scraped text, which is what continuationEligible was reduced to doing.
+     */
+    const continuationOffered = input.requestContinuation === true
+      && (Boolean(humanVerification) || input.continuationCheckpoint === true);
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, blockedSubmits, continuationOffered, elapsedMs: Date.now() - startedAt }));
+    if (phase > 0 || !continuationOffered) break;
     fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: input.continuationExpiresAt, host: input.allowedHost }));
-    const expiresAt = Date.parse(input.continuationExpiresAt);
+    /* A FLOOR UNDER THE IDLE, because the TTL is counted from before the run started and phase 0
+     * can legitimately eat most of it. The security boundary is untouched: the claim script checks
+     * the marker's own expiresAt, so a token that has expired is still refused. All this prevents is
+     * the runner exiting - and closing the browser - while a continuation the caller is still
+     * allowed to make is in flight, which would report itself as a continuation timeout. */
+    const expiresAt = Math.max(Date.parse(input.continuationExpiresAt), Date.now() + 30_000);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -1983,7 +2096,17 @@ const { chromium } = require('playwright');
     await browser.close();
   }
 })().catch((error) => {
-  console.error(error?.stack || error?.message || String(error));
+  const detail = String(error?.stack || error?.message || error);
+  /* WRITTEN TO A FILE, not only to stderr, because on a continuation run this process is DETACHED
+   * and nobody is holding its stderr. Before this, a runner that died on its first action and a
+   * runner still patiently filling a slow form looked identical from outside - an absent result
+   * file - so both were reported after the full timeout as "the run timed out", and a crash whose
+   * message was sitting right there went unread. The caller watches for this file alongside the
+   * result and reports whichever arrives. */
+  try {
+    fs.writeFileSync('stratus-error.json', JSON.stringify({ message: detail.split('\n')[0].slice(0, 500), detail: detail.slice(0, 4000) }));
+  } catch { /* the result of the run matters more than the record of why there is none */ }
+  console.error(detail);
   process.exit(1);
 });
 `;
@@ -2124,17 +2247,66 @@ function continuationSandboxName(projectBinding, token) {
   return `stratus-c-${digest(`${projectBinding}:${token}`).slice(0, 40)}`;
 }
 
+/* THE RUNNER DECIDES, and this is now only the fallback for a runner that predates it.
+ *
+ * `continuationOffered` is written by the run itself, which is the only party that has ever seen
+ * the page. The text sweep below is kept for one reason: a caller may be pointed at an older
+ * runtime image mid-deploy, and silently never offering a continuation there would break the
+ * emailed-code path rather than degrade it. Note what the sweep matches - "check your email",
+ * "confirmation code" - and where that text lives: an employer's own post-submit confirmation
+ * ("we've sent a confirmation to your email") reads as a security-code challenge to it. That
+ * false positive is exactly why the runner's own answer wins.
+ */
 function continuationEligible(result, checkpoint) {
+  if (typeof result?.continuationOffered === 'boolean') return result.continuationOffered;
   if (checkpoint) return true;
   if (result?.humanVerification?.kind === 'security_code') return true;
   const haystack = `${result?.title || ''}\n${result?.url || ''}\n${result?.text || ''}`;
   return /(?:verification|security|confirmation)\s+code|enter\s+(?:the\s+)?code|check\s+your\s+email/i.test(haystack);
 }
 
-async function waitForSandboxFile(sandbox, path, timeoutMs) {
-  const script = "const fs=require('node:fs');const p=process.argv[1];const end=Date.now()+Number(process.argv[2]);(async()=>{while(!fs.existsSync(p)&&Date.now()<end)await new Promise(r=>setTimeout(r,100));process.exit(fs.existsSync(p)?0:3)})()";
-  const result = await sandbox.runCommand('node', ['-e', script, path, String(timeoutMs)], { timeoutMs: timeoutMs + 5_000 });
-  if (result.exitCode !== 0) throw Object.assign(new Error('Managed browser continuation timed out'), { status: 410, code: 'CONTINUATION_EXPIRED' });
+/* THE RUN'S OWN BUDGET, and it must not shrink because a continuation was requested.
+ *
+ * A managed run with no continuation is `sandbox.runCommand` against a fork whose timeout is
+ * 90_000, so 90 seconds is what a submit has always been allowed. Requesting a continuation
+ * switched it to a detached run polled for 60_000, which quietly took a third of the budget away
+ * from every managed submit - and the caller asks for a continuation on every one of them, because
+ * it cannot know in advance whether a form will demand an emailed code.
+ *
+ * Production packet 13bccb2d (Skydio, Ashby, 2026-08-09): approved at 12:24:42.430, failure written
+ * at 12:25:49.894. 67.4 seconds end to end, of which one 60-second wait, on a form with no
+ * challenge and nothing to continue.
+ */
+const MANAGED_RUN_TIMEOUT_MS = 90_000;
+const CONTINUATION_TIMEOUT_MS = 60_000;
+
+/**
+ * Wait for whichever of `paths` appears first, and return its name.
+ *
+ * Plural because the runner has two things it can say - a result or, since it started running
+ * detached, a crash - and watching only for the good one turns every crash into a timeout report
+ * after the full budget. `failure` carries the message and code for the timeout, because "the run
+ * took too long" and "the continuation expired" are different facts and were being reported with
+ * the same sentence.
+ */
+async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
+  const wanted = Array.isArray(paths) ? paths : [paths];
+  const script = "const fs=require('node:fs');const end=Date.now()+Number(process.argv[1]);const ps=process.argv.slice(2);(async()=>{for(;;){const hit=ps.find((p)=>fs.existsSync(p));if(hit){process.stdout.write(hit);process.exit(0)}if(Date.now()>=end)process.exit(3);await new Promise(r=>setTimeout(r,100))}})()";
+  const result = await sandbox.runCommand('node', ['-e', script, String(timeoutMs), ...wanted], { timeoutMs: timeoutMs + 5_000 });
+  if (result.exitCode !== 0) throw Object.assign(new Error(failure.message), { status: failure.status, code: failure.code });
+  const found = typeof result.stdout === 'function' ? String(await result.stdout()).trim() : String(result.stdout || '').trim();
+  return wanted.includes(found) ? found : wanted[0];
+}
+
+/** Turn a crash the detached runner recorded into the error it would have thrown in-line. */
+async function throwSandboxRunnerError(sandbox) {
+  const buffer = await sandbox.readFileToBuffer({ path: 'stratus-error.json' }).catch(() => null);
+  let message = 'Sandbox browser run failed';
+  try {
+    const parsed = JSON.parse(buffer.toString('utf8'));
+    if (parsed?.message) message = String(parsed.message).slice(0, 500);
+  } catch { /* a crash we cannot read is still a crash, and the generic message says so */ }
+  throw Object.assign(new Error(message), { status: 502, code: 'SANDBOX_RUN_FAILED' });
 }
 
 const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const crypto=require('node:crypto');const [tokenHash,projectHash]=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
@@ -2177,7 +2349,10 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
         throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
       }
       await sandbox.writeFiles([{ path: 'stratus-continuation-input.json', content: Buffer.from(JSON.stringify(continuation)) }]);
-      await waitForSandboxFile(sandbox, 'stratus-result-1.json', 60_000);
+      const produced = await waitForSandboxFile(sandbox, ['stratus-result-1.json', 'stratus-error.json'], CONTINUATION_TIMEOUT_MS, {
+        message: 'Managed browser continuation timed out', status: 410, code: 'CONTINUATION_EXPIRED'
+      });
+      if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
       const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-1.json' });
       if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a continuation result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
       const result = JSON.parse(resultBuffer.toString('utf8'));
@@ -2209,7 +2384,12 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
     sandbox = await sandboxApi.fork({
       sourceSandbox: template.name,
       ...(continuationToken ? { name: continuationSandboxName(projectBinding, continuationToken) } : {}),
-      timeout: context.requestContinuation ? (context.continuationTtlSeconds + 30) * 1000 : 90_000,
+      /* The sandbox has to outlive whatever the caller is allowed to wait for, or the wait times
+         out against a box that is already gone and the run is reported as slow rather than as
+         evicted. Two things can be waited on: the run itself and, after it, one continuation. */
+      timeout: context.requestContinuation
+        ? Math.max((context.continuationTtlSeconds + 30) * 1000, MANAGED_RUN_TIMEOUT_MS + CONTINUATION_TIMEOUT_MS + 30_000)
+        : MANAGED_RUN_TIMEOUT_MS,
       resources: { vcpus: 2 },
       persistent: false,
       networkPolicy: 'allow-all'
@@ -2231,7 +2411,14 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
     await sandbox.writeFiles(files);
     if (context.requestContinuation) {
       await sandbox.runCommand({ cmd: 'node', args: ['stratus-runner.cjs'], detached: true });
-      await waitForSandboxFile(sandbox, 'stratus-result-0.json', 60_000);
+      /* THE SAME BUDGET THE RUN WOULD HAVE HAD WITHOUT A CONTINUATION, and a timeout here is named
+       * for what it is. `Managed browser continuation timed out` on a form with no challenge, no
+       * continuation and no phase 1 was a sentence about a feature that had not been used, and it
+       * is what the Skydio packet reported to its applicant. */
+      const produced = await waitForSandboxFile(sandbox, ['stratus-result-0.json', 'stratus-error.json'], MANAGED_RUN_TIMEOUT_MS, {
+        message: 'Managed browser run timed out before it produced a result', status: 504, code: 'RUN_TIMED_OUT'
+      });
+      if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
     } else {
       const command = await sandbox.runCommand('node', ['stratus-runner.cjs']);
       if (command.exitCode !== 0) {
