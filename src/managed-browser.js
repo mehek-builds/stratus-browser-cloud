@@ -9,7 +9,15 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
-const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+export const ATOMIC_SUBMIT_POLICY = Object.freeze({
+  name: 'litos-final-submit',
+  version: 1,
+  candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+  applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:my\\s+|this\\s+)?application',
+  verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:my\\s+|this\\s+)?application',
+  hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
+});
+const ATOMIC_SUBMIT_SELECTOR = ATOMIC_SUBMIT_POLICY.candidateSelector;
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
@@ -1388,7 +1396,7 @@ const { chromium } = require('playwright');
         unmatched: [...new Set(unmatched.filter((text) => !stale.includes(text)))]
       };
       };
-      const failed = { blocking: [], stale: [], unmatched: [] };
+      const failed = { blocking: ['Required-field readiness scan failed'], stale: [], unmatched: [] };
       return scope ? scope.evaluate(scan).catch(() => failed) : page.evaluate(scan).catch(() => failed);
     };
     /* Commit answers that the page paints as filled while its own validation still calls them
@@ -1405,19 +1413,21 @@ const { chromium } = require('playwright');
         const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
         const formText = String((form && (form.id + ' ' + form.className + ' ' + form.getAttribute('action'))) || '').toLowerCase();
         const normalizedText = text.toLowerCase();
+        const handoff = /linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile/.test(normalizedText);
+        const finalApplication = /(?:submit|send|complete|finish)\s+(?:my\s+|this\s+)?application/.test(normalizedText);
+        const finalVerification = /verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|submit\s+(?:my\s+|this\s+)?application/.test(normalizedText);
+        const finalIntent = submitKind === 'verification' ? finalVerification : finalApplication;
         let score = 0;
-        if (/submit application|send application|complete application|apply now|apply for/.test(normalizedText)) score += 100;
-        else if (/submit|apply|continue|finish|verify|confirm/.test(normalizedText)) score += 25;
+        if (finalIntent) score += 100;
         if (/application|apply|job|career|greenhouse|lever|ashby/.test(formText)) score += 40;
         if (/newsletter|subscribe|search|login|sign in|coupon/.test(normalizedText + ' ' + formText)) score -= 100;
-        if (submitKind === 'verification' && /verify|confirm|submit application/.test(normalizedText)) score += 30;
         element.setAttribute('data-litos-submit-candidate-v2', String(index));
-        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), text, formText, score };
+        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), finalIntent, handoff, text, formText, score };
       }), action.submitKind).catch(() => null);
-      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm) : [];
+      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm && choice.finalIntent && !choice.handoff) : [];
       viable.sort((a, b) => b.score - a.score || a.index - b.index);
       const selected = viable[0];
-      const ambiguous = !selected || selected.score <= 0 || (viable[1] && viable[1].score === selected.score);
+      const ambiguous = !selected || (viable[1] && viable[1].score === selected.score);
       if (ambiguous) throw new Error('Atomic submit control was missing or ambiguous');
       const submitLocator = page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
       const submitHandle = await submitLocator.elementHandle();
@@ -2607,6 +2617,9 @@ function validateSelector(selector) {
 export function normalizeManagedActions(actions = []) {
   if (!Array.isArray(actions)) throw inputError('actions must be an array');
   if (actions.length > MAX_ACTIONS) throw inputError(`A run may contain at most ${MAX_ACTIONS} actions`, 'TOO_MANY_ACTIONS');
+  if (actions.filter((action) => action?.type === 'confirmAndSubmit').length > 1) {
+    throw inputError('A remote run may contain at most one atomic submit action', 'MULTIPLE_ATOMIC_SUBMITS');
+  }
   return actions.map((action, index) => {
     if (!action || typeof action !== 'object' || !ALLOWED_ACTIONS.has(action.type)) {
       throw inputError(`Action ${index + 1} has an unsupported type`, 'INVALID_ACTION');
@@ -2677,11 +2690,18 @@ export function normalizeManagedActions(actions = []) {
       if (!['application', 'verification'].includes(action.submitKind)) throw inputError('confirmAndSubmit submitKind is invalid', 'INVALID_SUBMIT_KIND');
       if (action.securityCode && action.submitKind !== 'verification') throw inputError('A security code requires a verification atomic submit', 'INVALID_SUBMIT_KIND');
       if (action.selector !== ATOMIC_SUBMIT_SELECTOR) throw inputError('confirmAndSubmit selector must be the version 2 submit candidate set', 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR');
+      if (
+        !action.chooserPolicy || typeof action.chooserPolicy !== 'object'
+        || Object.keys(action.chooserPolicy).sort().join(',') !== 'name,version'
+        || action.chooserPolicy.name !== ATOMIC_SUBMIT_POLICY.name
+        || action.chooserPolicy.version !== ATOMIC_SUBMIT_POLICY.version
+      ) throw inputError('confirmAndSubmit chooser policy is invalid', 'INVALID_CONFIRM_AND_SUBMIT_POLICY');
       if (typeof action.label !== 'string' || !action.label.trim()) throw inputError('confirmAndSubmit requires a non-empty label', 'INVALID_CONFIRM_AND_SUBMIT_LABEL');
       if (action.optional !== false) throw inputError('confirmAndSubmit must be non-optional', 'INVALID_CONFIRM_AND_SUBMIT_OPTIONAL');
       normalized.maxRetries = maxRetries;
       normalized.contractVersion = 2;
       normalized.submitKind = action.submitKind;
+      normalized.chooserPolicy = { name: ATOMIC_SUBMIT_POLICY.name, version: ATOMIC_SUBMIT_POLICY.version };
       if (action.timeout != null) normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     }
     return normalized;

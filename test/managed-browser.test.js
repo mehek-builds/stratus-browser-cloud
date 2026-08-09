@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ATOMIC_SUBMIT_POLICY,
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
@@ -546,20 +547,36 @@ test('discover is an allowed action and needs no selector', () => {
 
 test('atomic required confirmation owns the submit and accepts only contract v2', () => {
   const actions = normalizeManagedActions([
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
   ]);
-  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
+  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
   assert.throws(
-    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_VERSION'
   );
   assert.throws(
-    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR'
   );
   assert.throws(
     () => normalizeManagedActions([{ ...actions[0], submitKind: 'application', securityCode: 'ABCD1234' }]),
     (error) => error.code === 'INVALID_SUBMIT_KIND'
+  );
+  assert.deepEqual(ATOMIC_SUBMIT_POLICY, {
+    name: 'litos-final-submit', version: 1,
+    candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:my\\s+|this\\s+)?application',
+    verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:my\\s+|this\\s+)?application',
+    hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
+  });
+  const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
+  assert.throws(
+    () => normalizeManagedActions([missingPolicy]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([actions[0], { ...actions[0], submitKind: 'verification' }]),
+    (error) => error.code === 'MULTIPLE_ATOMIC_SUBMITS'
   );
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
   assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);

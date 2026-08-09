@@ -43,6 +43,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
       var oldSubmit = document.getElementById('application-submit');
       oldSubmit.replaceWith(oldSubmit.cloneNode(true));
     }
+    if (location.search.includes('scan-exception')) {
+      document.getElementById('application').querySelectorAll = function () { throw new Error('injected scoped scan failure'); };
+    }
   });
   var transfer = new DataTransfer();
   transfer.items.add(new File(['resume'], 'resume.pdf', { type: 'application/pdf' }));
@@ -69,6 +72,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     });
   }
   var submitShape = new URLSearchParams(location.search).get('submit-shape');
+  if (location.search.includes('sole-continue')) document.getElementById('application-submit').textContent = 'Continue';
+  if (location.search.includes('sole-linkedin')) document.getElementById('application-submit').textContent = 'Apply with LinkedIn';
   if (submitShape) {
     var original = document.getElementById('application-submit');
     var replacement;
@@ -97,10 +102,18 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   document.getElementById('application').addEventListener('submit', function (event) {
     event.preventDefault();
     document.getElementById('submitted').textContent = 'yes';
+    fetch('/record-submit', { method: 'POST' });
   });
 </script>`;
 
-const server = http.createServer((_request, response) => {
+let submissionCount = 0;
+const server = http.createServer((request, response) => {
+  if (request.url === '/record-submit') {
+    submissionCount += 1;
+    response.writeHead(204, { connection: 'close' });
+    response.end();
+    return;
+  }
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
   response.end(fixture);
 });
@@ -108,7 +121,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-confirm-replay-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 const confirmedSubmitActions = [
-  { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+  { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
   { type: 'extract', selector: '#submitted' },
   { type: 'extract', selector: '#text', attribute: 'value' },
   { type: 'extract', selector: '.select__single-value' },
@@ -142,6 +155,27 @@ async function replay(suffix = '', actions = confirmedSubmitActions) {
   });
   assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
   return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
+}
+
+async function replayFailure(suffix) {
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: `http://127.0.0.1:${server.address().port}/${suffix}`,
+    actions: [confirmedSubmitActions[0]],
+    allowSubmit: true,
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 }
+  }));
+  fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
+  return await new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+      cwd: workDir,
+      env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+    });
+    child.stderr.resume();
+    child.stdout.resume();
+    child.on('close', resolve);
+  });
 }
 
 const result = await replay();
@@ -199,6 +233,17 @@ assert.equal(replaced.requiredFieldConfirmation.status, 'blocked');
 assert.equal(replaced.requiredFieldConfirmation.passes[0].scope.sameNode, false);
 assert.equal(replaced.requiredFieldConfirmation.passes[0].blockerReason, 'submit_node_replaced');
 assert.equal(replaced.requiredFieldConfirmation.passes[0].submissionOutcome, 'blocked');
+
+const scanFailure = await replay('?scan-exception');
+assert.equal(scanFailure.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
+assert.equal(scanFailure.requiredFieldConfirmation.status, 'blocked');
+assert.ok(scanFailure.requiredFieldConfirmation.passes[0].unresolved.includes('Required-field readiness scan failed'));
+
+for (const handoff of ['?sole-continue', '?sole-linkedin']) {
+  const before = submissionCount;
+  assert.notEqual(await replayFailure(handoff), 0, handoff + ' must fail closed as a non-final control');
+  assert.equal(submissionCount, before, handoff + ' must not be clicked');
+}
 
 const missingProof = await replay('', [
   { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },

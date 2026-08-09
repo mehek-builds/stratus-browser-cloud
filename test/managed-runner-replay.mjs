@@ -427,7 +427,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    because the gate did - a test passing for the wrong reason is how a gate rots unnoticed.
 {
   const blocked = await replay([
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(blocked, '#submitted'), '', 'an incomplete form must not be submitted');
@@ -442,7 +442,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
     fill('#req_phone', '+971 50 123 4567'),
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(allowed, '#submitted'), 'yes', 'a complete form must not be blocked');
@@ -455,7 +455,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   const phoneEmpty = await replay([
     fill('#req_name', 'Mehek Mandal'),
     fill('#req_email', 'person@example.com'),
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' }
   ], { allowSubmit: true });
   assert.equal(valueOf(phoneEmpty, '#submitted'), '',
