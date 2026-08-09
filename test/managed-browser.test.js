@@ -248,7 +248,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
-  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -306,6 +306,46 @@ test('a choice we could not make is reported as the applicant\'s, not as filled'
   assert.match(SANDBOX_RUNNER, /const state = await readChoiceState\(container\);/);
   assert.match(SANDBOX_RUNNER, /if \(state\.kind !== 'unknown'\) \{/);
   assert.match(SANDBOX_RUNNER, /left for you to choose/);
+});
+
+test('a widget that renders its answer shorter than the row that set it is not a lost answer', () => {
+  /* THE LARGEST ANSWER-LOSS CLASS IN THE CORPUS, and it was never a lost answer.
+   *
+   * 45 of this user's 133 stored packets carry "choice value did not persist after fill"; 43 of them
+   * are one control. Greenhouse's phone Country React Select is chosen from the menu row "United
+   * Arab Emirates +971" and then renders what it holds as a flag element plus "+971", so verifying
+   * that against the requested "United Arab Emirates" found nothing in common. Reproduced on 23 of
+   * the 24 live employer forms behind those reports on 2026-08-09, and executed end to end in
+   * test/managed-runner-replay.mjs case 10 against the live markup.
+   *
+   * The widening is verified against the row that was CLICKED, so it needs that row recorded.
+   */
+  assert.match(SANDBOX_RUNNER, /let lastClickedOptionText = '';/);
+  assert.match(SANDBOX_RUNNER, /lastClickedOptionText = clean\(await byRole\.textContent\(\)\.catch\(\(\) => ''\)\);/);
+  assert.match(SANDBOX_RUNNER, /lastClickedOptionText = clean\(await byText\.textContent\(\)\.catch\(\(\) => ''\)\);/);
+  // Cleared at the top of every fill, so a row left over from an earlier control can never stand in
+  // for one this control never showed.
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
+  // Both halves are required: the row had to carry the answer, and the control has to be showing
+  // part of that same row.
+  assert.match(SANDBOX_RUNNER, /if \(!row \|\| shown\.length < 2 \|\| !row\.includes\(shown\)\) return false;/);
+  // Compared on the CLEANED text, not the normalised text. Normalising strips punctuation and "+1"
+  // would then read as a substring of "united arab emirates 971".
+  assert.match(SANDBOX_RUNNER, /const row = clean\(clickedOptionText \|\| ''\)\.toLowerCase\(\);/);
+  assert.match(SANDBOX_RUNNER, /const shown = clean\(text\)\.toLowerCase\(\);/);
+  // And the two call sites that have a row to offer are the only ones that pass one.
+  assert.match(SANDBOX_RUNNER, /verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText\)/);
+});
+
+test('a choice option that is not on the list names the answer that went looking', () => {
+  // Measured 2026-08-09 on the live DV Trading form, one of the two packets that report this: the
+  // "Graduation Date" React Select offers ranges - "January 2028 - July 2028", "August 2028 -
+  // December 2028" - and the stored answer is the month "May 2028". The verdict is right and
+  // unchanged; the bare "choice option not found" simply never told the applicant what to fix.
+  // The emission, not the words: the sentence survives in the comment that explains why it went.
+  assert.doesNotMatch(SANDBOX_RUNNER, /': choice option not found'/);
+  assert.match(SANDBOX_RUNNER, /const unmatched = await readChoiceState\(container\);/);
+  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(action\.value \|\| ''\) \+ '", left for you to choose/);
 });
 
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
@@ -367,7 +407,9 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   // after fillByLabelText". A real text input keeps what you type; one that does not is a widget.
   assert.match(SANDBOX_RUNNER, /let persisted = await verifyFilled\(field, action\.value \|\| ''\);/);
   assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
-  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n\s+persisted = await verifyChoiceInContainer/);
+  // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
+  // exactly as readily as one reached through the two branches above.
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.
   assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);

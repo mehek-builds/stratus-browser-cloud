@@ -104,6 +104,37 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     <button type="button" class="select__dropdown-indicator" aria-label="Toggle flyout">v</button>
   </div>
 </div>
+<!-- GREENHOUSE'S PHONE COUNTRY CONTROL, copied node for node off the live rendered DOM.
+     Captured 2026-08-09 from job-boards.greenhouse.io/embed/job_app?for=redwoodmaterials&token=6126784004,
+     one of the 24 forms behind this user's stored "choice value did not persist after fill" reports.
+
+     The one property that matters, and the reason a hand-written select would prove nothing: the
+     MENU ROW reads "United Arab Emirates +971" and the CHOSEN value renders as a flag element plus
+     the bare dial code. The live markup, verbatim:
+
+       <div class="select__single-value"><div class="iti__flag iti__ae"></div><span>+971</span></div>
+
+     So the answer lands, readChoiceState reads the right node, and the text it finds has nothing in
+     common with the country name that was asked for. The distractor rows exist so a verification
+     that merely notices "something is selected" cannot pass this case. -->
+<div class="select__container" id="country-shell">
+  <!-- The live label carries a required asterisk. This one deliberately does not: the pre-submit
+       gate case below asserts an exact blocker list, and a required control loose in the page (this
+       one is outside #app-form on purpose, so it cannot disturb the phone rule either) would add a
+       fourth blocker to it. The asterisk has nothing to do with how the chosen value renders, which
+       is the only property this fixture exists to reproduce. -->
+  <label id="country-label" for="country" class="label select__label">Country</label>
+  <div class="select-shell">
+    <div><div class="select__control">
+      <div class="select__value-container">
+        <div class="select__placeholder" id="country-placeholder"></div>
+        <div class="select__input-container"><input id="country" class="select__input" role="combobox" aria-haspopup="true" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
+      </div>
+      <div class="select__indicators"><button type="button" class="icon-button" aria-label="Toggle flyout" tabindex="-1">v</button></div>
+    </div></div>
+  </div>
+</div>
+<div id="country-shown"></div>
 <!-- novalidate deliberately: with the browser's own required-field validation on, an empty required
      input stops the form submitting all by itself, and a gate that did nothing would look like a
      gate that worked. Turning it off leaves the gate as the only thing between the click and the
@@ -256,6 +287,92 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   });
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') closeMenu();
+  });
+
+  // ---- The phone Country React Select, behaving the way the live one does ----
+  //
+  // Same widget family as the discipline control above, and deliberately a SEPARATE fixture rather
+  // than a flag on that one, because the defect is not in the selecting. It is that this control
+  // renders what it is holding as a dial code while its menu row carries the country name, and only
+  // a control that does both can show that.
+  var COUNTRIES = [
+    { row: 'United Arab Emirates +971', shown: '+971' },
+    { row: 'United States +1', shown: '+1' },
+    { row: 'United Kingdom +44', shown: '+44' },
+    { row: 'Japan +81', shown: '+81' }
+  ];
+  var countryShell = document.getElementById('country-shell');
+  // React Select renders its menu INSIDE its own container - the .select-shell div, not the outer
+  // .select__container that also holds the label. The distinction is load-bearing rather than
+  // cosmetic: the runner scopes its option clicks to the nearest select-shell/select__container
+  // ancestor of the input precisely so it can never click a job-description bullet, and a fixture
+  // that hung the menu one level too high would put every option out of that scope and test nothing.
+  var countryMenuHost = countryShell.querySelector('.select-shell');
+  var countryInput = document.getElementById('country');
+  var countryControl = countryShell.querySelector('.select__control');
+  var countryValues = countryShell.querySelector('.select__value-container');
+  var countryChosen = null;
+  var countryTimer = null;
+  function renderCountry() {
+    var existing = countryShell.querySelector('.select__single-value');
+    if (existing) existing.remove();
+    var placeholder = document.getElementById('country-placeholder');
+    document.getElementById('country-shown').textContent = countryChosen ? countryChosen.shown : '';
+    if (!countryChosen) { if (placeholder) placeholder.style.display = ''; return; }
+    if (placeholder) placeholder.style.display = 'none';
+    // The live node, reproduced exactly: a flag element carrying no text, then the dial code. The
+    // country name appears nowhere inside it.
+    var node = document.createElement('div');
+    node.className = 'select__single-value';
+    var flag = document.createElement('div');
+    flag.className = 'iti__flag';
+    var span = document.createElement('span');
+    span.textContent = countryChosen.shown;
+    node.appendChild(flag);
+    node.appendChild(span);
+    countryValues.prepend(node);
+  }
+  function closeCountryMenu() {
+    if (countryTimer) { clearTimeout(countryTimer); countryTimer = null; }
+    var menu = countryShell.querySelector('.select__menu');
+    if (menu) menu.remove();
+    countryInput.setAttribute('aria-expanded', 'false');
+  }
+  function openCountryMenu() {
+    closeCountryMenu();
+    countryInput.setAttribute('aria-expanded', 'true');
+    countryTimer = setTimeout(function () {
+      countryTimer = null;
+      var query = countryInput.value.trim().toLowerCase();
+      var menu = document.createElement('div');
+      menu.className = 'select__menu';
+      menu.setAttribute('role', 'listbox');
+      COUNTRIES.filter(function (entry) {
+        return !query || entry.row.toLowerCase().indexOf(query) >= 0;
+      }).forEach(function (entry, index) {
+        var option = document.createElement('div');
+        option.className = 'select__option';
+        option.setAttribute('role', 'option');
+        option.id = 'react-select-country-option-' + index;
+        option.textContent = entry.row;
+        option.addEventListener('mousedown', function (event) {
+          event.preventDefault();
+          countryChosen = entry;
+          countryInput.value = '';
+          renderCountry();
+          closeCountryMenu();
+        });
+        menu.appendChild(option);
+      });
+      countryMenuHost.appendChild(menu);
+    }, ${MENU_RENDER_MS});
+  }
+  countryControl.addEventListener('mousedown', function () {
+    if (countryInput.getAttribute('aria-expanded') === 'true') closeCountryMenu(); else openCountryMenu();
+  });
+  countryInput.addEventListener('input', function () { openCountryMenu(); });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeCountryMenu();
   });
 </script>`;
 
@@ -578,6 +695,48 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   // would turn a correct fill into 'value did not persist after fill'.
   assert.deepEqual(result.filledFields.sort(), ['mobile', 'phone'],
     'both fills must be reported filled, got ' + JSON.stringify(result));
+}
+
+/* 10. A CONTROL THAT SHOWS THE DIAL CODE FOR THE COUNTRY IT IS HOLDING IS HOLDING THE COUNTRY.
+ *
+ * The measured cause of the largest single answer-loss class in the corpus: 45 stored packets carry
+ * "choice value did not persist after fill", and 43 of them are this one control. Greenhouse's phone
+ * Country React Select takes "United Arab Emirates" from the menu row "United Arab Emirates +971"
+ * and then renders the chosen value as a flag plus "+971". readChoiceState read that correctly; the
+ * verification compared "+971" against "United Arab Emirates", found nothing in common, and reported
+ * an answer that was sitting on the form as one Litos had lost. Reproduced on 23 of the 24 live
+ * employer forms behind those reports on 2026-08-09.
+ *
+ * Three assertions, and the last two are what keep the widening honest:
+ *   - the answer that DID land is reported filled;
+ *   - #country-shown proves it landed, independently of anything the runner says;
+ *   - an answer the control is NOT holding is still reported as lost. Without that this test would
+ *     pass just as well against a verification that had been deleted.
+ */
+{
+  const landed = await replay([
+    { type: 'fill', selector: '#country', value: 'United Arab Emirates', label: 'phone_country', optional: true },
+    { type: 'extract', selector: '#country-shown' }
+  ]);
+  assert.equal(valueOf(landed, '#country-shown'), '+971',
+    'the fixture must actually be holding the country before anything is claimed about it, got '
+    + JSON.stringify(valueOf(landed, '#country-shown')));
+  assert.deepEqual(landed.filledFields, ['phone_country'],
+    'a country the control is visibly holding must be reported filled, got ' + JSON.stringify(landed));
+  assert.deepEqual(landed.skipped, [], 'and nothing about it may be reported lost, got ' + JSON.stringify(landed.skipped));
+
+  // THE NEGATIVE CONTROL. Nothing on this menu carries "Atlantis", so no row is clicked, the control
+  // stays empty, and the run must say so rather than widen its way to a pass.
+  const missing = await replay([
+    { type: 'fill', selector: '#country', value: 'Atlantis', label: 'phone_country', optional: true },
+    { type: 'extract', selector: '#country-shown' }
+  ]);
+  assert.equal(valueOf(missing, '#country-shown'), '',
+    'the control must still be empty, got ' + JSON.stringify(valueOf(missing, '#country-shown')));
+  assert.deepEqual(missing.filledFields, [],
+    'an answer that never reached the control must never be reported filled, got ' + JSON.stringify(missing));
+  assert.ok(missing.skipped.some((entry) => /^phone_country: no option matched "Atlantis"/.test(entry)),
+    'and the applicant must be told which answer was not on the list, got ' + JSON.stringify(missing.skipped));
 }
 
 /* THE NO-CHALLENGE PATH FINISHES IN ONE PHASE.

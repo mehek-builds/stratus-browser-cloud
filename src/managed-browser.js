@@ -392,11 +392,50 @@ const { chromium } = require('playwright');
     // A verification that reads a different place from the one the value lands in is worse than no
     // verification, because it turns a good fill into a reported failure and a real failure into
     // noise indistinguishable from it.
-    const verifyChoiceInContainer = async (container, expected) => {
+    /* THE ROW THAT WAS CLICKED, so the third rule below has something to verify against.
+     *
+     * Written by fillCustomChoice and read only by the call that immediately follows it. Never
+     * consulted anywhere else: the third rule is worth nothing without the click that produced it,
+     * and a leftover row from an earlier control would be exactly the kind of verification-by-
+     * coincidence the two rules above exist to avoid.
+     */
+    let lastClickedOptionText = '';
+    const verifyChoiceInContainer = async (container, expected, clickedOptionText) => {
       const state = await readChoiceState(container);
       if (state.kind === 'empty') return false;
       const text = state.value;
-      return optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)));
+      if (optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)))) return true;
+      /* THIRD RULE: A WIDGET MAY RENDER WHAT IT IS HOLDING IN A SHORTER FORM THAN THE MENU ROW THAT
+       * SET IT, AND THAT IS NOT A LOST ANSWER.
+       *
+       * Measured 2026-08-09 against the live employer forms behind this user's stored reports, all
+       * 24 of them, at job-boards.greenhouse.io/embed/job_app. Greenhouse renders the phone Country
+       * field as a React Select whose MENU ROW reads "United Arab Emirates +971" and whose CHOSEN
+       * value renders as a flag element plus the text "+971", and nothing else:
+       *
+       *   <div class="select__single-value"><div class="iti__flag iti__ae"></div><span>+971</span></div>
+       *
+       * readChoiceState reads that node, which is the right node - the value HAD landed on 23 of the
+       * 24 forms. The two rules above then compared "+971" against the requested "United Arab
+       * Emirates", found nothing in common, and the runner reported an answer it had actually left
+       * on the form as one it had lost. That single control accounts for 43 of the 45 stored
+       * "choice value did not persist after fill" reports across 133 packets.
+       *
+       * So the third rule verifies against the row that was CLICKED instead of against the answer
+       * text, and only when both halves hold: that row had to carry the requested answer, and what
+       * the control now shows has to be part of that same row. A control that was never clicked has
+       * no row and fails; an empty control never reaches here; a control showing some other option
+       * cannot be a substring of the row we clicked.
+       *
+       * Compared on the CLEANED text rather than the normalised text, because normalising strips
+       * punctuation and "+1" would then read as a substring of "united arab emirates 971". The
+       * two-character floor is the same guard from the other side: a single character is a substring
+       * of almost any row and proves nothing.
+       */
+      const row = clean(clickedOptionText || '').toLowerCase();
+      const shown = clean(text).toLowerCase();
+      if (!row || shown.length < 2 || !row.includes(shown)) return false;
+      return optionMatches(row, expected) || answerOptions(expected).some((option) => normalized(row).includes(normalized(option)));
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
@@ -587,6 +626,10 @@ const { chromium } = require('playwright');
     // nothing. The other is the unscoped option click documented inside fillCustomChoice below.
     const CLEAR_CONTROL_RE = /\bclear\b|\bremove\b|\bdeselect\b|\breset\b/;
     const fillCustomChoice = async (container, wanted) => {
+      // Cleared on every call, so the row this function publishes can only ever be the row THIS call
+      // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
+      // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
+      lastClickedOptionText = '';
       const alreadyAnswered = await readChoiceState(container);
       if (alreadyAnswered.kind === 'chosen' && optionMatches(alreadyAnswered.value, wanted)) return true;
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
@@ -635,11 +678,13 @@ const { chromium } = require('playwright');
             ? scopedMenu.getByRole('option', { name: option, exact: false }).first()
             : page.getByRole('option', { name: option, exact: false }).first();
           if ((await byRole.count()) > 0 && await byRole.isVisible().catch(() => false)) {
+            lastClickedOptionText = clean(await byRole.textContent().catch(() => ''));
             await byRole.click();
             return true;
           }
           const byText = optionsRoot().filter({ hasText: option }).first();
           if ((await byText.count()) > 0 && await byText.isVisible().catch(() => false)) {
+            lastClickedOptionText = clean(await byText.textContent().catch(() => ''));
             await byText.click();
             return true;
           }
@@ -1748,7 +1793,7 @@ const { chromium } = require('playwright');
             'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
           );
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '')) filledFields.push(action.label);
+            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText)) filledFields.push(action.label);
             else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
             continue;
           }
@@ -1875,11 +1920,26 @@ const { chromium } = require('playwright');
           if (!selected) continue;
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '')) filledFields.push(action.label);
+            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText)) filledFields.push(action.label);
             else if (action.label) skipped.push(action.label + ': choice value did not persist after fillByLabelText');
             continue;
           }
-          if (action.label) skipped.push(action.label + ': choice option not found');
+          /* NAME THE ANSWER THAT WAS NOT ON THE LIST, the way the fill branch above already does.
+           *
+           * The verdict is unchanged and deliberately so: no option matched, and a choice we could
+           * not make belongs to the applicant. What changes is that she is told which answer went
+           * looking. Measured 2026-08-09 on the live DV Trading form behind two of these reports:
+           * "Graduation Date" is a React Select offering ranges - "January 2028 - July 2028",
+           * "August 2028 - December 2028" - and the stored answer is the month "May 2028", which
+           * genuinely is not on that list. "choice option not found" told her none of that, so a
+           * report she could have cleared in one click read as a fault in Litos.
+           */
+          if (action.label) {
+            const unmatched = await readChoiceState(container);
+            skipped.push(unmatched.kind === 'chosen'
+              ? action.label + ': left the answer already on the form, "' + clean(unmatched.value) + '"'
+              : action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+          }
           continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
           /* Scoped to THIS question's own option block, never the whole page and - since D-02 -
@@ -1972,7 +2032,10 @@ const { chromium } = require('playwright');
         if (!persisted) {
           if (await pickOptionPill(container, action.value || '')) persisted = true;
           else if (await fillCustomChoice(container, action.value || '')) {
-            persisted = await verifyChoiceInContainer(container, action.value || '');
+            // Same row hint as the two branches above, for the same reason: the fill that just
+            // succeeded is the one whose row this is, and a widget on this path abbreviates its
+            // chosen value exactly as readily as one on the others.
+            persisted = await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText);
           }
         }
         if (action.label && persisted) filledFields.push(action.label);
