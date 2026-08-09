@@ -166,6 +166,169 @@ const { chromium } = require('playwright');
       if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
+    /* IS THE NEXT QUESTION STILL REACHABLE, or is something sitting on top of it.
+     *
+     * Measured on the live Deepgram Ashby form: filling 'Expected Graduation Year' opens a May 2028
+     * calendar that does NOT close when the value is committed, and it renders over the question
+     * below it - over the control AND over its label. document.elementFromPoint at the centre of the
+     * following control returns the calendar, so anything aimed there afterwards hits the calendar
+     * instead of the field, and the screenshot of the 'filled' form shows the applicant a question
+     * she cannot read.
+     *
+     * The measurement is deliberately 'is the next control reachable' and not 'is a calendar open'.
+     * Which widget it is does not matter and there is no list of them worth keeping.
+     *
+     * Three narrowings, and each one is a false positive this would otherwise have:
+     *   - Only text-entry controls count as 'the next question'. A checkbox, radio or file input is
+     *     routinely 1px or opacity:0 with its real chrome painted by a sibling, so hit-testing one
+     *     reports 'covered' on a page where nothing is covering anything.
+     *   - The thing on top has to be FLOATING - inside an absolute, fixed or sticky ancestor. That is
+     *     what an overlay IS, and it is what separates a picker from ordinary layout.
+     *   - A control outside the viewport is answered 'no' rather than guessed at. elementFromPoint
+     *     has nothing to say about it.
+     */
+    const nextControlIsCovered = async (field) => await field.evaluate((element) => {
+      const TEXT_ENTRY = 'input:not([type]), input[type="text"], input[type="tel"], input[type="email"],'
+        + ' input[type="url"], input[type="number"], input[type="search"], input[type="password"],'
+        + ' input[type="date"], input[type="month"], input[type="week"], textarea, select, [role="combobox"]';
+      const root = element.closest('form') || element.ownerDocument.body;
+      const controls = Array.prototype.slice.call(root.querySelectorAll(TEXT_ENTRY));
+      const index = controls.indexOf(element);
+      if (index < 0) return false;
+      const floating = (node) => {
+        for (let at = node; at && at !== element.ownerDocument.body; at = at.parentElement) {
+          const position = getComputedStyle(at).position;
+          if (position === 'absolute' || position === 'fixed' || position === 'sticky') return true;
+        }
+        return false;
+      };
+      for (let i = index + 1; i < controls.length; i += 1) {
+        const next = controls[i];
+        if (next === element || element.contains(next) || next.contains(element)) continue;
+        const box = next.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0) continue;
+        const x = box.left + box.width / 2;
+        const y = box.top + box.height / 2;
+        if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+        const over = element.ownerDocument.elementFromPoint(x, y);
+        if (!over) return false;
+        if (over === next || next.contains(over) || over.contains(next)) return false;
+        return floating(over);
+      }
+      return false;
+    }).catch(() => false);
+    /* DISMISSING THAT OVERLAY, AND WHY IT IS NOT A KEYSTROKE AT THE PAGE.
+     *
+     * There is recorded history here. An unaimed global 'press Enter', queued to commit a value,
+     * reached the FORM instead and submitted it: five bounced applications and five emailed
+     * Greenhouse security codes. So a dismissal has to satisfy two things at once. It has to reach
+     * the overlay, and it has to be incapable of sending the application even if it lands somewhere
+     * unintended.
+     *
+     * Escape aimed at the field satisfies both. It is delivered to one named element rather than to
+     * whatever happens to hold focus; every picker measured here and live closes on it; and Escape
+     * has no submitting behaviour on any control in any browser - there is no arrangement of focus
+     * in which this key sends a form. Blur is the second attempt for the same two reasons: aimed at
+     * the one element, and incapable of submitting. Nothing here CLICKS. A click needs a point to
+     * land on, and any point on a real employer's page may turn out to be a control.
+     *
+     * The run-level submit guard above would catch a stray submit anyway. It is deliberately not
+     * leaned on: a guard is a net, and the thing over the net should still be the right thing.
+     *
+     * An overlay that survives both is REPORTED rather than fought. Telling the applicant the form
+     * was left with something covering a question is a true statement she can act on, and it is
+     * better than escalating to a blind click at coordinates.
+     *
+     * Costs ZERO actions. It runs inside the fill that opened the overlay, so it cannot displace a
+     * field at the MANAGED_ACTION_LIMIT boundary.
+     */
+    const dismissOverlayAfterFill = async (field, label) => {
+      if (!(await nextControlIsCovered(field))) return;
+      await field.press('Escape').catch(() => undefined);
+      await page.waitForTimeout(80);
+      if (!(await nextControlIsCovered(field))) return;
+      await field.evaluate((element) => { if (typeof element.blur === 'function') element.blur(); }).catch(() => undefined);
+      await page.waitForTimeout(80);
+      if (await nextControlIsCovered(field) && label) {
+        skipped.push(label + ': a picker overlay stayed open over the next question after Escape and blur');
+      }
+    };
+    /* THE DIAL CODE THE FORM ALREADY HAS, read off the form rather than assumed from the board.
+     *
+     * Cresta's live form rejected '+971 567417451' with 'Phone number is too short' while the
+     * country control beside it already read +971. Combining a selector holding +971 with a field
+     * that also holds +971 gives a string no numbering plan parses, and the phone-input libraries
+     * these forms use report that as a length error. The application could not be submitted.
+     *
+     * The rule is NOT 'this board strips'. It was exactly that, for exactly one board, and the same
+     * defect then turned up on another. It is: when the phone field has a SEPARATE control already
+     * showing THIS number's own dial code, the field is for the national number and the dial code
+     * does not go in it. Both halves are required, and the second half is what keeps the
+     * mirror-image defect away. A form with no country control, or one showing a different country,
+     * or one showing a country NAME and no dial code, still receives the full international number,
+     * because stripping the country off a number nothing else carries would be the worse of the two
+     * bugs: it produces a number the employer cannot dial and nothing on the page says so.
+     *
+     * The decision this feeds is phoneForPortalField in the backend, and it is pinned there by
+     * src/lib/phoneCountryControl.test.ts. This is the same rule at the one place that has a live
+     * DOM to ask; the runner is a standalone script and cannot import it.
+     */
+    const separateDialCodesFor = async (field) => await field.evaluate((element) => {
+      const attr = (name) => element.getAttribute(name) || '';
+      const type = attr('type').toLowerCase();
+      const hint = (attr('name') + ' ' + attr('id') + ' ' + attr('aria-label') + ' ' + attr('placeholder') + ' ' + attr('autocomplete')).toLowerCase();
+      // Narrow on purpose. A broad match here would rewrite an unrelated numeric answer that
+      // happened to sit next to something with a plus sign in it.
+      if (type !== 'tel' && !/phone|mobile|(^|[^a-z])tel([^a-z]|$)/.test(hint)) return [];
+      const dialCodesIn = (control) => {
+        if (control === element || control.contains(element) || element.contains(control)) return [];
+        let text = '';
+        if (control.tagName === 'SELECT') {
+          const selected = control.selectedOptions && control.selectedOptions[0];
+          text = String(control.value || '') + ' ' + (selected ? String(selected.textContent || '') : '');
+        } else {
+          text = String(control.getAttribute('aria-label') || '') + ' '
+            + String(control.value || '') + ' ' + String(control.textContent || '');
+        }
+        const found = [];
+        const pattern = /\+\s?(\d{1,4})/g;
+        let match = pattern.exec(text);
+        while (match) { found.push(match[1]); match = pattern.exec(text); }
+        return found;
+      };
+      // Nearest group outwards, stopping at the first level that holds a dial code, and never
+      // crossing the form or the page. A phone field's country control sits beside it in its own
+      // group; a dial code found past that boundary belongs to some other field.
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 4 && !/^(?:BODY|FORM|MAIN|SECTION|ARTICLE|HTML)$/.test(node.tagName); depth += 1) {
+        const found = [];
+        const controls = node.querySelectorAll(
+          'select, [class*="select__single-value"], [class*="PhoneInputCountry"], [class*="iti__selected"], [role="combobox"], button'
+        );
+        for (let i = 0; i < controls.length; i += 1) {
+          const codes = dialCodesIn(controls[i]);
+          for (let j = 0; j < codes.length; j += 1) found.push(codes[j]);
+        }
+        if (found.length > 0) return found;
+        node = node.parentElement;
+      }
+      return [];
+    }).catch(() => []);
+    const phoneValueForField = async (field, value) => {
+      const wanted = String(value === undefined || value === null ? '' : value).trim();
+      // No leading '+' means there is no dial code in the value to remove and no claim to act on.
+      if (wanted.charAt(0) !== '+') return value;
+      const digits = wanted.replace(/\D/g, '');
+      if (!digits) return value;
+      const codes = await separateDialCodesFor(field);
+      const dial = codes
+        // '>' and not '>=': a value that is nothing BUT its dial code would otherwise be stripped to
+        // an empty field, which is a worse answer than an odd one.
+        .filter((code) => code && digits.length > code.length && digits.indexOf(code) === 0)
+        .sort((a, b) => b.length - a.length)[0];
+      if (!dial) return value;
+      return digits.slice(dial.length);
+    };
     // Three states, not two, and the third one is the point. 'chosen' means the widget is showing an
     // answer and we can read it; 'empty' means it is positively showing its placeholder, so we KNOW
     // nothing is answered; 'unknown' means this is not a widget whose answered state can be read, and
@@ -1365,13 +1528,21 @@ const { chromium } = require('playwright');
             continue;
           }
         }
-        await locator.fill(action.value || '');
+        // What actually goes in the box. Identical to action.value for everything except a phone
+        // field whose own group already carries this number's dial code; see phoneValueForField.
+        const fillValue = await phoneValueForField(locator, action.value || '');
+        await locator.fill(fillValue || '');
         await locator.evaluate((element) => {
           element.dispatchEvent(new Event('input', { bubbles: true }));
           element.dispatchEvent(new Event('change', { bubbles: true }));
         }).catch(() => undefined);
-        if (action.label && await verifyFilled(locator, action.value || '')) filledFields.push(action.label);
+        // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
+        // phone against the international form would report a correct fill as a failed one.
+        if (action.label && await verifyFilled(locator, fillValue || '')) filledFields.push(action.label);
         else if (action.label) skipped.push(action.label + ': value did not persist after fill');
+        // Last, and only after the value is committed and verified: a date field commits its value
+        // and leaves its calendar standing over the next question.
+        await dismissOverlayAfterFill(locator, action.label);
       }
       if (action.type === 'fillByLabelText') {
         const label = page.getByText(action.text, { exact: false }).first();
