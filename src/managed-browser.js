@@ -217,6 +217,223 @@ const { chromium } = require('playwright');
       if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
       return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
     };
+    /* THE SELECTOR NAMED A QUESTION, NOT A CONTROL.
+     *
+     * Measured on production packet 59fb48ae (Deepgram, Ashby, 2026-08-09). Every question on that
+     * form was handed to the runner with a selector that resolves to its own control - '#_systemfield_name',
+     * '[name="477fc43f-..."]', '#caf77bb7-...' - except one. Ashby renders 'Expected Graduation Year'
+     * as a react-datepicker whose input carries no id and no name at all:
+     *
+     *   <div class="_fieldEntry_..." data-field-path="407cc864-...">
+     *     <label for="407cc864-...">Expected Graduation Year</label>
+     *     <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container">
+     *       <input type="text" placeholder="Pick date..." required></div></div></div>
+     *
+     * so discovery had nothing to name but the question's own wrapper, and the fill action arrived
+     * pointed at a DIV. locator.fill() on a div throws 'Element is not an <input>, <textarea>,
+     * <select> or [contenteditable]', the action is optional so the throw became one line in
+     * 'skipped', and the field stayed empty through the whole run. That is the entire reason the
+     * packet reported '"Expected Graduation Year" is required and is still empty': not the date
+     * format, not the widget - the write never reached a control.
+     *
+     * EXACTLY ONE candidate, or none. A wrapper holding two controls speaks for two questions, and
+     * writing the answer into whichever came first in DOM order is how a value lands on somebody
+     * else's question. That is the same refusal nearestQuestionText and questionOptionBlock already
+     * make, for the same reason.
+     */
+    const FILLABLE_WITHIN = 'input:not([type="file"]):not([type="hidden"]):not([type="checkbox"])'
+      + ':not([type="radio"]):not([type="submit"]):not([type="button"]), textarea, select, [contenteditable="true"]';
+    const fillTargetWithin = async (locator) => {
+      const itself = await locator.evaluate((element, selector) => element.matches(selector), FILLABLE_WITHIN).catch(() => false);
+      if (itself) return locator;
+      const inside = locator.locator(FILLABLE_WITHIN);
+      return (await inside.count().catch(() => 0)) === 1 ? inside.first() : null;
+    };
+    /* A CONTROL THAT DEMANDS A DATE, and how much of one.
+     *
+     * Read off the DOM, never off the answer. The previous test was
+     * (the answer is already YYYY-MM-DD) AND (the placeholder mentions a date), which can only
+     * recognise a date control on a run that was handed a date to begin with. The Deepgram field is
+     * a date control whatever it is handed, and it was handed the string "2028".
+     *
+     * Only real evidence of a PICKER counts. A plain text box whose placeholder happens to contain
+     * the word "date" is free text and must keep taking what it is given verbatim; a box that says
+     * "Pick date..." is a widget saying so. The three signals below are the ones the corpus has:
+     * the native types, react-datepicker's own wrapper (Ashby, and it is the most common React
+     * datepicker on these boards), and a placeholder written as an instruction to pick.
+     */
+    const dateControlPrecisionOf = async (field) => await field.evaluate((element) => {
+      const type = (element.getAttribute('type') || '').toLowerCase();
+      if (type === 'date') return 'day';
+      if (type === 'month') return 'month';
+      if (element.closest && element.closest(
+        '.react-datepicker-wrapper, .react-datepicker__input-container, [class*="datepicker" i], [class*="date-picker" i]'
+      )) return 'day';
+      if (/\b(?:pick|choose|select)\b[^a-z]{0,4}date/i.test(element.getAttribute('placeholder') || '')) return 'day';
+      return '';
+    }).catch(() => '');
+    const MONTH_WORDS = ['january', 'february', 'march', 'april', 'may', 'june',
+      'july', 'august', 'september', 'october', 'november', 'december'];
+    /* WHAT CALENDAR POINT A PIECE OF TEXT NAMES, and how precisely.
+     *
+     * Used twice and in both directions: once on the answer Litos was given, and once on whatever
+     * the control says after the write. Precision is the whole point of the function - a graduation
+     * answer routinely names less of a date than a date control insists on, and the difference
+     * between those two is the only thing standing between a stored fact and an invented one.
+     *
+     * A SEASON IS READ AS A YEAR AND NOTHING MORE. "Spring 2028" names a term, and which month a
+     * term begins in is the school's business, not Litos's: spring terms end in April, May and June
+     * at different institutions. Reading it as a month would be a guess wearing the clothes of a
+     * parse.
+     */
+    const calendarPointOf = (text) => {
+      const raw = clean(text);
+      if (!raw) return null;
+      const iso = raw.match(/\b((?:19|20)\d{2})-(\d{1,2})(?:-(\d{1,2}))?\b/);
+      if (iso) {
+        return { year: Number(iso[1]), month: Number(iso[2]), day: iso[3] ? Number(iso[3]) : 0, precision: iso[3] ? 'day' : 'month' };
+      }
+      const named = raw.match(new RegExp('\\b(' + MONTH_WORDS.map((name) => name.slice(0, 3)).join('|')
+        + ')[a-z]*\\.?\\s*(\\d{1,2})?(?:st|nd|rd|th)?,?\\s*((?:19|20)\\d{2})\\b', 'i'));
+      if (named) {
+        const month = MONTH_WORDS.findIndex((name) => name.startsWith(named[1].toLowerCase())) + 1;
+        if (month > 0) {
+          return { year: Number(named[3]), month, day: named[2] ? Number(named[2]) : 0, precision: named[2] ? 'day' : 'month' };
+        }
+      }
+      const slashed = raw.match(/\b(\d{1,2})[/.](\d{1,2})[/.]((?:19|20)\d{2})\b/);
+      if (slashed) {
+        // Written down in the order it was read. Which of the two small numbers is the month is not
+        // decided here: see sameCalendarPoint, which is deliberately order-blind about them.
+        return { year: Number(slashed[3]), month: Number(slashed[1]), day: Number(slashed[2]), precision: 'day' };
+      }
+      const monthOnly = raw.match(/\b(\d{1,2})[/.]((?:19|20)\d{2})\b/);
+      if (monthOnly) return { year: Number(monthOnly[2]), month: Number(monthOnly[1]), day: 0, precision: 'month' };
+      const year = raw.match(/\b((?:19|20)\d{2})\b/);
+      if (year) return { year: Number(year[1]), month: 0, day: 0, precision: 'year' };
+      return null;
+    };
+    /* DOES WHAT THE CONTROL NOW SAYS NAME THE POINT WE ASKED FOR.
+     *
+     * The read-back is compared as a DATE and not as a string, which is the defect class the two
+     * fixes above this one are both about: a widget that normalises "2028-05-01" to "05/01/2028" has
+     * kept the answer, and verifyFilled's string comparison calls that a lost fill. Same shape as
+     * the phone country rendered as "+971".
+     *
+     * ORDER-BLIND ABOUT THE TWO SMALL NUMBERS, on purpose. A control's display order is its own
+     * business - 05/01/2028 and 01/05/2028 are the same day written by two boards - and nothing here
+     * relies on guessing which convention a board uses. What keeps that safe is the WRITE, not the
+     * read: the forms written below are ISO and the month spelled out, and neither can be parsed
+     * into a different month by anyone.
+     */
+    const sameCalendarPoint = (shown, wanted) => {
+      if (!shown || !wanted) return false;
+      if (shown.year !== wanted.year) return false;
+      if (wanted.precision === 'year') return shown.precision === 'year';
+      if (shown.precision === 'year') return false;
+      if (wanted.day && shown.day) {
+        return (shown.month === wanted.month && shown.day === wanted.day)
+          || (shown.month === wanted.day && shown.day === wanted.month);
+      }
+      return shown.month === wanted.month || (shown.day && shown.day === wanted.month && shown.month === wanted.day);
+    };
+    /* THE CONVENTION, WRITTEN DOWN ONCE.
+     *
+     * A month-precision graduation date going into a control that insists on a day is written as the
+     * FIRST DAY OF THAT MONTH. This is a convention and not a fabrication, and the difference is
+     * worth stating plainly:
+     *
+     *   - The year and the month are exactly what is on file and are not touched. Those are the two
+     *     things a graduation question is screened on.
+     *   - The first of the month is the canonical widening of a month-precision date. It is what
+     *     ISO 8601 means by 2028-05, what every date library returns for the same input, and what
+     *     this very widget writes on its own when handed "May 2028".
+     *   - No reader can take a different month or a different year out of it.
+     *
+     * A BARE YEAR IS REFUSED INSTEAD, and that asymmetry is the whole rule. Widening a year to a day
+     * means choosing a month: twelve choices, eleven of them false, and the one the widget picks for
+     * itself is January - measured on the live Deepgram form, where typing "2028" and tabbing off
+     * leaves 01/01/2028 sitting in a field about a person who graduates in May. That is not a
+     * missing day, it is a wrong fact about when she stops being a student, and it is the fact an
+     * internship screens on. So the control is left empty and the run says exactly what was missing.
+     */
+    const dateWriteForms = (point, precision) => {
+      const pad = (value) => String(value).padStart(2, '0');
+      const month = MONTH_WORDS[point.month - 1];
+      const name = month ? month[0].toUpperCase() + month.slice(1) : '';
+      if (precision === 'month' || (point.precision === 'month' && precision !== 'day')) {
+        return [point.year + '-' + pad(point.month), name ? name + ' ' + point.year : ''].filter(Boolean);
+      }
+      const day = point.day || 1;
+      // ISO first, then the month spelled out. Both are unambiguous to a parser and to a person, and
+      // between them they cover every control the corpus has met. The slash forms are deliberately
+      // absent: 05/01/2028 asks the board to guess, and a board that guesses wrong writes a date in
+      // the wrong month that reads back as a clean success.
+      return [
+        point.year + '-' + pad(point.month) + '-' + pad(day),
+        name ? name + ' ' + day + ', ' + point.year : ''
+      ].filter(Boolean);
+    };
+    /* WRITE IT, COMMIT IT, READ IT BACK, AND ERASE ANYTHING THE CONTROL ADDED BY ITSELF.
+     *
+     * The commit is a real Tab keypress and it is not optional. Measured on the live Deepgram form:
+     * locator.fill() plus dispatched input and change events - which is what every other fill on
+     * this page does - leaves react-datepicker holding the raw text and holding NO date, so the
+     * employer's own validator still calls the field empty. Only a Tab keydown makes it parse. Every
+     * value fails without it, including a perfectly shaped one.
+     *
+     * The erase at the end is the honesty half. A control that turned what it was given into
+     * something more precise has made a statement the applicant did not make, and leaving it there
+     * is worse than leaving the field empty, because an empty required field is reported to her and
+     * a plausible wrong date is not.
+     */
+    const fillDateControl = async (field, requested, precision) => {
+      const wanted = calendarPointOf(requested);
+      if (!wanted) return { outcome: 'unreadable' };
+      if (wanted.precision === 'year' && precision !== 'year') return { outcome: 'too-coarse', wanted };
+      for (const form of dateWriteForms(wanted, precision)) {
+        await field.fill(form).catch(() => undefined);
+        await field.evaluate((element) => {
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(() => undefined);
+        await field.press('Tab').catch(() => field.evaluate((element) => element.blur()).catch(() => undefined));
+        await page.waitForTimeout(120).catch(() => undefined);
+        const shown = await field.evaluate((element) => String(element.value || '')).catch(() => '');
+        const asked = wanted.precision === 'month' && precision === 'day'
+          ? { year: wanted.year, month: wanted.month, day: 1, precision: 'day' }
+          : wanted;
+        if (sameCalendarPoint(calendarPointOf(shown), asked)) return { outcome: 'filled', shown };
+      }
+      const left = await field.evaluate((element) => String(element.value || '')).catch(() => '');
+      if (clean(left)) {
+        await field.fill('').catch(() => undefined);
+        await field.evaluate((element) => {
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(() => undefined);
+        await field.press('Tab').catch(() => undefined);
+      }
+      return { outcome: 'not-kept', wanted, left };
+    };
+    /* The one place the outcomes above are turned into words, so the 'fill' and 'fillByLabelText'
+     * branches cannot drift into describing the same failure two different ways. */
+    const recordDateFill = (result, label, requested) => {
+      if (!label) return result.outcome === 'filled';
+      if (result.outcome === 'filled') { filledFields.push(label); return true; }
+      if (result.outcome === 'too-coarse') {
+        skipped.push(label + ': this control is a date picker and needs a full date, but the answer on file is only the year "'
+          + clean(requested) + '", and picking a month for you could put the wrong one on the application, so it is left for you');
+        return false;
+      }
+      if (result.outcome === 'unreadable') {
+        skipped.push(label + ': this control is a date picker and "' + clean(requested) + '" is not a date Litos can read, left for you');
+        return false;
+      }
+      skipped.push(label + ': the date "' + clean(requested)
+        + '" did not stay on this picker, so the control was cleared rather than left showing something you did not say');
+      return false;
+    };
     /* IS THE NEXT QUESTION STILL REACHABLE, or is something sitting on top of it.
      *
      * Measured on the live Deepgram Ashby form: filling 'Expected Graduation Year' opens a May 2028
@@ -2258,13 +2475,29 @@ const { chromium } = require('playwright');
         }
       }
       if (action.type === 'fill') {
-        const fillShape = await locator.evaluate((element) => ({
+        // See fillTargetWithin. The selector is allowed to name the question rather than the
+        // control, because for one shape of control that is the only name it has.
+        const target = await fillTargetWithin(locator);
+        if (!target) {
+          const message = 'the selector ' + action.selector
+            + ' does not name a control Litos can type into, and the block it names holds no single field';
+          if (action.label) skipped.push(action.label + ': ' + message);
+          continue;
+        }
+        const datePrecision = await dateControlPrecisionOf(target);
+        if (datePrecision) {
+          const result = await fillDateControl(target, action.value || '', datePrecision);
+          recordDateFill(result, action.label, action.value || '');
+          await dismissOverlayAfterFill(target, action.label);
+          continue;
+        }
+        const fillShape = await target.evaluate((element) => ({
           role: element.getAttribute('role') || '',
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         })).catch(() => ({ role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
         if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true' || fillShape.ariaAutocomplete === 'list') {
-          const container = locator.locator(
+          const container = target.locator(
             'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
           );
           if (await fillCustomChoice(container, action.value || '')) {
@@ -2290,19 +2523,19 @@ const { chromium } = require('playwright');
         }
         // What actually goes in the box. Identical to action.value for everything except a phone
         // field whose own group already carries this number's dial code; see phoneValueForField.
-        const fillValue = await phoneValueForField(locator, action.value || '');
-        await locator.fill(fillValue || '');
-        await locator.evaluate((element) => {
+        const fillValue = await phoneValueForField(target, action.value || '');
+        await target.fill(fillValue || '');
+        await target.evaluate((element) => {
           element.dispatchEvent(new Event('input', { bubbles: true }));
           element.dispatchEvent(new Event('change', { bubbles: true }));
         }).catch(() => undefined);
         // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
         // phone against the international form would report a correct fill as a failed one.
-        if (action.label && await verifyFilled(locator, fillValue || '')) filledFields.push(action.label);
+        if (action.label && await verifyFilled(target, fillValue || '')) filledFields.push(action.label);
         else if (action.label) skipped.push(action.label + ': value did not persist after fill');
         // Last, and only after the value is committed and verified: a date field commits its value
         // and leaves its calendar standing over the next question.
-        await dismissOverlayAfterFill(locator, action.label);
+        await dismissOverlayAfterFill(target, action.label);
       }
       if (action.type === 'fillByLabelText') {
         /* THE ELEMENT THAT NAMES THE QUESTION, ahead of the first prose that mentions it.
@@ -2372,8 +2605,17 @@ const { chromium } = require('playwright');
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         }));
-        const dateLikeAnswer = /^\d{4}-\d{2}-\d{2}$/.test(String(action.value || '').trim());
-        const dateLikeField = /date|pick date/i.test(shape.placeholder);
+        // Read off the control, ahead of every other arm. A date picker is not a select, not a
+        // combobox and not free text, and the old test for one - an answer already shaped
+        // YYYY-MM-DD next to a placeholder mentioning a date - could only ever fire on a run that
+        // had been handed a date to start with. See dateControlPrecisionOf.
+        const labelDatePrecision = shape.tag === 'select' ? '' : await dateControlPrecisionOf(field);
+        if (labelDatePrecision) {
+          const result = await fillDateControl(field, action.value || '', labelDatePrecision);
+          recordDateFill(result, action.label, action.value || '');
+          await dismissOverlayAfterFill(field, action.label);
+          continue;
+        }
         if (shape.tag === 'select') {
           const customSelected = await fillCustomChoice(container, action.value || '');
           let selected = false;
@@ -2472,16 +2714,10 @@ const { chromium } = require('playwright');
           // far cheaper than guessing a checkbox on their behalf.
           if (action.label) skipped.push(action.label + ': no option matched "' + clean(wanted) + '", left for you to choose');
           continue;
-        } else if (shape.type === 'date' || (dateLikeAnswer && dateLikeField)) {
-          await field.fill(action.value || '');
-          await field.evaluate((element) => {
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-            element.dispatchEvent(new Event('change', { bubbles: true }));
-          });
-          await field.press('Tab').catch(() => field.evaluate((element) => element.blur()));
-          const committed = await field.evaluate((element) => String(element.value || '').trim()).catch(() => '');
-          if (!committed) await field.fill(action.value || '');
         } else {
+          // No date arm here any more. input[type=date] and every picker this runner can recognise
+          // are answered by fillDateControl above and never reach the shape dispatch, so an arm here
+          // could only ever run on a control that is not a date control.
           await field.fill(action.value || '');
           await field.evaluate((element) => {
             element.dispatchEvent(new Event('input', { bubbles: true }));

@@ -502,18 +502,33 @@ test('fillByLabelText climbs to a container that actually owns controls', () => 
   );
 });
 
-test('fillByLabelText commits date-like answers before generic text fill', () => {
-  // Ashby date pickers can expose a visible "Pick date..." text control while the required date
-  // state remains empty. Date answers need the native date/input events and blur path, not only
-  // a plain fill against the first input in the question container.
-  assert.ok(SANDBOX_RUNNER.includes("const dateLikeAnswer = /^\\d{4}-\\d{2}-\\d{2}$/.test"));
-  assert.ok(SANDBOX_RUNNER.includes("const dateLikeField = /date|pick date/i.test"));
-  assert.match(SANDBOX_RUNNER, /shape\.type === 'date' \|\| \(dateLikeAnswer && dateLikeField\)/);
-  assert.doesNotMatch(SANDBOX_RUNNER, /container\.locator\('input\[type=date\]/);
-  assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('input', \{ bubbles: true \}\)\)/);
-  assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
+test('a date control is recognised from the control, not from the answer', () => {
+  // Ashby date pickers expose a visible "Pick date..." text control while the required date state
+  // stays empty, and the answer they are handed is routinely NOT already date-shaped: production
+  // packet 59fb48ae was handed the string "2028". The old gate was
+  // (answer matches YYYY-MM-DD) AND (placeholder mentions a date), which can only recognise a date
+  // control on a run that had been given a date to begin with, so it is gone.
+  assert.doesNotMatch(SANDBOX_RUNNER, /dateLikeAnswer/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /dateLikeField/);
+  assert.match(SANDBOX_RUNNER, /const dateControlPrecisionOf = async \(field\)/);
+  assert.match(SANDBOX_RUNNER, /react-datepicker-wrapper/);
+  // The commit is a real Tab keypress: react-datepicker parses on nothing else. See
+  // test/date-control-dom.test.js, which runs this against a real DOM rather than reading it.
   assert.match(SANDBOX_RUNNER, /field\.press\('Tab'\)/);
-  assert.match(SANDBOX_RUNNER, /const committed = await field\.evaluate/);
+  // Both fill branches route through the one helper, so neither can describe a date failure in
+  // words the other does not use.
+  assert.equal(SANDBOX_RUNNER.split('await fillDateControl(').length - 1, 2);
+  assert.equal(SANDBOX_RUNNER.split('recordDateFill(result,').length - 1, 2);
+});
+
+test('a fill selector that names a question fills the one control inside it', () => {
+  // Production packet 59fb48ae: 'Expected Graduation Year' is the only question on that Ashby form
+  // whose input carries no id and no name, so its selector is the field-entry DIV and
+  // locator.fill() threw against it. Exactly one candidate, or none: a wrapper holding two controls
+  // speaks for two questions.
+  assert.match(SANDBOX_RUNNER, /const fillTargetWithin = async \(locator\)/);
+  assert.match(SANDBOX_RUNNER, /\(await inside\.count\(\)\.catch\(\(\) => 0\)\) === 1 \? inside\.first\(\) : null/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /await locator\.fill\(fillValue/);
 });
 
 test('an unticked required checkbox is reported as a blocker', () => {
