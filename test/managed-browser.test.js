@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
   ATOMIC_SUBMIT_POLICY,
   executeManagedRun,
@@ -547,42 +548,60 @@ test('discover is an allowed action and needs no selector', () => {
 
 test('atomic required confirmation owns the submit and accepts only contract v2', () => {
   const actions = normalizeManagedActions([
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
   ]);
-  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
+  assert.deepEqual(actions[0], { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' });
   assert.throws(
-    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 1, submitKind: 'application' }]),
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_VERSION'
   );
   assert.throws(
-    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
+    () => normalizeManagedActions([{ type: 'confirmAndSubmit', selector: 'button', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }]),
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR'
   );
   assert.throws(
     () => normalizeManagedActions([{ ...actions[0], submitKind: 'application', securityCode: 'ABCD1234' }]),
     (error) => error.code === 'INVALID_SUBMIT_KIND'
   );
-  assert.deepEqual(ATOMIC_SUBMIT_POLICY, {
-    name: 'litos-final-submit', version: 1,
-    candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-    applicationFinalPattern: '^(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application$',
-    verificationFinalPattern: '^(?:verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application)$',
-    handoffVerbProviderPattern: '\\b(?:apply|autofill|continue|import)\\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\\b',
-    thirdPartyHandoffPattern: '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:(?:the|your|my|a|an)\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
-    supportWidgetPattern: '\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b'
-  });
-  const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.applicationFinalPattern);
-  const exclusions = [
-    new RegExp(ATOMIC_SUBMIT_POLICY.handoffVerbProviderPattern),
-    new RegExp(ATOMIC_SUBMIT_POLICY.thirdPartyHandoffPattern),
-    new RegExp(ATOMIC_SUBMIT_POLICY.supportWidgetPattern)
-  ];
+  assert.equal(ATOMIC_SUBMIT_POLICY.name, 'litos-final-submit');
+  assert.equal(ATOMIC_SUBMIT_POLICY.version, 2);
+  assert.equal(ATOMIC_SUBMIT_POLICY.grammarHash, '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9');
+  assert.equal(
+    crypto.createHash('sha256').update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`).digest('hex'),
+    ATOMIC_SUBMIT_POLICY.grammarHash
+  );
+  const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.finalPattern, 'i');
+  const excluded = new RegExp(ATOMIC_SUBMIT_POLICY.exclusionPattern, 'i');
   const chooserCases = [
+    ['Submit', true],
+    ['Apply', true],
+    ['Apply now', true],
     ['Submit application', true],
     ['Submit your application', true],
     ['Submit my application', true],
     ['Submit the application', true],
+    ['Send this application', true],
     ['Send your application', true],
+    ['Submit application with attachments', true],
+    ['Submit your application with cover letter', true],
+    ['Send application from your profile', true],
+    ['Send application from your saved details', true],
+    ['Submit application for review', true],
+    ['Finish & apply', true],
+    ['Submit your application - Contact Center Agent', true],
+    ['Submit application - Acme Corp', true],
+    ['Apply with LinkedIn', false],
+    ['Apply With Indeed', false],
+    ['Continue with Google', false],
+    ['Sign in with Apple', false],
+    ['Apply now with our recruiting partner', false],
+    ['Import profile', false],
+    ['Autofill with resume service', false],
+    ['Quick apply', false],
+    ['One-click apply', false],
+    ['Submit feedback', false],
+    ['Submit a support request', false],
+    ['Submit your question', false],
     ['Submit application via Wellfound', false],
     ['Submit application with recruiting partner', false],
     ['Submit application feedback', false],
@@ -591,22 +610,39 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
     ['Continue', false],
     ['Next', false],
     ['Finish', false],
-    ['Apply with LinkedIn', false],
     ['Sign in with Google', false],
-    ['Import profile', false],
     ['Start application', false],
-    ['Submit a support request', false],
-    ['Submit your question', false],
     ['Submit application using Career Services', false],
     ['Send application from recruiting partner', false]
   ];
   for (const [label, expected] of chooserCases) {
-    const normalizedLabel = label.toLowerCase();
-    assert.equal(applicationFinal.test(normalizedLabel) && !exclusions.some((pattern) => pattern.test(normalizedLabel)), expected, label);
+    assert.equal(applicationFinal.test(label) && !excluded.test(label), expected, label);
   }
+  const score = (label) => {
+    if (!applicationFinal.test(label) || excluded.test(label)) return null;
+    if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(label)) return 3;
+    if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(label)) return 2;
+    return 1;
+  };
+  assert.equal(score('Submit application'), 3);
+  assert.equal(score('Send your application'), 3);
+  assert.equal(score('Finish and apply'), 2);
+  assert.equal(score('Apply now'), 2);
+  assert.equal(score('Submit'), 1);
+  assert.equal(score('Apply'), 1);
+  assert.equal(score('Submit with attachments'), 1);
+  assert.equal(score('Apply with LinkedIn'), null);
   const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
   assert.throws(
     () => normalizeManagedActions([missingPolicy]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY, finalPattern: `${ATOMIC_SUBMIT_POLICY.finalPattern} ` } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY, grammarHash: '0'.repeat(64) } }]),
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
   );
   assert.throws(

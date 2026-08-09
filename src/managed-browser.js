@@ -11,15 +11,18 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
 
 export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
-  version: 1,
-  candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-  applicationFinalPattern: '^(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application$',
-  verificationFinalPattern: '^(?:verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application)$',
-  handoffVerbProviderPattern: '\\b(?:apply|autofill|continue|import)\\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\\b',
-  thirdPartyHandoffPattern: '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:(?:the|your|my|a|an)\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
-  supportWidgetPattern: '\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b'
+  version: 2,
+  finalPattern: '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)',
+  exclusionPattern: '(?:\\b(?:apply|continue|autofill|import|sign\\s?in|log\\s?in)(?:\\s+with)?\\s+(?:linkedin|indeed|google|facebook|apple)\\b|\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:the\\s+|your\\s+|my\\s+|a\\s+|an\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b|^\\s*(?:continue|next|start(?:\\s+application)?|complete|finish|review\\s+(?:and\\s+submit|application)|save\\s+and\\s+continue)\\s*$|\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b)',
+  grammarHash: '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9'
 });
-const ATOMIC_SUBMIT_SELECTOR = ATOMIC_SUBMIT_POLICY.candidateSelector;
+const atomicSubmitGrammarHash = crypto.createHash('sha256')
+  .update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`)
+  .digest('hex');
+if (atomicSubmitGrammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash) {
+  throw new Error('Atomic submit chooser grammar hash mismatch');
+}
+const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
@@ -1407,29 +1410,34 @@ const { chromium } = require('playwright');
      * field type, then reads the same validation state back. An unresolved control is proof of
      * failure and the following submit is withheld. */
     const confirmAndSubmitPass = async (action) => {
-      const choices = await page.locator(action.selector).evaluateAll((elements, submitKind) => elements.map((element, index) => {
+      const chooserHash = crypto.createHash('sha256')
+        .update(action.chooserPolicy.finalPattern + '\n' + action.chooserPolicy.exclusionPattern)
+        .digest('hex');
+      if (chooserHash !== action.chooserPolicy.grammarHash) {
+        throw new Error('Atomic submit chooser grammar hash mismatch');
+      }
+      const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => elements.map((element, index) => {
         const rect = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const visible = (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
         const form = element.closest('form');
         const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-        const formText = String((form && (form.id + ' ' + form.className + ' ' + form.getAttribute('action'))) || '').toLowerCase();
-        const normalizedText = text.toLowerCase();
-        const handoffVerbProvider = /\b(?:apply|autofill|continue|import)\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\b/.test(normalizedText);
-        const thirdPartyHandoff = /\b(?:apply|submit|send|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,4}\s+(?:with|using|via|from)\s+(?!(?:(?:the|your|my|a|an)\s+)?(?:attachments?|resumes?|cvs?|cover\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\s+(?:details|information))\b)|\bquick apply\b|\bone[-\s]?click apply\b|\bpowered\s+by\b/.test(normalizedText);
-        const supportWidget = /\bapplication\s+(?:feedback|survey|issue|question|review|experience)\b|\bfeedback\s+on\s+your\s+application\b|^(?!.*\bapplication\b).*\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\b/.test(normalizedText);
-        const handoff = handoffVerbProvider || thirdPartyHandoff || supportWidget;
-        const finalApplication = /^(?:submit|send)\s+(?:(?:your|my|the)\s+)?application$/.test(normalizedText);
-        const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|(?:submit|send)\s+(?:(?:your|my|the)\s+)?application)$/.test(normalizedText);
-        const finalIntent = submitKind === 'verification' ? finalVerification : finalApplication;
+        const finalPattern = new RegExp(chooser.finalPattern, 'i');
+        const exclusionPattern = new RegExp(chooser.exclusionPattern, 'i');
+        const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code))$/i.test(text);
+        const canonicalFinal = finalPattern.test(text) && !exclusionPattern.test(text);
+        const finalIntent = chooser.submitKind === 'verification'
+          ? finalVerification || canonicalFinal
+          : canonicalFinal;
         let score = 0;
-        if (finalIntent) score += 100;
-        if (/application|apply|job|career|greenhouse|lever|ashby/.test(formText)) score += 40;
-        if (/newsletter|subscribe|search|login|sign in|coupon/.test(normalizedText + ' ' + formText)) score -= 100;
+        if (chooser.submitKind === 'verification' && finalVerification) score = 3;
+        else if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(text)) score = 3;
+        else if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(text)) score = 2;
+        else if (finalIntent) score = 1;
         element.setAttribute('data-litos-submit-candidate-v2', String(index));
-        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), finalIntent, handoff, text, formText, score };
-      }), action.submitKind).catch(() => null);
-      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm && choice.finalIntent && !choice.handoff) : [];
+        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), finalIntent, text, score };
+      }), { ...action.chooserPolicy, submitKind: action.submitKind }).catch(() => null);
+      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm && choice.finalIntent) : [];
       viable.sort((a, b) => b.score - a.score || a.index - b.index);
       const selected = viable[0];
       const ambiguous = !selected || (viable[1] && viable[1].score === selected.score);
@@ -2697,16 +2705,19 @@ export function normalizeManagedActions(actions = []) {
       if (action.selector !== ATOMIC_SUBMIT_SELECTOR) throw inputError('confirmAndSubmit selector must be the version 2 submit candidate set', 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR');
       if (
         !action.chooserPolicy || typeof action.chooserPolicy !== 'object'
-        || Object.keys(action.chooserPolicy).sort().join(',') !== 'name,version'
+        || Object.keys(action.chooserPolicy).sort().join(',') !== 'exclusionPattern,finalPattern,grammarHash,name,version'
         || action.chooserPolicy.name !== ATOMIC_SUBMIT_POLICY.name
         || action.chooserPolicy.version !== ATOMIC_SUBMIT_POLICY.version
+        || action.chooserPolicy.finalPattern !== ATOMIC_SUBMIT_POLICY.finalPattern
+        || action.chooserPolicy.exclusionPattern !== ATOMIC_SUBMIT_POLICY.exclusionPattern
+        || action.chooserPolicy.grammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash
       ) throw inputError('confirmAndSubmit chooser policy is invalid', 'INVALID_CONFIRM_AND_SUBMIT_POLICY');
       if (typeof action.label !== 'string' || !action.label.trim()) throw inputError('confirmAndSubmit requires a non-empty label', 'INVALID_CONFIRM_AND_SUBMIT_LABEL');
       if (action.optional !== false) throw inputError('confirmAndSubmit must be non-optional', 'INVALID_CONFIRM_AND_SUBMIT_OPTIONAL');
       normalized.maxRetries = maxRetries;
       normalized.contractVersion = 2;
       normalized.submitKind = action.submitKind;
-      normalized.chooserPolicy = { name: ATOMIC_SUBMIT_POLICY.name, version: ATOMIC_SUBMIT_POLICY.version };
+      normalized.chooserPolicy = { ...ATOMIC_SUBMIT_POLICY };
       if (action.timeout != null) normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     }
     return normalized;

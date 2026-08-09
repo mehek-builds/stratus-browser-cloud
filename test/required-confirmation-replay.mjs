@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmation replay</title>
@@ -74,6 +74,12 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   var submitShape = new URLSearchParams(location.search).get('submit-shape');
   var submitLabel = new URLSearchParams(location.search).get('submit-label');
   if (submitLabel) document.getElementById('application-submit').textContent = submitLabel;
+  if (location.search.includes('equal-final-candidates')) {
+    var duplicate = document.createElement('button');
+    duplicate.type = 'submit';
+    duplicate.textContent = 'Submit application';
+    document.getElementById('application').appendChild(duplicate);
+  }
   if (location.search.includes('sole-continue')) document.getElementById('application-submit').textContent = 'Continue';
   if (location.search.includes('sole-linkedin')) document.getElementById('application-submit').textContent = 'Apply with LinkedIn';
   if (submitShape) {
@@ -123,7 +129,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-confirm-replay-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 const confirmedSubmitActions = [
-  { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+  { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
   { type: 'extract', selector: '#submitted' },
   { type: 'extract', selector: '#text', attribute: 'value' },
   { type: 'extract', selector: '.select__single-value' },
@@ -229,9 +235,18 @@ for (const shape of ['button-default', 'input-image', 'input-button', 'role-butt
   assert.equal(shaped.requiredFieldConfirmation.status, 'confirmed');
 }
 
-for (const label of ['Submit your application', 'Submit the application', 'Send your application']) {
+for (const label of [
+  'Submit',
+  'Apply',
+  'Apply now',
+  'Submit your application',
+  'Submit the application',
+  'Send your application',
+  'Submit application with attachments',
+  'Finish & apply'
+]) {
   const labelled = await replay('?submit-label=' + encodeURIComponent(label));
-  assert.equal(labelled.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes', label + ' must satisfy chooser policy v1');
+  assert.equal(labelled.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes', label + ' must satisfy chooser policy v2');
   assert.equal(labelled.requiredFieldConfirmation.status, 'confirmed');
 }
 
@@ -246,6 +261,10 @@ const scanFailure = await replay('?scan-exception');
 assert.equal(scanFailure.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
 assert.equal(scanFailure.requiredFieldConfirmation.status, 'blocked');
 assert.ok(scanFailure.requiredFieldConfirmation.passes[0].unresolved.includes('Required-field readiness scan failed'));
+
+const beforeAmbiguous = submissionCount;
+assert.notEqual(await replayFailure('?equal-final-candidates'), 0, 'equal top-scoring final controls must fail closed');
+assert.equal(submissionCount, beforeAmbiguous, 'an equal top-score tie must not click either control');
 
 for (const handoff of [
   '?sole-continue',

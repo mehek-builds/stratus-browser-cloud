@@ -27,7 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODE = 'TPHJrFMJ';
@@ -176,7 +176,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' }
   ], { allowSubmit: true });
@@ -203,7 +203,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    challenge DOM and carries exactly one atomic action, one receipt pass, and one physical click.
 {
   const result = await replay([
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' },
     { type: 'extract', selector: '#empty-code-submits' }
@@ -224,7 +224,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    the same check and a fresh code is in her mailbox.
 {
   const result = await replay([
-    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: { name: 'litos-final-submit', version: 1 }, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: 'AAAAAAAA' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: 'AAAAAAAA' },
     { type: 'extract', selector: '#filed' },
     { type: 'extract', selector: '#empty-code-submits' }
   ], { allowSubmit: true, pathSuffix: '?challenge=1' });
