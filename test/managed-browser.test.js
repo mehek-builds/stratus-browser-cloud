@@ -544,6 +544,27 @@ test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
 });
 
+test('required confirmation has a durable form scope and must sit immediately before final submit', () => {
+  const actions = normalizeManagedActions([
+    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
+    { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' }
+  ]);
+  assert.deepEqual(actions[0], { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 });
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'confirmRequired', selector: 'form', maxRetries: 1, contractVersion: 1 }, { type: 'extract', selector: 'body' }]),
+    (error) => error.code === 'INVALID_CONFIRM_REQUIRED_ORDER'
+  );
+  assert.throws(
+    () => normalizeManagedActions([
+      { type: 'confirmRequired', selector: '#application-submit', maxRetries: 1, contractVersion: 1 },
+      { type: 'click', selector: '#newsletter-submit', label: 'final_submit' }
+    ]),
+    (error) => error.code === 'INVALID_CONFIRM_REQUIRED_SELECTOR'
+  );
+  assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
+  assert.match(SANDBOX_RUNNER, /submit withheld because required-field confirmation failed/);
+});
+
 test('discover scans choice controls as well as text-shaped ones', () => {
   /* This used to exclude select, radio and checkbox on the reasoning that the caller never clicks a
      choice control. That reasoning was already stale - fillByLabelText has select, radio and

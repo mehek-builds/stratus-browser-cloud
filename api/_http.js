@@ -15,14 +15,18 @@ export function requireMethod(request, response, methods) {
 export async function authorize(request, response, env = process.env, verifyOidc = verifyLitosOidcToken) {
   const expected = env.STRATUS_API_KEY?.trim();
   if (expected && request.headers['x-stratus-api-key'] === expected) return true;
-  if (env.VERCEL_ENV !== 'production' && !expected) return true;
+  const hostedEnvironment = env.VERCEL_ENV === 'production' || env.VERCEL_ENV === 'preview';
+  if (!hostedEnvironment && !expected) return true;
+  const expectedSubject = env.VERCEL_ENV === 'production'
+    ? LITOS_PRODUCTION_SUBJECT
+    : (env.STRATUS_ALLOW_LITOS_DEVELOPMENT_OIDC === '1' ? LITOS_DEVELOPMENT_SUBJECT : null);
   const authorization = request.headers.authorization;
   const token = typeof authorization === 'string' && authorization.startsWith('Bearer ')
     ? authorization.slice('Bearer '.length).trim()
     : '';
-  if (token) {
+  if (token && expectedSubject) {
     try {
-      await verifyOidc(token);
+      await verifyOidc(token, expectedSubject);
       return true;
     } catch {
       // The response below intentionally does not reveal which claim failed.
@@ -41,12 +45,13 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 const VERCEL_ISSUER = 'https://oidc.vercel.com/mehek-builds-projects';
 const VERCEL_AUDIENCE = 'https://vercel.com/mehek-builds-projects';
 const LITOS_PRODUCTION_SUBJECT = 'owner:mehek-builds-projects:project:student-outreach-backend:environment:production';
+const LITOS_DEVELOPMENT_SUBJECT = 'owner:mehek-builds-projects:project:student-outreach-backend:environment:development';
 const VERCEL_JWKS = createRemoteJWKSet(new URL(`${VERCEL_ISSUER}/.well-known/jwks`));
 
-async function verifyLitosOidcToken(token) {
+async function verifyLitosOidcToken(token, subject) {
   await jwtVerify(token, VERCEL_JWKS, {
     issuer: VERCEL_ISSUER,
     audience: VERCEL_AUDIENCE,
-    subject: LITOS_PRODUCTION_SUBJECT
+    subject
   });
 }

@@ -165,6 +165,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
+    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' }
@@ -194,6 +195,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 {
   const result = await replay([
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
+    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: CODE },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' }
@@ -211,6 +213,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //    the same check and a fresh code is in her mailbox.
 {
   const result = await replay([
+    { type: 'confirmRequired', selector: 'button[type="submit"]', maxRetries: 1, contractVersion: 1 },
     { type: 'click', selector: 'button[type="submit"]', label: 'final_submit', securityCode: 'AAAAAAAA' },
     { type: 'extract', selector: '#filed' }
   ], { allowSubmit: true });

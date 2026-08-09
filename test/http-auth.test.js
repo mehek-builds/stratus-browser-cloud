@@ -31,12 +31,49 @@ test('managed API accepts the exact configured key and rejects other values', as
 test('managed API accepts a verified short-lived Litos Vercel identity', async () => {
   const { response } = responseRecorder();
   let tokenSeen;
+  let subjectSeen;
   const verified = await authorize(
     { headers: { authorization: 'Bearer signed-oidc-token' } },
     response,
     { VERCEL_ENV: 'production' },
-    async (token) => { tokenSeen = token; },
+    async (token, subject) => { tokenSeen = token; subjectSeen = subject; },
   );
   assert.equal(verified, true);
   assert.equal(tokenSeen, 'signed-oidc-token');
+  assert.equal(subjectSeen, 'owner:mehek-builds-projects:project:student-outreach-backend:environment:production');
+});
+
+test('preview fails closed unless exact Litos development OIDC is explicitly enabled', async () => {
+  const disabled = responseRecorder();
+  let verifyCalls = 0;
+  assert.equal(await authorize(
+    { headers: { authorization: 'Bearer signed-oidc-token' } },
+    disabled.response,
+    { VERCEL_ENV: 'preview' },
+    async () => { verifyCalls += 1; },
+  ), false);
+  assert.equal(verifyCalls, 0);
+  assert.equal(disabled.output.statusCode, 401);
+
+  const enabled = responseRecorder();
+  let subjectSeen;
+  assert.equal(await authorize(
+    { headers: { authorization: 'Bearer signed-oidc-token' } },
+    enabled.response,
+    { VERCEL_ENV: 'preview', STRATUS_ALLOW_LITOS_DEVELOPMENT_OIDC: '1' },
+    async (_token, subject) => { subjectSeen = subject; },
+  ), true);
+  assert.equal(subjectSeen, 'owner:mehek-builds-projects:project:student-outreach-backend:environment:development');
+});
+
+test('production never widens to the development subject', async () => {
+  const { response } = responseRecorder();
+  let subjectSeen;
+  assert.equal(await authorize(
+    { headers: { authorization: 'Bearer signed-oidc-token' } },
+    response,
+    { VERCEL_ENV: 'production', STRATUS_ALLOW_LITOS_DEVELOPMENT_OIDC: '1' },
+    async (_token, subject) => { subjectSeen = subject; },
+  ), true);
+  assert.equal(subjectSeen, 'owner:mehek-builds-projects:project:student-outreach-backend:environment:production');
 });

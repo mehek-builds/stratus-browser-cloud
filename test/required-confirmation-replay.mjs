@@ -1,0 +1,159 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmation replay</title>
+<form id="newsletter"><div class="field"><label for="newsletter-email">Newsletter email</label><input id="newsletter-email" required value="newsletter@example.com" aria-invalid="true"><span id="newsletter-error">This requires an answer</span></div><button type="submit">Subscribe</button></form>
+<form id="application" novalidate>
+  <div class="field"><label for="text">Name</label><input id="text" required value="Mehek Mandal" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="email-field">Email</label><input id="email-field" type="email" required value="mehek@example.com" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="phone-field">Phone</label><input id="phone-field" type="tel" required value="+971501234567" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="essay">Why this role?</label><textarea id="essay" required aria-invalid="true">Because it fits.</textarea><span>This requires an answer</span></div>
+  <div class="field"><label for="resume">Resume</label><input id="resume" type="file" required><div id="file-state"></div></div>
+  <div class="field"><label for="date">Start date</label><input id="date" type="date" required value="2026-08-10" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="question_123[]">Bracket question</label><input id="question_123[]" required value="Already committed"></div>
+  <div class="field select__container"><label for="react">Location</label><div class="select__single-value">Dubai</div><input id="react" role="combobox" aria-required="true" aria-invalid="true"><span>This requires an answer</span></div>
+  <div class="field"><label for="select">Country</label><select id="select" required aria-invalid="true"><option selected>United Arab Emirates</option></select><span>This requires an answer</span></div>
+  <fieldset><legend>Work authorized</legend><input id="radio" name="work" type="radio" required checked aria-invalid="true"><label for="radio">Yes</label><span>This requires an answer</span></fieldset>
+  <div class="field"><label for="checkbox">I agree</label><input id="checkbox" type="checkbox" required checked aria-invalid="true"><span>This requires an answer</span></div>
+  <div id="custom" class="field" role="group" aria-required="true" aria-invalid="true"><label>Schedule</label><button type="button" class="_active_test">Weekdays</button><span>This requires an answer</span></div>
+  <button type="submit">Submit application</button>
+</form>
+<div id="submitted"></div>
+<div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div>
+<script>
+  function clear(id) {
+    var control = document.getElementById(id);
+    control.setAttribute('aria-invalid', 'false');
+    var error = control.closest('.field, fieldset').querySelector('span');
+    if (error) error.remove();
+  }
+  document.getElementById('newsletter-email').addEventListener('blur', function () { clear('newsletter-email'); });
+  ['text', 'email-field', 'phone-field', 'essay', 'date'].forEach(function (id) {
+    document.getElementById(id).addEventListener('blur', function () { clear(id); });
+  });
+  var transfer = new DataTransfer();
+  transfer.items.add(new File(['resume'], 'resume.pdf', { type: 'application/pdf' }));
+  document.getElementById('resume').files = transfer.files;
+  document.getElementById('file-state').textContent = document.getElementById('resume').files[0].name;
+  document.getElementById('react').addEventListener('click', function () { clear('react'); });
+  document.getElementById('select').addEventListener('change', function () { clear('select'); });
+  document.querySelector('label[for="radio"]').addEventListener('click', function () { clear('radio'); });
+  document.getElementById('checkbox').addEventListener('click', function () {
+    var clicks = document.getElementById('checkbox-clicks');
+    clicks.textContent = String(Number(clicks.textContent) + 1);
+  });
+  document.getElementById('checkbox').addEventListener('change', function () {
+    document.getElementById('checkbox-state').textContent = String(this.checked);
+    clear('checkbox');
+  });
+  if (!location.search.includes('leave-custom-invalid')) {
+    document.querySelector('#custom button').addEventListener('click', function () {
+      var control = document.getElementById('custom');
+      var selected = this.classList.toggle('_active_test');
+      document.getElementById('custom-state').textContent = selected ? 'selected' : 'deselected';
+      control.setAttribute('aria-invalid', 'false');
+      if (control.querySelector('span')) control.querySelector('span').remove();
+    });
+  }
+  document.getElementById('application').addEventListener('submit', function (event) {
+    event.preventDefault();
+    document.getElementById('submitted').textContent = 'yes';
+  });
+</script>`;
+
+const server = http.createServer((_request, response) => {
+  response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+  response.end(fixture);
+});
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-confirm-replay-'));
+fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
+const confirmedSubmitActions = [
+  { type: 'confirmRequired', selector: '#application button[type="submit"]', maxRetries: 1, contractVersion: 1 },
+  { type: 'click', selector: '#application button[type="submit"]', label: 'final_submit' },
+  { type: 'extract', selector: '#submitted' },
+  { type: 'extract', selector: '.select__single-value' },
+  { type: 'extract', selector: '#custom button' },
+  { type: 'extract', selector: '#custom-state' },
+  { type: 'extract', selector: '#checkbox-state' },
+  { type: 'extract', selector: '#checkbox-clicks' },
+  { type: 'extract', selector: '#newsletter-error' },
+  { type: 'extract', selector: '#file-state' }
+];
+
+async function replay(suffix = '', actions = confirmedSubmitActions) {
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: `http://127.0.0.1:${server.address().port}/${suffix}`,
+    actions,
+    allowSubmit: true,
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 }
+  }));
+  fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
+  const { status, stderr } = await new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+      cwd: workDir,
+      env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+    });
+    let captured = '';
+    child.stderr.on('data', (chunk) => { captured += chunk; });
+    child.stdout.resume();
+    child.on('close', (code) => resolve({ status: code, stderr: captured }));
+  });
+  assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
+  return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
+}
+
+const result = await replay();
+assert.equal(result.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.deepEqual(result.blockers, []);
+assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(result.requiredFieldConfirmation.version, 1);
+assert.equal(result.requiredFieldConfirmation.requiredControls.length, 12);
+assert.ok(result.requiredFieldConfirmation.requiredControls.every((control) => control.matchCount === 1));
+assert.equal(result.requiredFieldConfirmation.attempts.length, 12);
+assert.deepEqual(result.requiredFieldConfirmation.unresolved, []);
+assert.deepEqual(new Set(result.requiredFieldConfirmation.attempts.map((attempt) => attempt.fieldType)), new Set([
+  'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'custom', 'file'
+]));
+assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => ['confirmed', 'already_committed'].includes(attempt.outcome)));
+assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => attempt.attemptCount === 1));
+assert.equal(result.requiredFieldConfirmation.retries, 0);
+assert.ok(result.requiredFieldConfirmation.attempts.every((attempt) => /^(?:#|\[data-litos-stable-id-v1=)/.test(attempt.selector)));
+const bracketed = result.requiredFieldConfirmation.attempts.find((attempt) => attempt.label === 'Bracket question');
+assert.match(bracketed?.selector || '', /^\[data-litos-stable-id-v1="required-/);
+assert.equal(bracketed?.outcome, 'already_committed');
+assert.equal(result.extracted.find((entry) => entry.selector === '.select__single-value')?.value, 'Dubai');
+assert.equal(result.extracted.find((entry) => entry.selector === '#custom button')?.value, 'Weekdays');
+assert.equal(result.extracted.find((entry) => entry.selector === '#custom-state')?.value, 'selected');
+assert.equal(result.extracted.find((entry) => entry.selector === '#checkbox-state')?.value, 'true');
+assert.equal(result.extracted.find((entry) => entry.selector === '#checkbox-clicks')?.value, '0');
+assert.equal(result.extracted.find((entry) => entry.selector === '#newsletter-error')?.value, 'This requires an answer');
+assert.equal(result.extracted.find((entry) => entry.selector === '#file-state')?.value, 'resume.pdf');
+assert.equal(result.requiredFieldConfirmation.attempts.find((attempt) => attempt.selector === '#resume')?.outcome, 'already_committed');
+
+const refused = await replay('?leave-custom-invalid');
+assert.equal(refused.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
+assert.equal(refused.requiredFieldConfirmation.status, 'blocked');
+assert.equal(refused.requiredFieldConfirmation.unresolved.length, 1);
+assert.equal(refused.requiredFieldConfirmation.retries, 1);
+assert.equal(refused.requiredFieldConfirmation.attempts.find((attempt) => attempt.selector === '#custom')?.attemptCount, 2);
+assert.ok(refused.blockers.some((message) => /Schedule.*could not be confirmed/.test(message)));
+assert.ok(refused.skipped.some((message) => /submit withheld because required-field confirmation failed/.test(message)));
+
+const missingProof = await replay('', [
+  { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' },
+  { type: 'extract', selector: '#submitted' }
+]);
+assert.equal(missingProof.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
+assert.ok(missingProof.blockers.includes('Required-field confirmation proof is missing or malformed'));
+server.close();
+console.log('required confirmation replay: exact affected controls commit and verify before one final submit');
