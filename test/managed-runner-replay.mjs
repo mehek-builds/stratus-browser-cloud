@@ -58,6 +58,33 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <input id="aimed" type="text">
 <div id="combo-shell"><input id="combo" role="combobox" aria-expanded="false"></div>
 <div id="keytarget"></div>
+<!-- 'Expected Graduation Year' as the live Deepgram Ashby form renders it. Focusing the field opens
+     a calendar that does NOT close when the value is committed, and it is absolutely positioned over
+     the question below - over that question's control AND its label. #covers publishes what
+     document.elementFromPoint says about the next control, because the runner cannot run
+     elementFromPoint itself and a verdict has to come from the run that happened. The calendar
+     closes on Escape and on nothing else here, which is what makes the dismissal's aim visible. -->
+<div id="date-block" style="position: relative">
+  <label for="grad_year">Expected Graduation Year</label>
+  <input id="grad_year" type="text" autocomplete="off">
+  <div id="calendar" style="display: none; position: absolute; left: 0; top: 100%; z-index: 30; width: 320px; height: 200px; background: #fff; border: 1px solid #ccc">May 2028</div>
+</div>
+<label for="how_heard">How did you hear about this role?</label>
+<input id="how_heard" type="text">
+<div id="covers"></div>
+<div id="calendar-dismissed"></div>
+<!-- THE CONTRAST CASE for the phone rule, and the reason it is wrapped in its own block: a phone
+     field with NO country control anywhere in its group must keep its full international number.
+     Loose in the body it would find the country React Select in the application form below, which
+     is exactly the over-reach the ancestor walk is bounded to prevent. -->
+<div id="lone-phone-block">
+  <label for="lone_phone">Mobile number</label>
+  <input id="lone_phone" type="tel">
+</div>
+<!-- fill() sets the value PROPERTY, which no attribute read can see; the page's own input listener
+     echoes each one into the node named after it, and 'extract' reads that back. -->
+<div id="req_phone-echo"></div>
+<div id="lone_phone-echo"></div>
 <!-- A job description, copied in shape from the live DRW and Virtu Greenhouse postings. The bullet
      contains the answer text and is a plain <li> loose in the page. Sweeping the document for
      'li' containing the answer clicked exactly this and called the Discipline field answered. -->
@@ -127,6 +154,29 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
       document.getElementById('slow-panel').innerHTML = '<input id="slow-email" type="text">';
     }, ${SLOW_PANEL_MS});
   });
+
+  // ---- The calendar that commits its value and stays open over the next question ----
+  var grad = document.getElementById('grad_year');
+  var calendar = document.getElementById('calendar');
+  function openCalendar() { calendar.style.display = 'block'; }
+  grad.addEventListener('focus', openCalendar);
+  grad.addEventListener('click', openCalendar);
+  // Escape and nothing else. A click elsewhere does not close it, so a run that passes this case
+  // passes it by having aimed a keystroke at the field.
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    if (calendar.style.display !== 'block') return;
+    calendar.style.display = 'none';
+    document.getElementById('calendar-dismissed').textContent = 'yes';
+  });
+  // Polled rather than computed once: the overlay's geometry settles a frame after the style
+  // change, and the runner's next action follows a fill by a few milliseconds.
+  setInterval(function () {
+    var next = document.getElementById('how_heard');
+    var box = next.getBoundingClientRect();
+    var over = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    document.getElementById('covers').textContent = (over && over.id === 'calendar') ? 'yes' : 'no';
+  }, 50);
 
   // ---- React Select, faithfully enough to reproduce the two ways an answer was destroyed ----
   var TAXONOMY = ['Business Administration', 'Computer Engineering', 'Computer Science', 'Economics', 'Finance', 'Mathematics'];
@@ -470,6 +520,64 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(unmatchable.filledFields, [], 'and it must NOT be reported filled, got ' + JSON.stringify(unmatchable.filledFields));
   assert.ok(unmatchable.skipped.some((entry) => /^discipline: no option matched .*left for you to choose$/.test(entry)),
     'and the applicant must be told, got ' + JSON.stringify(unmatchable.skipped));
+}
+
+// 8. A DATE PICKER MUST NOT BE LEFT STANDING OVER THE NEXT QUESTION.
+//
+// Measured on the live Deepgram Ashby form: filling 'Expected Graduation Year' leaves a May 2028
+// calendar open, physically covering the following question AND its label. elementFromPoint over
+// that control returns the calendar, so anything aimed there hits the calendar rather than the
+// field, and the screenshot the applicant approves shows a question she cannot read.
+//
+// The submit assertion is the other half and is not decoration. The last time a keystroke was used
+// to commit a value it was an unaimed global 'press Enter' that reached the FORM: five bounced
+// applications and five emailed Greenhouse security codes. This case runs WITHOUT allowSubmit and
+// still asserts nothing was submitted, so a dismissal that could ever reach a submit control fails
+// here rather than on someone's application.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#grad_year', value: 'May 2028', label: 'education_end_year_field' },
+    { type: 'extract', selector: '#covers' },
+    { type: 'extract', selector: '#calendar-dismissed' },
+    { type: 'extract', selector: '#submitted' }
+  ]);
+  assert.equal(valueOf(result, '#covers'), 'no',
+    'the calendar must not be left covering the next question, got ' + JSON.stringify(valueOf(result, '#covers')));
+  assert.equal(valueOf(result, '#calendar-dismissed'), 'yes',
+    'and it must have been dismissed by an aimed Escape, not left to close itself');
+  assert.deepEqual(result.filledFields, ['education_end_year_field'],
+    'the value still has to be committed and reported, got ' + JSON.stringify(result));
+  assert.equal(valueOf(result, '#submitted'), '',
+    'NOTHING may be submitted by a dismissal keystroke');
+}
+
+// 9. THE DIAL CODE THAT WAS WRITTEN TWICE, and its mirror image, in one run.
+//
+// Cresta's live form rejected '+971 567417451' with 'Phone number is too short' while the country
+// control beside it already read +971. #req_phone reproduces that shape: Greenhouse puts the number
+// and its country React Select in ONE fieldset, and the fixture's select is showing +971.
+//
+// #lone_phone is the mirror image and matters just as much. It is a phone field with no country
+// control in its group, so it must receive the FULL international number. Stripping there would
+// produce a number the employer cannot dial, with nothing on the page saying so - the worse of the
+// two bugs, and the one a board-by-board special case walks straight into.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#req_phone', value: '+971 567417451', label: 'phone' },
+    { type: 'fill', selector: '#lone_phone', value: '+971 567417451', label: 'mobile' },
+    { type: 'extract', selector: '#req_phone-echo' },
+    { type: 'extract', selector: '#lone_phone-echo' }
+  ]);
+  assert.equal(valueOf(result, '#req_phone-echo'), '567417451',
+    'a phone field whose own group already shows +971 takes the national number, got '
+    + JSON.stringify(valueOf(result, '#req_phone-echo')));
+  assert.equal(valueOf(result, '#lone_phone-echo'), '+971 567417451',
+    'a phone field with no country control beside it keeps its country, got '
+    + JSON.stringify(valueOf(result, '#lone_phone-echo')));
+  // Reported against what was WRITTEN. Verifying a stripped number against the international form
+  // would turn a correct fill into 'value did not persist after fill'.
+  assert.deepEqual(result.filledFields.sort(), ['mobile', 'phone'],
+    'both fills must be reported filled, got ' + JSON.stringify(result));
 }
 
 // A continuation must operate on the same Page and BrowserContext. The first phase writes a value
