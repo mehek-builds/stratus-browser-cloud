@@ -27,15 +27,42 @@ const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', '
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
+/* THE HELD SESSION, and what the two numbers on it now mean.
+ *
+ * A continuation exists for exactly one reason: some pages answer a submit with a challenge that
+ * only that page can resolve, and reloading the page to reach the challenge control means SENDING
+ * THE FORM AGAIN. Greenhouse rotates its emailed security code on every send, measured on a live
+ * Cresta application on 2026-08-09 - three codes to one mailbox, 20:24:03, 21:13:07 and 21:13:53,
+ * each one invalidating the last - so a code typed into a page that had to be resubmitted to exist
+ * is always one generation stale. The held page is not an optimisation. It is the only page that
+ * can ever accept the code.
+ *
+ * TTL IS COUNTED FROM THE CHALLENGE, NOT FROM THE FORK. It used to be counted from before phase 0
+ * started, and phase 0 is a hundred-odd actions against a real employer form: on a 120 second TTL a
+ * 75 second fill left 45 seconds to fetch an email and come back, and the runner's own 30 second
+ * floor was the only thing keeping that from being negative. The window a caller asks for is a
+ * window ON THE CHALLENGE, so the runner rebases it the moment the challenge is the thing in front
+ * of it, and reports the rebased deadline back. See the marker rewrite at the end of the run loop.
+ *
+ * 240 SECONDS, and where it comes from. The caller's own budget is a 300 second serverless
+ * invocation which also pays for phase 0, so no caller can idle here for the full window anyway;
+ * the ceiling is sized so that a bounded automated mailbox read - seconds, not a person's minutes -
+ * fits with room for the round trip rather than racing it. maxContinuations stays 1: one challenge,
+ * one answer, and no session that can be resumed twice.
+ */
 export const MANAGED_CONTINUATION_CONTRACT = Object.freeze({
   requestField: 'requestContinuation',
   checkpointField: 'continuationCheckpoint',
   ttlField: 'continuationTtlSeconds',
   tokenField: 'continuationToken',
   expiresAtField: 'continuationExpiresAt',
-  defaultTtlSeconds: 120,
+  defaultTtlSeconds: 180,
   minTtlSeconds: 15,
-  maxTtlSeconds: 120,
+  maxTtlSeconds: 240,
+  /* The window opens when the challenge is raised, not when the sandbox is forked. Stated in the
+   * contract because the caller's `continuationExpiresAt` now comes back later than the one it
+   * could have computed itself, and a caller that assumed otherwise would expire a live session. */
+  ttlStartsAt: 'challenge',
   maxContinuations: 1
 });
 
@@ -3037,15 +3064,39 @@ const { chromium } = require('playwright');
     const discoveryCapabilities = currentInput.actions.some((action) => action.type === 'discover')
       ? ['discovery-control-role-v1']
       : null;
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(discoveryCapabilities ? { capabilities: discoveryCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, elapsedMs: Date.now() - startedAt }));
+    /* THE WINDOW OPENS HERE, on the page that raised the challenge, not back when the sandbox was
+     * forked.
+     *
+     * The old deadline was fixed before phase 0 ran, so the fill paid for it: a 120 second window
+     * against a 75 second Greenhouse fill left 45 seconds to read a mailbox and come back, and the
+     * 30 second floor underneath it was covering for a budget that had already been spent. Rebasing
+     * it is what makes a bounded wait for an emailed code a real option rather than a race, and it
+     * is the difference between the challenged page receiving the code and a SECOND submit having
+     * to be sent to make a code field exist at all.
+     *
+     * WHAT IS NOT RELAXED. The window is still the caller's own clamped TTL and nothing longer, the
+     * marker is still one-shot, still bound to the token and project hashes, and the claim script
+     * still refuses a marker whose own expiresAt has passed. The marker is rewritten by RENAME so a
+     * claim can never read a half-written one, and it is rewritten BEFORE the ready file exists, so
+     * for the whole time a claim is possible the deadline it is checked against is this one. */
+    const continuationExpiresAt = continuationOffered
+      ? new Date(Date.now() + Math.max(Number(input.continuationTtlSeconds) || 0, 15) * 1000).toISOString()
+      : null;
+    if (continuationOffered) {
+      try {
+        const marker = JSON.parse(fs.readFileSync('stratus-continuation.json', 'utf8'));
+        fs.writeFileSync('stratus-continuation-next.json', JSON.stringify({ ...marker, expiresAt: continuationExpiresAt }));
+        fs.renameSync('stratus-continuation-next.json', 'stratus-continuation.json');
+      } catch {
+        /* No marker means no continuation was ever authorized, and the idle below simply ends. The
+         * run's own result is written either way: a page we cannot offer to continue is still a
+         * page we have to report. */
+      }
+      fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
+    }
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(discoveryCapabilities ? { capabilities: discoveryCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
-    fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: input.continuationExpiresAt, host: input.allowedHost }));
-    /* A FLOOR UNDER THE IDLE, because the TTL is counted from before the run started and phase 0
-     * can legitimately eat most of it. The security boundary is untouched: the claim script checks
-     * the marker's own expiresAt, so a token that has expired is still refused. All this prevents is
-     * the runner exiting - and closing the browser - while a continuation the caller is still
-     * allowed to make is in flight, which would report itself as a continuation timeout. */
-    const expiresAt = Math.max(Date.parse(input.continuationExpiresAt), Date.now() + 30_000);
+    const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -3368,6 +3419,12 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
       ? await ensureSandboxTemplate()
       : await sandboxApi.get({ name: SANDBOX_NAME, resume: false });
     const continuationToken = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
+    /* THE MARKER'S OPENING DEADLINE, and it is a floor rather than the answer.
+     *
+     * The run rebases it to the moment the challenge appears and rewrites the marker before any
+     * claim can be made, so this value is only ever in force while phase 0 is still running - a
+     * window in which no ready file exists and no claim can succeed anyway. It is written because a
+     * marker with no expiry at all would be a marker the claim script could not refuse. */
     const continuationExpiresAt = context.requestContinuation
       ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
       : null;
@@ -3377,9 +3434,12 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
       ...(continuationToken ? { name: continuationSandboxName(projectBinding, continuationToken) } : {}),
       /* The sandbox has to outlive whatever the caller is allowed to wait for, or the wait times
          out against a box that is already gone and the run is reported as slow rather than as
-         evicted. Two things can be waited on: the run itself and, after it, one continuation. */
+         evicted. Three things can be waited on now, in sequence, and the box has to cover all
+         three: phase 0, then the idle window that only STARTS when phase 0 raises a challenge, then
+         one continuation. The old sum omitted the middle term because the window used to overlap
+         phase 0 rather than follow it, so a rebased window would have outlived its own sandbox. */
       timeout: context.requestContinuation
-        ? Math.max((context.continuationTtlSeconds + 30) * 1000, MANAGED_RUN_TIMEOUT_MS + CONTINUATION_TIMEOUT_MS + 30_000)
+        ? MANAGED_RUN_TIMEOUT_MS + context.continuationTtlSeconds * 1000 + CONTINUATION_TIMEOUT_MS + 30_000
         : MANAGED_RUN_TIMEOUT_MS,
       resources: { vcpus: 2 },
       persistent: false,
@@ -3426,7 +3486,15 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
     if (continuationToken && continuationEligible(result, context.continuationCheckpoint)) {
       keepAlive = true;
       result.continuationToken = continuationToken;
-      result.continuationExpiresAt = continuationExpiresAt;
+      /* THE RUN'S OWN DEADLINE WINS, for the same reason continuationOffered does: the run is the
+       * only party that knows when the challenge appeared, and the window is a window on the
+       * challenge. Reporting the fork-time value here would hand the caller a deadline that has
+       * usually already passed by the time it reads it, and every caller of this API checks the
+       * deadline before spending a continuation. The fallback covers a runtime image that predates
+       * the rebase, which reports no deadline of its own and is still on the old clock. */
+      result.continuationExpiresAt = typeof result.continuationExpiresAt === 'string'
+        ? result.continuationExpiresAt
+        : continuationExpiresAt;
     }
     return result;
   } catch (error) {
