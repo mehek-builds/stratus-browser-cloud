@@ -854,12 +854,23 @@ const { chromium } = require('playwright');
      * system is allowed to be in and a wrong "submitted" is not. */
     const readSubmitOutcome = () => page.evaluate(() => {
       const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+      /* VISIBLE MEANS A PERSON COULD SEE IT, and every cheap approximation of that has already been
+       * caught lying here. Requiring width AND height to both be zero passes a container collapsed
+       * to zero height with hidden overflow, which is what a React success panel looks like for the
+       * whole of its mount-then-animate-open, and for the entire life of one that never opens.
+       * Either dimension being zero is enough to disqualify. Zero opacity and a node parked at a
+       * large negative offset are the other two ways this markup hides, and all three were measured
+       * being reported as confirmed submissions over a live form. */
       const isVisible = (element) => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) return false;
+        if (rect.width === 0 || rect.height === 0) return false;
+        if (rect.bottom < 0 || rect.right < 0) return false;
+        if (rect.left > (document.documentElement.clientWidth || 0)) return false;
         const style = getComputedStyle(element);
-        return style.display !== 'none' && style.visibility !== 'hidden';
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (Number(style.opacity) === 0) return false;
+        return true;
       };
       const visibleOne = (selector) => [...document.querySelectorAll(selector)].find(isVisible) || null;
       // Published ATS state hooks. One entry per confirmed reading; nothing speculative belongs
@@ -868,23 +879,46 @@ const { chromium } = require('playwright');
       const REJECTED_CONTAINERS = ['.ashby-application-form-failure-container'];
       const CONFIRMED_TEXT = /thank you for (?:submitting|applying)|thanks for (?:applying|your application)|your application (?:has been |was )?(?:successfully )?(?:submitted|received)|application (?:has been )?(?:submitted|received)|we(?:'| ha)ve received your application/i;
       const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)/i;
-      const formStillPresent = Boolean(visibleOne('input[type=file], input[type=email], textarea'));
+      /* THE FORM IS THE COUNTER-WITNESS, so it has to be hard to miss. Probing only for file, email
+       * and textarea controls missed a form whose email field is type="text", which is common, and
+       * that single miss let the weakest arm below confirm a submission with the Submit button still
+       * on the page. A live submit control is the least ambiguous evidence that nothing was sent. */
+      const formStillPresent = Boolean(visibleOne([
+        'input[type=file]', 'input[type=email]', 'textarea',
+        'form button[type=submit]', 'form input[type=submit]',
+      ].join(', ')));
       for (const selector of REJECTED_CONTAINERS) {
         const node = visibleOne(selector);
         if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
       }
+      /* A CONTAINER IS NOT A CONFIRMATION. Ashby's success container is mounted by the same React
+       * tree that renders the form, and an empty one over a live form was being read as a filed
+       * application: the worst output this system can produce, because she is told it went and never
+       * follows up. Three things have to agree before this arm speaks, and all three were observed
+       * disagreeing: the container is visible, it actually says something, and the form it replaces
+       * is gone. Any other combination falls through to 'unknown', which is a state the caller now
+       * knows how to carry. */
       for (const selector of CONFIRMED_CONTAINERS) {
         const node = visibleOne(selector);
-        if (node) return { state: 'confirmed', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
+        if (!node) continue;
+        const message = clean(node.innerText).slice(0, 600);
+        if (!message || formStillPresent) {
+          return { state: 'unknown', source: 'ats_state_unconfirmed', evidence: selector, message: message || null, formStillPresent };
+        }
+        return { state: 'confirmed', source: 'ats_state', evidence: selector, message, formStillPresent };
       }
       // A live region is the page telling assistive technology that something just happened, which
-      // is a far narrower claim than "these words appear somewhere on the page".
-      for (const node of [...document.querySelectorAll('[role=status], [role=alert], [aria-live]')]) {
+      // is a far narrower claim than "these words appear somewhere on the page". aria-live="off"
+      // is the value that means DO NOT announce, so a node carrying it is not the page saying
+      // anything; it was matched by the bare [aria-live] selector and confirmed a live form once.
+      for (const node of [...document.querySelectorAll('[role=status], [role=alert], [aria-live]:not([aria-live="off"])')]) {
         if (!isVisible(node)) continue;
         const text = clean(node.innerText);
         if (!text) continue;
         if (REJECTED_TEXT.test(text)) return { state: 'rejected', source: 'live_region', evidence: node.getAttribute('role') || 'aria-live', message: text.slice(0, 600), formStillPresent };
-        if (CONFIRMED_TEXT.test(text)) return { state: 'confirmed', source: 'live_region', evidence: node.getAttribute('role') || 'aria-live', message: text.slice(0, 600), formStillPresent };
+        // Gated on the form being gone for the same reason the body-text arm is: an announcement
+        // over a form that is still there, still filled and still submittable has not confirmed it.
+        if (CONFIRMED_TEXT.test(text) && !formStillPresent) return { state: 'confirmed', source: 'live_region', evidence: node.getAttribute('role') || 'aria-live', message: text.slice(0, 600), formStillPresent };
       }
       /* THE WEAKEST ARM, AND IT IS GATED ON THE FORM BEING GONE. Body text alone was the old
        * instrument and it is the one that has to be able to say no: a confirmation sentence over a
