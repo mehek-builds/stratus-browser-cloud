@@ -13,9 +13,11 @@ export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
   version: 1,
   candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-  applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:(?:your|my|the)\\s+)?application',
-  verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:(?:your|my|the)\\s+)?application',
-  hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
+  applicationFinalPattern: '^(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application$',
+  verificationFinalPattern: '^(?:verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application)$',
+  handoffVerbProviderPattern: '\\b(?:apply|autofill|continue|import)\\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\\b',
+  thirdPartyHandoffPattern: '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:(?:the|your|my|a|an)\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
+  supportWidgetPattern: '\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b'
 });
 const ATOMIC_SUBMIT_SELECTOR = ATOMIC_SUBMIT_POLICY.candidateSelector;
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
@@ -1413,9 +1415,12 @@ const { chromium } = require('playwright');
         const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
         const formText = String((form && (form.id + ' ' + form.className + ' ' + form.getAttribute('action'))) || '').toLowerCase();
         const normalizedText = text.toLowerCase();
-        const handoff = /linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile/.test(normalizedText);
-        const finalApplication = /(?:submit|send|complete|finish)\s+(?:(?:your|my|the)\s+)?application/.test(normalizedText);
-        const finalVerification = /verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|submit\s+(?:(?:your|my|the)\s+)?application/.test(normalizedText);
+        const handoffVerbProvider = /\b(?:apply|autofill|continue|import)\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\b/.test(normalizedText);
+        const thirdPartyHandoff = /\b(?:apply|submit|send|autofill|sign\s?in|log\s?in|continue|register|import)\b(?:\s+\w+){0,4}\s+(?:with|using|via|from)\s+(?!(?:(?:the|your|my|a|an)\s+)?(?:attachments?|resumes?|cvs?|cover\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\s+(?:details|information))\b)|\bquick apply\b|\bone[-\s]?click apply\b|\bpowered\s+by\b/.test(normalizedText);
+        const supportWidget = /\bapplication\s+(?:feedback|survey|issue|question|review|experience)\b|\bfeedback\s+on\s+your\s+application\b|^(?!.*\bapplication\b).*\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\b/.test(normalizedText);
+        const handoff = handoffVerbProvider || thirdPartyHandoff || supportWidget;
+        const finalApplication = /^(?:submit|send)\s+(?:(?:your|my|the)\s+)?application$/.test(normalizedText);
+        const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code)|(?:submit|send)\s+(?:(?:your|my|the)\s+)?application)$/.test(normalizedText);
         const finalIntent = submitKind === 'verification' ? finalVerification : finalApplication;
         let score = 0;
         if (finalIntent) score += 100;

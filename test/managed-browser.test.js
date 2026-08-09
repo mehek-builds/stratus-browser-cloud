@@ -565,29 +565,44 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
   assert.deepEqual(ATOMIC_SUBMIT_POLICY, {
     name: 'litos-final-submit', version: 1,
     candidateSelector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-    applicationFinalPattern: '(?:submit|send|complete|finish)\\s+(?:(?:your|my|the)\\s+)?application',
-    verificationFinalPattern: 'verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|submit\\s+(?:(?:your|my|the)\\s+)?application',
-    hardExclusionPattern: 'linkedin|indeed|google|facebook|apple|apply with|continue|next|review application|save and continue|start application|autofill|import profile'
+    applicationFinalPattern: '^(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application$',
+    verificationFinalPattern: '^(?:verify(?:\\s+(?:code|email|identity|application))?|confirm\\s+(?:code|email|identity|application)|submit\\s+(?:verification|code)|(?:submit|send)\\s+(?:(?:your|my|the)\\s+)?application)$',
+    handoffVerbProviderPattern: '\\b(?:apply|autofill|continue|import)\\s+(?:handshake|symplicity|linkedin|indeed|seek|glassdoor|ziprecruiter|monster|xing|stepstone|google|facebook|github|apple|greenhouse|workday|workable|ashby|smartrecruiters|okta|microsoft|sso)\\b',
+    thirdPartyHandoffPattern: '\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:(?:the|your|my|a|an)\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b',
+    supportWidgetPattern: '\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b'
   });
   const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.applicationFinalPattern);
-  const hardExcluded = new RegExp(ATOMIC_SUBMIT_POLICY.hardExclusionPattern);
+  const exclusions = [
+    new RegExp(ATOMIC_SUBMIT_POLICY.handoffVerbProviderPattern),
+    new RegExp(ATOMIC_SUBMIT_POLICY.thirdPartyHandoffPattern),
+    new RegExp(ATOMIC_SUBMIT_POLICY.supportWidgetPattern)
+  ];
   const chooserCases = [
     ['Submit application', true],
     ['Submit your application', true],
     ['Submit my application', true],
     ['Submit the application', true],
     ['Send your application', true],
+    ['Submit application via Wellfound', false],
+    ['Submit application with recruiting partner', false],
+    ['Submit application feedback', false],
+    ['Complete application', false],
+    ['Finish application', false],
     ['Continue', false],
     ['Next', false],
     ['Finish', false],
     ['Apply with LinkedIn', false],
     ['Sign in with Google', false],
     ['Import profile', false],
-    ['Start application', false]
+    ['Start application', false],
+    ['Submit a support request', false],
+    ['Submit your question', false],
+    ['Submit application using Career Services', false],
+    ['Send application from recruiting partner', false]
   ];
   for (const [label, expected] of chooserCases) {
     const normalizedLabel = label.toLowerCase();
-    assert.equal(applicationFinal.test(normalizedLabel) && !hardExcluded.test(normalizedLabel), expected, label);
+    assert.equal(applicationFinal.test(normalizedLabel) && !exclusions.some((pattern) => pattern.test(normalizedLabel)), expected, label);
   }
   const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
   assert.throws(

@@ -252,6 +252,15 @@ for (const handoff of [
   '?sole-linkedin',
   '?submit-label=Next',
   '?submit-label=Finish',
+  '?submit-label=' + encodeURIComponent('Complete application'),
+  '?submit-label=' + encodeURIComponent('Finish application'),
+  '?submit-label=' + encodeURIComponent('Submit application via Wellfound'),
+  '?submit-label=' + encodeURIComponent('Submit application with recruiting partner'),
+  '?submit-label=' + encodeURIComponent('Submit application feedback'),
+  '?submit-label=' + encodeURIComponent('Submit application using Career Services'),
+  '?submit-label=' + encodeURIComponent('Send application from recruiting partner'),
+  '?submit-label=' + encodeURIComponent('Submit a support request'),
+  '?submit-label=' + encodeURIComponent('Submit your question'),
   '?submit-label=' + encodeURIComponent('Sign in with Google'),
   '?submit-label=' + encodeURIComponent('Import profile')
 ]) {
