@@ -299,6 +299,59 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'this replay did not request a continuation, so detecting the challenge must not invent one');
 }
 
+/* 3c. THE WINDOW OPENS ON THE CHALLENGE, NOT ON THE FORK.
+ *
+ * This is the case that decides whether a held session is usable at all. The window used to be
+ * fixed before phase 0 started, so the fill spent it: a real Greenhouse packet is a hundred-odd
+ * actions, and on the measured runs most of a 120 second budget was gone before there was anything
+ * to continue. What was left had to cover reading a mailbox and coming back, and when it did not,
+ * the only way back to a code field was to SEND THE APPLICATION AGAIN - which is what makes the
+ * code stale, because Greenhouse issues a new one on every send.
+ *
+ * The assertion is a lower bound rather than an equality: the deadline must sit at least most of a
+ * full TTL in the future AFTER a run that already spent real time submitting. A fork-clock deadline
+ * cannot, by construction, because the run's own elapsed time has already come out of it.
+ *
+ * The marker is checked too, because the marker is what the claim script actually enforces. A
+ * result that advertises a later deadline than the marker allows is worse than no rebase: the
+ * caller would spend a continuation it is about to be refused.
+ */
+{
+  const markerPath = path.join(workDir, 'stratus-continuation.json');
+  const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
+  fs.rmSync(readyPath, { force: true });
+  const forkedAt = Date.now();
+  fs.writeFileSync(markerPath, JSON.stringify({
+    tokenHash: 'token-hash', projectHash: 'project-hash', host: new URL(base).hostname,
+    expiresAt: new Date(forkedAt + 15_000).toISOString(), used: false
+  }));
+  const result = await replay([
+    { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+  ], {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 15,
+    continuationExpiresAt: new Date(forkedAt + 15_000).toISOString()
+  });
+  assert.equal(result.continuationOffered, true, 'a challenge with a continuation requested is a continuation offered');
+  const reopened = Date.parse(result.continuationExpiresAt);
+  assert.ok(Number.isFinite(reopened), 'the run must report the deadline it is actually holding to');
+  assert.ok(reopened - (forkedAt + 15_000) >= 1_000,
+    'the window must be measured from the challenge: the run spent ' + result.elapsedMs
+    + 'ms getting there, and a fork-clock deadline would already have lost every one of those ms');
+  const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  assert.equal(marker.expiresAt, result.continuationExpiresAt,
+    'the deadline the caller is told must be the deadline the claim script enforces');
+  assert.equal(marker.tokenHash, 'token-hash', 'rebasing the deadline must not disturb what the marker binds to');
+  assert.equal(marker.used, false, 'rebasing must not consume the single use');
+  assert.equal(JSON.parse(fs.readFileSync(readyPath, 'utf8')).expiresAt, result.continuationExpiresAt);
+  assert.equal(fs.existsSync(path.join(workDir, 'stratus-continuation-next.json')), false,
+    'the marker is replaced by rename, so no half-written copy may be left where a claim could read it');
+  fs.rmSync(markerPath, { force: true });
+  fs.rmSync(readyPath, { force: true });
+}
+
 // 4. THE CODE FINISHES THE APPLICATION in its own continuation run. That run begins on the changed
 //    challenge DOM and carries exactly one atomic action, one receipt pass, and one physical click.
 {

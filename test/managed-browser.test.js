@@ -115,9 +115,10 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     ttlField: 'continuationTtlSeconds',
     tokenField: 'continuationToken',
     expiresAtField: 'continuationExpiresAt',
-    defaultTtlSeconds: 120,
+    defaultTtlSeconds: 180,
     minTtlSeconds: 15,
-    maxTtlSeconds: 120,
+    maxTtlSeconds: 240,
+    ttlStartsAt: 'challenge',
     maxContinuations: 1
   });
   const token = 'a'.repeat(43);
