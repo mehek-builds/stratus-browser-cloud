@@ -651,6 +651,7 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
   );
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
   assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
+  assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {

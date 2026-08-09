@@ -192,6 +192,7 @@ assert.equal(result.extracted.find((entry) => entry.selector === '#text')?.value
 assert.deepEqual(result.blockers, []);
 assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
 assert.equal(result.requiredFieldConfirmation.version, 2);
+assert.equal(result.submitOutcome.pressed, true, 'the atomic click must feed current-main submit outcome reporting');
 assert.equal(result.requiredFieldConfirmation.passes.length, 1);
 const applicationPass = result.requiredFieldConfirmation.passes[0];
 assert.equal(applicationPass.scope.requiredControlCount, 12);
@@ -223,6 +224,7 @@ assert.equal(applicationPass.attempts.find((attempt) => attempt.selector === '#r
 const refused = await replay('?leave-custom-invalid');
 assert.equal(refused.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
 assert.equal(refused.requiredFieldConfirmation.status, 'blocked');
+assert.equal(refused.submitOutcome.pressed, false, 'a blocked atomic confirmation must not claim a submit attempt');
 assert.equal(refused.requiredFieldConfirmation.passes[0].unresolved.length, 1);
 assert.equal(refused.requiredFieldConfirmation.passes[0].retries, 1);
 assert.equal(refused.requiredFieldConfirmation.passes[0].attempts.find((attempt) => attempt.selector === '#custom')?.attemptCount, 2);

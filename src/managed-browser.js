@@ -1769,7 +1769,10 @@ const { chromium } = require('playwright');
         }
       }
       const blocked = unresolved.length > 0;
-      if (!blocked) await submitHandle.click({ timeout: action.timeout || 10_000 });
+      if (!blocked) {
+        await submitHandle.click({ timeout: action.timeout || 10_000 });
+        finalSubmitPressed = true;
+      }
       return {
         pass: {
           submitKind: action.submitKind,
