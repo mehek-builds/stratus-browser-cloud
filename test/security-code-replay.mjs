@@ -32,53 +32,135 @@ import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODE = 'TPHJrFMJ';
 
-// A Greenhouse application form, reduced to the parts that decide the outcome.
-//
-// novalidate for the same reason the other fixture uses it: with native validation on, an empty
-// required field would stop the submission by itself and a guard that did nothing would look like a
-// guard that worked. Greenhouse validates in JavaScript.
-//
-// The legend is present ON PURPOSE. '* indicates a required field' is on every Greenhouse form ever
-// rendered, including every one with no challenge at all, and this repo has already shipped one
-// gate that keyed on page text. Case 5 asserts the detector ignores it.
+/* THE WIDGET IS GREENHOUSE'S, NOT AN IMPRESSION OF ONE.
+ *
+ * Everything in the challenge below is transcribed from the code job-boards.greenhouse.io serves to
+ * the live Cresta posting, read on 2026-08-10 out of
+ * https://job-boards.cdn.greenhouse.io/assets/entry.client-Da_lLnMl.js, the asset that page links.
+ * The previous fixture was written from a screenshot and got three things wrong, and every one of
+ * them is load-bearing:
+ *
+ *   1. it put autocomplete="one-time-code" on the boxes. Greenhouse does not. Its inputs are
+ *      id="security-input-0" through "security-input-7", type=text, maxLength 1, aria-required,
+ *      aria-invalid, aria-errormessage, and nothing else. So the detector's platform-name branch
+ *      never fires on a real Greenhouse form and the one-character-group branch does all the work.
+ *   2. it left aria-required OFF. Greenhouse sets it on all eight, which is what made the old "the
+ *      code boxes must not be reported as empty required fields" assertion vacuous: it passed
+ *      because the fixture had no marker to find.
+ *   3. it left the submit button permanently enabled. Greenhouse disables the form in the same
+ *      breath as it learns the recipient, and re-enables it only once the eight joined box values
+ *      are exactly eight characters long. A run that types the code and immediately reaches for a
+ *      submit control finds a disabled one, and the atomic submit drops disabled candidates.
+ *
+ * The auto-advance and the paste distribution are the compiled handlers, with the input element
+ * substituted for React's ref.current, which is what ref.current is:
+ *
+ *   onChange u(m,x): f=value; g=a[x+1]; y=a.map(k=>k.current?.value); a[x].current.value=f;
+ *                    y[x]=f; b=y.join(""); t(b); d(b);
+ *                    if (a[x].current?.value) g?.current?.select();
+ *   onPaste  h(m,x): f=clipboardData.getData("text").split(""); g=0;
+ *                    a.forEach((b,j)=>{ if (j<x) return; b.current.value=f[g]; g+=1 });
+ *                    t(joined); d(joined)
+ *   enable   d(m):   m.length === 8 ? setFormDisabled(false) : setFormDisabled(true)
+ *
+ * novalidate for the same reason the other fixture uses it: with native validation on, an empty
+ * required field would stop the submission by itself and a guard that did nothing would look like a
+ * guard that worked. Greenhouse validates in JavaScript.
+ *
+ * The legend is present ON PURPOSE. '* indicates a required field' is on every Greenhouse form ever
+ * rendered, including every one with no challenge at all, and this repo has already shipped one
+ * gate that keyed on page text. Case 6 asserts the detector ignores it.
+ */
 const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixture</title>
 <form id="app-form" novalidate>
   <label for="first_name">First Name</label><input id="first_name" type="text">
   <label for="email">Email</label><input id="email" type="text">
   <p class="legend">* indicates a required field</p>
   <div id="challenge"></div>
-  <button id="submit-btn" type="submit">Submit application</button>
+  <div class="application--submit"><button id="submit-btn" type="submit">Submit application</button></div>
 </form>
 <div id="submitted">no</div>
 <div id="filed">no</div>
 <div id="empty-code-submits">0</div>
+<div id="box-values">-</div>
+<div id="disabled-at-challenge">-</div>
+<div id="disabled-at-code-submit">-</div>
 <script>
   var attempts = 0;
-  function renderChallenge() {
-    var html = '<p>A verification code was sent to mehekmandal05@gmail.com. To submit your'
-      + ' application, enter the 8-character code to confirm you\\'re a human.</p>'
-      + '<label id="code-label">Security code</label><div id="code-group">';
-    for (var b = 0; b < 8; b += 1) {
-      html += '<input class="code-box" type="text" maxlength="1" autocomplete="one-time-code"'
-        + ' aria-labelledby="code-label">';
-    }
-    document.getElementById('challenge').innerHTML = html + '</div>';
+  var CODE_LENGTH = 8;
+  var securityCode = '';
+  function boxRefs() { return [].slice.call(document.querySelectorAll('#email-verification input')); }
+  function setFormDisabled(state) { document.getElementById('submit-btn').disabled = state; }
+  // d(m), one render later. React does not apply setFormDisabled during the change handler: it
+  // schedules a re-render, and the button's disabled attribute changes when that render commits. A
+  // fixture that flips the attribute synchronously would let a run that reaches for the submit
+  // control the instant the last character lands pass here and fail against Greenhouse.
+  function onCodeLength(value) {
+    var next = value.length !== CODE_LENGTH;
+    setTimeout(function () { setFormDisabled(next); }, 0);
   }
-  // What Greenhouse does. The first submit does not file the application: it emails a code and
-  // renders the code field. Only a submit carrying the right code files anything.
+  function onCodeChange(event, index) {
+    var a = boxRefs();
+    var f = event.currentTarget.value;
+    var g = a[index + 1];
+    var y = a.map(function (k) { return k.value; });
+    a[index].value = f;
+    y[index] = f;
+    var b = y.join('');
+    securityCode = b;
+    onCodeLength(b);
+    if (a[index].value && g) g.select();
+  }
+  function onCodePaste(event, index) {
+    var a = boxRefs();
+    var f = (event.clipboardData ? event.clipboardData.getData('text') : '').split('');
+    var g = 0;
+    a.forEach(function (b, j) { if (j < index) return; b.value = f[g]; g += 1; });
+    var y = a.map(function (b) { return b.value; }).join('');
+    securityCode = y;
+    onCodeLength(y);
+    event.preventDefault();
+  }
+  function renderChallenge() {
+    var html = '<div class="divider" role="separator"></div><fieldset id="email-verification">'
+      + '<legend>A verification code was sent to mehekmandal05@gmail.com. To submit your'
+      + ' application, enter the 8-character code to confirm you\\'re a human.</legend>'
+      + '<label aria-hidden="true" id="email-verification-label" for="security-input-0">Security code</label>'
+      + '<div class="email-verification__wrapper">';
+    for (var b = 0; b < CODE_LENGTH; b += 1) {
+      html += '<input id="security-input-' + b + '" type="text" aria-invalid="false"'
+        + ' aria-errormessage="email-verification-error" aria-required="true" maxlength="1">';
+    }
+    document.getElementById('challenge').innerHTML = html + '</div></fieldset>';
+    boxRefs().forEach(function (box, index) {
+      box.addEventListener('input', function (event) { onCodeChange(event, index); });
+      box.addEventListener('paste', function (event) { onCodePaste(event, index); });
+    });
+    securityCode = '';
+    setFormDisabled(true);
+    document.getElementById('disabled-at-challenge').textContent = String(document.getElementById('submit-btn').disabled);
+  }
   document.getElementById('app-form').addEventListener('submit', function (event) {
     event.preventDefault();
     attempts += 1;
     document.getElementById('submitted').textContent = String(attempts);
-    var boxes = document.querySelectorAll('.code-box');
+    var boxes = boxRefs();
     if (boxes.length) {
-      var typed = '';
-      for (var i = 0; i < boxes.length; i += 1) typed += boxes[i].value || '';
+      document.getElementById('disabled-at-code-submit').textContent = String(document.getElementById('submit-btn').disabled);
+      document.getElementById('box-values').textContent = boxes.map(function (box) { return box.value || '_'; }).join('|');
+      var typed = securityCode;
       if (!typed) {
         document.getElementById('empty-code-submits').textContent = String(Number(document.getElementById('empty-code-submits').textContent) + 1);
       }
       if (typed === '${CODE}') {
-        document.getElementById('challenge').innerHTML = '';
+        // window.location.assign(confirmationPath). The form goes, and what replaces it is the body
+        // of Greenhouse's own confirmation route, fetched read-only from the live Cresta board on
+        // 2026-08-10.
+        document.getElementById('app-form').remove();
+        var done = document.createElement('div');
+        done.id = 'confirmation';
+        done.textContent = 'Thank you for applying. Your application has been received.';
+        document.body.appendChild(done);
         document.getElementById('filed').textContent = 'yes';
         return;
       }
@@ -91,14 +173,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     else renderChallenge();
   });
   if (location.search.includes('challenge=1')) renderChallenge();
-  // A boxed code group that auto-advances, which is what makes focus-and-type the right first
-  // strategy for entering one.
-  document.addEventListener('input', function (event) {
-    if (!event.target.classList || !event.target.classList.contains('code-box')) return;
-    var boxes = [].slice.call(document.querySelectorAll('.code-box'));
-    var index = boxes.indexOf(event.target);
-    if (event.target.value && index >= 0 && index < boxes.length - 1) boxes[index + 1].focus();
-  });
 </script>`;
 
 const server = http.createServer((request, response) => {
@@ -182,7 +256,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
     { type: 'extract', selector: '#submitted' },
-    { type: 'extract', selector: '#filed' }
+    { type: 'extract', selector: '#filed' },
+    { type: 'extract', selector: '#disabled-at-challenge' }
   ], { allowSubmit: true });
   assert.equal(valueOf(result, '#submitted'), '1', 'the submit happened');
   assert.equal(valueOf(result, '#filed'), 'no', 'and the employer has nothing: the code gates it');
@@ -196,11 +271,18 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
    * click now writes `blockers` too. The code control is eight empty inputs sitting on the form at
    * exactly the moment that scan runs. If it claimed them, a packet waiting on a code would carry
    * eight junk blocker sentences under its own honest one, and the applicant would be sent looking
-   * for form fields to fill instead of an email to open. It does not claim them, because Greenhouse
-   * marks them with neither the required attribute, nor aria-required, nor a `_required_` label
-   * class - which is the whole reason this detector reads the control's SHAPE instead. */
+   * for form fields to fill instead of an email to open.
+   *
+   * THIS ASSERTION USED TO PROVE NOTHING. Its comment said Greenhouse marks the boxes with neither
+   * the required attribute nor aria-required, and the fixture was built to match that claim. The
+   * live bundle says otherwise: aria-required="true" is on all eight, and the readiness scan reads
+   * aria-required. The gate now excludes the group on its SHAPE, which is the same structural
+   * signal the detector uses, and the fixture now carries the marker that makes the exclusion the
+   * thing being tested. */
   assert.deepEqual(result.blockers, [],
     'the code boxes must not be reported as empty required fields, got ' + JSON.stringify(result.blockers));
+  assert.equal(valueOf(result, '#disabled-at-challenge'), 'true',
+    'Greenhouse disables its own submit the moment the challenge appears');
 }
 
 // 3b. THE POST-CLICK TRANSITION CAN BE CLIENT-RENDERED. This action is deliberately last, matching
@@ -224,10 +306,24 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#submitted' },
     { type: 'extract', selector: '#filed' },
-    { type: 'extract', selector: '#empty-code-submits' }
+    { type: 'extract', selector: '#empty-code-submits' },
+    { type: 'extract', selector: '#box-values' },
+    { type: 'extract', selector: '#disabled-at-code-submit' }
   ], { allowSubmit: true, pathSuffix: '?challenge=1' });
   assert.equal(valueOf(result, '#submitted'), '1', 'the continuation makes exactly one submit with the code in it');
   assert.equal(valueOf(result, '#filed'), 'yes', 'and this time the employer has the application');
+  /* EIGHT CHARACTERS IN EIGHT BOXES, IN ORDER, and read back off the boxes themselves at the moment
+     the form was submitted rather than inferred from the outcome. The widget auto-advances by
+     calling select() on the next box after each character, so one focus and eight keystrokes is
+     the right shape; on a widget that did not, this is the assertion that would say so. */
+  assert.equal(valueOf(result, '#box-values'), CODE.split('').join('|'),
+    'each box must hold exactly one character of the code, in order');
+  /* AND THE SUBMIT WAS ENABLED WHEN IT WAS PRESSED. Greenhouse re-enables the button from state one
+     render after the eighth character. Without the wait for that, the atomic submit's candidate
+     filter drops disabled controls and raises "Atomic submit control was missing or ambiguous" over
+     a form that was about to be perfectly submittable. */
+  assert.equal(valueOf(result, '#disabled-at-code-submit'), 'false',
+    'the code must be complete, and the form re-enabled, before the click');
   assert.deepEqual(result.securityCodeAttempt, {
     supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
   });
@@ -235,6 +331,37 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(result.requiredFieldConfirmation.passes.length, 1);
   assert.equal(result.requiredFieldConfirmation.passes[0].submitKind, 'verification');
   assert.equal(result.humanVerification, null, 'the challenge is gone, which is what accepted means');
+  /* AND THE CHALLENGE BEING GONE IS NOT WHAT PROVES IT. The page said so itself, with the form
+     replaced by the confirmation body. The backend refuses to write 'submitted' on a code run
+     without both this and an 'accepted' code outcome. */
+  assert.equal(result.submitOutcome?.state, 'confirmed');
+  assert.equal(result.submitOutcome?.formStillPresent, false);
+}
+
+// 4b. THE PRODUCTION SHAPE THAT FAILED, and the reason the code now travels on a continuation.
+//
+//     Packet 9810bdcf-fc3d-44bb-a8cb-b09c51aaf131, Cresta, 2026-08-09. The finishing run was given
+//     the whole packet action list with the code hung on its terminal atomic submit. That list
+//     begins with a fresh page load, so at the moment the atomic action ran there was no code
+//     control on the page at all - Greenhouse only renders one in answer to a submit it has
+//     refused. The runner reported no_control and threw, and the receipt shows eight empty boxes
+//     under a fully populated form.
+//
+//     The runner's refusal is correct and stays: typing must come before the click, so an atomic
+//     verification submit on a page with no code control has nothing it can honestly do. What
+//     changed is the caller, which now sends this action only as a continuation of the run that
+//     raised the challenge. This case pins the runner half.
+{
+  let failed = null;
+  try {
+    await replay([
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE }
+    ], { allowSubmit: true });
+  } catch (error) {
+    failed = error;
+  }
+  assert.ok(failed, 'a verification submit with no code control on the page must not proceed');
+  assert.match(String(failed.message), /Security code was not entered before atomic verification/);
 }
 
 // 5. A WRONG CODE IS REPORTED AS WRONG. It must not read as accepted, and it must not read as a
@@ -267,4 +394,4 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('security-code replay: 6 cases passed');
+console.log('security-code replay: 8 cases passed');
