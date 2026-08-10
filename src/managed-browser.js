@@ -1368,11 +1368,16 @@ const { chromium } = require('playwright');
      * receipt, or an explicit refusal. Polling the same typed readers keeps prose from becoming a
      * trigger, and the short deadline bounds the cost on an employer page that remains genuinely
      * ambiguous. This is deliberately not a blind sleep: a synchronous receipt returns on the first
-     * pass, while a client-rendered challenge gets the browser tasks it needs to commit. */
-    const waitForPostSubmitApplicationState = async () => {
+     * pass, while a client-rendered challenge gets the browser tasks it needs to commit.
+     *
+     * securityCodeSettles is false for exactly one caller: the run that has just RESUBMITTED with a
+     * code in the boxes. There the code control is the thing under test, not evidence of anything
+     * settling, and a wait that returned the moment it saw one would return before the page had
+     * changed at all. Everywhere else a challenge appearing is a real terminal state. */
+    const waitForPostSubmitApplicationState = async ({ securityCodeSettles = true } = {}) => {
       const deadline = Date.now() + 3_000;
       while (Date.now() < deadline) {
-        if (await readSecurityCodeChallenge()) return;
+        if (securityCodeSettles && await readSecurityCodeChallenge()) return;
         const outcome = await readSubmitOutcome();
         if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
         await page.waitForTimeout(50).catch(() => undefined);
@@ -2655,15 +2660,41 @@ const { chromium } = require('playwright');
             // reject or rotate the code and must remain structurally impossible.
             const verification = await confirmAndSubmitPass({ ...action, securityCode: undefined });
             passes.push(verification.pass);
+            /* THE VERDICT IS THE RECEIPT, NOT THE CONTROL, and the difference cost a filed
+             * application.
+             *
+             * This branch used to read the code control the instant networkidle resolved and call it
+             * rejected if the control was still attached. On a client-rendered Greenhouse embed
+             * networkidle resolves BEFORE React swaps the view, so the control is momentarily still
+             * there and a perfect submission read as a refusal. Measured on the Cresta packet
+             * (Greenhouse, Data Science Intern (Customer Success)): the attempt at 17:35:04Z was
+             * recorded rejected, and at 17:36:04Z recruiting@cresta.ai wrote "Thank you for applying
+             * to Cresta" to that packet's alias. The application was filed and the applicant was told
+             * to go and file it again by hand.
+             *
+             * Two changes, and they belong together. Wait for a state the same way the sibling
+             * application submit four lines below already does, and then let a CONFIRMED receipt
+             * outrank the control: a page that has said the application is in is not waiting for a
+             * code, whatever is still mounted while the view finishes changing. Control presence is
+             * still what decides the ambiguous case, because on a genuine refusal Greenhouse renders
+             * no receipt at all and the challenge is all there is to read. An explicitly REJECTED
+             * receipt is honoured too, which the old shape could not do: it read a cleared control
+             * over a failure panel as acceptance. */
+            let codeOutcome = 'not_entered';
             if (verification.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+              await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+              const receipt = await readSubmitOutcome();
+              const still = await readSecurityCodeChallenge();
+              codeOutcome = receipt.state === 'confirmed'
+                ? 'accepted'
+                : ((receipt.state === 'rejected' || still) ? 'rejected' : 'accepted');
             }
-            const still = await readSecurityCodeChallenge();
             securityCodeAttempt = {
               supplied: true,
               entered: true,
               resubmitted: verification.pass.submissionOutcome === 'clicked',
-              outcome: verification.pass.submissionOutcome !== 'clicked' ? 'not_entered' : (still ? 'rejected' : 'accepted')
+              outcome: codeOutcome
             };
           }
         } else {
@@ -2727,15 +2758,20 @@ const { chromium } = require('playwright');
             // nothing.
             await locator.click().catch(() => undefined);
             await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-            // Accepted or not is read off the CONTROL, the same way its arrival was: a challenge
-            // still standing after the resubmit means the code did not clear it. Deliberately not
-            // read off any success or error sentence.
+            // The same verdict the atomic branch above makes, for the same measured reason: the
+            // control is still attached while a client-rendered view swaps, so a receipt outranks it.
+            // Two code paths reaching opposite conclusions about the same page is how one of them
+            // stays wrong without anyone noticing.
+            await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+            const receipt = await readSubmitOutcome();
             const still = await readSecurityCodeChallenge();
             securityCodeAttempt = {
               supplied: true,
               entered: true,
               resubmitted: true,
-              outcome: still ? 'rejected' : 'accepted'
+              outcome: receipt.state === 'confirmed'
+                ? 'accepted'
+                : ((receipt.state === 'rejected' || still) ? 'rejected' : 'accepted')
             };
           }
         }

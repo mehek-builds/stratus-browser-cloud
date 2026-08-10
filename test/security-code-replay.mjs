@@ -153,13 +153,35 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
         document.getElementById('empty-code-submits').textContent = String(Number(document.getElementById('empty-code-submits').textContent) + 1);
       }
       if (typed === '${CODE}') {
+        var done = document.createElement('div');
+        done.id = 'confirmation';
+        done.textContent = 'Thank you for applying. Your application has been received.';
+        /* THE VIEW SWAP IS NOT ATOMIC, and 'linger' is that fact made observable.
+         *
+         * On a client-rendered embed the receipt commits before the old subtree is unmounted, so
+         * there is a window in which the page says the application is in AND the code control the
+         * resubmit was aimed at is still attached. networkidle resolves inside that window - there
+         * is no request to wait for - so a verdict read off the control alone reads a filed
+         * application as a refusal. Measured on the Cresta packet: rejected at 17:35:04Z, and
+         * recruiting@cresta.ai wrote "Thank you for applying to Cresta" to that alias at 17:36:04Z.
+         *
+         * The submit control goes with the receipt, because that is what makes the receipt readable:
+         * every arm of readSubmitOutcome is gated on the form being gone. The code fieldset stays. */
+        if (location.search.includes('linger=1')) {
+          document.getElementById('submit-btn').remove();
+          document.body.appendChild(done);
+          document.getElementById('filed').textContent = 'yes';
+          // 'keep' holds the window open for the whole run. See case 4c for why one case pins it
+          // that way and does not rely on a timer.
+          if (!location.search.includes('keep=1')) {
+            setTimeout(function () { document.getElementById('email-verification').remove(); }, 250);
+          }
+          return;
+        }
         // window.location.assign(confirmationPath). The form goes, and what replaces it is the body
         // of Greenhouse's own confirmation route, fetched read-only from the live Cresta board on
         // 2026-08-10.
         document.getElementById('app-form').remove();
-        var done = document.createElement('div');
-        done.id = 'confirmation';
-        done.textContent = 'Thank you for applying. Your application has been received.';
         document.body.appendChild(done);
         document.getElementById('filed').textContent = 'yes';
         return;
@@ -391,6 +413,54 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(result.submitOutcome?.formStillPresent, false);
 }
 
+/* 4c. A CONFIRMED RECEIPT OUTRANKS A CONTROL THAT HAS NOT UNMOUNTED YET.
+ *
+ * The false negative this pins is the worst output on the security-code path, and it is worse than a
+ * missing verdict: the application HAS been filed, and the applicant is told "the employer did not
+ * accept it, so this one needs you: open the portal and finish it there." She then reapplies to a
+ * job she already holds an application for, or writes it off.
+ *
+ * Two things had to change and this case needs both. The branch waits for a post-submit state the
+ * way the sibling application submit already did, and the receipt outranks control presence.
+ *
+ * THE CONTROL NEVER DETACHES HERE, deliberately. A fixture that removed it on a timer would be racy
+ * in the direction that hides the bug: if the removal fires before the verdict read, the old code
+ * passes too and the case proves nothing. Holding it attached for the whole run makes the assertion
+ * impossible to satisfy by accident - the run must decide 'accepted' with the challenge in front of
+ * it - and humanVerification is asserted non-null to prove it really was there. */
+{
+  const result = await replay([
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
+    { type: 'extract', selector: '#filed' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1&linger=1&keep=1' });
+  assert.equal(valueOf(result, '#filed'), 'yes', 'the employer has the application');
+  assert.equal(result.submitOutcome?.state, 'confirmed', 'and the page says so');
+  assert.equal(result.humanVerification?.kind, 'security_code',
+    'the code control is still on the page, which is what makes the next assertion mean something');
+  assert.equal(result.securityCodeAttempt?.outcome, 'accepted',
+    'a filed application must not be reported as a rejected code because its control has not unmounted');
+}
+
+/* 4d. THE SAME THING IN ITS PRODUCTION SHAPE, where the control unmounts a beat after the receipt
+ * instead of never. This is the measured Cresta timing, and it is here because a fix that only
+ * handled the permanent case would be fitting the fixture rather than the defect.
+ *
+ * The property under test is that the verdict is STABLE ACROSS THE SWAP WINDOW: whether the run
+ * reads the page before or after the unmount, the answer is the same, because the receipt is what
+ * decides it either way. Which side of the window the read lands on depends on how fast the machine
+ * is - the same suite measured 12s and 140s on one laptop - so nothing here asserts the end-of-run
+ * challenge state. An assertion that a timer had fired would be testing the host, and case 4c
+ * already pins the hard side of the window deterministically. */
+{
+  const result = await replay([
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
+    { type: 'extract', selector: '#filed' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1&linger=1' });
+  assert.equal(valueOf(result, '#filed'), 'yes');
+  assert.equal(result.submitOutcome?.state, 'confirmed');
+  assert.equal(result.securityCodeAttempt?.outcome, 'accepted');
+}
+
 // 4b. THE PRODUCTION SHAPE THAT FAILED, and the reason the code now travels on a continuation.
 //
 //     Packet 9810bdcf-fc3d-44bb-a8cb-b09c51aaf131, Cresta, 2026-08-09. The finishing run was given
@@ -447,4 +517,4 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('security-code replay: 8 cases passed');
+console.log('security-code replay: 10 cases passed');
