@@ -24,24 +24,38 @@ import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 /* Extracted from the shipped runner string rather than copied, for the same reason as
  * test/submit-outcome-dom.test.js: a copy lets this file keep passing while the real predicate
- * drifts, which is the exact failure the ordinary suite's assert.match-on-a-string already had. */
-function extractPredicate() {
-  const start = SANDBOX_RUNNER.indexOf('const readUnresolvedCaptcha = () => page.evaluate(');
-  assert.notEqual(start, -1, 'readUnresolvedCaptcha must still be in the runner');
-  const open = SANDBOX_RUNNER.indexOf('(', SANDBOX_RUNNER.indexOf('page.evaluate', start));
+ * drifts, which is the exact failure the ordinary suite's assert.match-on-a-string already had.
+ * Both halves come from there, the selector table as well as the decision, so a selector added to
+ * the runner reaches these cases and a selector added only here proves nothing. */
+function extractBraced(prefix) {
+  const start = SANDBOX_RUNNER.indexOf(prefix);
+  assert.notEqual(start, -1, `${prefix} must still be in the runner`);
+  const open = SANDBOX_RUNNER.indexOf('{', start);
   let depth = 0;
   for (let i = open; i < SANDBOX_RUNNER.length; i += 1) {
     const ch = SANDBOX_RUNNER[i];
-    if (ch === '(') depth += 1;
-    else if (ch === ')') {
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
       depth -= 1;
-      if (depth === 0) return SANDBOX_RUNNER.slice(open + 1, i);
+      if (depth === 0) return SANDBOX_RUNNER.slice(start, i + 1);
     }
   }
-  throw new Error('could not find the end of the readUnresolvedCaptcha callback');
+  throw new Error(`could not find the end of ${prefix}`);
 }
 
-const PREDICATE = extractPredicate();
+const SELECTORS = new Function(`${extractBraced('const CAPTCHA_SELECTORS = ')}; return CAPTCHA_SELECTORS;`)();
+const SNAPSHOT_SOURCE = extractBraced('const captchaSnapshot = ').replace(/^const captchaSnapshot = /, '');
+
+/* THE LOCATOR IS PART OF WHAT IS UNDER TEST, so the test uses one too. Playwright's CSS engine
+ * pierces open shadow roots and document.querySelectorAll does not, and a widget mounted in a shadow
+ * root is one of the cases below. Driving these through querySelectorAll would quietly test a
+ * different collector than the one that ships and would report that case as passing. */
+const COMBINED_SELECTOR = [SELECTORS.challenge, SELECTORS.response, SELECTORS.bframe].join(', ');
+const SNAPSHOT = new Function('nodes', 'sel', `return (${SNAPSHOT_SOURCE})(nodes, sel);`);
+
+/* A token the length of a real one. Every provider mints an encoded blob far longer than the floor
+ * the runner applies, so a fixture that wants to say "solved" has to look solved. */
+const REAL_TOKEN = `03AGdBq2${'QwErTyUiOpAsDfGhJkLzXcVbNm0123456789-_'.repeat(4)}`;
 
 /* The real form under all of this. Present in every fixture because the badge cases are only
  * interesting over a page that is otherwise perfectly submittable: that is the shape of all 48. */
@@ -86,9 +100,13 @@ test.before(async () => {
 });
 test.after(async () => { await browser?.close(); });
 
+async function evaluateSnapshot() {
+  return page.locator(COMBINED_SELECTOR).evaluateAll(SNAPSHOT, SELECTORS);
+}
+
 async function read(html) {
   await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
-  return page.evaluate(`(${PREDICATE})()`);
+  return evaluateSnapshot();
 }
 
 test('the invisible reCAPTCHA badge alone is NOT a challenge', async () => {
@@ -166,17 +184,46 @@ test('an opacity:0 widget is not a challenge', async () => {
 });
 
 test('a SOLVED widget is not a challenge', async () => {
-  /* The token is read off the value PROPERTY, which is the whole reason this predicate lives in a
-   * page.evaluate. g-recaptcha-response is a <textarea>: it has no value ATTRIBUTE, so an attribute
-   * read returns null on a solved widget and every cleared challenge would be reported as still
-   * waiting. The value is set here the way the widget sets it, through the property. */
+  /* The token is read off the value PROPERTY, which is the whole reason this runs in the page.
+   * g-recaptcha-response is a <textarea>: it has no value ATTRIBUTE, so an attribute read returns
+   * null on a solved widget and every cleared challenge would be reported as still waiting. The
+   * value is set here the way the widget sets it, through the property. */
   await page.setContent(`<!doctype html><html><body>${FORM}${V2_WIDGET}
     <textarea id="g-recaptcha-response" name="g-recaptcha-response" style="display:none"></textarea>
     </body></html>`);
-  await page.evaluate(() => {
-    document.getElementById('g-recaptcha-response').value = '03AGdBq26SolvedTokenValue';
-  });
-  assert.equal(await page.evaluate(`(${PREDICATE})()`), false);
+  await page.evaluate((token) => {
+    document.getElementById('g-recaptcha-response').value = token;
+  }, REAL_TOKEN);
+  assert.equal(await evaluateSnapshot(), false);
+});
+
+test('a STALE leftover value is not a solved widget', async () => {
+  /* REGRESSION C. The first version accepted any non-empty value as proof of a solved widget, so a
+   * short leftover string in the response field silenced a widget that is still asking. The floor
+   * sits far below a real token and above every placeholder, which is the whole claim it makes.
+   * What it deliberately does NOT claim is that a correctly-shaped token can be checked for expiry:
+   * nothing in the DOM distinguishes a fresh blob from one the provider expired server side, at this
+   * layer or in the backend. The visible-popup rule below is the only honest answer to that. */
+  for (const leftover of ['expired', 'null', 'undefined', '   ']) {
+    assert.equal(await read(`${FORM}${V2_WIDGET}
+      <textarea name="g-recaptcha-response" style="display:none">${leftover}</textarea>`), true,
+    `a response field holding ${JSON.stringify(leftover)} must not read as solved`);
+  }
+});
+
+test('an OPEN popup outranks any token, however real it looks', async () => {
+  /* The provider is putting an image grid in front of a person right now, so whatever is sitting in
+   * the response field belongs to an earlier round. This is the one staleness signal a DOM read can
+   * produce without guessing, and it is why the token check runs after the popup check. */
+  await page.setContent(`<!doctype html><html><body>${FORM}${V2_WIDGET}
+    <textarea id="g-recaptcha-response" name="g-recaptcha-response" style="display:none"></textarea>
+    <iframe title="recaptcha challenge" src="https://www.google.com/recaptcha/api2/bframe?k=K"
+      width="400" height="580"></iframe>
+    </body></html>`);
+  await page.evaluate((token) => {
+    document.getElementById('g-recaptcha-response').value = token;
+  }, REAL_TOKEN);
+  assert.equal(await evaluateSnapshot(), true);
 });
 
 test('a rendered widget with an EMPTY response is a challenge', async () => {
@@ -202,6 +249,43 @@ test('an ESCALATED invisible widget IS a challenge', async () => {
     <div class="g-recaptcha" data-sitekey="K" data-size="invisible" style="width:304px;height:78px"></div>
     <iframe title="recaptcha challenge"
       src="https://www.google.com/recaptcha/api2/bframe?hl=en&amp;k=K" width="400" height="580"></iframe>`), true);
+});
+
+test('a bframe that is MOUNTED but hidden does not switch the invisible rule off', async () => {
+  /* REGRESSION D. The first version tested the bframe for PRESENCE. reCAPTCHA mounts that iframe
+   * collapsed and leaves it mounted after the popup closes, so presence is true on pages where
+   * nobody is being asked anything, and the invisible exclusion switched itself off over a form with
+   * no challenge on it. The escalation exception has to key on the popup being on screen. */
+  assert.equal(await read(`${FORM}
+    <div class="g-recaptcha" data-sitekey="K" data-size="invisible" style="width:304px;height:78px"></div>
+    <iframe title="recaptcha challenge" src="https://www.google.com/recaptcha/api2/bframe?k=K"
+      width="400" height="580" style="display:none"></iframe>`), false);
+});
+
+test('a widget inside an OPEN shadow root is still a challenge', async () => {
+  /* REGRESSION A, and a straight capability loss against the selector this replaced. Playwright's
+   * CSS engine pierces open shadow roots; document.querySelectorAll stops at the boundary. Embedded
+   * application widgets are mounted this way, and the first version could not see into any of them.
+   * The shadow root is attached through the DOM API rather than declaratively so the test cannot
+   * accidentally pass on a light-DOM copy of the markup. */
+  await page.setContent(`<!doctype html><html><body>${FORM}<div id="widget-host"></div></body></html>`);
+  await page.evaluate((markup) => {
+    document.getElementById('widget-host').attachShadow({ mode: 'open' }).innerHTML = markup;
+  }, V2_WIDGET);
+  assert.equal(await evaluateSnapshot(), true);
+});
+
+test('noise nodes cannot use up the budget before a real widget is reached', async () => {
+  /* REGRESSION B. The first version capped the scan at 20 nodes and applied the cap BEFORE the
+   * visibility and badge filters, so a page whose CSS framework uses "captcha" in utility class
+   * names hid a real widget behind its own noise. The cap existed to bound per-node round trips, and
+   * there are no per-node round trips left: the whole matched list is handed to one page-side pass.
+   * Forty hidden noise nodes here, double the old cap, with the widget last. */
+  const noise = Array.from(
+    { length: 40 },
+    (_, i) => `<div class="captcha-tooltip-${i}" style="display:none">tooltip</div>`,
+  ).join('');
+  assert.equal(await read(`${FORM}${noise}${V2_WIDGET}`), true);
 });
 
 test('a plain application page reports nothing', async () => {

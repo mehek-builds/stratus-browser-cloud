@@ -1284,11 +1284,9 @@ const { chromium } = require('playwright');
      * only on POSITIVE evidence of a real, visible, unsolved one, and a probe that cannot see at all
      * reports nothing rather than inventing a wall.
      *
-     * FOUR CHECKS, ported from hasUnresolvedCaptcha in the backend's portalSubmission.ts so the two
-     * layers stop disagreeing by construction. Translated, not copied: that one is DOM-string and
-     * per-node locator probes, this one is a single page.evaluate, which reads the response token off
-     * the DOM PROPERTY. That matters - g-recaptcha-response is a <textarea> with no value ATTRIBUTE
-     * at all, so an attribute read reports every solved widget as unsolved.
+     * FIVE CHECKS, ported from hasUnresolvedCaptcha in the backend's portalSubmission.ts so the two
+     * layers stop disagreeing by construction. Translated, not copied: that one probes node by node
+     * with locators, this one collects with ONE locator and decides in ONE page-side pass.
      *
      *   1. VISIBLE. A node with a zero dimension, display:none, visibility:hidden or opacity 0 is not
      *      being shown to anyone. Same rule as readSubmitOutcome above, for the same reason.
@@ -1297,37 +1295,71 @@ const { chromium } = require('playwright');
      *      own class list is not a descendant of itself. closest() covers both in one probe. If v3
      *      scores the session badly it escalates to a real widget, and that widget renders OUTSIDE
      *      the badge, so closest() returns null and it is counted normally.
-     *   3. NOT AN INVISIBLE WIDGET, unless a bframe is open. A form that mounts its own
+     *   3. NOT AN INVISIBLE WIDGET, unless a bframe is VISIBLE. A form that mounts its own
      *      <div class="g-recaptcha" data-size="invisible"> outside the badge is the shape the badge
      *      exclusion does not watch. The bframe is the load-bearing half: reCAPTCHA renders the
      *      image-grid popup in a SECOND iframe whose src carries 'bframe', and an ESCALATED invisible
-     *      widget still declares itself invisible - so without that test this would wave through the
-     *      one case where a person really is looking at a challenge.
-     *   4. UNSOLVED. Something rendered plus at least one empty response field. Widget count is
-     *      deliberately not compared to token count: providers render a variable number of visible
-     *      nodes per widget, so "3 nodes, 1 token" is one solved widget and not two missing ones. */
-    const readUnresolvedCaptcha = () => page.evaluate(() => {
-      const RESPONSE_SELECTOR = [
+     *      widget still declares itself invisible. Presence alone is not enough, and testing only
+     *      presence was a measured regression: reCAPTCHA MOUNTS the bframe collapsed and keeps it
+     *      mounted after the popup closes, so a page showing nobody anything carried one and the
+     *      invisible exclusion switched itself off over a form with no challenge on it.
+     *   4. AN OPEN POPUP BEATS ANY TOKEN. If a bframe is on screen, the provider is asking a person
+     *      right now, so whatever sits in the response field is stale by construction. This is the
+     *      only staleness signal a DOM read can honestly produce.
+     *   5. UNSOLVED. Something rendered plus at least one response field that does not hold a real
+     *      token. Read off the DOM PROPERTY, which is why this runs in the page: g-recaptcha-response
+     *      is a <textarea> with no value ATTRIBUTE at all, so an attribute read reports every solved
+     *      widget as unsolved. Widget count is deliberately not compared to token count, because
+     *      providers render a variable number of visible nodes per widget, so "3 nodes, 1 token" is
+     *      one solved widget and not two missing ones.
+     *
+     * COLLECTED WITH A LOCATOR, NOT document.querySelectorAll, and that is a capability and not a
+     * style choice. Playwright's CSS engine pierces OPEN SHADOW ROOTS; querySelectorAll stops at the
+     * boundary. An embedded widget mounted in a shadow root was invisible to the first version of
+     * this and visible to the selector it replaced, which is a straight regression against what the
+     * runner could already see.
+     *
+     * NO CANDIDATE CAP. The first version capped the scan at 20 nodes to bound per-node round trips,
+     * and applied the cap BEFORE the visibility and badge filters, so twenty hidden nodes whose class
+     * names merely contain "captcha" exhausted the budget and a real widget behind them was never
+     * examined. evaluateAll hands the whole matched list to one page-side function, so there are no
+     * round trips left to bound: the loop is a synchronous pass over an array that is already in the
+     * page. The cost the cap existed to control no longer exists, so the cap does not either. */
+    const CAPTCHA_SELECTORS = {
+      challenge: [
+        'iframe[src*="captcha" i]',
+        'iframe[src*="challenges.cloudflare.com" i]',
+        '[class*="captcha" i]',
+        '[id*="captcha" i]',
+        '[data-sitekey]'
+      ].join(', '),
+      response: [
         'textarea[name*="captcha-response" i]',
         'input[name*="captcha-response" i]',
         'textarea[id*="captcha-response" i]',
         'input[id*="captcha-response" i]',
         'textarea[name="cf-turnstile-response"]',
         'input[name="cf-turnstile-response"]'
-      ].join(', ');
-      const CHALLENGE_SELECTOR = [
-        'iframe[src*="captcha" i]',
-        'iframe[src*="challenges.cloudflare.com" i]',
-        '[class*="captcha" i]',
-        '[id*="captcha" i]',
-        '[data-sitekey]'
-      ].join(', ');
-      const BADGE_SELECTOR = '.grecaptcha-badge';
-      const BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe" i]';
-      const INVISIBLE_MARKER_SELECTOR = '[data-size="invisible"], iframe[src*="size=invisible" i]';
-      // A page whose CSS framework happens to use "captcha" in a utility class can match dozens of
-      // times. Past ~20 candidates the page is telling us about its class names, not about a widget.
-      const MAX_CANDIDATE_NODES = 20;
+      ].join(', '),
+      bframe: 'iframe[src*="/recaptcha/"][src*="bframe" i]',
+      badge: '.grecaptcha-badge',
+      invisible: '[data-size="invisible"], iframe[src*="size=invisible" i]',
+      /* WHAT COUNTS AS A TOKEN AT ALL. Every provider mints an encoded blob hundreds of characters
+       * long, so this floor sits far below any real one and above every placeholder: an empty field,
+       * a whitespace field, and the short literals a restored form or a test harness leaves behind
+       * ('null', 'undefined', 'expired'). It buys exactly one thing, that a short leftover value
+       * stops reading as a solved widget, and it is honest about what it cannot buy: a
+       * correctly-shaped token that a provider has expired SERVER SIDE is indistinguishable from a
+       * fresh one in the DOM, by this layer or by the backend. Check 4 is the only real answer to
+       * that, and it only speaks when the provider puts a popup on screen. */
+      minTokenLength: 40
+    };
+
+    /* Pure, and separated from the locator on purpose: this is the half that decides, so it is the
+     * half a test has to be able to drive with real nodes. It takes the selector table as an
+     * argument rather than closing over it because evaluateAll serializes the function into the
+     * page, where nothing from this scope exists. */
+    const captchaSnapshot = (nodes, sel) => {
       const isVisible = (element) => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
@@ -1337,25 +1369,32 @@ const { chromium } = require('playwright');
         if (Number(style.opacity) === 0) return false;
         return true;
       };
-      const bframeOpen = document.querySelectorAll(BFRAME_SELECTOR).length > 0;
+      const bframeOpen = nodes.some((node) => node.matches(sel.bframe) && isVisible(node));
       let visibleChallenges = 0;
-      const candidates = [...document.querySelectorAll(CHALLENGE_SELECTOR)].slice(0, MAX_CANDIDATE_NODES);
-      for (const node of candidates) {
+      for (const node of nodes) {
+        if (!node.matches(sel.challenge)) continue;
         if (!isVisible(node)) continue;
-        if (node.closest(BADGE_SELECTOR)) continue;
-        if (!bframeOpen && (node.matches(INVISIBLE_MARKER_SELECTOR) || node.closest(INVISIBLE_MARKER_SELECTOR))) continue;
+        if (node.closest(sel.badge)) continue;
+        if (!bframeOpen && (node.matches(sel.invisible) || node.closest(sel.invisible))) continue;
         visibleChallenges += 1;
       }
       if (visibleChallenges === 0) return false;
-      const tokens = [...document.querySelectorAll(RESPONSE_SELECTOR)]
-        .map((field) => String(field.value == null ? '' : field.value));
+      if (bframeOpen) return true;
+      const tokens = nodes
+        .filter((node) => node.matches(sel.response))
+        .map((node) => String(node.value == null ? '' : node.value).trim());
       if (tokens.length === 0) return true;
-      return tokens.some((token) => token.trim().length === 0);
-    // Fails OPEN, and it is the only probe in this file that does. Everywhere else "we could not
-    // see" means "assume the worse state"; here the worse state IS the false alarm, because it is
-    // the one that strands a finished application. An evaluate that throws saw no widget, no token
-    // and no badge, so it has no evidence of a challenge and must not manufacture one.
-    }).catch(() => false);
+      return tokens.some((token) => token.length < sel.minTokenLength);
+    };
+
+    const readUnresolvedCaptcha = () => page
+      .locator([CAPTCHA_SELECTORS.challenge, CAPTCHA_SELECTORS.response, CAPTCHA_SELECTORS.bframe].join(', '))
+      .evaluateAll(captchaSnapshot, CAPTCHA_SELECTORS)
+      // Fails OPEN, and it is the only probe in this file that does. Everywhere else "we could not
+      // see" means "assume the worse state"; here the worse state IS the false alarm, because it is
+      // the one that strands a finished application. A read that throws saw no widget, no token and
+      // no badge, so it has no evidence of a challenge and must not manufacture one.
+      .catch(() => false);
 
     /* NETWORK IDLE IS NOT A CLIENT STATE TRANSITION. A React application can accept the physical
      * submit click, schedule its verification step for a later browser task, and make no request or
