@@ -1207,21 +1207,36 @@ const { chromium } = require('playwright');
        * window.location.assign(confirmationPath), where confirmationPath is the board's own
        * '/embed/job_app/confirmation?for=<company>&token=<id>'. So the evidence that a Greenhouse
        * application was filed is that the browser is standing on Greenhouse's confirmation route
-       * with the form gone. That is the ATS's own state, in the same class as Ashby's published
-       * success container, and it is a far better witness than the sentence on the page: fetched
+       * with the form gone. It is a far better witness than the sentence on the page: fetched
        * read-only, the Cresta confirmation route says "Thank you for applying. Your application has
        * been received.", which the body-text arm below would also match - but it would match it on
        * any page that happened to carry those words.
        *
+       * ITS OWN SOURCE TAG, and NOT the 'ats_state' the container arm below uses, which is the whole
+       * point rather than bookkeeping. This arm is derived from location: hostname and pathname, set
+       * by where the browser actually IS, and an employer page cannot write itself onto Greenhouse's
+       * hostname. The container arm is derived from a CSS class the page prints, and that class is
+       * published for customer styling, so any page at all can mint one. The two are not the same
+       * kind of evidence and must not answer to the same name: securityCodeVerdict lets the strong
+       * one overturn a challenge control that is still standing, and letting a forgeable class do
+       * that would hand any page the power to have a refused code reported as accepted.
+       *
+       * EU DATA REGION. Greenhouse serves boards for EU-resident customers from job-boards.eu and
+       * boards.eu on the same domain, and without the optional label those hosts fell through this
+       * arm to the body-text one. On a security-code screen that is the difference between a filed
+       * EU application being reported accepted and being reported refused, because body text is no
+       * longer allowed to decide that. Not a regression, it was never matched, but this change is
+       * what made it load-bearing.
+       *
        * Gated on the form being gone for the same reason every other arm is. A route match with an
        * application form still on screen is not a confirmation, it is a page mid-navigation. */
-      const greenhouseConfirmation = /(^|\.)(?:job-boards|boards)\.greenhouse\.io$/i.test(location.hostname)
+      const greenhouseConfirmation = /(^|\.)(?:job-boards|boards)\.(?:eu\.)?greenhouse\.io$/i.test(location.hostname)
         && /\/(?:application_)?confirmation\/?$/i.test(location.pathname);
       if (greenhouseConfirmation && !formStillPresent) {
         const body = clean(document.body ? document.body.innerText : '');
         return {
           state: 'confirmed',
-          source: 'ats_state',
+          source: 'ats_route',
           evidence: 'greenhouse:' + location.pathname,
           message: body.slice(0, 600) || 'Greenhouse confirmation page',
           formStillPresent
@@ -1438,31 +1453,39 @@ const { chromium } = require('playwright');
     /* DID THE EMPLOYER TAKE THE CODE. One function, because there are two places that answer this and
      * a copy is how one of them stays wrong.
      *
-     * ONLY AN ats_state RECEIPT MAY OUTRANK A STANDING CONTROL, and the reason is that every weaker
-     * arm of readSubmitOutcome is gated on formStillPresent, which is STRUCTURALLY DEAD on a
-     * security-code screen. That gate looks for input[type=file], input[type=email], textarea,
+     * ONLY AN UNFORGEABLE RECEIPT MAY OUTRANK A STANDING CONTROL. Two separate reasons stack here,
+     * and the predicate has to satisfy both.
+     *
+     * FIRST, EVERY WEAK ARM IS UNGATED ON THIS PATH. readSubmitOutcome gates its lesser arms on
+     * formStillPresent, which looks for input[type=file], input[type=email], textarea,
      * form button[type=submit] or form input[type=submit]. Greenhouse renders the code as eight
      * maxLength=1 input[type=text] boxes, which match none of them, and by the time the code screen
      * exists the application form itself is already gone. So formStillPresent is false on this whole
-     * path whatever is really happening, the body-text arm is left ungated, and any
-     * confirmation-shaped sentence on the page flips the verdict.
+     * path whatever is really happening, the body-text arm runs unopposed, and any
+     * confirmation-shaped sentence on the page flips the verdict. Measured on the shipped readers: a
+     * refused code on a screen carrying "Thank you for applying" read as ACCEPTED through source
+     * 'page_text', both with a bare <button> inside a form and in the React shape with no <form>
+     * element at all. The only shape that survived did so because the control happened to spell
+     * type="submit" literally, which is not a property any employer owes us.
      *
-     * Measured against the shipped readers on four DOMs. A refused code on a screen carrying "Thank
-     * you for applying" read as ACCEPTED through source 'page_text', both with a bare <button> inside
-     * a form and in the React shape with no <form> element at all. The only case that survived did so
-     * because the control happened to spell type="submit" literally, which is not a property any
-     * employer owes us: a bare <button> in a form is a submit button per HTML, and the selector wants
-     * the attribute. Telling an applicant her rejected code was accepted is the one error class this
-     * system must not make, and it is strictly worse than the false rejection this whole change set
-     * exists to remove.
+     * SECOND, AND THIS IS WHY THE TEST IS 'ats_route' AND NOT 'ats_state'. Narrowing to the ATS's own
+     * state was not narrow enough, because two different things carried that one name. The container
+     * arm keys on '.ashby-application-form-success-container', a CSS class the page prints and that
+     * Ashby publishes for customer styling: any page can write it, including a Greenhouse code screen
+     * that has just refused a code. Measured, a page with no Ashby involvement at all minted a
+     * confirmed/ats_state receipt purely from the class string. The route arm keys on location, which
+     * is set by where the browser actually IS and which no employer markup can forge. Only that one
+     * is allowed to overturn a challenge the page is still showing.
      *
-     * The Cresta fix survives the tightening intact, because in production that confirmation arrives
-     * through the Greenhouse confirmation ROUTE arm, which is source 'ats_state'. The narrowing costs
-     * nothing real and closes the inversion. Everything else is unchanged: an explicit refusal is a
-     * refusal, a standing control is a refusal, and a cleared control with no contrary evidence is
-     * acceptance. */
+     * This is the single predicate on this path where being wrong means telling an applicant a
+     * refused application is filed, so it takes evidence nobody can print. The Cresta fix survives
+     * intact: in production that confirmation is exactly the route arm. Everything else is unchanged,
+     * and deliberately still generous in the safe direction: an explicit refusal is a refusal
+     * whatever its source, a standing control is a refusal, and a cleared control with nothing
+     * contrary is acceptance. A forged CONTAINER can now only ever produce a false refusal, which
+     * costs a re-check rather than a lost application. */
     const securityCodeVerdict = (receipt, challengeStanding) => (
-      receipt.state === 'confirmed' && receipt.source === 'ats_state'
+      receipt.state === 'confirmed' && receipt.source === 'ats_route'
         ? 'accepted'
         : ((receipt.state === 'rejected' || challengeStanding) ? 'rejected' : 'accepted')
     );

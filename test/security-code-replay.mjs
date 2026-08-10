@@ -479,12 +479,14 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
  * it - and humanVerification is asserted non-null to prove it really was there.
  *
  * AND THE RECEIPT IS THE ROUTE. The run is served from Greenhouse's own hostname so that the
- * confirmation reaches readSubmitOutcome through its ats_state arm, which is the only source allowed
- * to outrank a standing control. Reviewed and measured: with a prose receipt instead, a REFUSED code
- * under a page that merely says "Thank you for applying" also read as accepted, because every weaker
- * arm is gated on formStillPresent and a code screen has nothing formStillPresent can see. The
- * source is asserted below, not just the state, so this case cannot start passing again through the
- * arm it exists to keep out. */
+ * confirmation reaches readSubmitOutcome through its ats_route arm, which is the only source allowed
+ * to outrank a standing control. Reviewed and measured twice over. With a prose receipt instead, a
+ * REFUSED code under a page that merely says "Thank you for applying" also read as accepted, because
+ * every weaker arm is gated on formStillPresent and a code screen has nothing formStillPresent can
+ * see. And with 'ats_state' as the requirement, a page could mint one by printing Ashby's published
+ * container class, which is markup and therefore forgeable; 'ats_route' is derived from location and
+ * is not. The source and the evidence are both asserted below, not just the state, so this case
+ * cannot start passing again through an arm it exists to keep out. */
 {
   const result = await replay([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
@@ -492,8 +494,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   ], { allowSubmit: true, origin: greenhouseBase, pathSuffix: '?challenge=1&linger=1&keep=1' });
   assert.equal(valueOf(result, '#filed'), 'yes', 'the employer has the application');
   assert.equal(result.submitOutcome?.state, 'confirmed', 'and the page says so');
-  assert.equal(result.submitOutcome?.source, 'ats_state',
-    'through the ATS state hook, which is the only source strong enough to outrank a standing control');
+  assert.equal(result.submitOutcome?.source, 'ats_route',
+    'through the location-derived arm, which is the only source strong enough to outrank a standing control');
   assert.match(String(result.submitOutcome?.evidence), /^greenhouse:.*\/confirmation$/,
     'and specifically through the confirmation route, which is what production actually does');
   assert.equal(result.humanVerification?.kind, 'security_code',
@@ -511,7 +513,10 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
  * decides it either way. Which side of the window the read lands on depends on how fast the machine
  * is - the same suite measured 12s and 140s on one laptop - so nothing here asserts the end-of-run
  * challenge state. An assertion that a timer had fired would be testing the host, and case 4c
- * already pins the hard side of the window deterministically. */
+ * already pins the hard side of the window deterministically.
+ *
+ * The evidence is asserted here as well as the source, because 'ats_route' has exactly one producer
+ * today and a second one arriving later must not be able to satisfy this case silently. */
 {
   const result = await replay([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
@@ -519,7 +524,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   ], { allowSubmit: true, origin: greenhouseBase, pathSuffix: '?challenge=1&linger=1' });
   assert.equal(valueOf(result, '#filed'), 'yes');
   assert.equal(result.submitOutcome?.state, 'confirmed');
-  assert.equal(result.submitOutcome?.source, 'ats_state');
+  assert.equal(result.submitOutcome?.source, 'ats_route');
+  assert.match(String(result.submitOutcome?.evidence), /^greenhouse:.*\/confirmation$/);
   assert.equal(result.securityCodeAttempt?.outcome, 'accepted');
 }
 

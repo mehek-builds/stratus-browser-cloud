@@ -15,13 +15,25 @@
  * readers, a refused code under "Thank you for applying" read as ACCEPTED, and the only near-miss
  * that survived did so because the fixture happened to spell type="submit" literally.
  *
- * So the verdict now requires source 'ats_state' to outrank a standing control, and these cases are
- * what hold that line. Every one of them drives the readers that actually ship, extracted from the
- * runner string, over a browser, and feeds their real output into the expression that actually
- * ships. Nothing here restates the rule in its own words, because a restatement is what lets the two
- * drift apart.
+ * AND 'ats_state' WAS NOT NARROW ENOUGH EITHER. The first repair let any receipt the ATS's own state
+ * produced overturn the control, but two different things carried that one name: a route the browser
+ * is standing on, and a CSS class the page prints. Ashby publishes
+ * '.ashby-application-form-success-container' for customer styling, so any page can write it,
+ * including a Greenhouse code screen that has just refused a code. An earlier version of THIS FILE
+ * demonstrated the forgery without noticing, minting a confirmed receipt on a page with no Ashby
+ * involvement at all. So the verdict now requires 'ats_route', which is derived from location and
+ * which no employer markup can forge, and the forged container is pinned below as a refusal.
+ *
+ * Every case drives the readers that actually ship, extracted from the runner string, over a real
+ * browser, and feeds their real output into the expression that actually ships. Nothing here restates
+ * the rule in its own words, because a restatement is what lets the two drift apart.
+ *
+ * The page is served over Greenhouse's own hostname, mapped to a loopback fixture server, because
+ * the route arm reads location.hostname and location.pathname together and nothing on 127.0.0.1 can
+ * reach it. Every case sets the path it wants, so the arm fires only where a case asks for it.
  */
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
 import { SANDBOX_RUNNER } from '../src/managed-browser.js';
@@ -78,17 +90,47 @@ const CHALLENGE = `
 
 const RECEIPT_SENTENCE = '<p>Thank you for applying. Your application has been received.</p>';
 
+/* Greenhouse's two board hostnames, US and EU data region, both pointed at the loopback fixture.
+ * The EU one is here because it is the host the route regex used to miss entirely. */
+const US_HOST = 'job-boards.greenhouse.io';
+const EU_HOST = 'job-boards.eu.greenhouse.io';
+const APPLICATION_PATH = '/embed/job_app';
+const CONFIRMATION_PATH = '/embed/job_app/confirmation?for=cresta&token=fixture';
+
 let browser;
 let page;
+let server;
+let port;
 
 test.before(async () => {
-  browser = await chromium.launch();
+  server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+    response.end('<!doctype html><html><body></body></html>');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  port = server.address().port;
+  browser = await chromium.launch({
+    args: [`--host-resolver-rules=MAP ${US_HOST} 127.0.0.1, MAP ${EU_HOST} 127.0.0.1`],
+  });
   page = await browser.newPage();
 });
-test.after(async () => { await browser?.close(); });
+test.after(async () => {
+  await browser?.close();
+  server?.close();
+});
 
-async function verdictFor(html) {
-  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+/* Every case names the host and path it wants, so the route arm is never reached by accident and a
+ * case that means to reach it says so. The body is written in and the path rewritten with
+ * replaceState rather than navigated to, because a navigation would discard the DOM the case just
+ * built, which on this path includes the code control the whole question is about. */
+async function verdictFor(html, { host = US_HOST, path = APPLICATION_PATH } = {}) {
+  if (!page.url().startsWith(`http://${host}:${port}/`)) {
+    await page.goto(`http://${host}:${port}${APPLICATION_PATH}`);
+  }
+  await page.evaluate(([markup, nextPath]) => {
+    history.replaceState({}, '', nextPath);
+    document.body.innerHTML = markup;
+  }, [html, path]);
   const receipt = await page.evaluate(`(${READ_SUBMIT_OUTCOME})()`);
   const standing = await page.evaluate(`(${READ_SECURITY_CODE})()`);
   return { verdict: securityCodeVerdict(receipt, standing), receipt, standing };
@@ -133,20 +175,57 @@ test('the verdict does not hang on the page spelling type="submit"', async () =>
   assert.equal(withoutAttribute.verdict, withAttribute.verdict);
 });
 
-test('an ats_state receipt DOES outrank a control that has not unmounted', async () => {
-  /* The Cresta case, and the reason the tightening is a narrowing rather than a revert. A published
-   * ATS state hook is the employer's own machine-readable claim that the application is in, which is
-   * a different kind of evidence from a sentence that happens to be on the page. In production this
-   * arrives as the Greenhouse confirmation ROUTE; test/security-code-replay.mjs drives that shape
-   * end to end, and this drives the container shape. */
+test('a FORGED success container does not outrank a standing control', async () => {
+  /* The forgery, and the one place this change set was briefly worse than the code it replaces.
+   * '.ashby-application-form-success-container' is a CSS class Ashby publishes for customer styling,
+   * so it is markup, and markup is something any page can print. This fixture is a Greenhouse code
+   * screen that has just refused a code, with the class written onto it and no Ashby anywhere.
+   *
+   * The receipt really is confirmed/ats_state, which is asserted so the case cannot pass by the trap
+   * failing to arm. The verdict is still a refusal, because a class name is not evidence of where
+   * the browser is. Before this narrowing the same DOM produced 'accepted'. */
   const { verdict, receipt, standing } = await verdictFor(
     `<div class="ashby-application-form-success-container" style="height:60px;width:320px">
        Your application was successfully submitted.</div>${CHALLENGE}`,
   );
   assert.equal(receipt.state, 'confirmed');
-  assert.equal(receipt.source, 'ats_state');
+  assert.equal(receipt.source, 'ats_state', 'the container arm fired, so the forgery is genuinely armed');
+  assert.equal(standing?.kind, 'security_code');
+  assert.equal(verdict, 'rejected');
+});
+
+test('an ats_route receipt DOES outrank a control that has not unmounted', async () => {
+  /* The Cresta case, and the reason the tightening is a narrowing rather than a revert. Where the
+   * browser is standing is set by the navigation, not by anything the employer writes, so this is
+   * the one confirmation that may overturn a challenge the page is still showing. */
+  const { verdict, receipt, standing } = await verdictFor(CHALLENGE, { path: CONFIRMATION_PATH });
+  assert.equal(receipt.state, 'confirmed');
+  assert.equal(receipt.source, 'ats_route');
+  assert.match(receipt.evidence, /^greenhouse:.*\/confirmation$/);
   assert.equal(standing?.kind, 'security_code', 'the control is still up, which is what makes this the case it is');
   assert.equal(verdict, 'accepted');
+});
+
+test('the EU data region board confirms the same way', async () => {
+  /* Greenhouse serves EU-resident customers from job-boards.eu.greenhouse.io, which the route regex
+   * did not match. That was true at base too and is not a regression, but this change set is what
+   * made the route arm load-bearing: without the optional label an EU application filed behind a
+   * security code fell through to body text, which is no longer allowed to decide this, and would
+   * have been reported refused. */
+  const { verdict, receipt } = await verdictFor(CHALLENGE, { host: EU_HOST, path: CONFIRMATION_PATH });
+  assert.equal(receipt.source, 'ats_route');
+  assert.equal(verdict, 'accepted');
+});
+
+test('the confirmation ROUTE alone is not a confirmation while the form is up', async () => {
+  // The gate that keeps the strong arm honest: standing on the route with an application form still
+  // on screen is a page mid-navigation, not a filed application.
+  const { receipt } = await verdictFor(
+    '<form><input type="file"><button type="submit">Submit</button></form>',
+    { path: CONFIRMATION_PATH },
+  );
+  assert.equal(receipt.formStillPresent, true);
+  assert.notEqual(receipt.source, 'ats_route');
 });
 
 test('an explicit ats_state refusal is a refusal even with the control gone', async () => {
