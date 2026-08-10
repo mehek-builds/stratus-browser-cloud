@@ -1267,6 +1267,96 @@ const { chromium } = require('playwright');
       return { state: 'unknown', source: null, evidence: null, message: null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
+    /* IS A HUMAN ACTUALLY BEING ASKED FOR ANYTHING, read off the widget rather than off a class name.
+     *
+     * THE DEFECT THIS REPLACES, measured on the applicant's own packets: the old test was a single
+     * count of 'iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]' with no visibility
+     * test, no badge exclusion and no token read. reCAPTCHA v3 and invisible v2 render
+     * <div class="grecaptcha-badge"> on pages that ask a person for NOTHING - the score comes from
+     * behaviour and the token is minted on submit - and that div matches [class*="captcha" i]. So
+     * every Greenhouse and Ashby page carrying the badge reported a challenge. 48 of 158 application
+     * packets were labelled "CAPTCHA requires your attention" on that basis, which made this the
+     * single largest blocker in the pipeline and almost all of it was noise.
+     *
+     * THE ASYMMETRY THIS IS TUNED TO. A false "no captcha" lets a submit run into a wall, and the
+     * post-submit readers see no receipt: one wasted click, recoverable. A false "captcha" strands a
+     * finished application and hands it back to a person to redo by hand. So a challenge is reported
+     * only on POSITIVE evidence of a real, visible, unsolved one, and a probe that cannot see at all
+     * reports nothing rather than inventing a wall.
+     *
+     * FOUR CHECKS, ported from hasUnresolvedCaptcha in the backend's portalSubmission.ts so the two
+     * layers stop disagreeing by construction. Translated, not copied: that one is DOM-string and
+     * per-node locator probes, this one is a single page.evaluate, which reads the response token off
+     * the DOM PROPERTY. That matters - g-recaptcha-response is a <textarea> with no value ATTRIBUTE
+     * at all, so an attribute read reports every solved widget as unsolved.
+     *
+     *   1. VISIBLE. A node with a zero dimension, display:none, visibility:hidden or opacity 0 is not
+     *      being shown to anyone. Same rule as readSubmitOutcome above, for the same reason.
+     *   2. NOT THE BADGE. Matched with closest(), never a self-or-descendant check: the badge is a
+     *      CONTAINER whose child anchor iframe matches iframe[src*="captcha" i] on its own, and its
+     *      own class list is not a descendant of itself. closest() covers both in one probe. If v3
+     *      scores the session badly it escalates to a real widget, and that widget renders OUTSIDE
+     *      the badge, so closest() returns null and it is counted normally.
+     *   3. NOT AN INVISIBLE WIDGET, unless a bframe is open. A form that mounts its own
+     *      <div class="g-recaptcha" data-size="invisible"> outside the badge is the shape the badge
+     *      exclusion does not watch. The bframe is the load-bearing half: reCAPTCHA renders the
+     *      image-grid popup in a SECOND iframe whose src carries 'bframe', and an ESCALATED invisible
+     *      widget still declares itself invisible - so without that test this would wave through the
+     *      one case where a person really is looking at a challenge.
+     *   4. UNSOLVED. Something rendered plus at least one empty response field. Widget count is
+     *      deliberately not compared to token count: providers render a variable number of visible
+     *      nodes per widget, so "3 nodes, 1 token" is one solved widget and not two missing ones. */
+    const readUnresolvedCaptcha = () => page.evaluate(() => {
+      const RESPONSE_SELECTOR = [
+        'textarea[name*="captcha-response" i]',
+        'input[name*="captcha-response" i]',
+        'textarea[id*="captcha-response" i]',
+        'input[id*="captcha-response" i]',
+        'textarea[name="cf-turnstile-response"]',
+        'input[name="cf-turnstile-response"]'
+      ].join(', ');
+      const CHALLENGE_SELECTOR = [
+        'iframe[src*="captcha" i]',
+        'iframe[src*="challenges.cloudflare.com" i]',
+        '[class*="captcha" i]',
+        '[id*="captcha" i]',
+        '[data-sitekey]'
+      ].join(', ');
+      const BADGE_SELECTOR = '.grecaptcha-badge';
+      const BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe" i]';
+      const INVISIBLE_MARKER_SELECTOR = '[data-size="invisible"], iframe[src*="size=invisible" i]';
+      // A page whose CSS framework happens to use "captcha" in a utility class can match dozens of
+      // times. Past ~20 candidates the page is telling us about its class names, not about a widget.
+      const MAX_CANDIDATE_NODES = 20;
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        const style = getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (Number(style.opacity) === 0) return false;
+        return true;
+      };
+      const bframeOpen = document.querySelectorAll(BFRAME_SELECTOR).length > 0;
+      let visibleChallenges = 0;
+      const candidates = [...document.querySelectorAll(CHALLENGE_SELECTOR)].slice(0, MAX_CANDIDATE_NODES);
+      for (const node of candidates) {
+        if (!isVisible(node)) continue;
+        if (node.closest(BADGE_SELECTOR)) continue;
+        if (!bframeOpen && (node.matches(INVISIBLE_MARKER_SELECTOR) || node.closest(INVISIBLE_MARKER_SELECTOR))) continue;
+        visibleChallenges += 1;
+      }
+      if (visibleChallenges === 0) return false;
+      const tokens = [...document.querySelectorAll(RESPONSE_SELECTOR)]
+        .map((field) => String(field.value == null ? '' : field.value));
+      if (tokens.length === 0) return true;
+      return tokens.some((token) => token.trim().length === 0);
+    // Fails OPEN, and it is the only probe in this file that does. Everywhere else "we could not
+    // see" means "assume the worse state"; here the worse state IS the false alarm, because it is
+    // the one that strands a finished application. An evaluate that throws saw no widget, no token
+    // and no badge, so it has no evidence of a challenge and must not manufacture one.
+    }).catch(() => false);
+
     /* NETWORK IDLE IS NOT A CLIENT STATE TRANSITION. A React application can accept the physical
      * submit click, schedule its verification step for a later browser task, and make no request or
      * navigation that Playwright can wait on. The controlled portal reproduced this exactly: the
@@ -2987,7 +3077,10 @@ const { chromium } = require('playwright');
     // The gate's findings lead, because "we did not send this" is the first thing the caller needs
     // to know and the reason has to travel with it.
     const blockers = [...submitGateBlockers];
-    if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
+    // The literal is a contract with the backend, which matches on it to decide whether an attention
+    // state is a human-verification stall. See readUnresolvedCaptcha for what now has to be true
+    // before it is said.
+    if (await readUnresolvedCaptcha()) {
       blockers.push('CAPTCHA requires your attention');
     }
     /* THE SAME READING OF THE FORM THE PRE-SUBMIT GATE MAKES, made on every run.
