@@ -89,8 +89,18 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
   var attempts = 0;
   var CODE_LENGTH = 8;
   var securityCode = '';
+  // Read once, at load. The linger path rewrites the URL to Greenhouse's confirmation route, which
+  // replaces the query string, so a flag re-read after that point would silently change meaning.
+  var LINGER = location.search.indexOf('linger=1') !== -1;
+  var KEEP = location.search.indexOf('keep=1') !== -1;
+  var PROSE = location.search.indexOf('prose=1') !== -1;
   function boxRefs() { return [].slice.call(document.querySelectorAll('#email-verification input')); }
-  function setFormDisabled(state) { document.getElementById('submit-btn').disabled = state; }
+  // Null-guarded because the prose case below removes the control mid-run, and the re-enable is
+  // scheduled on a timer that can outlive it.
+  function setFormDisabled(state) {
+    var button = document.getElementById('submit-btn');
+    if (button) button.disabled = state;
+  }
   // d(m), one render later. React does not apply setFormDisabled during the change handler: it
   // schedules a re-render, and the button's disabled attribute changes when that render commits. A
   // fixture that flips the attribute synchronously would let a run that reaches for the submit
@@ -165,15 +175,30 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
          * application as a refusal. Measured on the Cresta packet: rejected at 17:35:04Z, and
          * recruiting@cresta.ai wrote "Thank you for applying to Cresta" to that alias at 17:36:04Z.
          *
-         * The submit control goes with the receipt, because that is what makes the receipt readable:
-         * every arm of readSubmitOutcome is gated on the form being gone. The code fieldset stays. */
-        if (location.search.includes('linger=1')) {
+         * THE RECEIPT IS THE ROUTE, not the sentence, because that is the only kind of receipt
+         * allowed to outrank a standing control. Greenhouse confirms by navigating to its own
+         * '/embed/job_app/confirmation', and the runner reads that off location together with the
+         * form being gone. A fixture that confirmed by prose would be pinning the verdict against
+         * source 'page_text', which is exactly the arm that must NOT be able to decide this: every
+         * weaker arm is gated on formStillPresent, and formStillPresent is structurally dead on a
+         * code screen, whose eight maxLength=1 text boxes match none of its selectors.
+         *
+         * replaceState rather than assign, and that is the one deliberate difference from
+         * Greenhouse. A real navigation would tear down the document and take the code control with
+         * it, which destroys the very combination this case exists to put in front of the runner.
+         * The difference cannot reach the code under test: readSubmitOutcome reads location.hostname
+         * and location.pathname, and both say the same thing either way.
+         *
+         * The submit control goes with the receipt, because the route arm is gated on the form being
+         * gone too. The code fieldset stays. */
+        if (LINGER) {
+          history.replaceState({}, '', '/embed/job_app/confirmation?for=cresta&token=fixture');
           document.getElementById('submit-btn').remove();
           document.body.appendChild(done);
           document.getElementById('filed').textContent = 'yes';
           // 'keep' holds the window open for the whole run. See case 4c for why one case pins it
           // that way and does not rely on a timer.
-          if (!location.search.includes('keep=1')) {
+          if (!KEEP) {
             setTimeout(function () { document.getElementById('email-verification').remove(); }, 250);
           }
           return;
@@ -185,6 +210,22 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
         document.body.appendChild(done);
         document.getElementById('filed').textContent = 'yes';
         return;
+      }
+      /* A REFUSED CODE ON A PAGE THAT STILL SAYS SOMETHING ENCOURAGING. Employer pages carry prose
+       * like this whether or not anything was filed, and Greenhouse leaves the code control standing
+       * when it refuses. The submit control goes so that formStillPresent reads false, which is not
+       * a contrivance: on a real code screen there is nothing formStillPresent can see anyway, since
+       * the boxes are input[type=text] and the application form is already gone. Nothing here was
+       * filed, and #filed stays 'no' to say so. */
+      if (PROSE) {
+        var button = document.getElementById('submit-btn');
+        if (button) button.remove();
+        if (!document.getElementById('prose-receipt')) {
+          var prose = document.createElement('p');
+          prose.id = 'prose-receipt';
+          prose.textContent = 'Thank you for applying. Your application has been received.';
+          document.body.appendChild(prose);
+        }
       }
       return;
     }
@@ -204,16 +245,24 @@ const server = http.createServer((request, response) => {
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}/`;
+/* The same server under the name Greenhouse serves its boards from, resolved to the loopback by the
+ * host-resolver rule in test/managed-runner-shim.cjs. Only the cases that need the confirmation
+ * ROUTE arm of readSubmitOutcome use it, because that arm keys on hostname and pathname together and
+ * nothing served from 127.0.0.1 can ever reach it. Every other case stays on the loopback name, so
+ * the mapping cannot quietly change what they are testing. */
+const greenhouseBase = `http://job-boards.greenhouse.io:${server.address().port}/`;
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-seccode-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 
 async function replay(actions, options = {}) {
   const pathSuffix = options.pathSuffix || '';
+  const origin = options.origin || base;
   const runOptions = { ...options };
   delete runOptions.pathSuffix;
+  delete runOptions.origin;
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
-    url: base + pathSuffix,
+    url: origin + pathSuffix,
     actions,
     screenshot: false,
     waitUntil: 'networkidle',
@@ -427,14 +476,26 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
  * in the direction that hides the bug: if the removal fires before the verdict read, the old code
  * passes too and the case proves nothing. Holding it attached for the whole run makes the assertion
  * impossible to satisfy by accident - the run must decide 'accepted' with the challenge in front of
- * it - and humanVerification is asserted non-null to prove it really was there. */
+ * it - and humanVerification is asserted non-null to prove it really was there.
+ *
+ * AND THE RECEIPT IS THE ROUTE. The run is served from Greenhouse's own hostname so that the
+ * confirmation reaches readSubmitOutcome through its ats_state arm, which is the only source allowed
+ * to outrank a standing control. Reviewed and measured: with a prose receipt instead, a REFUSED code
+ * under a page that merely says "Thank you for applying" also read as accepted, because every weaker
+ * arm is gated on formStillPresent and a code screen has nothing formStillPresent can see. The
+ * source is asserted below, not just the state, so this case cannot start passing again through the
+ * arm it exists to keep out. */
 {
   const result = await replay([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#filed' }
-  ], { allowSubmit: true, pathSuffix: '?challenge=1&linger=1&keep=1' });
+  ], { allowSubmit: true, origin: greenhouseBase, pathSuffix: '?challenge=1&linger=1&keep=1' });
   assert.equal(valueOf(result, '#filed'), 'yes', 'the employer has the application');
   assert.equal(result.submitOutcome?.state, 'confirmed', 'and the page says so');
+  assert.equal(result.submitOutcome?.source, 'ats_state',
+    'through the ATS state hook, which is the only source strong enough to outrank a standing control');
+  assert.match(String(result.submitOutcome?.evidence), /^greenhouse:.*\/confirmation$/,
+    'and specifically through the confirmation route, which is what production actually does');
   assert.equal(result.humanVerification?.kind, 'security_code',
     'the code control is still on the page, which is what makes the next assertion mean something');
   assert.equal(result.securityCodeAttempt?.outcome, 'accepted',
@@ -455,10 +516,36 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   const result = await replay([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
     { type: 'extract', selector: '#filed' }
-  ], { allowSubmit: true, pathSuffix: '?challenge=1&linger=1' });
+  ], { allowSubmit: true, origin: greenhouseBase, pathSuffix: '?challenge=1&linger=1' });
   assert.equal(valueOf(result, '#filed'), 'yes');
   assert.equal(result.submitOutcome?.state, 'confirmed');
+  assert.equal(result.submitOutcome?.source, 'ats_state');
   assert.equal(result.securityCodeAttempt?.outcome, 'accepted');
+}
+
+/* 4e. THE INVERSION, WIRED END TO END, and the case this whole change set was blocked on.
+ *
+ * A wrong code, refused, on a page that carries a confirmation-shaped sentence. The first repair let
+ * ANY confirmed receipt outrank the standing control, and this is the shape where that is wrong:
+ * readSubmitOutcome gates every weak arm on formStillPresent, and a security-code screen has nothing
+ * formStillPresent can see, so the body-text arm decides unopposed and a refused code reads as
+ * accepted. That is the error class this system must not make, and it is worse than the false
+ * rejection the repair removed: an applicant told her application is in stops following it up.
+ *
+ * The trap is asserted armed rather than assumed: state confirmed, source page_text. If a later
+ * change stops the sentence from producing a receipt at all, this case must fail loudly instead of
+ * passing for the wrong reason. */
+{
+  const result = await replay([
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: 'AAAAAAAA' },
+    { type: 'extract', selector: '#filed' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1&prose=1' });
+  assert.equal(valueOf(result, '#filed'), 'no', 'nothing was filed, whatever the page says');
+  assert.equal(result.submitOutcome?.state, 'confirmed', 'the weak arm really did fire');
+  assert.equal(result.submitOutcome?.source, 'page_text', 'off body text, which must not be able to decide this');
+  assert.equal(result.humanVerification?.kind, 'security_code', 'and the challenge is still standing');
+  assert.equal(result.securityCodeAttempt?.outcome, 'rejected',
+    'a refused code must not be reported as accepted because the page carries an encouraging sentence');
 }
 
 // 4b. THE PRODUCTION SHAPE THAT FAILED, and the reason the code now travels on a continuation.
@@ -517,4 +604,4 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('security-code replay: 10 cases passed');
+console.log('security-code replay: 11 cases passed');

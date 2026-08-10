@@ -1423,6 +1423,38 @@ const { chromium } = require('playwright');
       }
     };
 
+    /* DID THE EMPLOYER TAKE THE CODE. One function, because there are two places that answer this and
+     * a copy is how one of them stays wrong.
+     *
+     * ONLY AN ats_state RECEIPT MAY OUTRANK A STANDING CONTROL, and the reason is that every weaker
+     * arm of readSubmitOutcome is gated on formStillPresent, which is STRUCTURALLY DEAD on a
+     * security-code screen. That gate looks for input[type=file], input[type=email], textarea,
+     * form button[type=submit] or form input[type=submit]. Greenhouse renders the code as eight
+     * maxLength=1 input[type=text] boxes, which match none of them, and by the time the code screen
+     * exists the application form itself is already gone. So formStillPresent is false on this whole
+     * path whatever is really happening, the body-text arm is left ungated, and any
+     * confirmation-shaped sentence on the page flips the verdict.
+     *
+     * Measured against the shipped readers on four DOMs. A refused code on a screen carrying "Thank
+     * you for applying" read as ACCEPTED through source 'page_text', both with a bare <button> inside
+     * a form and in the React shape with no <form> element at all. The only case that survived did so
+     * because the control happened to spell type="submit" literally, which is not a property any
+     * employer owes us: a bare <button> in a form is a submit button per HTML, and the selector wants
+     * the attribute. Telling an applicant her rejected code was accepted is the one error class this
+     * system must not make, and it is strictly worse than the false rejection this whole change set
+     * exists to remove.
+     *
+     * The Cresta fix survives the tightening intact, because in production that confirmation arrives
+     * through the Greenhouse confirmation ROUTE arm, which is source 'ats_state'. The narrowing costs
+     * nothing real and closes the inversion. Everything else is unchanged: an explicit refusal is a
+     * refusal, a standing control is a refusal, and a cleared control with no contrary evidence is
+     * acceptance. */
+    const securityCodeVerdict = (receipt, challengeStanding) => (
+      receipt.state === 'confirmed' && receipt.source === 'ats_state'
+        ? 'accepted'
+        : ((receipt.state === 'rejected' || challengeStanding) ? 'rejected' : 'accepted')
+    );
+
     /* Type a code the applicant supplied into the control found above, and say what happened.
      *
      * WHAT GREENHOUSE'S WIDGET ACTUALLY DOES, read on 2026-08-10 out of the bundle the Cresta board
@@ -2718,16 +2750,15 @@ const { chromium } = require('playwright');
              * still what decides the ambiguous case, because on a genuine refusal Greenhouse renders
              * no receipt at all and the challenge is all there is to read. An explicitly REJECTED
              * receipt is honoured too, which the old shape could not do: it read a cleared control
-             * over a failure panel as acceptance. */
+             * over a failure panel as acceptance. What may outrank the control, and why it has to be
+             * that narrow, is argued at securityCodeVerdict. */
             let codeOutcome = 'not_entered';
             if (verification.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
               await waitForPostSubmitApplicationState({ securityCodeSettles: false });
               const receipt = await readSubmitOutcome();
               const still = await readSecurityCodeChallenge();
-              codeOutcome = receipt.state === 'confirmed'
-                ? 'accepted'
-                : ((receipt.state === 'rejected' || still) ? 'rejected' : 'accepted');
+              codeOutcome = securityCodeVerdict(receipt, still);
             }
             securityCodeAttempt = {
               supplied: true,
@@ -2808,9 +2839,7 @@ const { chromium } = require('playwright');
               supplied: true,
               entered: true,
               resubmitted: true,
-              outcome: receipt.state === 'confirmed'
-                ? 'accepted'
-                : ((receipt.state === 'rejected' || still) ? 'rejected' : 'accepted')
+              outcome: securityCodeVerdict(receipt, still)
             };
           }
         }
