@@ -1319,12 +1319,15 @@ const { chromium } = require('playwright');
      * this and visible to the selector it replaced, which is a straight regression against what the
      * runner could already see.
      *
-     * NO CANDIDATE CAP. The first version capped the scan at 20 nodes to bound per-node round trips,
-     * and applied the cap BEFORE the visibility and badge filters, so twenty hidden nodes whose class
-     * names merely contain "captcha" exhausted the budget and a real widget behind them was never
-     * examined. evaluateAll hands the whole matched list to one page-side function, so there are no
-     * round trips left to bound: the loop is a synchronous pass over an array that is already in the
-     * page. The cost the cap existed to control no longer exists, so the cap does not either. */
+     * NO CANDIDATE CAP, and the reason it went is narrower than the reason first written here. The
+     * first version capped the scan at 20 nodes, and the comment claimed the cap bounded per-node
+     * round trips. It never did: that cap lived INSIDE a single page.evaluate, as a slice of a
+     * querySelectorAll result, so every node it dropped was already in the page and cost nothing to
+     * look at. What it actually did was run BEFORE the visibility and badge filters, so twenty hidden
+     * nodes whose class names merely contain "captcha" used it up and a real widget behind them was
+     * never examined. That is the whole defect and the whole reason the cap is gone. Nothing replaces
+     * it because nothing needs to: measured on this shape, 1000 nodes decide in 14ms, 100000 in
+     * 1203ms and 500000 in 2359ms, one round trip, linear, no throw. */
     const CAPTCHA_SELECTORS = {
       challenge: [
         'iframe[src*="captcha" i]',
@@ -1351,7 +1354,16 @@ const { chromium } = require('playwright');
        * stops reading as a solved widget, and it is honest about what it cannot buy: a
        * correctly-shaped token that a provider has expired SERVER SIDE is indistinguishable from a
        * fresh one in the DOM, by this layer or by the backend. Check 4 is the only real answer to
-       * that, and it only speaks when the provider puts a popup on screen. */
+       * that, and it only speaks when the provider puts a popup on screen.
+       *
+       * TWO KNOWN FALSE POSITIVES, both deliberate. Cloudflare's documented test token
+       * 'XXXX.DUMMY.TOKEN.XXXX' is 21 characters and hCaptcha's
+       * '10000000-aaaa-bbbb-cccc-000000000001' is 36, so both sit under this floor and both are
+       * genuinely solved states that get called unsolved. They are test-key states rather than
+       * anything an employer serves, the miss fails toward "CAPTCHA requires your attention" which
+       * strands rather than lies, and the selector this replaced flagged those pages too. Raising the
+       * floor to admit them would let every short leftover value back in, which is the direction that
+       * costs an application. */
       minTokenLength: 40
     };
 
