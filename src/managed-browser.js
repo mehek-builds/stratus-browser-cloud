@@ -154,6 +154,12 @@ const { chromium } = require('playwright');
     }
     const extracted = [];
     const filledFields = [];
+    /* THE CONTROLS THIS RUN WAS SENT TO WRITE INTO, kept for the whole session rather than per
+     * phase. The submit chooser uses them to tell the application form apart from any other form
+     * on the page: a form holding a control this run typed into, uploaded to or chose an option in
+     * is the form this run was filling. A continuation phase submits the page an earlier phase
+     * filled, so clearing this per phase would throw away the evidence exactly when it is needed. */
+    const addressedSelectors = [];
     const skipped = [];
     const discovered = [];
     // Filled by the pre-submit gate, and merged into 'blockers' after the loop. It has to be
@@ -2336,15 +2342,21 @@ const { chromium } = require('playwright');
        * The scope is what the whole pass binds to: the required-field scan root, the readiness
        * scan root, the fingerprint subject and the sameNode witness. So it is resolved once, here,
        * and stamped onto the DOM so Playwright addresses the exact node rather than re-deriving it.
-       * Four rules, in order, and the last three all exist to keep a container from being trusted
-       * on a page that has not earned it:
+       * Five rules, in order, and the last four all exist to keep a scope from being trusted on a
+       * page that has not earned it:
        *
-       *   1. a form ancestor, and then this behaves exactly as it does today;
+       *   1. a form ancestor, but only a form that is plausibly the application itself. See
+       *      isApplicationSurface: a button that merely sits inside SOME form is not a submit;
        *   2. otherwise a container, but ONLY if no candidate anywhere on the page is viable under
        *      rule 1, so a page the current code can already submit is untouched;
-       *   3. the container is the nearest ancestor holding a field control, and it is accepted only
-       *      when every required field on its own tree, outside any form, is inside it;
-       *   4. never body and never documentElement, because "the whole page" is not a scope. */
+       *   3. a button inside a form never reaches rule 2. If its own form is not the application,
+       *      it has no scope at all, because a stray form's control is not this run's submit;
+       *   4. the container is the nearest ancestor holding a field control, and it is accepted only
+       *      when every required field on its own tree, outside any form, is inside it. Where a
+       *      form was refused under rule 1, the container must additionally be one this run wrote
+       *      inside, or be named by the control itself, so that refusing a form withholds the
+       *      click rather than relocating it onto a decoy that collects a little more;
+       *   5. never body and never documentElement, because "the whole page" is not a scope. */
       const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => {
         const FIELD_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], input[type="file"]';
         const REQUIRED_CONTROLS = 'input:not([type="hidden"])[required], textarea[required], select[required], [aria-required="true"]';
@@ -2422,6 +2434,106 @@ const { chromium } = require('playwright');
           }
           return null;
         };
+        /* WHAT MAKES A NODE THE APPLICATION, rather than merely a box the page happens to carry.
+         *
+         * Asked of a <form> to decide whether a control inside it is this run's submit, and asked
+         * of a container in the one place where refusing a form would otherwise move the click; see
+         * refusedFormExists below.
+         *
+         * Measured in Chromium on an Ashby application page, which renders no <form> of its own,
+         * carrying one unrelated stray form: with "is it inside any form at all" as the only test,
+         * a newsletter form whose button says "Submit" took the click, and a filter form whose
+         * button says "Apply" took the click. The real application submit was never pressed. Worse
+         * than losing the click: a stray form holding a final-intent control also satisfies rule 2
+         * above, so it vetoes the container path and silently disables every formless application
+         * on that page.
+         *
+         * So a form has to show that it is an intake surface. Three kinds of evidence, any one of
+         * which is enough, and no evidence means no scope:
+         *
+         *   - THIS RUN WROTE INTO IT. addressedSelectors carries the selector of every fill,
+         *     upload and select action the caller aimed at this page. A form holding one of those
+         *     controls is the form this run was filling. This is the only evidence that survives a
+         *     one-field application, and it is what a real run almost always has. It is also the
+         *     one that goes missing on a continuation phase, whose selectors were written against
+         *     the previous DOM, which is why the refusal path below has to be safe on its own;
+         *   - IT COLLECTS WHAT AN APPLICATION COLLECTS. Two or more text-entry controls, or a file
+         *     input beside at least one other field. A newsletter asks for an email and nothing
+         *     else; a search box asks for one string; a filter is made of selects. An application
+         *     asks for a name AND contact details, and nearly always a resume. The resume is not
+         *     the sole gate on purpose: kos.ai on Ashby takes name, email and a resume file input
+         *     and nothing more, and forms with no upload at all still have to pass;
+         *   - THE CONTROL NAMES THE APPLICATION. Only the chooser's strongest tier, the one
+         *     already scored 3 by the pinned grammar, which is a control reading "submit
+         *     application" or "send my application" rather than a bare "submit" or "apply". A page
+         *     that puts that sentence on a button has said which form it belongs to.
+         *
+         * Everything here is structure or the run's own record, not a list of forbidden words: a
+         * blocklist of "newsletter", "subscribe", "search" is exactly the finite phrase list this
+         * codebase has had bypassed before, and it would not have caught the filter form measured
+         * above, whose button says "Apply". The one word-free exception is role="search", which is
+         * the page declaring in ARIA what the form is, not us guessing from its label.
+         *
+         * Counting ignores CSS visibility on purpose. Every ATS in production hides its resume
+         * input behind a styled dropzone, so a visibility test would throw away the file signal on
+         * the exact forms it exists for. The control that gets clicked is still filtered on
+         * visibility, one level up, which is where that test belongs. */
+        const TEXT_ENTRY_TYPES = new Set(['', 'text', 'email', 'tel', 'url', 'number', 'date', 'datetime-local', 'month', 'week', 'time']);
+        const isTextEntry = (control) => {
+          /* A CHOICE IS NOT INTAKE. A filter panel is built of selects and comboboxes and a search
+           * box is one string, so none of them count towards the two this test asks for. They are
+           * still fields, so they still satisfy the file-input rule below, which is what keeps an
+           * application whose questions are all dropdowns beside a resume. A React Select renders
+           * its own input[type=text], which is why the role is read before the type. */
+          const role = String(control.getAttribute('role') || '').toLowerCase();
+          if (role === 'combobox' || role === 'listbox' || role === 'searchbox') return false;
+          if (control.getAttribute('aria-haspopup') === 'listbox') return false;
+          const tag = control.tagName.toLowerCase();
+          if (tag === 'textarea') return true;
+          if (tag !== 'input') return false;
+          const type = String(control.getAttribute('type') || 'text').toLowerCase();
+          return type !== 'search' && TEXT_ENTRY_TYPES.has(type);
+        };
+        const addressed = new Set();
+        for (const selector of chooser.addressed || []) {
+          let node = null;
+          // document.querySelector, singular, because the fill it stands for used locator.first().
+          try { node = document.querySelector(selector); } catch { node = null; }
+          if (node) addressed.add(node);
+        }
+        const writtenInto = (node) => [...addressed].some((control) => node.contains(control));
+        const intakeEvidence = new Map();
+        const isApplicationSurface = (node, score) => {
+          if (String(node.getAttribute('role') || '').toLowerCase() === 'search') return false;
+          if (score >= 3) return true;
+          if (!intakeEvidence.has(node)) {
+            const fields = [...node.querySelectorAll(FIELD_CONTROLS)];
+            const textEntry = fields.filter(isTextEntry);
+            const files = fields.filter((control) => control.matches('input[type="file"]'));
+            intakeEvidence.set(node, writtenInto(node) || textEntry.length >= 2 || (files.length >= 1 && fields.length >= 2));
+          }
+          return intakeEvidence.get(node);
+        };
+        /* WHAT A CONTAINER NEEDS WHEN IT IS DISPLACING A FORM THIS RUN REFUSED, which is strictly
+         * more than the intake test above.
+         *
+         * Intake is a threshold, and a threshold is something a decoy can simply be over. A
+         * formless "Talk to a recruiter" widget asking a name and an email, or a "Join our talent
+         * pool" widget asking an email and a CV, satisfies exactly the test a three-select
+         * self-identification form fails, and React pages render widgets like those with no <form>
+         * at all, for the same reason Ashby renders none. Measured in Chromium: with intake as the
+         * gate, both of those widgets took the click on pages main submits correctly.
+         *
+         * Counting fields on both sides and taking the larger is no better, because the decoy wins
+         * that comparison by holding one more input. So the gate is the two things a decoy cannot
+         * manufacture by being slightly richer: THIS RUN WROTE INSIDE IT, or the control names the
+         * application outright. Both are statements about this run and this page rather than about
+         * how much a box collects.
+         *
+         * This is only reachable when a form was refused. Where no form is in play, the PR 42
+         * container rules stand untouched, which is why a formless page with a single field still
+         * submits exactly as it does today. */
+        const canDisplaceRefusedForm = (container, score) => score >= 3 || writtenInto(container);
         const markScope = (node, index) => {
           const current = node.getAttribute('data-litos-submit-scope-v2');
           const tokens = current ? current.split(/\s+/).filter(Boolean) : [];
@@ -2457,15 +2569,46 @@ const { chromium } = require('playwright');
          * real submit that shipped code presses today. So the container path is disabled outright
          * as soon as any candidate is viable under the form rule, which makes this change a strict
          * addition: on every page the current code can already submit, it still selects exactly
-         * what it selects today. */
-        const formCandidateExists = rows.some((row) => row.visible && !row.disabled && row.finalIntent && Boolean(row.form));
+         * what it selects today.
+         *
+         * "Viable under the form rule" now means the form is the application, not that a form
+         * exists. A stray newsletter form used to satisfy this test on its own and switch the
+         * container path off, which is how one unrelated form with an unfortunate button label
+         * disabled every Ashby, Paylocity and BambooHR application on the page it sat on.
+         *
+         * REFUSING A FORM MUST NOT MOVE THE CLICK, which is the other half of that and the more
+         * dangerous half. A refused form also stops counting here, so a page whose real application
+         * form cannot be confirmed would let a formless region compete that nothing had switched
+         * off before. Measured in Chromium on two ordinary pages, both of which main submits
+         * correctly: a voluntary self-identification continuation page whose only controls are
+         * three selects, and a one-question screening form, each under a sticky "Apply Now" bar
+         * carrying an email box. The form is refused, the bar's container is accepted, and the bar
+         * takes the click. The conjunction is not exotic, and it is worst exactly where the
+         * strongest evidence is weakest: a continuation phase, whose recorded selectors were
+         * written against the previous DOM.
+         *
+         * So when a viable final control sits in a form this run refused, the container has to earn
+         * the displacement, and an intake threshold does not do it: see canDisplaceRefusedForm. It
+         * has to be a container this run wrote inside, or a control that names the application.
+         * Where no form is in the running at all, nothing has been refused and PR 42's container
+         * rules stand exactly as they are: nearest field-bearing ancestor, every required field
+         * outside a form inside it, never body. That is the whole delta, and it is why a formless
+         * page carrying a single field still submits exactly as it does today. */
+        const applicationFormOf = (row) => (row.form && isApplicationSurface(row.form, row.score) ? row.form : null);
+        const inPlay = (row) => row.visible && !row.disabled && row.finalIntent;
+        const formCandidateExists = rows.some((row) => inPlay(row) && Boolean(applicationFormOf(row)));
+        const refusedFormExists = rows.some((row) => inPlay(row) && row.form && !applicationFormOf(row));
         const containerCache = new Map();
         return rows.map((row) => {
-          let scopeNode = row.form || null;
-          let scopeKind = row.form ? 'form' : null;
-          if (!scopeNode && !formCandidateExists) {
+          const applicationForm = applicationFormOf(row);
+          let scopeNode = applicationForm;
+          let scopeKind = applicationForm ? 'form' : null;
+          // row.form, not scopeNode: a control whose own form is not the application has no scope
+          // at all. Letting it climb to a container would hand the stray form the click by another
+          // route, and the container it would find is not the form its click would submit.
+          if (!row.form && !formCandidateExists) {
             const container = containerOf(row.element);
-            if (container) {
+            if (container && (!refusedFormExists || canDisplaceRefusedForm(container, row.score))) {
               if (!containerCache.has(container)) containerCache.set(container, !requiredOutside(container));
               if (containerCache.get(container)) {
                 scopeNode = container;
@@ -2479,7 +2622,7 @@ const { chromium } = require('playwright');
             hasScope: Boolean(scopeNode), scopeKind, finalIntent: row.finalIntent, text: row.text, score: row.score
           };
         });
-      }, { ...action.chooserPolicy, submitKind: action.submitKind }).catch(() => null);
+      }, { ...action.chooserPolicy, submitKind: action.submitKind, addressed: [...new Set(addressedSelectors)] }).catch(() => null);
       const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent) : [];
       viable.sort((a, b) => b.score - a.score || a.index - b.index);
       const selected = viable[0];
@@ -2891,6 +3034,13 @@ const { chromium } = require('playwright');
     for (const action of currentInput.actions || []) {
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
+      // Recorded before the action runs, and recorded whether or not it succeeds. What this list
+      // claims is only that the caller aimed this run at that control, which is what makes the
+      // form around it the application. See the form viability rules in confirmAndSubmitPass.
+      if (action.selector && (action.type === 'fill' || action.type === 'fillByLabelText'
+        || action.type === 'upload' || action.type === 'select')) {
+        addressedSelectors.push(action.selector);
+      }
       // waitForSelector is exempt outright: its own timeout is the caller's declared, already-bounded
       // intent (normalizeManagedActions clamps it to 100-20000ms), and a pre-check that can answer
       // 'not there' before that timeout starts is the bug itself. An optional one that times out

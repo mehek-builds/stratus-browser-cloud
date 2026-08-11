@@ -22,6 +22,13 @@
  * application clicked with a required question elsewhere on the page still empty. Both are pinned
  * below.
  *
+ * The stray-form cases were measured later, on the same shape. Requiring a form ancestor was
+ * replaced by accepting ANY form ancestor, so a button that merely sat inside some form on the
+ * page counted as a submit. On an Ashby application carrying one unrelated form, the runner
+ * pressed the newsletter when its button said "Submit" and the filter when its button said
+ * "Apply", and the application itself was unreachable either way, because a stray form holding a
+ * final-intent control also switches the container path off. Those pages are served here too.
+ *
  * Every test spawns the shipped runner against a served page and asserts on what happened: which
  * button was pressed, how many times, and which node the pass bound as its scope. Nothing here
  * matches on runner source text.
@@ -198,13 +205,17 @@ const FOOTER_BAR_FURNITURE = `<!doctype html><meta charset="utf-8"><title>Furnit
 
 /* THE BAMBOOHR SHAPE: a formless application sitting beside a real <form> that is not an
  * application at all. The newsletter's email is required, and it must not veto the application,
- * because it belongs to its own form's submission. Its Subscribe button is not a final control, so
- * the form path finds nothing and the container path is still allowed to run. */
+ * because it belongs to its own form's submission.
+ *
+ * Its button used to say "Subscribe", which is not a final control at all, so this case never
+ * exercised the veto its own name claims: the form path found nothing here whatever the scope
+ * rules did. "Submit" is the label that makes it a real boundary, and it is the label the reviewer
+ * measured taking the click on a live page. */
 const SIBLING_FORM = `<!doctype html><meta charset="utf-8"><title>Formless application beside a real form</title>
 <div id="page">
   <form id="newsletter">
     <div class="field"><label for="alerts">Job alert email *</label><input id="alerts" type="email" required value=""></div>
-    <button id="subscribe" type="submit">Subscribe</button>
+    <button id="subscribe" type="submit">Submit</button>
   </form>
   <div id="app-form">
     <div class="field"><label for="b-name">Full name *</label><input id="b-name" required value="Mehek Mandal"></div>
@@ -223,6 +234,236 @@ const SIBLING_FORM = `<!doctype html><meta charset="utf-8"><title>Formless appli
     record('subscribe');
   });
 </script>`;
+
+/* THE STRAY FORM, which is the shape that made the runner press a control belonging to something
+ * else on a real employer page.
+ *
+ * Same Ashby application as above, and one unrelated form beside it. Its field is answered, so
+ * nothing stops the click but the choice of scope. Measured in Chromium before this fix: the
+ * newsletter took the click, and the application was never pressed. Two things went wrong at once
+ * and both are here. The stray form's button is a viable candidate on its own, and because it is
+ * viable under the form rule it also switches the container path off, so the real application
+ * cannot be selected even after the stray control loses.
+ *
+ * The three labels are the point of the three fixtures. "Submit" and "Apply" are what the reviewer
+ * measured; "Subscribe" is the benign one, and it is here so that a fix which only recognises the
+ * two reported labels cannot pass. */
+const strayPage = (title, stray) => `<!doctype html><meta charset="utf-8"><title>` + title + `</title>
+<div id="page">
+` + stray + `
+  <div id="app-form">
+    <div class="field"><label for="a-name">Full name *</label><input id="a-name" required value="Mehek Mandal"></div>
+    <div class="field"><label for="a-email">Email *</label><input id="a-email" type="email" required value="mehek@example.com"></div>
+    <div class="field"><label for="a-phone">Phone *</label><input id="a-phone" type="tel" required value="+971501234567"></div>
+    <div class="field"><label for="a-resume">Resume *</label><input id="a-resume" type="file" required></div>
+    <button id="submit">Submit Application</button>
+  </div>
+</div>
+<div id="submitted"></div>
+<script>${HELPERS}
+  attach('a-resume');
+  document.getElementById('submit').addEventListener('click', function () { record('application'); });
+  document.getElementById('stray').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('stray');
+  });
+</script>`;
+
+const NEWSLETTER = `  <form id="stray">
+    <div class="field"><label for="alerts">Job alert email *</label><input id="alerts" type="email" required value="reader@example.com"></div>
+    <button id="stray-submit" type="submit">Submit</button>
+  </form>`;
+
+/* A filter is made of choices, not of intake, which is why counting selects as evidence of an
+ * application would hand this one the click. The keyword box is deliberately a plain text input
+ * rather than type=search, so this case does not pass on the ARIA read alone. */
+const FILTER = `  <form id="stray">
+    <div class="field"><label for="keyword">Keyword</label><input id="keyword" type="text" value="engineer"></div>
+    <div class="field"><label for="location">Location</label><select id="location"><option selected>Dubai</option></select></div>
+    <div class="field"><label for="team">Team</label><select id="team"><option selected>Engineering</option></select></div>
+    <button id="stray-submit" type="submit">Apply</button>
+  </form>`;
+
+const SUBSCRIBE = `  <form id="stray">
+    <div class="field"><label for="alerts">Job alert email *</label><input id="alerts" type="email" required value="reader@example.com"></div>
+    <button id="stray-submit" type="submit">Subscribe</button>
+  </form>`;
+
+const STRAY_NEWSLETTER = strayPage('Application beside a newsletter form', NEWSLETTER);
+const STRAY_FILTER = strayPage('Application beside a filter form', FILTER);
+const STRAY_SUBSCRIBE = strayPage('Application beside a subscribe form', SUBSCRIBE);
+
+/* THE SAME STRAY FORM WITH NO APPLICATION ANYWHERE. Its field is answered and its button says
+ * "Submit", so nothing except the scope rules stands between this run and a stranger's newsletter.
+ * A run that cannot find an application refuses: a refusal costs a retry, and a wrong click cannot
+ * be withdrawn. */
+const STRAY_ONLY = `<!doctype html><meta charset="utf-8"><title>A stray form and no application</title>
+<div id="page">
+  <form id="stray">
+    <div class="field"><label for="alerts">Job alert email *</label><input id="alerts" type="email" required value="reader@example.com"></div>
+    <button id="stray-submit" type="submit">Submit</button>
+  </form>
+  <div id="posting"><h1>Software Engineering Intern</h1><p>Applications open until September.</p></div>
+</div>
+<div id="submitted"></div>
+<script>${HELPERS}
+  document.getElementById('stray').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('stray');
+  });
+</script>`;
+
+/* THE FALSE-POSITIVE GUARD, and the case that matters most. Modelled on the live kos.ai posting:
+ * name, email, a resume file input, and nothing else. Its button says "Submit", the weakest final
+ * label there is, so nothing about the control itself can rescue this form. If the test for "is
+ * this the application" is tuned by field count alone, this real application is the first thing it
+ * throws away. */
+const MINIMAL_APPLICATION = `<!doctype html><meta charset="utf-8"><title>A three field application</title>
+<form id="application" novalidate>
+  <div class="field"><label for="k-name">Full name *</label><input id="k-name" required value="Mehek Mandal"></div>
+  <div class="field"><label for="k-email">Email *</label><input id="k-email" type="email" required value="mehek@example.com"></div>
+  <div class="field"><label for="k-resume">Resume *</label><input id="k-resume" type="file" required></div>
+  <button id="submit" type="submit">Submit</button>
+</form>
+<div id="submitted"></div>
+<script>${HELPERS}
+  attach('k-resume');
+  document.getElementById('application').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('minimal');
+  });
+</script>`;
+
+/* A real Greenhouse form with the same stray newsletter beside it. Nothing about which control is
+ * pressed may change here: the application already outscores the newsletter today, and it has to
+ * keep winning for the reason it wins now as well as the new one. */
+const GREENHOUSE_STRAY = `<!doctype html><meta charset="utf-8"><title>Greenhouse beside a newsletter form</title>
+<div id="page">
+  <div id="header"><h1>Software Engineering Intern</h1><button id="decoy">Apply</button></div>
+  <form id="stray">
+    <div class="field"><label for="alerts">Job alert email *</label><input id="alerts" type="email" required value="reader@example.com"></div>
+    <button id="stray-submit" type="submit">Submit</button>
+  </form>
+  <form id="application" novalidate>
+    <div class="field"><label for="g-name">Full name *</label><input id="g-name" required value="Mehek Mandal"></div>
+    <div class="field"><label for="g-email">Email *</label><input id="g-email" type="email" required value="mehek@example.com"></div>
+    <div class="field"><label for="g-resume">Resume *</label><input id="g-resume" type="file" required></div>
+    <button id="submit" type="submit">Submit application</button>
+  </form>
+</div>
+<div id="submitted"></div>
+<script>${HELPERS}
+  attach('g-resume');
+  document.getElementById('decoy').addEventListener('click', function () { record('decoy'); });
+  document.getElementById('stray').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('stray');
+  });
+  document.getElementById('application').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('greenhouse');
+  });
+</script>`;
+
+/* ONE FIELD, ONE BUTTON, AND NOTHING ELSE TO GO ON. Structure cannot separate this from a
+ * newsletter, because there is nothing here a newsletter does not also have: one email, required,
+ * and a button reading "Submit". The two cases below serve this identical page and differ only in
+ * whether the run was sent to fill that field first. A run that typed into this form was filling
+ * it; a run that never touched it has no reason to believe it is an application. The field is
+ * answered in the markup so the required-field gate is not what decides either case. */
+const ONE_FIELD_FORM = `<!doctype html><meta charset="utf-8"><title>A one field form</title>
+<form id="signup" novalidate>
+  <div class="field"><label for="one-email">Email *</label><input id="one-email" type="email" required value="mehek@example.com"></div>
+  <button id="submit" type="submit">Submit</button>
+</form>
+<div id="submitted"></div>
+<script>${HELPERS}
+  document.getElementById('signup').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('one-field');
+  });
+</script>`;
+
+/* THE OTHER HALF OF DISQUALIFYING A FORM, and the one that bites.
+ *
+ * Refusing a form does not only withhold the click from that form. It also removes that form from
+ * the test PR 42 uses to switch the container path off, so a page whose real application form
+ * cannot be confirmed suddenly lets a formless region compete, and the click lands on the region
+ * rather than on the form. Main presses the application on both pages below, because on main any
+ * form at all switches the container path off.
+ *
+ * Both shapes are ordinary. The first is a continuation page carrying only voluntary
+ * self-identification questions, which is the standard second phase on Greenhouse, Lever and
+ * Workday. The second is a one question screening form, which Ashby and Workable render constantly.
+ * Neither holds two text-entry controls and neither holds a file input, so both fail the form test
+ * on structure alone, and the sticky "Apply Now" bar beside them holds an email box, which is
+ * enough for the old container walk to accept it.
+ *
+ * The rule these pin: a run that has refused a form does not go looking for something else to
+ * press. It either finds evidence that the formless region is the application, held to the same
+ * test the form was held to, or it refuses. A refusal costs a retry. */
+const stickyBarPage = (title, application, decoy) => `<!doctype html><meta charset="utf-8"><title>` + title + `</title>
+<div id="page">
+` + application + `
+` + decoy + `
+</div>
+<div id="submitted"></div>
+<script>${HELPERS}
+  if (document.getElementById('decoy-cv')) attach('decoy-cv');
+  document.getElementById('decoy-apply').addEventListener('click', function () { record('decoy'); });
+  document.getElementById('real').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('application');
+  });
+</script>`;
+
+/* THE THIN DECOY: one email box. It cannot clear an intake test on any reading, which is exactly
+ * why it cannot be the only decoy in this file. */
+const THIN_BAR = `  <div id="decoy">
+    <div class="field"><label for="decoy-email">Email me about this role</label><input id="decoy-email" type="email" value="reader@example.com"></div>
+    <button id="decoy-apply">Apply Now</button>
+  </div>`;
+
+/* THE DECOYS THAT CLEAR THE BAR, which is the version of the adversary that can actually win.
+ *
+ * A fixed intake bar is not enough on its own: a formless widget that collects a name and an email,
+ * or an email and a CV upload, satisfies exactly the test the refused form failed, and React pages
+ * render widgets like these with no <form> element at all, for the same reason Ashby renders none.
+ * "Refer a friend", "Talk to a recruiter", "Get job alerts" and "Join our talent pool" are all this
+ * shape, and all of them wear a final-intent label sooner or later.
+ *
+ * Paired with the refused application shapes below, both of these took the click before the gate
+ * became a comparison rather than a threshold. */
+const RECRUITER_WIDGET = `  <div id="decoy">
+    <h2>Talk to a recruiter</h2>
+    <div class="field"><label for="decoy-name">Your name</label><input id="decoy-name" value="Mehek Mandal"></div>
+    <div class="field"><label for="decoy-email">Your email</label><input id="decoy-email" type="email" value="reader@example.com"></div>
+    <button id="decoy-apply">Apply Now</button>
+  </div>`;
+
+const TALENT_POOL_WIDGET = `  <div id="decoy">
+    <h2>Join our talent pool</h2>
+    <div class="field"><label for="decoy-email">Your email</label><input id="decoy-email" type="email" value="reader@example.com"></div>
+    <div class="field"><label for="decoy-cv">Attach a CV</label><input id="decoy-cv" type="file"></div>
+    <button id="decoy-apply">Apply Now</button>
+  </div>`;
+
+const EEO_FORM = `  <form id="real" novalidate>
+    <div class="field"><label for="race">Race *</label><select id="race" required><option value="Decline">Decline to self identify</option><option value="Asian" selected>Asian</option></select></div>
+    <div class="field"><label for="gender">Gender *</label><select id="gender" required><option selected>Female</option></select></div>
+    <div class="field"><label for="veteran">Veteran status *</label><select id="veteran" required><option selected>I am not a protected veteran</option></select></div>
+    <button id="submit" type="submit">Submit</button>
+  </form>`;
+
+const SCREENING_FORM = `  <form id="real" novalidate>
+    <div class="field"><label for="years">How many years of Python have you written? *</label><input id="years" required value="3"></div>
+    <button id="submit" type="submit">Submit</button>
+  </form>`;
+
+const EEO_STICKY_BAR = stickyBarPage('Self identification page under a sticky bar', EEO_FORM, THIN_BAR);
+const SCREENING_STICKY_BAR = stickyBarPage('One question screening under a sticky bar', SCREENING_FORM, THIN_BAR);
+const EEO_RICH_DECOY = stickyBarPage('Self identification page beside a recruiter widget', EEO_FORM, RECRUITER_WIDGET);
+const SCREENING_RICH_DECOY = stickyBarPage('Screening question beside a talent pool widget', SCREENING_FORM, TALENT_POOL_WIDGET);
 
 /* An empty required field inside the container, and an unrelated block outside it carrying a live
  * validation error over a field that is not required. Only the first belongs to this application. */
@@ -277,6 +518,17 @@ const FIXTURES = {
   '/footer-bar': FOOTER_BAR,
   '/footer-bar-furniture': FOOTER_BAR_FURNITURE,
   '/sibling-form': SIBLING_FORM,
+  '/stray-newsletter': STRAY_NEWSLETTER,
+  '/stray-filter': STRAY_FILTER,
+  '/stray-subscribe': STRAY_SUBSCRIBE,
+  '/stray-only': STRAY_ONLY,
+  '/minimal-application': MINIMAL_APPLICATION,
+  '/greenhouse-stray': GREENHOUSE_STRAY,
+  '/one-field-form': ONE_FIELD_FORM,
+  '/eeo-sticky-bar': EEO_STICKY_BAR,
+  '/screening-sticky-bar': SCREENING_STICKY_BAR,
+  '/eeo-rich-decoy': EEO_RICH_DECOY,
+  '/screening-rich-decoy': SCREENING_RICH_DECOY,
   '/scan-bounds': SCAN_BOUNDS,
   '/shadow': SHADOW
 };
@@ -320,10 +572,10 @@ const readResult = (phase) => (fs.existsSync(resultPath(phase))
   ? JSON.parse(fs.readFileSync(resultPath(phase), 'utf8'))
   : null);
 
-function writeInput(fixture, extras, overrides) {
+function writeInput(fixture, extras, overrides, before = []) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
     url: `http://127.0.0.1:${server.address().port}${fixture}`,
-    actions: [submitAction, { type: 'extract', selector: '#submitted' }, ...extras],
+    actions: [...before, submitAction, { type: 'extract', selector: '#submitted' }, ...extras],
     allowSubmit: true,
     screenshot: false,
     waitUntil: 'networkidle',
@@ -342,10 +594,12 @@ function startRunner() {
   return child;
 }
 
-/** Runs the shipped runner against one fixture. Returns the exit code and the result file if any. */
-async function run(fixture, extras = []) {
+/** Runs the shipped runner against one fixture. Returns the exit code and the result file if any.
+ *  'before' is queued ahead of the submit action, which is how a run that actually fills something
+ *  is expressed: the fills a real caller sends always precede its final submit. */
+async function run(fixture, extras = [], before = []) {
   clicks.length = 0;
-  writeInput(fixture, extras, {});
+  writeInput(fixture, extras, {}, before);
   fs.rmSync(resultPath(0), { force: true });
   fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
   const status = await new Promise((resolve) => startRunner().on('close', resolve));
@@ -464,16 +718,186 @@ test('a real form beside a formless application does not veto that application',
   ]);
   assert.equal(status, 0);
   // The newsletter's email is required and empty, but it belongs to its own form's submission.
-  assert.deepEqual(recorded, ['bamboo'], 'the application is sent and Subscribe is never pressed');
+  assert.deepEqual(recorded, ['bamboo'], 'the application is sent and the newsletter is never pressed');
   assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
   const pass = result.requiredFieldConfirmation.passes[0];
   assert.equal(pass.scope.scopeKind, 'container');
   assert.equal(pass.scope.requiredControlCount, 3, 'only the application fields are scanned');
-  // Subscribe is candidate 0 and resolves its own form, which is exactly why it does not disable
-  // the container path: it is not a final control, so the form rule finds nothing to submit here.
-  assert.equal(valueOf(result, '#newsletter'), '0');
+  // The newsletter's button is candidate 0 and says "Submit", so it is a final control by the
+  // grammar. What stops it vetoing the container path is that its form is one email field: it
+  // collects nothing an application collects, so it is not a submission scope at all.
+  assert.equal(valueOf(result, '#newsletter'), null);
   assert.equal(valueOf(result, '#app-form'), '1');
   assert.equal(valueOf(result, '#alerts'), '', 'the newsletter field is untouched');
+});
+
+test('a stray newsletter form whose button says Submit never takes the click', async () => {
+  const { status, result, clicks: recorded } = await run('/stray-newsletter', [
+    { type: 'extract', selector: '#app-form', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#stray', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#alerts', attribute: 'value' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['application'], 'the application is pressed and the newsletter is not');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  const pass = result.requiredFieldConfirmation.passes[0];
+  assert.equal(pass.scope.scopeKind, 'container', 'the formless application is still reachable');
+  assert.equal(pass.submissionOutcome, 'clicked');
+  assert.equal(valueOf(result, '#app-form'), '1', 'candidate 1 is the application submit');
+  assert.equal(valueOf(result, '#stray'), null, 'a one field newsletter is not a submission scope');
+  assert.equal(valueOf(result, '#alerts'), 'reader@example.com', 'the newsletter is untouched');
+});
+
+test('a stray filter form whose button says Apply never takes the click', async () => {
+  const { status, result, clicks: recorded } = await run('/stray-filter', [
+    { type: 'extract', selector: '#app-form', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#stray', attribute: 'data-litos-submit-scope-v2' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['application'], 'the application is pressed and the filter is not');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'container');
+  assert.equal(valueOf(result, '#app-form'), '1');
+  assert.equal(valueOf(result, '#stray'), null, 'a keyword box and two selects are not an application');
+});
+
+test('the benign stray label is decided the same way as the two reported ones', async () => {
+  // "Subscribe" is not a final control, so this page was already submitted correctly. It is here
+  // to fail any fix that recognises the labels it was told about instead of the shape of the form.
+  const { status, result, clicks: recorded } = await run('/stray-subscribe', [
+    { type: 'extract', selector: '#app-form', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#stray', attribute: 'data-litos-submit-scope-v2' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['application'], 'the application is pressed and Subscribe is not');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'container');
+  assert.equal(valueOf(result, '#app-form'), '1');
+  assert.equal(valueOf(result, '#stray'), null);
+});
+
+test('a page carrying only a stray form and no application clicks nothing', async () => {
+  const { status, result, clicks: recorded } = await run('/stray-only');
+  // Clicks first, deliberately: what this case is about is the control that gets pressed, and a
+  // failure that names the exit code before the click hides which form was submitted.
+  assert.deepEqual(recorded, [], 'a stranger\'s form is never pressed to satisfy a submit action');
+  assert.notEqual(status, 0, 'no application means no submit, and the run stops');
+  assert.equal(result, null, 'a failed pass writes no result packet');
+});
+
+test('a three field application with a bare Submit is not mistaken for a stray form', async () => {
+  const { status, result, clicks: recorded } = await run('/minimal-application', [
+    { type: 'extract', selector: '#application', attribute: 'data-litos-submit-scope-v2' }
+  ]);
+  assert.equal(status, 0, 'the smallest real application must still submit');
+  assert.deepEqual(recorded, ['minimal'], 'name, email and a resume is an application');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  const pass = result.requiredFieldConfirmation.passes[0];
+  assert.equal(pass.scope.scopeKind, 'form');
+  assert.equal(pass.submissionOutcome, 'clicked');
+  assert.equal(valueOf(result, '#application'), '0');
+});
+
+test('a one field form this run never touched is not submitted', async () => {
+  const { status, result, clicks: recorded } = await run('/one-field-form');
+  assert.deepEqual(recorded, [], 'a form with no more in it than a newsletter has is not pressed');
+  assert.notEqual(status, 0);
+  assert.equal(result, null);
+});
+
+test('a one field form this run was sent to fill is the application', async () => {
+  const { status, result, clicks: recorded } = await run('/one-field-form', [
+    { type: 'extract', selector: '#signup', attribute: 'data-litos-submit-scope-v2' }
+  ], [
+    { type: 'fill', selector: '#one-email', value: 'mehek@example.com', label: 'Email' }
+  ]);
+  assert.equal(status, 0, 'the same page, submitted, because this run filled it');
+  assert.deepEqual(recorded, ['one-field'], 'the form this run typed into is the one it submits');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+  assert.equal(valueOf(result, '#signup'), '0');
+});
+
+test('a self identification page under a sticky bar presses neither of them', async () => {
+  const { status, result, clicks: recorded } = await run('/eeo-sticky-bar');
+  assert.deepEqual(recorded, [], 'the sticky bar is not a consolation prize for refusing the form');
+  assert.notEqual(status, 0, 'a form this run cannot confirm ends the run, it does not redirect it');
+  assert.equal(result, null);
+});
+
+test('the same self identification page submits its own form once the run has answered it', async () => {
+  const { status, result, clicks: recorded } = await run('/eeo-sticky-bar', [
+    { type: 'extract', selector: '#real', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#decoy', attribute: 'data-litos-submit-scope-v2' }
+  ], [
+    { type: 'fill', selector: '#race', value: 'Asian', label: 'Race' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['application'], 'the form this run answered is the one it submits');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+  assert.equal(valueOf(result, '#real'), '0', 'candidate 0 is the form submit');
+  assert.equal(valueOf(result, '#decoy'), null, 'the bar is never a scope while the form is viable');
+});
+
+test('a one question screening form under a sticky bar presses neither of them', async () => {
+  const { status, result, clicks: recorded } = await run('/screening-sticky-bar');
+  assert.deepEqual(recorded, [], 'one answered question is not enough to press anything on this page');
+  assert.notEqual(status, 0);
+  assert.equal(result, null);
+});
+
+test('the same screening page submits its own form once the run has filled it', async () => {
+  const { status, result, clicks: recorded } = await run('/screening-sticky-bar', [], [
+    { type: 'fill', selector: '#years', value: '3', label: 'Years of Python' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['application'], 'the filled form wins over the formless bar');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+});
+
+test('a refused form beside a decoy that clears the intake bar still presses neither', async () => {
+  /* The decoy collects a name and an email, which is exactly what the refused form failed to show.
+   * A threshold cannot separate them, because the decoy is over it. Only the two things a decoy
+   * cannot manufacture can: this run's own record of what it wrote, and a label that names the
+   * application. The decoy has neither. */
+  const { status, result, clicks: recorded } = await run('/eeo-rich-decoy', [
+    { type: 'extract', selector: '#decoy', attribute: 'data-litos-submit-scope-v2' }
+  ]);
+  assert.deepEqual(recorded, [], 'a richer decoy is still not this run\'s application');
+  assert.notEqual(status, 0);
+  assert.equal(result, null);
+});
+
+test('a refused form beside a decoy carrying a file input still presses neither', async () => {
+  // The other half of the intake test, bought just as cheaply: one email and a CV upload.
+  const { status, result, clicks: recorded } = await run('/screening-rich-decoy');
+  assert.deepEqual(recorded, [], 'an upload box does not make a widget the application either');
+  assert.notEqual(status, 0);
+  assert.equal(result, null);
+});
+
+test('the rich decoy page submits the real form once the run has answered it', async () => {
+  const { status, result, clicks: recorded } = await run('/eeo-rich-decoy', [
+    { type: 'extract', selector: '#real', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#decoy', attribute: 'data-litos-submit-scope-v2' }
+  ], [
+    { type: 'fill', selector: '#race', value: 'Asian', label: 'Race' }
+  ]);
+  assert.equal(status, 0, 'refusing the decoy must not cost the page its own submit');
+  assert.deepEqual(recorded, ['application'], 'the answered form wins over the richer decoy');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+  assert.equal(valueOf(result, '#real'), '0');
+  assert.equal(valueOf(result, '#decoy'), null);
+});
+
+test('a real Greenhouse form beside a stray form is chosen exactly as it is today', async () => {
+  const { status, result, clicks: recorded } = await run('/greenhouse-stray', [
+    { type: 'extract', selector: '#application', attribute: 'data-litos-submit-scope-v2' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['greenhouse'], 'the application form is pressed, and only it');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+  assert.equal(valueOf(result, '#application'), '2', 'candidate 2 is the in-form submit');
 });
 
 test('the container scope bounds the required-field scan to its own fields', async () => {
