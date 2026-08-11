@@ -412,9 +412,8 @@ test('plain fill actions dispatch native selects through selectOption', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.tag === 'select'/);
   assert.match(SANDBOX_RUNNER, /selectNativeOption\(target, action\.value \|\| ''\)/);
   assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| ''\]/);
-  assert.match(SANDBOX_RUNNER, /actual\.some\(\(candidate\) => optionMatches\(candidate, expected\)/);
   assert.match(helper, /const choices = await field\.evaluate/);
-  assert.match(helper, /const valueMatch = labelMatch\n\s+\? null/);
+  assert.match(helper, /const byLabel = chooseOptionIndex\(choices\.map\(\(choice\) => choice\.label\), wanted\)/);
   assert.equal((helper.match(/field\.evaluate/g) || []).length, 1, 'native options are inspected once');
   assert.equal((helper.match(/field\.selectOption/g) || []).length, 1, 'one proven option is selected once');
 });
@@ -1069,11 +1068,16 @@ test('Latin choice verification is unchanged by the non-Latin repair', async () 
 // verifyFilled reads a control's own value rather than a widget's rendered answer, and its equality
 // arm carried the identical defect one function away: normalized(candidate) === normalized(expected)
 // is '' === '' for any two non-Latin strings.
-const filledHelpers = () => sandboxScope(['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'verifyFilled']);
+const filledHelpers = () => sandboxScope([
+  'clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'optionMatchesExactly',
+  'declineMatches', 'verifyFilled'
+]);
 
 // The element read is a DOM branch exercised in the replay suites against real markup; what these
-// cases are about is the comparison it feeds, so the field hands back the value list directly.
-const holding = (...values) => ({ evaluate: async () => values });
+// cases are about is the comparison it feeds, so the field hands back the read's own result. 'kind'
+// is what routes a native select to the exact tier and everything else to the equality tier.
+const holding = (...actual) => ({ evaluate: async () => ({ kind: 'other', actual }) });
+const selectHolding = (...actual) => ({ evaluate: async () => ({ kind: 'select', actual }) });
 
 test('a filled field holding one non-Latin answer does not verify as another', async () => {
   const { verifyFilled } = filledHelpers();
@@ -1083,15 +1087,29 @@ test('a filled field holding one non-Latin answer does not verify as another', a
   // An empty control normalised away too, so it verified as holding whatever non-Latin answer was
   // asked for. That is a blank field reported as a filled one.
   assert.equal(await verifyFilled(holding(''), 'はい'), false);
-  // Still useful: the right answer, and a native select's [label, value] pair, both verify.
+  // Still useful: the right answer verifies on its own text.
   assert.equal(await verifyFilled(holding('はい'), 'はい'), true);
   assert.equal(await verifyFilled(holding('نعم'), 'نعم'), true);
-  assert.equal(await verifyFilled(holding('いいえ', 'no'), 'いいえ'), true);
+  assert.equal(await verifyFilled(holding('はい', 'yes'), 'はい'), true);
   // Latin, unchanged: equality is still judged on the normalised text.
   assert.equal(await verifyFilled(holding('Yes'), 'yes'), true);
   assert.equal(await verifyFilled(holding('Computer Science.'), 'Computer Science'), true);
   assert.equal(await verifyFilled(holding('No'), 'Yes'), false);
   assert.equal(await verifyFilled(holding(''), 'Yes'), false);
+});
+
+test('a native select holding a non-Latin answer fails closed rather than agreeing with itself', async () => {
+  /* The select tier is exact-only, and both of its rules refuse anything normalized() erases. So a
+   * Japanese <select> verifies as nothing and is left for the applicant: safe, and honest about
+   * being unverified, which is the opposite of the defect above. Asserted rather than assumed,
+   * because "it refuses" and "it accepts anything" look identical from the outside until you ask.
+   */
+  const { verifyFilled } = filledHelpers();
+  assert.equal(await verifyFilled(selectHolding('いいえ', 'no'), 'はい'), false, 'never a false accept');
+  assert.equal(await verifyFilled(selectHolding('はい', 'yes'), 'はい'), false, 'and not yet useful either');
+  // Latin selects are unaffected: an exact answer verifies, a substring relative of it does not.
+  assert.equal(await verifyFilled(selectHolding('Yes', 'yes'), 'Yes'), true);
+  assert.equal(await verifyFilled(selectHolding('Yes, with sponsorship', 'y2'), 'Yes'), false);
 });
 
 test('Enter is withheld from a choice control whose menu is shut', async () => {

@@ -99,6 +99,57 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     </div></div>
   </div></li></ul>
 </div>
+<!-- SPONSORSHIP AND WORK AUTHORISATION, in the shape Lever and Greenhouse actually serve them: a
+     short answer that is a PREFIX of the true longer one, sitting on the same list. Every option
+     text below is the ordinary vocabulary of these two questions. A matcher that accepts containment
+     answers each of these questions with whichever line the employer listed first, which is a false
+     statement about visa status made under the applicant's name.
+     Both orders are on the page, because the answer must not depend on the order. -->
+<label for="sponsorship_prefix_first">Will you now or in the future require sponsorship?</label>
+<select id="sponsorship_prefix_first">
+  <option value="">Select...</option>
+  <option>I do not require sponsorship</option>
+  <option>I do not require sponsorship now, but will in the future</option>
+  <option>I require sponsorship now</option>
+</select>
+<label for="work_auth_prefix_first">Are you legally authorized to work in the United States?</label>
+<select id="work_auth_prefix_first">
+  <option value="">Select...</option>
+  <option>I am authorized to work</option>
+  <option>I am authorized to work only with a student visa</option>
+  <option>I am not authorized to work</option>
+</select>
+<label for="sponsorship_prefix_last">Sponsorship, longer answer listed first</label>
+<select id="sponsorship_prefix_last">
+  <option value="">Select...</option>
+  <option>I do not require sponsorship now, but will in the future</option>
+  <option>I do not require sponsorship</option>
+</select>
+<!-- An exact answer that sits BELOW a looser candidate. DOM order must not reach it first. -->
+<label for="exact_below">What is your field of study?</label>
+<select id="exact_below">
+  <option value="">Select...</option>
+  <option>Computer Science and Engineering</option>
+  <option>Computer Science, Business Administration</option>
+  <option>Computer Science</option>
+</select>
+<!-- Two options that are both containment relatives of the answer and neither of them the answer.
+     There is no right pick here, so there must be no pick. -->
+<label for="ambiguous_auth">Work authorization, no exact answer on the list</label>
+<select id="ambiguous_auth">
+  <option value="">Select...</option>
+  <option>I am authorized to work in the United States for any employer</option>
+  <option>I am authorized to work in the United States only with a student visa</option>
+</select>
+<!-- The page rewrites the choice after the write, which is what a form that normalises its own
+     input does. verifyFilled is the only thing standing between that and a field reported answered
+     while the control holds a different declaration. -->
+<label for="snapback_auth">Work authorization (the page normalises the choice)</label>
+<select id="snapback_auth">
+  <option value="">Select...</option>
+  <option>I am authorized to work</option>
+  <option>I am authorized to work only with a student visa</option>
+</select>
 <label for="plain">End year</label><input id="plain" type="text">
 <div id="plain-echo"></div>
 <input id="aimed" type="text">
@@ -254,6 +305,12 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   document.addEventListener('input', function (event) {
     var echo = document.getElementById(event.target.id + '-echo');
     if (echo) echo.textContent = event.target.value;
+  });
+  // A form that rewrites its own choice on change. Real boards do this to collapse answers they
+  // treat as equivalent; here it is the only way to put a control into a state the chooser did not
+  // ask for, which is the one state verification exists to catch.
+  document.getElementById('snapback_auth').addEventListener('change', function (event) {
+    if (event.target.selectedIndex === 2) event.target.selectedIndex = 1;
   });
   // Where a keystroke actually LANDED. An unaimed page.keyboard.press() with nothing focused reports
   // BODY; a press aimed at an element reports that element's id.
@@ -652,6 +709,121 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'question:university major'
   ]);
   assert.deepEqual(result.skipped, []);
+}
+
+// SPONSORSHIP AND WORK AUTHORISATION ARE ANSWERED EXACTLY OR NOT AT ALL.
+//
+// The matcher that shipped accepted containment in both directions for texts over six characters,
+// and the chooser took the first option that satisfied it. On the ordinary Lever and Greenhouse
+// lists below, a short answer is a prefix of the true longer one, so the run selected the shorter
+// line and then reported the field filled. That is a false declaration about visa status and work
+// authorisation, sent to an employer under the applicant's name, and it is invisible from both ends
+// of the run. Five cases, and each one is about the answer being the answer.
+{
+  // 1. The truthful answer is listed SECOND, under a shorter option that is its prefix.
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#sponsorship_prefix_first',
+      value: 'I do not require sponsorship now, but will in the future',
+      label: 'question:sponsorship',
+      optional: true
+    },
+    { type: 'extract', selector: '#sponsorship_prefix_first option:checked' }
+  ]);
+  assert.equal(
+    valueOf(result, '#sponsorship_prefix_first option:checked'),
+    'I do not require sponsorship now, but will in the future',
+    'a shorter option that is a prefix of the stored answer must never be sent in its place'
+  );
+  assert.deepEqual(result.filledFields, ['question:sponsorship']);
+  assert.deepEqual(result.skipped, []);
+}
+{
+  // 2. The same shape on the work authorisation question, and the reverse order alongside it, so
+  //    the verdict is pinned as order independent rather than accidentally right once.
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#work_auth_prefix_first',
+      value: 'I am authorized to work only with a student visa',
+      label: 'question:work authorization',
+      optional: true
+    },
+    {
+      type: 'fill',
+      selector: '#sponsorship_prefix_last',
+      value: 'I do not require sponsorship now, but will in the future',
+      label: 'question:sponsorship order',
+      optional: true
+    },
+    { type: 'extract', selector: '#work_auth_prefix_first option:checked' },
+    { type: 'extract', selector: '#sponsorship_prefix_last option:checked' }
+  ]);
+  assert.equal(
+    valueOf(result, '#work_auth_prefix_first option:checked'),
+    'I am authorized to work only with a student visa',
+    'the prefix option listed first must not answer a question it does not answer'
+  );
+  assert.equal(
+    valueOf(result, '#sponsorship_prefix_last option:checked'),
+    'I do not require sponsorship now, but will in the future',
+    'the same list in the opposite order must reach the same answer'
+  );
+  assert.deepEqual(result.filledFields, ['question:work authorization', 'question:sponsorship order']);
+  assert.deepEqual(result.skipped, []);
+}
+{
+  // 3. An exact answer sitting BELOW two looser candidates. Position must not beat exactness.
+  const result = await replay([
+    { type: 'fill', selector: '#exact_below', value: 'Computer Science', label: 'question:field of study', optional: true },
+    { type: 'extract', selector: '#exact_below option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#exact_below option:checked'), 'Computer Science',
+    'an exact option must win wherever it sits in the list');
+  assert.deepEqual(result.filledFields, ['question:field of study']);
+  assert.deepEqual(result.skipped, []);
+}
+{
+  // 4. Two containment relatives and no exact answer. There is no right pick, so there is no pick,
+  //    and the applicant is told which answer went looking. This is what an unanswerable field has
+  //    always done, and an ambiguous one is unanswerable.
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#ambiguous_auth',
+      value: 'I am authorized to work in the United States',
+      label: 'question:ambiguous authorization',
+      optional: true
+    },
+    { type: 'extract', selector: '#ambiguous_auth option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#ambiguous_auth option:checked'), 'Select...',
+    'an ambiguous list must be left exactly as it was found');
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped, [
+    'question:ambiguous authorization: no option matched "I am authorized to work in the United States", left for you to choose'
+  ]);
+}
+{
+  // 5. Verification fails closed. The page rewrites the choice to a substring relative of the stored
+  //    answer after the write lands. The old check asked optionMatches about the same pair the
+  //    chooser had just used, so it could only ever agree; a control holding "I am authorized to
+  //    work" must not report a field answered "only with a student visa".
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#snapback_auth',
+      value: 'I am authorized to work only with a student visa',
+      label: 'question:snapback authorization',
+      optional: true
+    },
+    { type: 'extract', selector: '#snapback_auth option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#snapback_auth option:checked'), 'I am authorized to work',
+    'the fixture must actually rewrite the choice, or this case proves nothing');
+  assert.deepEqual(result.filledFields, [], 'a control the page moved is not a field that was filled');
+  assert.deepEqual(result.skipped, ['question:snapback authorization: choice value did not persist after fill']);
 }
 
 // Native option values are machine data and need not repeat the visible label. selectNativeOption
@@ -1248,4 +1420,4 @@ const GRAD_ECHO = '#grad-echo';
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, a graduation date picker is reached through the wrapper that names it and is never given a month nobody stated, and the pre-submit gate holds in both directions');
+console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, a sponsorship or work authorization select is answered exactly or left for her and never verified by the predicate that chose it, a graduation date picker is reached through the wrapper that names it and is never given a month nobody stated, and the pre-submit gate holds in both directions');
