@@ -1,0 +1,84 @@
+name: Test
+
+# This repository shipped an unreachable final submit control to production because nothing ran
+# its tests on a pull request. The only check was a Vercel build, which proves the app compiles
+# and nothing about whether it can still click Submit on an employer form. Every suite below
+# already existed and already passed locally. The gap was that no one had to run them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: npm run verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # THE DOM SUITES AND THE END TO END RUN NEED TWO DIFFERENT BROWSERS, and the first version of
+      # this workflow only provided one, which is why its first green-CI run reported 76 failures.
+      #
+      # The DOM suites call chromium.launch() with no executablePath, so they need Playwright's own
+      # matched build. playwright-core ships the browser downloader but not the browser, hence this
+      # step. test/e2e.mjs is the other case: it launches with config.chromePath, which is what the
+      # Resolve Chrome step below supplies.
+      - name: Install Playwright Chromium
+        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+
+      # The GitHub Ubuntu image already carries Google Chrome, so resolve it rather than downloading
+      # a third copy. Fail loudly if it is ever absent: a silently skipped browser suite is how an
+      # untested chooser reached production in the first place.
+      - name: Resolve Chrome
+        run: |
+          for candidate in /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/chromium-browser /usr/bin/chromium; do
+            if [ -x "$candidate" ]; then
+              echo "CHROME_EXECUTABLE_PATH=$candidate" >> "$GITHUB_ENV"
+              echo "Using $candidate"
+              "$candidate" --version
+              exit 0
+            fi
+          done
+          echo "No Chrome or Chromium binary found on this runner." >&2
+          exit 1
+
+      # Each suite runs on its own step so a failure names the pathway that broke instead of
+      # collapsing into one red "verify". These are the same commands `npm run verify` chains.
+      - name: Unit and DOM suites
+        run: npm test
+
+      - name: Managed runner replay
+        run: npm run test:runner
+
+      - name: Security code replay
+        run: npm run test:security-code
+
+      - name: Required confirmation replay
+        run: npm run test:required-confirmation
+
+      - name: Browser end to end
+        run: npm run test:e2e
+
+      - name: Upload end to end evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-evidence
+          path: /tmp/stratus-e2e-*
+          if-no-files-found: ignore
+          retention-days: 7
