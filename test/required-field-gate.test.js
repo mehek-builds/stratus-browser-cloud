@@ -93,6 +93,70 @@ test('the required scan reads a per-control marker and never page text', () => {
   assert.match(gate, /indicates\?/);
 });
 
+/* THE LABEL READER INSIDE THIS GATE, RUN RATHER THAN ASSERTED ABOUT.
+ *
+ * The search starts at readSubmitReadiness on purpose: this runner declares labelOf twice, here and
+ * again in the discovery scan, and they are not the same function. Extracted from the shipped runner
+ * string rather than copied, so these cannot keep passing while the reader drifts.
+ */
+function readinessConst(name) {
+  const scopeStart = SANDBOX_RUNNER.indexOf('const readSubmitReadiness');
+  assert.notEqual(scopeStart, -1, 'readSubmitReadiness must exist in the sandbox runner');
+  const start = SANDBOX_RUNNER.indexOf(`\n      const ${name} = `, scopeStart);
+  assert.notEqual(start, -1, `${name} must exist inside readSubmitReadiness`);
+  const rest = SANDBOX_RUNNER.slice(start + 1);
+  const next = rest.search(/\n {6}(?:const|let|var|for|if|return|await)/);
+  return rest.slice(0, next === -1 ? rest.length : next);
+}
+
+function submitReadinessLabelOf() {
+  const sources = ['clean', 'wrappingLabelTextOf', 'genericControlText', 'nearestQuestionText', 'labelOf']
+    .map(readinessConst)
+    .join('\n');
+  return Function('root', 'CSS', `${sources}\nreturn labelOf;`)(
+    { querySelector: () => null },
+    { escape: (value) => String(value) },
+  );
+}
+
+/** A control whose only label is its aria-label, with nothing above it to walk to. */
+function bareControl(ariaLabel) {
+  return {
+    id: '',
+    closest: () => null,
+    parentElement: null,
+    getAttribute: (name) => (name === 'aria-label' ? ariaLabel : null),
+  };
+}
+
+test('a label written in a non-Latin script is a label, not a machine id', () => {
+  /* THE REGRESSION. The guard here was /[a-z]/i, so a label containing no ASCII letter was
+     classified as a machine identifier and thrown away, and the control came out of this gate with
+     no name at all. The applicant is then told that an unnamed field is required, which is the same
+     defect as being told a UUID is required, and it fires on every Japanese, Arabic, Cyrillic,
+     Greek, Hebrew, Thai or Han label an employer serves.
+
+     Confirmed as drift rather than as a decision: the backend already asks this with a Unicode
+     letter class in fieldLabel.ts, and isProviderHandleOnly in this very runner already carries the
+     comment "\p{L} and not [a-z]: a Japanese or Arabic label is a label". Two of the three copies
+     had been fixed. This one was missed. */
+  const labelOf = submitReadinessLabelOf();
+  assert.equal(labelOf(null, bareControl('氏名')), '氏名');
+  assert.equal(labelOf(null, bareControl('الاسم الكامل')), 'الاسم الكامل');
+  assert.equal(labelOf(null, bareControl('Фамилия')), 'Фамилия');
+  assert.equal(labelOf(null, bareControl('Διεύθυνση')), 'Διεύθυνση');
+});
+
+test('a machine identifier with no letters in any script is still discarded', () => {
+  // The guard still earns its place. None of these carries a word a person wrote, in any script,
+  // so widening it to \p{L} must not start letting them through.
+  const labelOf = submitReadinessLabelOf();
+  assert.equal(labelOf(null, bareControl('19302464004')), '');
+  assert.equal(labelOf(null, bareControl('__ 1234 _ 5678 __')), '');
+  assert.equal(labelOf(null, bareControl('---')), '');
+  assert.equal(labelOf(null, bareControl('5a326a1d-1a9e-42b1-a918-ca74022064dc')), '');
+});
+
 test('an Ashby yes/no is read from its pills, because its checkbox cannot tell No from unanswered', () => {
   /* Verified live on the Deepgram form, 2026-08-09, by pressing each pill in a throwaway browser:
        press Yes -> the Yes button gains _active_1svni_57, the hidden checkbox becomes checked

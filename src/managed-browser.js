@@ -1958,7 +1958,12 @@ const { chromium } = require('playwright');
           // A machine identifier is not a label. Greenhouse names custom questions with UUIDs and
           // numeric tokens, and "question_19302464004 is required" tells the applicant nothing.
           if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) continue;
-          if (!/[a-z]/i.test(text)) continue;
+          // \p{L} and not [a-z]: a Japanese, Arabic or Cyrillic label is a label. An ASCII-only test
+          // classifies every non-Latin label as a machine id and throws it away, so the control ends
+          // up with no name at all and the applicant is told an unnamed field is required. The other
+          // two copies of this judgement already ask it this way, the backend's fieldLabel.ts and
+          // isProviderHandleOnly in this same runner; this one was the copy left behind.
+          if (!/\p{L}/u.test(text)) continue;
           return text.slice(0, 120);
         }
         return '';
