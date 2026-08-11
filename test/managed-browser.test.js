@@ -366,8 +366,12 @@ test('a widget that renders its answer shorter than the row that set it is not a
    * The widening is verified against the row that was CLICKED, so it needs that row recorded.
    */
   assert.match(SANDBOX_RUNNER, /let lastClickedOptionText = '';/);
-  assert.match(SANDBOX_RUNNER, /lastClickedOptionText = clean\(await byRole\.textContent\(\)\.catch\(\(\) => ''\)\);/);
-  assert.match(SANDBOX_RUNNER, /lastClickedOptionText = clean\(await byText\.textContent\(\)\.catch\(\(\) => ''\)\);/);
+  // Recorded in the one place a row is ever clicked, so no rule can reach the page without leaving
+  // the row behind for the third rule to verify against. It stays a textContent read: the row hint
+  // is compared against what the WIDGET renders, and an accessible name is not what it renders.
+  assert.match(SANDBOX_RUNNER, /const clickIfPresent = async \(locator\) => \{/);
+  assert.match(SANDBOX_RUNNER, /lastClickedOptionText = clean\(await first\.textContent\(\)\.catch\(\(\) => ''\)\);/);
+  assert.equal((SANDBOX_RUNNER.match(/lastClickedOptionText = clean\(/g) || []).length, 1, 'one place records the row');
   // Cleared at the top of every fill, so a row left over from an earlier control can never stand in
   // for one this control never showed.
   assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
