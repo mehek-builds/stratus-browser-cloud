@@ -270,6 +270,75 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   </div>
 </div>
 <div id="country-shown"></div>
+<!-- ─── THE SAME TWO QUESTIONS, ON THE THREE CONTROLS THAT ARE NOT A NATIVE SELECT ───────────────
+     Sponsorship and work authorisation are asked on every board in this corpus, and only Lever asks
+     them with a <select>. Greenhouse serves them as a React Select or as a radio group; Ashby serves
+     them as a pair of buttons beside a display:none checkbox that holds the value. All three of
+     those paths read their option list with a bidirectional containment test and took the FIRST hit,
+     so on the ordinary list - a short answer sitting above the longer one it is a prefix of - the
+     declaration that reached the employer was chosen by the board's own ordering.
+     The rows below are the ordinary vocabulary of these questions, and the option text is deliberately
+     not identical across the three controls: the point is the shape, not the wording. -->
+<div class="select__container" id="sponsor-choice-shell">
+  <label for="sponsor-choice">Will you now or in the future require visa sponsorship?</label>
+  <div class="select__control">
+    <div class="select__value-container">
+      <div class="select__placeholder">Select...</div>
+      <div class="select__input-container"><input id="sponsor-choice" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
+    </div>
+  </div>
+</div>
+<div id="sponsor-choice-chosen"></div>
+<div class="select__container" id="auth-choice-shell">
+  <label for="auth-choice">Work authorization, no exact answer on the menu</label>
+  <div class="select__control">
+    <div class="select__value-container">
+      <div class="select__placeholder">Select...</div>
+      <div class="select__input-container"><input id="auth-choice" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
+    </div>
+  </div>
+</div>
+<div id="auth-choice-chosen"></div>
+<div class="select__container" id="study-choice-shell">
+  <label for="study-choice">Primary field of study</label>
+  <div class="select__control">
+    <div class="select__value-container">
+      <div class="select__placeholder">Select...</div>
+      <div class="select__input-container"><input id="study-choice" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
+    </div>
+  </div>
+</div>
+<div id="study-choice-chosen"></div>
+<fieldset id="sponsor-radio-block" data-field-path="sponsorship-radio-group" data-choice-echo="sponsor-radio-chosen">
+  <label>Do you need visa sponsorship for employment?</label>
+  <div><input type="radio" id="sponsor-radio-0" name="sponsorship_radio_group"><label for="sponsor-radio-0">I do not require sponsorship</label></div>
+  <div><input type="radio" id="sponsor-radio-1" name="sponsorship_radio_group"><label for="sponsor-radio-1">I do not require sponsorship now, but will in the future</label></div>
+</fieldset>
+<div id="sponsor-radio-chosen"></div>
+<fieldset id="auth-radio-block" data-field-path="authorization-radio-group" data-choice-echo="auth-radio-chosen">
+  <label>Select the work authorization that applies to you</label>
+  <div><input type="radio" id="auth-radio-0" name="authorization_radio_group"><label for="auth-radio-0">I am authorized to work in the United States for any employer</label></div>
+  <div><input type="radio" id="auth-radio-1" name="authorization_radio_group"><label for="auth-radio-1">I am authorized to work in the United States only with a student visa</label></div>
+</fieldset>
+<div id="auth-radio-chosen"></div>
+<!-- Ashby's option pills, in the shape D-01 records: two plain buttons carrying no role, no value
+     and no aria-checked, beside one display:none checkbox whose label is the QUESTION rather than an
+     answer. The pill text is short because Ashby's is: pickOptionPill ignores anything over forty
+     characters, which is what keeps it from pressing a page's action buttons. -->
+<div class="_fieldEntry_pills ashby-application-form-field-entry" data-field-path="pill-authorization">
+  <label class="_heading_pills" for="pill-auth-mirror">Are you authorized to work in the United States?</label>
+  <input id="pill-auth-mirror" type="checkbox" style="display:none">
+  <button type="button" class="_option_pills" data-pill="pill-auth">Authorized to work</button>
+  <button type="button" class="_option_pills" data-pill="pill-auth">Authorized to work with a visa</button>
+</div>
+<div id="pill-auth-chosen"></div>
+<div class="_fieldEntry_pills ashby-application-form-field-entry" data-field-path="pill-ambiguous">
+  <label class="_heading_pills" for="pill-amb-mirror">Confirm the work authorization on file</label>
+  <input id="pill-amb-mirror" type="checkbox" style="display:none">
+  <button type="button" class="_option_pills" data-pill="pill-amb">Authorized to work, no visa</button>
+  <button type="button" class="_option_pills" data-pill="pill-amb">Authorized to work with a visa</button>
+</div>
+<div id="pill-amb-chosen"></div>
 <!-- novalidate deliberately: with the browser's own required-field validation on, an empty required
      input stops the form submitting all by itself, and a gate that did nothing would look like a
      gate that worked. Turning it off leaves the gate as the only thing between the click and the
@@ -578,6 +647,122 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') closeCountryMenu();
   });
+
+  // ---- The sponsorship and work authorisation controls, one per widget family ----
+  //
+  // Built from one factory rather than copied three times: the widget is not what is under test, the
+  // OPTION LIST is, and the three lists below differ only in the way real boards' lists differ. Same
+  // late menu as the discipline control, because a menu that is already there when the control is
+  // clicked would not be a React Select.
+  function reactSelect(shellId, inputId, echoId, rows) {
+    var host = document.getElementById(shellId);
+    var box = document.getElementById(inputId);
+    var control = host.querySelector('.select__control');
+    var values = host.querySelector('.select__value-container');
+    var placeholder = host.querySelector('.select__placeholder');
+    var echo = document.getElementById(echoId);
+    var picked = '';
+    var timer = null;
+    var suppress = false;
+    function render() {
+      var existing = host.querySelector('.select__single-value');
+      if (existing) existing.remove();
+      echo.textContent = picked;
+      if (!picked) { placeholder.style.display = ''; return; }
+      placeholder.style.display = 'none';
+      var node = document.createElement('div');
+      node.className = 'select__single-value';
+      node.textContent = picked;
+      values.prepend(node);
+    }
+    function close() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      var menu = host.querySelector('.select__menu');
+      if (menu) menu.remove();
+      box.setAttribute('aria-expanded', 'false');
+    }
+    function open() {
+      close();
+      box.setAttribute('aria-expanded', 'true');
+      timer = setTimeout(function () {
+        timer = null;
+        var query = box.value.trim().toLowerCase();
+        var menu = document.createElement('div');
+        menu.className = 'select__menu';
+        menu.setAttribute('role', 'listbox');
+        rows.filter(function (row) {
+          return !query || row.toLowerCase().indexOf(query) >= 0;
+        }).forEach(function (row, index) {
+          var node = document.createElement('div');
+          node.className = 'select__option';
+          node.setAttribute('role', 'option');
+          node.id = shellId + '-option-' + index;
+          node.textContent = row;
+          node.addEventListener('mousedown', function (event) {
+            event.preventDefault();
+            picked = row;
+            suppress = true;
+            box.value = '';
+            suppress = false;
+            render();
+            close();
+          });
+          menu.appendChild(node);
+        });
+        host.appendChild(menu);
+      }, ${MENU_RENDER_MS});
+    }
+    control.addEventListener('mousedown', function () {
+      if (box.getAttribute('aria-expanded') === 'true') close(); else open();
+    });
+    box.addEventListener('input', function () {
+      if (suppress) return;
+      if (box.value === '' && picked) { picked = ''; render(); }
+      open();
+    });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') close(); });
+  }
+  // A short answer listed above the longer one it is a prefix of, and the longer row spelled without
+  // the comma the applicant wrote. Character-for-character the stored answer is on no row here; the
+  // second row IS that answer once case and punctuation are normalised away, and the first row says
+  // the opposite thing about her future.
+  reactSelect('sponsor-choice-shell', 'sponsor-choice', 'sponsor-choice-chosen', [
+    'I do not require sponsorship',
+    'I do not require sponsorship now but will in the future'
+  ]);
+  // Two rows that both contain the stored answer and neither of which is it.
+  reactSelect('auth-choice-shell', 'auth-choice', 'auth-choice-chosen', [
+    'I am authorized to work in the United States for any employer',
+    'I am authorized to work in the United States only with a student visa'
+  ]);
+  // The exact answer listed last, under two looser relatives of it.
+  reactSelect('study-choice-shell', 'study-choice', 'study-choice-chosen', [
+    'Computer Science and Engineering',
+    'Computer Science, Business Administration',
+    'Computer Science'
+  ]);
+
+  // Which radio a run left ticked, published for 'extract' the same way the pickers publish theirs.
+  Array.prototype.forEach.call(document.querySelectorAll('[data-choice-echo]'), function (block) {
+    var echo = document.getElementById(block.getAttribute('data-choice-echo'));
+    block.addEventListener('change', function () {
+      var ticked = block.querySelector('input:checked');
+      var label = ticked && document.querySelector('label[for="' + ticked.id + '"]');
+      echo.textContent = label ? label.textContent : '';
+    });
+  });
+
+  // The pills. React would re-render these; what matters to the runner is the selected-state signal
+  // it reads back, so the pressed pill carries aria-pressed and its siblings lose it.
+  document.addEventListener('click', function (event) {
+    var pill = event.target.closest && event.target.closest('[data-pill]');
+    if (!pill) return;
+    var group = pill.getAttribute('data-pill');
+    Array.prototype.forEach.call(document.querySelectorAll('[data-pill="' + group + '"]'), function (other) {
+      other.setAttribute('aria-pressed', other === pill ? 'true' : 'false');
+    });
+    document.getElementById(group + '-chosen').textContent = pill.textContent;
+  });
 </script>`;
 
 const server = http.createServer((request, response) => {
@@ -824,6 +1009,128 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'the fixture must actually rewrite the choice, or this case proves nothing');
   assert.deepEqual(result.filledFields, [], 'a control the page moved is not a field that was filled');
   assert.deepEqual(result.skipped, ['question:snapback authorization: choice value did not persist after fill']);
+}
+
+// THE SAME RULE ON THE CONTROLS THAT ARE NOT A NATIVE SELECT.
+//
+// The five cases above fixed the <select>, which is how Lever asks these two questions. Greenhouse
+// asks them with a React Select or a radio group and Ashby with a pair of buttons, and all three of
+// those paths still took the first option a bidirectional containment test accepted. On these lists
+// that is the shorter line, so the same false declaration about visa status went to the employer
+// through a different widget. Four runs, covering the three paths in both directions: the answer
+// must be reached wherever the board put it, and an ambiguous list must be left alone and reported.
+{
+  // 1. A React Select whose longer row is the answer and whose shorter row is a prefix of it. The
+  //    board spells its row without the comma the applicant wrote, so nothing on the menu is the
+  //    answer character for character - and the rule that reaches past that must be exactness after
+  //    normalisation, not a substring rule that finds "I do not require sponsorship" instead.
+  //    The second control is the same list shape with the exact answer listed LAST, under two looser
+  //    relatives of it, so position cannot beat exactness here either.
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#sponsor-choice',
+      value: 'I do not require sponsorship now, but will in the future',
+      label: 'question:sponsorship menu',
+      optional: true
+    },
+    { type: 'fill', selector: '#study-choice', value: 'Computer Science', label: 'question:field of study menu', optional: true },
+    { type: 'extract', selector: '#sponsor-choice-chosen' },
+    { type: 'extract', selector: '#study-choice-chosen' }
+  ]);
+  assert.equal(
+    valueOf(result, '#sponsor-choice-chosen'),
+    'I do not require sponsorship now but will in the future',
+    'a menu row that is a prefix of the stored answer must never be clicked in its place'
+  );
+  assert.equal(valueOf(result, '#study-choice-chosen'), 'Computer Science',
+    'an exact row must win wherever the menu lists it');
+  assert.deepEqual(result.filledFields, ['question:sponsorship menu', 'question:field of study menu']);
+  assert.deepEqual(result.skipped, []);
+}
+{
+  // 2. A React Select offering two rows that both contain the answer and neither of which is it.
+  //    There is no right row, so there is no click, and the applicant is told which answer went
+  //    looking - the same verdict, in the same words, as the native select's ambiguous list.
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#auth-choice',
+      value: 'I am authorized to work in the United States',
+      label: 'question:ambiguous authorization menu',
+      optional: true
+    },
+    { type: 'extract', selector: '#auth-choice-chosen' }
+  ]);
+  assert.equal(valueOf(result, '#auth-choice-chosen'), '',
+    'an ambiguous menu must be left exactly as it was found');
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped, [
+    'question:ambiguous authorization menu: no option matched "I am authorized to work in the United States", left for you to choose'
+  ]);
+}
+{
+  // 3. The radio group and the option pills, both answered with the longer of two options whose
+  //    shorter sibling is listed first. The radio group is Greenhouse's shape for these questions and
+  //    the pills are Ashby's; before this, both ticked the line above the answer.
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Do you need visa sponsorship for employment?',
+      value: 'I do not require sponsorship now, but will in the future',
+      label: 'question:sponsorship radios',
+      optional: true
+    },
+    {
+      type: 'fillByLabelText',
+      text: 'Are you authorized to work in the United States?',
+      value: 'Authorized to work with a visa',
+      label: 'question:authorization pills',
+      optional: true
+    },
+    { type: 'extract', selector: '#sponsor-radio-chosen' },
+    { type: 'extract', selector: '#pill-auth-chosen' }
+  ]);
+  assert.equal(
+    valueOf(result, '#sponsor-radio-chosen'),
+    'I do not require sponsorship now, but will in the future',
+    'the radio whose label IS the answer must be the one ticked, not the one above it'
+  );
+  assert.equal(valueOf(result, '#pill-auth-chosen'), 'Authorized to work with a visa',
+    'the pill whose text IS the answer must be the one pressed');
+  assert.deepEqual(result.filledFields, ['question:sponsorship radios', 'question:authorization pills']);
+  assert.deepEqual(result.skipped, []);
+}
+{
+  // 4. The same two widgets with an ambiguous list, in one run. Neither may be answered, both must be
+  //    reported, and the report has to name the answer that went looking so a question the applicant
+  //    can finish in one click does not read as a fault in Litos.
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Select the work authorization that applies to you',
+      value: 'I am authorized to work in the United States',
+      label: 'question:ambiguous authorization radios',
+      optional: true
+    },
+    {
+      type: 'fillByLabelText',
+      text: 'Confirm the work authorization on file',
+      value: 'Authorized to work',
+      label: 'question:ambiguous authorization pills',
+      optional: true
+    },
+    { type: 'extract', selector: '#auth-radio-chosen' },
+    { type: 'extract', selector: '#pill-amb-chosen' }
+  ]);
+  assert.equal(valueOf(result, '#auth-radio-chosen'), '', 'no radio may be ticked on an ambiguous group');
+  assert.equal(valueOf(result, '#pill-amb-chosen'), '', 'no pill may be pressed on an ambiguous pair');
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped, [
+    'question:ambiguous authorization radios: more than one option here could be'
+      + ' "I am authorized to work in the United States", so none was chosen, left for you to choose',
+    'question:ambiguous authorization pills: no option matched "Authorized to work", left for you to choose'
+  ]);
 }
 
 // Native option values are machine data and need not repeat the visible label. selectNativeOption
@@ -1420,4 +1727,4 @@ const GRAD_ECHO = '#grad-echo';
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, a sponsorship or work authorization select is answered exactly or left for her and never verified by the predicate that chose it, a graduation date picker is reached through the wrapper that names it and is never given a month nobody stated, and the pre-submit gate holds in both directions');
+console.log('managed runner replay: an optional waitForSelector waits, a press lands where it is aimed, a choice is taken from the control\'s own menu and never undone by a later candidate, a sponsorship or work authorization question is answered exactly or left for her on a native select, a React Select menu, a radio group and a pair of option pills alike, and never verified by the predicate that chose it, a graduation date picker is reached through the wrapper that names it and is never given a month nobody stated, and the pre-submit gate holds in both directions');

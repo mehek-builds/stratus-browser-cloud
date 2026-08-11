@@ -285,6 +285,42 @@ const { chromium } = require('playwright');
       if (!refusals.length) return -1;
       return new Set(refusals.map((index) => normalized(texts[index]))).size === 1 ? refusals[0] : -1;
     };
+    /* THE SAME VERDICT FOR A CUSTOM CHOICE CONTROL, because the question is the same question.
+     *
+     * A native <select> is not where these answers live. The very same sponsorship and work
+     * authorisation questions arrive as a Greenhouse React Select, as an Ashby radio group and as a
+     * pair of Ashby buttons, and each of those was reading its list with optionMatches and taking
+     * the FIRST hit. optionMatches accepts containment in both directions for texts over six
+     * characters, and the ordinary shape of these lists is a short answer that is a prefix of the
+     * true longer one:
+     *
+     *   I do not require sponsorship
+     *   I do not require sponsorship now, but will in the future
+     *   I am authorized to work
+     *   I am authorized to work only with a student visa
+     *
+     * So the declaration that reached the employer was decided by which line the board listed first.
+     * It is the identical defect the native select was fixed for, on the identical questions, and it
+     * is answered the identical way: an exact match anywhere in the list beats every loose one, and
+     * a loose match is used only when the whole list offers exactly one of them.
+     *
+     * Ambiguity is reported, never resolved. Two rows that are both containment relatives of the
+     * answer and neither of them the answer is a question this file cannot answer - "I am authorized
+     * to work in the United States" against a list offering "...for any employer" and "...only with
+     * a student visa" is a choice only the applicant can make. Guessing costs her a false statement
+     * about her visa status under her own name; declining costs her one click.
+     */
+    const chooseFromTexts = (texts, wanted) => {
+      const exact = chooseOptionIndex(texts, wanted);
+      if (exact !== -1) return { index: exact, ambiguous: false };
+      if (!clean(wanted)) return { index: -1, ambiguous: false };
+      const loose = [];
+      for (let index = 0; index < texts.length; index += 1) {
+        if (clean(texts[index]) && optionMatches(texts[index], wanted)) loose.push(index);
+      }
+      if (loose.length === 1) return { index: loose[0], ambiguous: false };
+      return { index: -1, ambiguous: loose.length > 1 };
+    };
     const verifyFilled = async (field, expected) => {
       const state = await field.evaluate((element) => {
         if (element instanceof HTMLInputElement && element.type === 'file') return { kind: 'other', actual: [element.files?.length ? 'file' : ''] };
@@ -836,14 +872,23 @@ const { chromium } = require('playwright');
       const total = await pills.count();
       if (total === 0) return false;
       const ACTION_TEXT = /upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i;
-      let match = null;
+      // THE WHOLE ROW OF PILLS IS READ BEFORE ANY OF THEM IS PRESSED. The loop used to break on the
+      // first pill optionMatches accepted, which on an Ashby work-authorisation pair is the shorter
+      // of two pills whose longer sibling is the answer. See chooseFromTexts.
+      const candidates = [];
+      const texts = [];
       for (let index = 0; index < total; index += 1) {
         const pill = pills.nth(index);
         if (!await pill.isVisible().catch(() => false)) continue;
         const text = clean(await pill.textContent().catch(() => ''));
         if (!text || text.length > 40 || ACTION_TEXT.test(text)) continue;
-        if (optionMatches(text, wanted)) { match = pill; break; }
+        candidates.push(pill);
+        texts.push(text);
       }
+      const chosen = chooseFromTexts(texts, wanted);
+      // Nothing pressed on an ambiguous pair, and nothing claimed for it either: the caller reports
+      // an unpressed question, which is what puts it in front of the applicant.
+      const match = chosen.index === -1 ? null : candidates[chosen.index];
       if (!match) return false;
       const press = async () => {
         await match.evaluate((element) => {
@@ -917,13 +962,18 @@ const { chromium } = require('playwright');
       if (!clean(wanted)) return 'no-answer';
       const choices = scope.locator('input[type=checkbox], input[type=radio]');
       const total = await choices.count();
-      let match = null;
+      // Every option's text first, then one verdict over the whole group. Breaking on the first
+      // optionMatches hit ticked "I do not require sponsorship" for an applicant who does require it
+      // in the future, purely because Greenhouse lists the shorter line above the longer one. See
+      // chooseFromTexts.
+      const texts = [];
       for (let index = 0; index < total; index += 1) {
-        const option = choices.nth(index);
-        const optionText = await optionTextOf(option);
-        if (optionText && optionMatches(optionText, wanted)) { match = option; break; }
+        texts.push(await optionTextOf(choices.nth(index)));
       }
-      if (!match) return 'no-option';
+      const chosen = chooseFromTexts(texts, wanted);
+      if (chosen.ambiguous) return 'ambiguous';
+      if (chosen.index === -1) return 'no-option';
+      const match = choices.nth(chosen.index);
       const isChecked = async () => await match.evaluate((element) => element.checked === true).catch(() => false);
       await match.check({ timeout: 5000 }).catch(() => undefined);
       if (!await isChecked()) {
@@ -1106,15 +1156,56 @@ const { chromium } = require('playwright');
         }
         return [...buckets.keys()].sort((left, right) => right - left).map((size) => buckets.get(size));
       };
+      /* A ROW THAT MERELY CONTAINS THE ANSWER IS TAKEN ONLY WHEN THERE IS EXACTLY ONE OF THEM.
+       *
+       * clickIfPresent takes .first(), and on the two questions this whole file keeps coming back to
+       * that is a coin toss decided by the board's own ordering. A React Select offering
+       * "I am authorized to work in the United States for any employer" above "...only with a
+       * student visa", asked for "I am authorized to work in the United States", satisfies the
+       * inexact name query on BOTH rows; the first one was clicked and the field reported filled.
+       * Same list, same answer, same refusal as the native select: see chooseOptionIndex.
+       */
+      const clickIfUnique = async (locator) => {
+        const found = await locator.count();
+        if (found === 0) return 'none';
+        if (found > 1) return 'ambiguous';
+        return await clickIfPresent(locator) ? 'clicked' : 'none';
+      };
       const clickMatchingOption = async (target) => {
-        // The caller's own order of preference stays dominant: every rule is tried for one answer
-        // before the next answer is considered at all. Inside one answer, the row that IS that
-        // answer is taken before a row that merely contains it, which is the only reordering here.
-        // The second and third rules are the two queries that shipped, in the order they shipped.
+        // TIER 1, and it is an EXACT tier: a row whose whole accessible name is this answer, found
+        // wherever it sits in the menu. The caller's own order of preference stays dominant - every
+        // answer is looked for across the whole list before the next answer is considered - and no
+        // looser rule below can run while any answer has an exact row waiting for it.
         for (const option of answerOptions(target)) {
           if (await clickIfPresent(menuRoot().getByRole('option', { name: wholeName(option) }))) return true;
-          if (await clickIfPresent(menuRoot().getByRole('option', { name: option, exact: false }))) return true;
-          if (await clickIfPresent(optionsRoot().filter({ hasText: option }))) return true;
+        }
+        /* TIER 2, STILL EXACT, and this is where the native select's own rule is reused verbatim.
+         *
+         * Tier 1 compares the answer to the row character for character, so an employer who writes
+         * "I do not require sponsorship now but will in the future" without the comma the applicant
+         * wrote misses it - and then the loose rules below reach "I do not require sponsorship",
+         * which says the opposite thing. chooseOptionIndex compares the two after normalisation, so
+         * punctuation and case cannot turn an exact answer into a near miss, and it carries the
+         * decline-to-decline rule the EEO lists need.
+         *
+         * Enumerated through the ROLE engine rather than through OPTION_NODES, so an aria-hidden
+         * ghost row cannot enter the list, and the row that is clicked is the row at that index in
+         * the same enumeration. The texts are read in one round trip.
+         */
+        const rows = menuRoot().getByRole('option');
+        const byText = chooseOptionIndex(await rows.allTextContents().catch(() => []), target);
+        if (byText !== -1 && await clickIfPresent(rows.nth(byText))) return true;
+        // TIER 3, the two queries that shipped, in the order they shipped, and now each of them
+        // refuses a list that offers more than one candidate rather than resolving it by position.
+        for (const option of answerOptions(target)) {
+          for (const rowsFor of [
+            menuRoot().getByRole('option', { name: option, exact: false }),
+            optionsRoot().filter({ hasText: option })
+          ]) {
+            const outcome = await clickIfUnique(rowsFor);
+            if (outcome === 'clicked') return true;
+            if (outcome === 'ambiguous') return false;
+          }
         }
         /* THE FIX, and it is last on purpose.
          *
@@ -3545,6 +3636,17 @@ const { chromium } = require('playwright');
           const outcome = await pickRadioOption(scope, wanted);
           if (outcome === 'checked') {
             if (action.label) filledFields.push(action.label);
+            continue;
+          }
+          if (outcome === 'ambiguous') {
+            // Two options that both read as this answer and neither of which IS it. Ticking either
+            // one states something about her work authorisation that she did not state, and the
+            // pill and single-checkbox fallbacks below would only make the same guess with different
+            // markup, so the question stops here and she is told what went looking.
+            if (action.label) {
+              skipped.push(action.label + ': more than one option here could be "' + clean(wanted)
+                + '", so none was chosen, left for you to choose');
+            }
             continue;
           }
           if (outcome === 'not-checked') {
