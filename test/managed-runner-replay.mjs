@@ -53,6 +53,52 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <div id="slow-email-echo"></div>
 <label for="start_month">Start month</label>
 <select id="start_month"><option value=""></option><option value="5">May</option></select>
+<label for="native_value">Major code</label>
+<select id="native_value"><option value=""></option><option value="cs">Computer Science</option></select>
+<!-- Lever custom-card selects copied from the live Palantir internship form on 2026-08-11.
+     Discovery correctly returns the durable name selectors below. The fill pass sends ordinary
+     fill actions to those selectors, so the runner must dispatch from the native control shape. -->
+<div class="section page-centered application-form" data-qa="additional-cards">
+  <h4 data-qa="card-name">University</h4>
+  <ul><li class="application-question custom-question"><div>
+    <div class="application-label full-width dropdown"><div class="text">Which university are you currently attending or did you last attend?</div></div>
+    <div class="application-field full-width required-field"><div class="application-dropdown">
+      <select name="cards[3da58b41-acf5-40a1-945e-c7f047ef8050][field0]" required>
+        <option value="">Click Here</option>
+        <option value="University of Southern California">University of Southern California</option>
+        <option value="Other (School Not Listed)">Other (School Not Listed)</option>
+      </select>
+    </div></div>
+  </div></li></ul>
+</div>
+<div class="section page-centered application-form" data-qa="additional-cards">
+  <h4 data-qa="card-name">Year of Graduation</h4>
+  <ul><li class="application-question custom-question"><div>
+    <div class="application-label full-width dropdown"><div class="text">Please include your intended graduation year.</div></div>
+    <div class="application-field full-width required-field"><div class="application-dropdown">
+      <select name="cards[026d7ce7-7ca4-44ed-9db6-1c7857707f0e][field0]" required>
+        <option value="">Select...</option>
+        <option value="2027">2027</option>
+        <option value="2028">2028</option>
+        <option value="2029">2029</option>
+      </select>
+    </div></div>
+  </div></li></ul>
+</div>
+<div class="section page-centered application-form" data-qa="additional-cards">
+  <h4 data-qa="card-name">University Major</h4>
+  <ul><li class="application-question custom-question"><div>
+    <div class="application-label full-width dropdown"><div class="text">What is your major?</div></div>
+    <div class="application-field full-width required-field"><div class="application-dropdown">
+      <select name="cards[c2bf8591-ecbb-4de6-bf0b-e8ea17f8afa2][field0]" required>
+        <option value="">Select...</option>
+        <option value="Computer Science">Computer Science</option>
+        <option value="Computer Engineering">Computer Engineering</option>
+        <option value="Other">Other</option>
+      </select>
+    </div></div>
+  </div></li></ul>
+</div>
 <label for="plain">End year</label><input id="plain" type="text">
 <div id="plain-echo"></div>
 <input id="aimed" type="text">
@@ -578,6 +624,68 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(declared, '#email-echo'), 'person@example.com',
     'declaring the wait is what fills a late control, and it must work');
   assert.deepEqual(declared.skipped, [], 'nothing was missing once the wait was declared');
+}
+
+// Lever discovery returns native select controls with durable name selectors. Those questions are
+// built as ordinary fill actions because the selector already identifies one exact control. A fill
+// action still has to dispatch on the control it reaches: locator.fill() cannot operate on a
+// native select. This is the exact shape that left University, Year of Graduation, and University
+// Major empty on production packet c1ddd420 after question discovery had resolved all three.
+{
+  const university = '[name="cards[3da58b41-acf5-40a1-945e-c7f047ef8050][field0]"]';
+  const graduation = '[name="cards[026d7ce7-7ca4-44ed-9db6-1c7857707f0e][field0]"]';
+  const major = '[name="cards[c2bf8591-ecbb-4de6-bf0b-e8ea17f8afa2][field0]"]';
+  const result = await replay([
+    { type: 'fill', selector: university, value: 'University of Southern California', label: 'question:university', optional: true },
+    { type: 'fill', selector: graduation, value: '2028', label: 'question:year of graduation', optional: true },
+    { type: 'fill', selector: major, value: 'Computer Science', label: 'question:university major', optional: true },
+    { type: 'extract', selector: `${university} option:checked` },
+    { type: 'extract', selector: `${graduation} option:checked` },
+    { type: 'extract', selector: `${major} option:checked` }
+  ]);
+  assert.equal(valueOf(result, `${university} option:checked`), 'University of Southern California');
+  assert.equal(valueOf(result, `${graduation} option:checked`), '2028');
+  assert.equal(valueOf(result, `${major} option:checked`), 'Computer Science');
+  assert.deepEqual(result.filledFields, [
+    'question:university',
+    'question:year of graduation',
+    'question:university major'
+  ]);
+  assert.deepEqual(result.skipped, []);
+}
+
+// Native option values are machine data and need not repeat the visible label. selectNativeOption
+// chooses a known label first and a known value second, so verification must accept either
+// representation of the same selected option. Before this regression, the value fallback selected
+// `cs`, then verifyFilled read
+// only `Computer Science` and falsely reported that the choice had not persisted.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#native_value', value: 'cs', label: 'question:major code', optional: true },
+    { type: 'extract', selector: '#native_value option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#native_value option:checked'), 'Computer Science');
+  assert.deepEqual(result.filledFields, ['question:major code']);
+  assert.deepEqual(result.skipped, []);
+  assert.ok(result.elapsedMs < 5000,
+    `a value-only native option must not wait for an absent label, took ${result.elapsedMs}ms`);
+}
+
+// A native answer absent from both labels and values is left untouched and reported immediately.
+// Before the option snapshot, each speculative selectOption call waited for an option that the DOM
+// had already proved was not present.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#native_value', value: 'not-an-option', label: 'question:major code', optional: true },
+    { type: 'extract', selector: '#native_value option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#native_value option:checked'), '');
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped, [
+    'question:major code: no option matched "not-an-option", left for you to choose'
+  ]);
+  assert.ok(result.elapsedMs < 5000,
+    `an unmatched native option must return from the option snapshot, took ${result.elapsedMs}ms`);
 }
 
 // 3. The cost. Six absent optional selectors in a row, exactly Greenhouse's cookie preflight. Each

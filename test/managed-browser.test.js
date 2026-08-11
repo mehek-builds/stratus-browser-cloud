@@ -397,8 +397,22 @@ test('fillByLabelText handles Greenhouse Select2 controls before hidden native s
   assert.match(SANDBOX_RUNNER, /\.select2-choice, \.select2-container/);
   assert.match(SANDBOX_RUNNER, /\.select2-result, \.select2-results li/);
   assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
-  assert.match(SANDBOX_RUNNER, /if \(!customSelected\) \{/);
-  assert.match(SANDBOX_RUNNER, /if \(customSelected\) selected = true;/);
+  assert.match(SANDBOX_RUNNER, /const selectNativeOption = async \(field, wanted\) =>/);
+  assert.match(SANDBOX_RUNNER, /const selected = customSelected \|\| await selectNativeOption\(field, action\.value \|\| ''\)/);
+});
+
+test('plain fill actions dispatch native selects through selectOption', () => {
+  const helperStart = SANDBOX_RUNNER.indexOf('const selectNativeOption = async');
+  const helperEnd = SANDBOX_RUNNER.indexOf('/* THE SELECTOR NAMED A QUESTION', helperStart);
+  const helper = SANDBOX_RUNNER.slice(helperStart, helperEnd);
+  assert.match(SANDBOX_RUNNER, /fillShape\.tag === 'select'/);
+  assert.match(SANDBOX_RUNNER, /selectNativeOption\(target, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| ''\]/);
+  assert.match(SANDBOX_RUNNER, /actual\.some\(\(candidate\) => optionMatches\(candidate, expected\)/);
+  assert.match(helper, /const choices = await field\.evaluate/);
+  assert.match(helper, /const valueMatch = labelMatch\n\s+\? null/);
+  assert.equal((helper.match(/field\.evaluate/g) || []).length, 1, 'native options are inspected once');
+  assert.equal((helper.match(/field\.selectOption/g) || []).length, 1, 'one proven option is selected once');
 });
 
 test('React Select comboboxes are filled as choices, not plain text', () => {
@@ -471,7 +485,7 @@ test('choice matching is scoped to the question container, never the page', () =
   // so, which it used to do silently.
   assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(wanted\) \+ '", left for you to choose/);
   assert.match(SANDBOX_RUNNER, /total === 1 && \/\^yes\$\/i\.test\(wanted\)/);
-  assert.match(SANDBOX_RUNNER, /actual === 'checked' && \/\^yes\$\/i\.test\(clean\(expected\)\)/);
+  assert.match(SANDBOX_RUNNER, /actual\.includes\('checked'\) && \/\^yes\$\/i\.test\(clean\(expected\)\)/);
 });
 
 test('a radio is reported from the radio that was clicked, not from the first one in the block', () => {
