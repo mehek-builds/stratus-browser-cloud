@@ -655,8 +655,9 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 }
 
 // Native option values are machine data and need not repeat the visible label. selectNativeOption
-// falls back from label to value, so verification must accept either representation of the same
-// selected option. Before this regression, the value fallback selected `cs`, then verifyFilled read
+// chooses a known label first and a known value second, so verification must accept either
+// representation of the same selected option. Before this regression, the value fallback selected
+// `cs`, then verifyFilled read
 // only `Computer Science` and falsely reported that the choice had not persisted.
 {
   const result = await replay([
@@ -666,6 +667,25 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(result, '#native_value option:checked'), 'Computer Science');
   assert.deepEqual(result.filledFields, ['question:major code']);
   assert.deepEqual(result.skipped, []);
+  assert.ok(result.elapsedMs < 5000,
+    `a value-only native option must not wait for an absent label, took ${result.elapsedMs}ms`);
+}
+
+// A native answer absent from both labels and values is left untouched and reported immediately.
+// Before the option snapshot, each speculative selectOption call waited for an option that the DOM
+// had already proved was not present.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#native_value', value: 'not-an-option', label: 'question:major code', optional: true },
+    { type: 'extract', selector: '#native_value option:checked' }
+  ]);
+  assert.equal(valueOf(result, '#native_value option:checked'), '');
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped, [
+    'question:major code: no option matched "not-an-option", left for you to choose'
+  ]);
+  assert.ok(result.elapsedMs < 5000,
+    `an unmatched native option must return from the option snapshot, took ${result.elapsedMs}ms`);
 }
 
 // 3. The cost. Six absent optional selectors in a row, exactly Greenhouse's cookie preflight. Each

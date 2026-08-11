@@ -254,19 +254,35 @@ const { chromium } = require('playwright');
      *
      * One helper serves both selector-based fill and fillByLabelText so the two paths cannot choose
      * different option semantics. Label first, value second: Lever uses the same text for both,
-     * while other native forms may expose only one of them. */
+     * while other native forms may expose only one of them. The option snapshot matters because
+     * selectOption auto-waits for a requested option. Trying a label that is not present before its
+     * matching value, or trying any unmatched answer, otherwise spends the full action timeout on
+     * every speculative call. */
     const selectNativeOption = async (field, wanted) => {
-      for (const option of answerOptions(wanted)) {
-        try {
-          await field.selectOption({ label: option });
-          return true;
-        } catch {}
-        try {
-          await field.selectOption(option);
-          return true;
-        } catch {}
+      const choices = await field.evaluate((element) => {
+        if (!(element instanceof HTMLSelectElement)) return [];
+        return [...element.options].map((option) => ({
+          label: option.label || option.textContent || '',
+          value: option.value || ''
+        }));
+      }).catch(() => []);
+      const wantedOptions = answerOptions(wanted);
+      const labelMatch = choices.find((choice) => wantedOptions.some((option) => optionMatches(choice.label, option)));
+      const valueMatch = labelMatch
+        ? null
+        : choices.find((choice) => wantedOptions.some((option) => optionMatches(choice.value, option)));
+      const selection = labelMatch
+        ? { label: labelMatch.label }
+        : valueMatch
+          ? { value: valueMatch.value }
+          : null;
+      if (!selection) return false;
+      try {
+        await field.selectOption(selection);
+        return true;
+      } catch {
+        return false;
       }
-      return false;
     };
     /* THE SELECTOR NAMED A QUESTION, NOT A CONTROL.
      *

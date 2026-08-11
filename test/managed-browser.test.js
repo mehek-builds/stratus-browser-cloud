@@ -402,10 +402,17 @@ test('fillByLabelText handles Greenhouse Select2 controls before hidden native s
 });
 
 test('plain fill actions dispatch native selects through selectOption', () => {
+  const helperStart = SANDBOX_RUNNER.indexOf('const selectNativeOption = async');
+  const helperEnd = SANDBOX_RUNNER.indexOf('/* THE SELECTOR NAMED A QUESTION', helperStart);
+  const helper = SANDBOX_RUNNER.slice(helperStart, helperEnd);
   assert.match(SANDBOX_RUNNER, /fillShape\.tag === 'select'/);
   assert.match(SANDBOX_RUNNER, /selectNativeOption\(target, action\.value \|\| ''\)/);
   assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| ''\]/);
   assert.match(SANDBOX_RUNNER, /actual\.some\(\(candidate\) => optionMatches\(candidate, expected\)/);
+  assert.match(helper, /const choices = await field\.evaluate/);
+  assert.match(helper, /const valueMatch = labelMatch\n\s+\? null/);
+  assert.equal((helper.match(/field\.evaluate/g) || []).length, 1, 'native options are inspected once');
+  assert.equal((helper.match(/field\.selectOption/g) || []).length, 1, 'one proven option is selected once');
 });
 
 test('React Select comboboxes are filled as choices, not plain text', () => {
