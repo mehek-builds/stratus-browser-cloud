@@ -1441,7 +1441,12 @@ const { chromium } = require('playwright');
      * settling, and a wait that returned the moment it saw one would return before the page had
      * changed at all. Everywhere else a challenge appearing is a real terminal state. */
     const waitForPostSubmitApplicationState = async ({ securityCodeSettles = true } = {}) => {
-      const deadline = Date.now() + 3_000;
+      const greenhouseHost = /^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/i.test(await page.evaluate(() => location.hostname).catch(() => ''));
+      // Greenhouse can paint its exact code control after the ordinary receipt-settle window. Hold
+      // phase zero a little longer only on that measured ATS so the original challenge capability
+      // survives. A later empty receipt observation has already consumed its one token and cannot
+      // safely answer a newly rendered code wall without another application submit.
+      const deadline = Date.now() + (securityCodeSettles && greenhouseHost ? 8_000 : 3_000);
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
         const outcome = await readSubmitOutcome();
@@ -2855,6 +2860,20 @@ const { chromium } = require('playwright');
         discovered.push(...found);
       }
       if (action.type === 'confirmAndSubmit') {
+        /* A CODE WALL IS ALREADY THE APPLICATION SUBMIT'S RESULT.
+         *
+         * A retained Greenhouse page can begin this phase with the eight-box verification control
+         * already standing and its submit button disabled until the code is complete. Running the
+         * ordinary application confirmation against that DOM reports "Atomic submit control was
+         * missing or ambiguous" before any click, which used to fall through to applicant copy that
+         * falsely said a submission had been attempted. Do not click the application again. End the
+         * application action here, let the zero-cost post-run challenge reader advertise the held
+         * continuation, and allow only the later atomic verification action to enter the inbox code
+         * and submit that existing challenge. */
+        if (!action.securityCode && action.submitKind === 'application' && await readSecurityCodeChallenge()) {
+          skipped.push('confirm_and_submit: employer security code challenge already standing');
+          continue;
+        }
         const passes = [];
         if (action.securityCode) {
           const entry = await enterSecurityCode(action.securityCode);
@@ -3392,8 +3411,14 @@ const { chromium } = require('playwright');
      * page in front of it. 'continuationOffered' travels in the result so the caller does not have
      * to re-derive it from scraped text, which is what continuationEligible was reduced to doing.
      */
+    const pressedUnknown = phase === 0
+      && submitOutcome.pressed === true
+      && submitOutcome.state === 'unknown';
+    const receiptObservationOnly = pressedUnknown
+      && !humanVerification
+      && input.continuationCheckpoint !== true;
     const continuationOffered = input.requestContinuation === true
-      && (Boolean(humanVerification) || input.continuationCheckpoint === true);
+      && (Boolean(humanVerification) || input.continuationCheckpoint === true || pressedUnknown);
     const discoveryCapabilities = currentInput.actions.some((action) => action.type === 'discover')
       ? ['discovery-control-role-v1']
       : null;
@@ -3413,7 +3438,9 @@ const { chromium } = require('playwright');
      * claim can never read a half-written one, and it is rewritten BEFORE the ready file exists, so
      * for the whole time a claim is possible the deadline it is checked against is this one. */
     const continuationExpiresAt = continuationOffered
-      ? new Date(Date.now() + Math.max(Number(input.continuationTtlSeconds) || 0, 15) * 1000).toISOString()
+      ? new Date(Date.now() + (receiptObservationOnly
+        ? 15
+        : Math.max(Number(input.continuationTtlSeconds) || 0, 15)) * 1000).toISOString()
       : null;
     if (continuationOffered) {
       try {
@@ -3684,7 +3711,7 @@ async function throwSandboxRunnerError(sandbox) {
   throw Object.assign(new Error(message), { status: 502, code: 'SANDBOX_RUN_FAILED' });
 }
 
-const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const crypto=require('node:crypto');const [tokenHash,projectHash]=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
+export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const crypto=require('node:crypto');const [tokenHash,projectHash]=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
