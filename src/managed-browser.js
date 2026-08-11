@@ -2532,6 +2532,16 @@ const { chromium } = require('playwright');
         // and the extension's own candidateInputs()/questionLabel() - keep the three in sync by
         // hand.
         //
+        // THE HAND-SYNCING FAILED ONCE, MEASURED. On 2026-08-11 a fix for Lever custom-question
+        // labels was verified against 39 live employer forms, merged into the backend as PR 477 and
+        // deployed, and the next real run was identical to the one before it: the same 7 discovered
+        // questions, the same 9 filled fields, the same 8 blockers. THIS copy is the one that opens
+        // employer forms, and it had not been touched. Nothing in either repo can notice that -
+        // there is no shared module, no generated artefact and no test that reads both - so the note
+        // above is the entire mechanism, and a note is not a mechanism. Anyone changing questionLabel
+        // here should expect to change it three times, and should assume the other two have drifted
+        // until they have read them.
+        //
         // D-01. This used to scan text-shaped inputs ONLY, on the reasoning that the caller never
         // clicks a choice control so there was nothing useful to report. That reasoning was already
         // stale - the caller does answer choice questions, through fillByLabelText's select, radio
@@ -2567,15 +2577,67 @@ const { chromium } = require('playwright');
             function genericControlText(value) {
               return /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/.test(clean(value).toLowerCase());
             }
-            function nearestQuestionText(start) {
+            /* THE HEADING A CONTROL SITS UNDER. Ported from nearestQuestionText in the backend's
+             * READ_SUBMIT_READINESS_SCRIPT, which is the walk that already names these very fields
+             * in the blocker line the applicant reads, so a question recovered here and the blocker
+             * about the same field say the same words.
+             *
+             * textContent, NOT innerText, and that is measured rather than inherited: Lever paints
+             * its card headings text-transform:uppercase, and innerText reports the transformed
+             * glyphs, so "Year of Graduation" comes back as "YEAR OF GRADUATION". That is the
+             * employer's styling, not the employer's words.
+             *
+             * refuseAmbiguousBlock is the safety bound, and it is passed ONLY by the handle-only
+             * fall-through below. A block holding more than one control ends the walk there, because
+             * the first heading inside such a block speaks for one of the controls in particular and
+             * borrowing it names the other one wrongly. Measured on the live Palantir Lever form on
+             * 2026-08-11: the "High School Name & Graduation Year" card holds two controls, so the
+             * walk stops and both stay honest handle-only rows, while the seven single-control cards
+             * recover their own headings. A wrong question is worse than a missing one - the
+             * resolver answers "High School Name" out of the education profile and would type her
+             * UNIVERSITY into it.
+             *
+             * The OTHER caller, the long-standing tail below, passes nothing and keeps the unbounded
+             * walk it has always had. It fires where the assembled string is empty or is generic
+             * control text, never where a handle is present, so the ambiguity this bound guards
+             * against is not the shape it sees, and narrowing it would only lose labels. */
+            function nearestQuestionText(start, refuseAmbiguousBlock) {
               let block = start.parentElement;
               for (let depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
                 if (!block.matches('div, section, li, fieldset')) continue;
+                if (refuseAmbiguousBlock && block.querySelectorAll(
+                  'input:not([type="hidden"]), textarea, select, [role="combobox"]'
+                ).length > 1) return '';
                 const candidate = block.querySelector('label, legend, .question, h3, h4');
                 const text = clean((candidate && candidate.textContent) || '').toLowerCase();
                 if (text && !genericControlText(text)) return text;
               }
               return '';
+            }
+            /* NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a machine handle
+             * this runner can name, so removing them all leaves no word a person wrote.
+             *
+             * The list and the order are the backend's PROVIDER_HANDLE_STRIPPERS, verbatim
+             * (src/lib/questionDiscovery.ts). They have to agree, because the whole safety argument
+             * for the fall-through below is that a string this calls handle-only is a string
+             * normalizeDiscoveredLabel already reduces to '' and drops - so recovering it can only
+             * add a question, never rename one. Order is load-bearing: the uuid strip is what turns
+             * the middle bracket of cards[<uuid>][field0] into a bare "[ ]" for the next one to
+             * clear.
+             *
+             * \p{L} and not [a-z]: a Japanese or Arabic label is a label. */
+            function isProviderHandleOnly(value) {
+              const strippers = [
+                /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+                /\bquestion_\d+\b/gi,
+                /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/gi,
+                /\[\s*\]/g,
+                /\bcards\s*\[\s*field\d+\s*\]/gi,
+                /\s*\*?\s+\d{2,5}\s*$/u
+              ];
+              let rest = value == null ? '' : String(value);
+              for (const stripper of strippers) rest = rest.replace(stripper, ' ');
+              return !/\p{L}/u.test(rest);
             }
             const fieldset = el.closest('fieldset');
             const legend = fieldset ? fieldset.querySelector('legend') : null;
@@ -2629,6 +2691,45 @@ const { chromium } = require('playwright');
             }
             const parts = [labelText || '', ariaLabel, el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
+            /* THE HANDLE THAT IS NOT A LABEL.
+             *
+             * own is the visible label, the aria-label and the placeholder concatenated with the
+             * control's name and id, and returning it whenever it is merely non-empty means a field
+             * carrying NOTHING but a name returns that name. Lever's custom questions are built that
+             * way: the question text sits in a sibling div.application-label, never in a label
+             * element, and the control carries only name="cards[<uuid>][field0]". So the label this
+             * runner reports is the handle, normalizeDiscoveredLabel drops it as handle-only, and
+             * the question is simply absent - no row on the Apply screen, no answer resolved, no
+             * fill attempted, and the run comes back saying "University" is required and is still
+             * empty while the packet holds USC Viterbi, 2028 and Computer Science.
+             *
+             * This is a port of the fall-through merged into the backend as PR 477. It had to be
+             * made twice because it lives twice: the backend's questionDiscovery.ts, the extension,
+             * and THIS runner each carry their own questionLabel, and the runner is the copy that
+             * drives employer forms. The backend fix alone changed nothing about a real run.
+             *
+             * BOTH CONDITIONS, and both are needed:
+             *   - nothing a person wrote (no label text, no aria-label, no placeholder), so a field
+             *     with any human text keeps it and this branch cannot touch it; and
+             *   - what survives is nothing but handles this runner can name, so a meaningful name or
+             *     id - firstName, school, gpa - is still a label and is kept.
+             *
+             * That pair is exactly the set of fields whose label is thrown away downstream today,
+             * which is why this cannot rename a question that already reads correctly: it only runs
+             * where the stored label would have been the empty string. When the walk finds nothing
+             * either, own is returned unchanged and the field is dropped as before - no heading is
+             * invented for a field that has none.
+             *
+             * NOT tried again here, because the original author measured both and rejected them:
+             * adding .application-label to the walk's candidates recovers four more fields and also
+             * resolves "High School Name*" to "University of Southern California, Viterbi School of
+             * Engineering"; and keying the regression diff on selector rather than index reports 93
+             * false positives, because every radio in a group shares one name. */
+            const written = clean([labelText || '', ariaLabel, el.getAttribute('placeholder') || ''].join(' '));
+            if (own && !written && isProviderHandleOnly(own)) {
+              const underHeading = nearestQuestionText(el, true);
+              if (underHeading) return underHeading;
+            }
             const fallbackText = nearestQuestionText(el);
             if (own && !genericControlText(own)) return own;
             return fallbackText || own;
