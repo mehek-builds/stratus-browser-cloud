@@ -412,9 +412,8 @@ test('plain fill actions dispatch native selects through selectOption', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.tag === 'select'/);
   assert.match(SANDBOX_RUNNER, /selectNativeOption\(target, action\.value \|\| ''\)/);
   assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| ''\]/);
-  assert.match(SANDBOX_RUNNER, /actual\.some\(\(candidate\) => optionMatches\(candidate, expected\)/);
   assert.match(helper, /const choices = await field\.evaluate/);
-  assert.match(helper, /const valueMatch = labelMatch\n\s+\? null/);
+  assert.match(helper, /const byLabel = chooseOptionIndex\(choices\.map\(\(choice\) => choice\.label\), wanted\)/);
   assert.equal((helper.match(/field\.evaluate/g) || []).length, 1, 'native options are inspected once');
   assert.equal((helper.match(/field\.selectOption/g) || []).length, 1, 'one proven option is selected once');
 });

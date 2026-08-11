@@ -230,18 +230,83 @@ const { chromium } = require('playwright');
         return a === b || (b.length > 6 && a.includes(b)) || (a.length > 6 && b.includes(a));
       });
     };
+    /* EXACTNESS IS NOT NEGOTIABLE ON A CHOICE CONTROL, AND HERE IS WHY.
+     *
+     * optionMatches above is deliberately loose: for texts longer than six characters it matches in
+     * BOTH directions, so an option containing the answer, or contained by it, counts. That is
+     * survivable on a free-text field, where a near miss reads as a typo. It is not survivable on a
+     * select, because these controls carry sponsorship, work authorisation and disclosure answers,
+     * and the ordinary shape of a Lever or Greenhouse list is a short answer that is a PREFIX of the
+     * true longer one:
+     *
+     *   I do not require sponsorship
+     *   I do not require sponsorship now, but will in the future
+     *   I am authorized to work
+     *   I am authorized to work only with a student visa
+     *
+     * Under containment every one of those pairs matches, so the answer that gets sent depends on
+     * which line the employer happened to list first. A near miss there is not a cosmetic error: it
+     * is a false statement about visa status and work authorisation, made to an employer, under the
+     * applicant's own name, and neither she nor Litos would ever see it. So on a native select the
+     * answer must be the answer: exact after case and punctuation are normalised away, or nothing.
+     *
+     * Two loosenings survive because neither can produce a false claim:
+     *   - answerOptions synonyms, which are authorised restatements of the same answer (yes / agree,
+     *     and the enumerated refusals), compared by exact equality and never by containment;
+     *   - decline-to-decline intent, which requires BOTH texts to read independently as a refusal to
+     *     state. A refusal cannot be a near miss of a claim, and an employer words its opt-out
+     *     however it likes.
+     * Anything else is left for the applicant, which is what an unanswerable field already does. */
+    const optionMatchesExactly = (candidate, wanted) => {
+      const a = normalized(candidate);
+      if (!a) return false;
+      return answerOptions(wanted).some((option) => normalized(option) === a);
+    };
+    const declineMatches = (candidate, wanted) =>
+      DECLINE_TO_STATE.test(normalized(candidate)) && DECLINE_TO_STATE.test(normalized(wanted));
+    // THE FIRST OF SEVERAL IS NEVER AN ANSWER. The exact tier is ranked by what the CALLER asked for
+    // rather than by where the employer put it: her own words first, then the authorised
+    // restatements in the order answerOptions lists them, and inside one rank the list is searched
+    // whole. So DOM order can never beat an exact match found later, and a widened match sits
+    // strictly below every exact one. A widened match is used only when the list offers exactly one;
+    // two candidates fail closed rather than being resolved by position.
+    const chooseOptionIndex = (texts, wanted) => {
+      if (!clean(wanted)) return -1;
+      for (const option of answerOptions(wanted)) {
+        const want = normalized(option);
+        if (!want) continue;
+        const exact = texts.findIndex((text) => normalized(text) === want);
+        if (exact !== -1) return exact;
+      }
+      const refusals = [];
+      for (let index = 0; index < texts.length; index += 1) {
+        if (declineMatches(texts[index], wanted)) refusals.push(index);
+      }
+      if (!refusals.length) return -1;
+      return new Set(refusals.map((index) => normalized(texts[index]))).size === 1 ? refusals[0] : -1;
+    };
     const verifyFilled = async (field, expected) => {
-      const actual = await field.evaluate((element) => {
-        if (element instanceof HTMLInputElement && element.type === 'file') return [element.files?.length ? 'file' : ''];
-        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return [element.checked ? 'checked' : ''];
+      const state = await field.evaluate((element) => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return { kind: 'other', actual: [element.files?.length ? 'file' : ''] };
+        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return { kind: 'other', actual: [element.checked ? 'checked' : ''] };
         if (element instanceof HTMLSelectElement) {
           const selected = element.selectedOptions && element.selectedOptions[0];
-          return selected ? [selected.textContent || '', selected.value || ''] : [element.value || ''];
+          return { kind: 'select', actual: selected ? [selected.textContent || '', selected.value || ''] : [element.value || ''] };
         }
-        return ['value' in element ? String(element.value || '') : (element.textContent || '')];
-      }).catch(() => []);
+        return { kind: 'other', actual: ['value' in element ? String(element.value || '') : (element.textContent || '')] };
+      }).catch(() => ({ kind: 'other', actual: [] }));
+      const actual = state.actual || [];
       if (!clean(expected)) return actual.some((candidate) => Boolean(clean(candidate)));
       if (actual.includes('checked') && /^yes$/i.test(clean(expected))) return true;
+      /* A VERIFICATION THAT CAN ONLY AGREE WITH THE CHOOSER IS NOT A VERIFICATION. selectNativeOption
+       * picked the option it picked BECAUSE a predicate said yes; asking that same predicate the same
+       * question about the same pair afterwards is a tautology, and it is the reason the containment
+       * defect above shipped reporting selectNativeOption=true and verifyFilled=true together. So a
+       * select is checked against the ANSWER, by the same exact rule that was allowed to choose it,
+       * and a control left holding a substring relative of the answer fails closed. */
+      if (state.kind === 'select') {
+        return actual.some((candidate) => optionMatchesExactly(candidate, expected) || declineMatches(candidate, expected));
+      }
       return actual.some((candidate) => optionMatches(candidate, expected) || normalized(candidate) === normalized(expected));
     };
     /* A NATIVE SELECT IS A CHOICE CONTROL EVEN WHEN THE CALLER SAYS FILL.
@@ -257,7 +322,14 @@ const { chromium } = require('playwright');
      * while other native forms may expose only one of them. The option snapshot matters because
      * selectOption auto-waits for a requested option. Trying a label that is not present before its
      * matching value, or trying any unmatched answer, otherwise spends the full action timeout on
-     * every speculative call. */
+     * every speculative call.
+     *
+     * The snapshot is also what makes the choice answerable: chooseOptionIndex reads the WHOLE list
+     * before it commits, so an exact answer beats a looser candidate that happens to sit above it,
+     * and an ambiguous list is refused instead of resolved by position. See chooseOptionIndex for
+     * why a select cannot be allowed the containment rule the rest of the runner uses. The chosen
+     * option is then selected by its index in that same snapshot, so the option that was inspected
+     * is exactly the option that is taken. */
     const selectNativeOption = async (field, wanted) => {
       const choices = await field.evaluate((element) => {
         if (!(element instanceof HTMLSelectElement)) return [];
@@ -266,19 +338,12 @@ const { chromium } = require('playwright');
           value: option.value || ''
         }));
       }).catch(() => []);
-      const wantedOptions = answerOptions(wanted);
-      const labelMatch = choices.find((choice) => wantedOptions.some((option) => optionMatches(choice.label, option)));
-      const valueMatch = labelMatch
-        ? null
-        : choices.find((choice) => wantedOptions.some((option) => optionMatches(choice.value, option)));
-      const selection = labelMatch
-        ? { label: labelMatch.label }
-        : valueMatch
-          ? { value: valueMatch.value }
-          : null;
-      if (!selection) return false;
+      if (!choices.length) return false;
+      const byLabel = chooseOptionIndex(choices.map((choice) => choice.label), wanted);
+      const index = byLabel === -1 ? chooseOptionIndex(choices.map((choice) => choice.value), wanted) : byLabel;
+      if (index === -1) return false;
       try {
-        await field.selectOption(selection);
+        await field.selectOption({ index });
         return true;
       } catch {
         return false;
