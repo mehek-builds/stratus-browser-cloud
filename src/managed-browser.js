@@ -1207,21 +1207,36 @@ const { chromium } = require('playwright');
        * window.location.assign(confirmationPath), where confirmationPath is the board's own
        * '/embed/job_app/confirmation?for=<company>&token=<id>'. So the evidence that a Greenhouse
        * application was filed is that the browser is standing on Greenhouse's confirmation route
-       * with the form gone. That is the ATS's own state, in the same class as Ashby's published
-       * success container, and it is a far better witness than the sentence on the page: fetched
+       * with the form gone. It is a far better witness than the sentence on the page: fetched
        * read-only, the Cresta confirmation route says "Thank you for applying. Your application has
        * been received.", which the body-text arm below would also match - but it would match it on
        * any page that happened to carry those words.
        *
+       * ITS OWN SOURCE TAG, and NOT the 'ats_state' the container arm below uses, which is the whole
+       * point rather than bookkeeping. This arm is derived from location: hostname and pathname, set
+       * by where the browser actually IS, and an employer page cannot write itself onto Greenhouse's
+       * hostname. The container arm is derived from a CSS class the page prints, and that class is
+       * published for customer styling, so any page at all can mint one. The two are not the same
+       * kind of evidence and must not answer to the same name: securityCodeVerdict lets the strong
+       * one overturn a challenge control that is still standing, and letting a forgeable class do
+       * that would hand any page the power to have a refused code reported as accepted.
+       *
+       * EU DATA REGION. Greenhouse serves boards for EU-resident customers from job-boards.eu and
+       * boards.eu on the same domain, and without the optional label those hosts fell through this
+       * arm to the body-text one. On a security-code screen that is the difference between a filed
+       * EU application being reported accepted and being reported refused, because body text is no
+       * longer allowed to decide that. Not a regression, it was never matched, but this change is
+       * what made it load-bearing.
+       *
        * Gated on the form being gone for the same reason every other arm is. A route match with an
        * application form still on screen is not a confirmation, it is a page mid-navigation. */
-      const greenhouseConfirmation = /(^|\.)(?:job-boards|boards)\.greenhouse\.io$/i.test(location.hostname)
+      const greenhouseConfirmation = /(^|\.)(?:job-boards|boards)\.(?:eu\.)?greenhouse\.io$/i.test(location.hostname)
         && /\/(?:application_)?confirmation\/?$/i.test(location.pathname);
       if (greenhouseConfirmation && !formStillPresent) {
         const body = clean(document.body ? document.body.innerText : '');
         return {
           state: 'confirmed',
-          source: 'ats_state',
+          source: 'ats_route',
           evidence: 'greenhouse:' + location.pathname,
           message: body.slice(0, 600) || 'Greenhouse confirmation page',
           formStillPresent
@@ -1267,6 +1282,147 @@ const { chromium } = require('playwright');
       return { state: 'unknown', source: null, evidence: null, message: null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
+    /* IS A HUMAN ACTUALLY BEING ASKED FOR ANYTHING, read off the widget rather than off a class name.
+     *
+     * THE DEFECT THIS REPLACES, measured on the applicant's own packets: the old test was a single
+     * count of 'iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]' with no visibility
+     * test, no badge exclusion and no token read. reCAPTCHA v3 and invisible v2 render
+     * <div class="grecaptcha-badge"> on pages that ask a person for NOTHING - the score comes from
+     * behaviour and the token is minted on submit - and that div matches [class*="captcha" i]. So
+     * every Greenhouse and Ashby page carrying the badge reported a challenge. 48 of 158 application
+     * packets were labelled "CAPTCHA requires your attention" on that basis, which made this the
+     * single largest blocker in the pipeline and almost all of it was noise.
+     *
+     * THE ASYMMETRY THIS IS TUNED TO. A false "no captcha" lets a submit run into a wall, and the
+     * post-submit readers see no receipt: one wasted click, recoverable. A false "captcha" strands a
+     * finished application and hands it back to a person to redo by hand. So a challenge is reported
+     * only on POSITIVE evidence of a real, visible, unsolved one, and a probe that cannot see at all
+     * reports nothing rather than inventing a wall.
+     *
+     * FIVE CHECKS, ported from hasUnresolvedCaptcha in the backend's portalSubmission.ts so the two
+     * layers stop disagreeing by construction. Translated, not copied: that one probes node by node
+     * with locators, this one collects with ONE locator and decides in ONE page-side pass.
+     *
+     *   1. VISIBLE. A node with a zero dimension, display:none, visibility:hidden or opacity 0 is not
+     *      being shown to anyone. Same rule as readSubmitOutcome above, for the same reason.
+     *   2. NOT THE BADGE. Matched with closest(), never a self-or-descendant check: the badge is a
+     *      CONTAINER whose child anchor iframe matches iframe[src*="captcha" i] on its own, and its
+     *      own class list is not a descendant of itself. closest() covers both in one probe. If v3
+     *      scores the session badly it escalates to a real widget, and that widget renders OUTSIDE
+     *      the badge, so closest() returns null and it is counted normally.
+     *   3. NOT AN INVISIBLE WIDGET, unless a bframe is VISIBLE. A form that mounts its own
+     *      <div class="g-recaptcha" data-size="invisible"> outside the badge is the shape the badge
+     *      exclusion does not watch. The bframe is the load-bearing half: reCAPTCHA renders the
+     *      image-grid popup in a SECOND iframe whose src carries 'bframe', and an ESCALATED invisible
+     *      widget still declares itself invisible. Presence alone is not enough, and testing only
+     *      presence was a measured regression: reCAPTCHA MOUNTS the bframe collapsed and keeps it
+     *      mounted after the popup closes, so a page showing nobody anything carried one and the
+     *      invisible exclusion switched itself off over a form with no challenge on it.
+     *   4. AN OPEN POPUP BEATS ANY TOKEN. If a bframe is on screen, the provider is asking a person
+     *      right now, so whatever sits in the response field is stale by construction. This is the
+     *      only staleness signal a DOM read can honestly produce.
+     *   5. UNSOLVED. Something rendered plus at least one response field that does not hold a real
+     *      token. Read off the DOM PROPERTY, which is why this runs in the page: g-recaptcha-response
+     *      is a <textarea> with no value ATTRIBUTE at all, so an attribute read reports every solved
+     *      widget as unsolved. Widget count is deliberately not compared to token count, because
+     *      providers render a variable number of visible nodes per widget, so "3 nodes, 1 token" is
+     *      one solved widget and not two missing ones.
+     *
+     * COLLECTED WITH A LOCATOR, NOT document.querySelectorAll, and that is a capability and not a
+     * style choice. Playwright's CSS engine pierces OPEN SHADOW ROOTS; querySelectorAll stops at the
+     * boundary. An embedded widget mounted in a shadow root was invisible to the first version of
+     * this and visible to the selector it replaced, which is a straight regression against what the
+     * runner could already see.
+     *
+     * NO CANDIDATE CAP, and the reason it went is narrower than the reason first written here. The
+     * first version capped the scan at 20 nodes, and the comment claimed the cap bounded per-node
+     * round trips. It never did: that cap lived INSIDE a single page.evaluate, as a slice of a
+     * querySelectorAll result, so every node it dropped was already in the page and cost nothing to
+     * look at. What it actually did was run BEFORE the visibility and badge filters, so twenty hidden
+     * nodes whose class names merely contain "captcha" used it up and a real widget behind them was
+     * never examined. That is the whole defect and the whole reason the cap is gone. Nothing replaces
+     * it because nothing needs to: measured on this shape, 1000 nodes decide in 14ms, 100000 in
+     * 1203ms and 500000 in 2359ms, one round trip, linear, no throw. */
+    const CAPTCHA_SELECTORS = {
+      challenge: [
+        'iframe[src*="captcha" i]',
+        'iframe[src*="challenges.cloudflare.com" i]',
+        '[class*="captcha" i]',
+        '[id*="captcha" i]',
+        '[data-sitekey]'
+      ].join(', '),
+      response: [
+        'textarea[name*="captcha-response" i]',
+        'input[name*="captcha-response" i]',
+        'textarea[id*="captcha-response" i]',
+        'input[id*="captcha-response" i]',
+        'textarea[name="cf-turnstile-response"]',
+        'input[name="cf-turnstile-response"]'
+      ].join(', '),
+      bframe: 'iframe[src*="/recaptcha/"][src*="bframe" i]',
+      badge: '.grecaptcha-badge',
+      invisible: '[data-size="invisible"], iframe[src*="size=invisible" i]',
+      /* WHAT COUNTS AS A TOKEN AT ALL. Every provider mints an encoded blob hundreds of characters
+       * long, so this floor sits far below any real one and above every placeholder: an empty field,
+       * a whitespace field, and the short literals a restored form or a test harness leaves behind
+       * ('null', 'undefined', 'expired'). It buys exactly one thing, that a short leftover value
+       * stops reading as a solved widget, and it is honest about what it cannot buy: a
+       * correctly-shaped token that a provider has expired SERVER SIDE is indistinguishable from a
+       * fresh one in the DOM, by this layer or by the backend. Check 4 is the only real answer to
+       * that, and it only speaks when the provider puts a popup on screen.
+       *
+       * TWO KNOWN FALSE POSITIVES, both deliberate. Cloudflare's documented test token
+       * 'XXXX.DUMMY.TOKEN.XXXX' is 21 characters and hCaptcha's
+       * '10000000-aaaa-bbbb-cccc-000000000001' is 36, so both sit under this floor and both are
+       * genuinely solved states that get called unsolved. They are test-key states rather than
+       * anything an employer serves, the miss fails toward "CAPTCHA requires your attention" which
+       * strands rather than lies, and the selector this replaced flagged those pages too. Raising the
+       * floor to admit them would let every short leftover value back in, which is the direction that
+       * costs an application. */
+      minTokenLength: 40
+    };
+
+    /* Pure, and separated from the locator on purpose: this is the half that decides, so it is the
+     * half a test has to be able to drive with real nodes. It takes the selector table as an
+     * argument rather than closing over it because evaluateAll serializes the function into the
+     * page, where nothing from this scope exists. */
+    const captchaSnapshot = (nodes, sel) => {
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        const style = getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (Number(style.opacity) === 0) return false;
+        return true;
+      };
+      const bframeOpen = nodes.some((node) => node.matches(sel.bframe) && isVisible(node));
+      let visibleChallenges = 0;
+      for (const node of nodes) {
+        if (!node.matches(sel.challenge)) continue;
+        if (!isVisible(node)) continue;
+        if (node.closest(sel.badge)) continue;
+        if (!bframeOpen && (node.matches(sel.invisible) || node.closest(sel.invisible))) continue;
+        visibleChallenges += 1;
+      }
+      if (visibleChallenges === 0) return false;
+      if (bframeOpen) return true;
+      const tokens = nodes
+        .filter((node) => node.matches(sel.response))
+        .map((node) => String(node.value == null ? '' : node.value).trim());
+      if (tokens.length === 0) return true;
+      return tokens.some((token) => token.length < sel.minTokenLength);
+    };
+
+    const readUnresolvedCaptcha = () => page
+      .locator([CAPTCHA_SELECTORS.challenge, CAPTCHA_SELECTORS.response, CAPTCHA_SELECTORS.bframe].join(', '))
+      .evaluateAll(captchaSnapshot, CAPTCHA_SELECTORS)
+      // Fails OPEN, and it is the only probe in this file that does. Everywhere else "we could not
+      // see" means "assume the worse state"; here the worse state IS the false alarm, because it is
+      // the one that strands a finished application. A read that throws saw no widget, no token and
+      // no badge, so it has no evidence of a challenge and must not manufacture one.
+      .catch(() => false);
+
     /* NETWORK IDLE IS NOT A CLIENT STATE TRANSITION. A React application can accept the physical
      * submit click, schedule its verification step for a later browser task, and make no request or
      * navigation that Playwright can wait on. The controlled portal reproduced this exactly: the
@@ -1278,16 +1434,61 @@ const { chromium } = require('playwright');
      * receipt, or an explicit refusal. Polling the same typed readers keeps prose from becoming a
      * trigger, and the short deadline bounds the cost on an employer page that remains genuinely
      * ambiguous. This is deliberately not a blind sleep: a synchronous receipt returns on the first
-     * pass, while a client-rendered challenge gets the browser tasks it needs to commit. */
-    const waitForPostSubmitApplicationState = async () => {
+     * pass, while a client-rendered challenge gets the browser tasks it needs to commit.
+     *
+     * securityCodeSettles is false for exactly one caller: the run that has just RESUBMITTED with a
+     * code in the boxes. There the code control is the thing under test, not evidence of anything
+     * settling, and a wait that returned the moment it saw one would return before the page had
+     * changed at all. Everywhere else a challenge appearing is a real terminal state. */
+    const waitForPostSubmitApplicationState = async ({ securityCodeSettles = true } = {}) => {
       const deadline = Date.now() + 3_000;
       while (Date.now() < deadline) {
-        if (await readSecurityCodeChallenge()) return;
+        if (securityCodeSettles && await readSecurityCodeChallenge()) return;
         const outcome = await readSubmitOutcome();
         if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
         await page.waitForTimeout(50).catch(() => undefined);
       }
     };
+
+    /* DID THE EMPLOYER TAKE THE CODE. One function, because there are two places that answer this and
+     * a copy is how one of them stays wrong.
+     *
+     * ONLY AN UNFORGEABLE RECEIPT MAY OUTRANK A STANDING CONTROL. Two separate reasons stack here,
+     * and the predicate has to satisfy both.
+     *
+     * FIRST, EVERY WEAK ARM IS UNGATED ON THIS PATH. readSubmitOutcome gates its lesser arms on
+     * formStillPresent, which looks for input[type=file], input[type=email], textarea,
+     * form button[type=submit] or form input[type=submit]. Greenhouse renders the code as eight
+     * maxLength=1 input[type=text] boxes, which match none of them, and by the time the code screen
+     * exists the application form itself is already gone. So formStillPresent is false on this whole
+     * path whatever is really happening, the body-text arm runs unopposed, and any
+     * confirmation-shaped sentence on the page flips the verdict. Measured on the shipped readers: a
+     * refused code on a screen carrying "Thank you for applying" read as ACCEPTED through source
+     * 'page_text', both with a bare <button> inside a form and in the React shape with no <form>
+     * element at all. The only shape that survived did so because the control happened to spell
+     * type="submit" literally, which is not a property any employer owes us.
+     *
+     * SECOND, AND THIS IS WHY THE TEST IS 'ats_route' AND NOT 'ats_state'. Narrowing to the ATS's own
+     * state was not narrow enough, because two different things carried that one name. The container
+     * arm keys on '.ashby-application-form-success-container', a CSS class the page prints and that
+     * Ashby publishes for customer styling: any page can write it, including a Greenhouse code screen
+     * that has just refused a code. Measured, a page with no Ashby involvement at all minted a
+     * confirmed/ats_state receipt purely from the class string. The route arm keys on location, which
+     * is set by where the browser actually IS and which no employer markup can forge. Only that one
+     * is allowed to overturn a challenge the page is still showing.
+     *
+     * This is the single predicate on this path where being wrong means telling an applicant a
+     * refused application is filed, so it takes evidence nobody can print. The Cresta fix survives
+     * intact: in production that confirmation is exactly the route arm. Everything else is unchanged,
+     * and deliberately still generous in the safe direction: an explicit refusal is a refusal
+     * whatever its source, a standing control is a refusal, and a cleared control with nothing
+     * contrary is acceptance. A forged CONTAINER can now only ever produce a false refusal, which
+     * costs a re-check rather than a lost application. */
+    const securityCodeVerdict = (receipt, challengeStanding) => (
+      receipt.state === 'confirmed' && receipt.source === 'ats_route'
+        ? 'accepted'
+        : ((receipt.state === 'rejected' || challengeStanding) ? 'rejected' : 'accepted')
+    );
 
     /* Type a code the applicant supplied into the control found above, and say what happened.
      *
@@ -2565,15 +2766,40 @@ const { chromium } = require('playwright');
             // reject or rotate the code and must remain structurally impossible.
             const verification = await confirmAndSubmitPass({ ...action, securityCode: undefined });
             passes.push(verification.pass);
+            /* THE VERDICT IS THE RECEIPT, NOT THE CONTROL, and the difference cost a filed
+             * application.
+             *
+             * This branch used to read the code control the instant networkidle resolved and call it
+             * rejected if the control was still attached. On a client-rendered Greenhouse embed
+             * networkidle resolves BEFORE React swaps the view, so the control is momentarily still
+             * there and a perfect submission read as a refusal. Measured on the Cresta packet
+             * (Greenhouse, Data Science Intern (Customer Success)): the attempt at 17:35:04Z was
+             * recorded rejected, and at 17:36:04Z recruiting@cresta.ai wrote "Thank you for applying
+             * to Cresta" to that packet's alias. The application was filed and the applicant was told
+             * to go and file it again by hand.
+             *
+             * Two changes, and they belong together. Wait for a state the same way the sibling
+             * application submit four lines below already does, and then let a CONFIRMED receipt
+             * outrank the control: a page that has said the application is in is not waiting for a
+             * code, whatever is still mounted while the view finishes changing. Control presence is
+             * still what decides the ambiguous case, because on a genuine refusal Greenhouse renders
+             * no receipt at all and the challenge is all there is to read. An explicitly REJECTED
+             * receipt is honoured too, which the old shape could not do: it read a cleared control
+             * over a failure panel as acceptance. What may outrank the control, and why it has to be
+             * that narrow, is argued at securityCodeVerdict. */
+            let codeOutcome = 'not_entered';
             if (verification.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+              await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+              const receipt = await readSubmitOutcome();
+              const still = await readSecurityCodeChallenge();
+              codeOutcome = securityCodeVerdict(receipt, still);
             }
-            const still = await readSecurityCodeChallenge();
             securityCodeAttempt = {
               supplied: true,
               entered: true,
               resubmitted: verification.pass.submissionOutcome === 'clicked',
-              outcome: verification.pass.submissionOutcome !== 'clicked' ? 'not_entered' : (still ? 'rejected' : 'accepted')
+              outcome: codeOutcome
             };
           }
         } else {
@@ -2637,15 +2863,18 @@ const { chromium } = require('playwright');
             // nothing.
             await locator.click().catch(() => undefined);
             await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-            // Accepted or not is read off the CONTROL, the same way its arrival was: a challenge
-            // still standing after the resubmit means the code did not clear it. Deliberately not
-            // read off any success or error sentence.
+            // The same verdict the atomic branch above makes, for the same measured reason: the
+            // control is still attached while a client-rendered view swaps, so a receipt outranks it.
+            // Two code paths reaching opposite conclusions about the same page is how one of them
+            // stays wrong without anyone noticing.
+            await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+            const receipt = await readSubmitOutcome();
             const still = await readSecurityCodeChallenge();
             securityCodeAttempt = {
               supplied: true,
               entered: true,
               resubmitted: true,
-              outcome: still ? 'rejected' : 'accepted'
+              outcome: securityCodeVerdict(receipt, still)
             };
           }
         }
@@ -2987,7 +3216,10 @@ const { chromium } = require('playwright');
     // The gate's findings lead, because "we did not send this" is the first thing the caller needs
     // to know and the reason has to travel with it.
     const blockers = [...submitGateBlockers];
-    if (await page.locator('iframe[src*="captcha" i], [class*="captcha" i], [id*="captcha" i]').count() > 0) {
+    // The literal is a contract with the backend, which matches on it to decide whether an attention
+    // state is a human-verification stall. See readUnresolvedCaptcha for what now has to be true
+    // before it is said.
+    if (await readUnresolvedCaptcha()) {
       blockers.push('CAPTCHA requires your attention');
     }
     /* THE SAME READING OF THE FORM THE PRE-SUBMIT GATE MAKES, made on every run.
