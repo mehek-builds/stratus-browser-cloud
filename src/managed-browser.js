@@ -976,22 +976,111 @@ const { chromium } = require('playwright');
         }
         await optionsRoot().first().waitFor({ state: 'visible', timeout }).catch(() => undefined);
       };
-      const clickMatchingOption = async (target) => {
+      /* THE NAME OF AN OPTION IS COMPUTED BY PLAYWRIGHT, NEVER BY THIS FILE.
+       *
+       * An earlier attempt at the fix below read the rows itself, as textContent with aria-label and
+       * title behind it, and compared them with normalized(). Every one of those two decisions was
+       * wrong, and each produced its own defect:
+       *   - the accessible name is aria-labelledby, then aria-label, then content, then title. A row
+       *     reading '<div role="option" aria-label="Bachelor s Degree">BS</div>' is named
+       *     "Bachelor's Degree" and looks like "BS" to a textContent read, and a row named only by
+       *     aria-labelledby has no text at all;
+       *   - normalized() keeps only [a-z0-9], so a stored "C++" becomes "c", which is a substring of
+       *     "computer science"; "C++" and "C#" become the same string; and a stored "はい" becomes
+       *     the empty string and matches nothing at all, on exactly the non-Latin forms the sibling
+       *     commit exists to support;
+       *   - and enumerating the rows through OPTION_NODES, a CSS selector, sees aria-hidden rows
+       *     that the role engine correctly refuses, so an aria-hidden ghost duplicate can win on DOM
+       *     order and swallow the click.
+       * Re-deriving the accessible name by hand is a losing game. Every tier below is a Playwright
+       * role query, so the name is computed by the same engine that computed it before this change.
+       */
+      const clickIfPresent = async (locator) => {
+        const first = locator.first();
+        if ((await first.count()) === 0) return false;
+        if (!await first.isVisible().catch(() => false)) return false;
+        lastClickedOptionText = clean(await first.textContent().catch(() => ''));
+        await first.click();
+        return true;
+      };
+      const menuRoot = () => scopedMenu ?? page;
+      const escapeName = (value) => String(value).replace(/[.*+?^{}()|[\]\\$]/g, '\\$&');
+      // A whole-name match, case-insensitive. Playwright's own exact:true is case SENSITIVE, and an
+      // employer who prints "COMPUTER SCIENCE" is spelling the same answer. Matches here are a
+      // strict subset of the inexact query on the very same string, so this can only choose a
+      // different row among rows that were already acceptable. It cannot reach a new one.
+      const wholeName = (option) => new RegExp('^\\s*' + escapeName(option) + '\\s*$', 'i');
+      /* THE ROWS AN EMPLOYER OFFERS THAT ARE SHORTER THAN THE STORED ANSWER.
+       *
+       * This is optionMatches's third clause, 'a.length > 6 && b.includes(a)', asked forwards. The
+       * predicate asks "is this row a substring of the answer", which needs the row's name in hand;
+       * asking it that way is what drove the previous attempt to compute names itself. Enumerated
+       * instead: a row that is a contiguous run of the answer's own words IS such a substring, so
+       * the runs are generated here and Playwright is asked whether any row is named one of them.
+       * Same six-character floor as optionMatches, and slightly stricter than it, because these runs
+       * keep their punctuation where normalized() would have dissolved it.
+       *
+       * Bucketed longest first so a more specific row still wins: "Bachelor's Degree" is preferred
+       * over "Degree" for a stored "Bachelor's Degree in Computer Science". One query per bucket,
+       * and the twelve-word ceiling bounds that at eleven. Beyond twelve words a stored answer is a
+       * sentence, and the runs inside a sentence are common phrases that belong to no option.
+       */
+      const shorterOptionNames = (target) => {
+        const buckets = new Map();
         for (const option of answerOptions(target)) {
-          const byRole = scopedMenu
-            ? scopedMenu.getByRole('option', { name: option, exact: false }).first()
-            : page.getByRole('option', { name: option, exact: false }).first();
-          if ((await byRole.count()) > 0 && await byRole.isVisible().catch(() => false)) {
-            lastClickedOptionText = clean(await byRole.textContent().catch(() => ''));
-            await byRole.click();
-            return true;
+          const words = clean(option).split(' ').filter(Boolean);
+          if (words.length < 2 || words.length > 12) continue;
+          for (let size = words.length - 1; size >= 1; size -= 1) {
+            for (let start = 0; start + size <= words.length; start += 1) {
+              const span = words.slice(start, start + size).join(' ');
+              if (normalized(span).length <= 6) continue;
+              if (!buckets.has(size)) buckets.set(size, []);
+              if (!buckets.get(size).includes(span)) buckets.get(size).push(span);
+            }
           }
-          const byText = optionsRoot().filter({ hasText: option }).first();
-          if ((await byText.count()) > 0 && await byText.isVisible().catch(() => false)) {
-            lastClickedOptionText = clean(await byText.textContent().catch(() => ''));
-            await byText.click();
-            return true;
-          }
+        }
+        return [...buckets.keys()].sort((left, right) => right - left).map((size) => buckets.get(size));
+      };
+      const clickMatchingOption = async (target) => {
+        // The caller's own order of preference stays dominant: every rule is tried for one answer
+        // before the next answer is considered at all. Inside one answer, the row that IS that
+        // answer is taken before a row that merely contains it, which is the only reordering here.
+        // The second and third rules are the two queries that shipped, in the order they shipped.
+        for (const option of answerOptions(target)) {
+          if (await clickIfPresent(menuRoot().getByRole('option', { name: wholeName(option) }))) return true;
+          if (await clickIfPresent(menuRoot().getByRole('option', { name: option, exact: false }))) return true;
+          if (await clickIfPresent(optionsRoot().filter({ hasText: option }))) return true;
+        }
+        /* THE FIX, and it is last on purpose.
+         *
+         * Every rule above requires the EMPLOYER'S row to contain the answer. optionMatches, which
+         * is what verifyChoiceInContainer uses to decide whether a control ended up holding the
+         * right answer, also accepts a row that is a substring of the stored answer. So an employer
+         * offering "Bachelor's Degree" against a stored "Bachelor's Degree in Computer Science"
+         * could never be clicked, while that identical row would have been accepted as correct had
+         * the form arrived with it already selected.
+         *
+         * It runs last because it is the loosest thing optionMatches permits, and it is bounded to
+         * exactly what optionMatches permits and no further. A control this rule cannot answer is
+         * still reported for a person to finish, which is what the caller does with false.
+         */
+        for (const bucket of shorterOptionNames(target)) {
+          const names = new RegExp('^\\s*(?:' + bucket.map(escapeName).join('|') + ')\\s*$', 'i');
+          const rows = menuRoot().getByRole('option', { name: names });
+          const found = await rows.count();
+          if (found === 0) continue;
+          /* TWO ROWS IS A QUESTION THIS RULE CANNOT ANSWER, so it does not guess.
+           *
+           * A stored "Bachelor's Degree in Computer Science" contains both "Bachelor's Degree" and
+           * "Computer Science", and on a menu offering both there is nothing here that knows
+           * whether the employer asked for the degree or the discipline. Every rule above is
+           * anchored on the answer as the applicant stated it and cannot be ambiguous this way;
+           * this one is asking which PART of her answer the employer wanted. Declining costs her a
+           * minute. Guessing puts the wrong word on a real application under her name, and
+           * verifyChoiceInContainer would accept either row and report it as filled.
+           */
+          if (found > 1) return false;
+          if (await clickIfPresent(rows)) return true;
         }
         return false;
       };
