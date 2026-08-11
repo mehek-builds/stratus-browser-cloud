@@ -31,10 +31,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # playwright-core ships no browser of its own, and the DOM suites plus the end to end run
-      # need a real Chromium. The GitHub Ubuntu image already carries Google Chrome, so resolve it
-      # rather than downloading another copy. Fail loudly if it is ever absent: a silently skipped
-      # browser suite is how an untested chooser reached production in the first place.
+      # THE DOM SUITES AND THE END TO END RUN NEED TWO DIFFERENT BROWSERS, and the first version of
+      # this workflow only provided one, which is why its first green-CI run reported 76 failures.
+      #
+      # The DOM suites call chromium.launch() with no executablePath, so they need Playwright's own
+      # matched build. playwright-core ships the browser downloader but not the browser, hence this
+      # step. test/e2e.mjs is the other case: it launches with config.chromePath, which is what the
+      # Resolve Chrome step below supplies.
+      - name: Install Playwright Chromium
+        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+
+      # The GitHub Ubuntu image already carries Google Chrome, so resolve it rather than downloading
+      # a third copy. Fail loudly if it is ever absent: a silently skipped browser suite is how an
+      # untested chooser reached production in the first place.
       - name: Resolve Chrome
         run: |
           for candidate in /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/chromium-browser /usr/bin/chromium; do
