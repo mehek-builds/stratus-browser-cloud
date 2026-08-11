@@ -305,9 +305,32 @@ const { chromium } = require('playwright');
        * select is checked against the ANSWER, by the same exact rule that was allowed to choose it,
        * and a control left holding a substring relative of the answer fails closed. */
       if (state.kind === 'select') {
+        // Both of these refuse a non-Latin candidate on their first line, because normalized() has
+        // erased it. That is a fail-closed refusal and not a false accept: a Japanese native select
+        // is left for the applicant, the same way this tier leaves any answer it cannot make exact.
         return actual.some((candidate) => optionMatchesExactly(candidate, expected) || declineMatches(candidate, expected));
       }
-      return actual.some((candidate) => optionMatches(candidate, expected) || normalized(candidate) === normalized(expected));
+      /* TWO BLANKS ARE NOT EQUAL ANSWERS.
+       *
+       * normalized() keeps only [a-z0-9], so it erases a Japanese, Arabic, Cyrillic, Greek or
+       * Chinese string entirely. This equality read '' === '' and a field holding いいえ verified as
+       * holding はい, and a field holding NOTHING verified as holding either. Same defect as the
+       * containment arm in verifyChoiceInContainer, one function apart, and unlike the select tier
+       * above it accepts rather than refuses.
+       *
+       * When either side normalises away, compare the CLEANED text instead. Raw equality is strictly
+       * stricter than normalised equality, and it is only ever reached on the pairs the normalised
+       * comparison could not have judged, so no answer that used to verify stops verifying: a
+       * non-Latin answer that is genuinely correct still matches itself.
+       */
+      const sameAnswer = (candidate) => {
+        const a = normalized(candidate);
+        const b = normalized(expected);
+        if (a && b) return a === b;
+        const rawCandidate = clean(candidate).toLowerCase();
+        return Boolean(rawCandidate) && rawCandidate === clean(expected).toLowerCase();
+      };
+      return actual.some((candidate) => optionMatches(candidate, expected) || sameAnswer(candidate));
     };
     /* A NATIVE SELECT IS A CHOICE CONTROL EVEN WHEN THE CALLER SAYS FILL.
      *
@@ -770,10 +793,50 @@ const { chromium } = require('playwright');
      */
     let lastClickedOptionText = '';
     const verifyChoiceInContainer = async (container, expected, clickedOptionText) => {
+      /* CONTAINMENT THAT TWO BLANKS CANNOT SATISFY, AND A JAPANESE ANSWER IS NOT A BLANK.
+       *
+       * THE DEFECT. This arm used to read, plainly:
+       *   answerOptions(expected).some((option) => normalized(text).includes(normalized(option)))
+       * normalized() keeps only [a-z0-9], so both sides of a non-Latin comparison come back as the
+       * empty string, and ''.includes('') is true. Every non-Latin rendered value therefore matched
+       * every non-Latin expected value. Measured in Chromium on 2026-08-11: a control rendering
+       * いいえ verified as holding はい; Нет verified as Да; لا verified as نعم; while the same
+       * control rendering "No" against an expected "Yes" correctly returned false. A blank widget
+       * verified as holding either. On a work-authorisation or eligibility question that is a
+       * materially wrong answer, put on a real employer form under her name and then recorded as a
+       * field that filled correctly, which is the one failure she cannot see and cannot undo.
+       *
+       * It was unreachable in practice only because labelOf discarded non-Latin labels outright, so
+       * a non-Latin form never got this far. That gate is being removed, so this is repaired first.
+       *
+       * THE REPAIR, and why it is a repair rather than a refusal. Containment runs on the normalised
+       * strings only when BOTH survived normalising, which is every Latin comparison and leaves them
+       * bit-identical. When either side normalises away, the comparison falls back to the CLEANED
+       * text: what the employer actually rendered against what she actually asked for, lowercased
+       * so Да still matches да.
+       *
+       * That fallback cannot loosen anything. A string with no [a-z0-9] in it cannot contain one
+       * that has, so every pair the old expression rejected is still rejected; the only pairs whose
+       * verdict changes are the ones the old expression accepted on two blanks, and those now have
+       * to actually overlap. So a wrong non-Latin answer is refused AND a correct one still
+       * verifies, instead of the whole script degrading to "unverified, hand it back to her".
+       * optionMatches cannot do this job: it returns false on its first line for anything that
+       * normalises empty, so without this arm a correct non-Latin choice would verify nowhere.
+       */
+      const carriesAnswer = (haystack, wanted) => {
+        const normalizedHaystack = normalized(haystack);
+        const rawHaystack = clean(haystack).toLowerCase();
+        return answerOptions(wanted).some((option) => {
+          const normalizedOption = normalized(option);
+          if (normalizedHaystack && normalizedOption) return normalizedHaystack.includes(normalizedOption);
+          const rawOption = clean(option).toLowerCase();
+          return Boolean(rawHaystack) && Boolean(rawOption) && rawHaystack.includes(rawOption);
+        });
+      };
       const state = await readChoiceState(container);
       if (state.kind === 'empty') return false;
       const text = state.value;
-      if (optionMatches(text, expected) || answerOptions(expected).some((option) => normalized(text).includes(normalized(option)))) return true;
+      if (optionMatches(text, expected) || carriesAnswer(text, expected)) return true;
       /* THIRD RULE: A WIDGET MAY RENDER WHAT IT IS HOLDING IN A SHORTER FORM THAN THE MENU ROW THAT
        * SET IT, AND THAT IS NOT A LOST ANSWER.
        *
@@ -804,7 +867,11 @@ const { chromium } = require('playwright');
       const row = clean(clickedOptionText || '').toLowerCase();
       const shown = clean(text).toLowerCase();
       if (!row || shown.length < 2 || !row.includes(shown)) return false;
-      return optionMatches(row, expected) || answerOptions(expected).some((option) => normalized(row).includes(normalized(option)));
+      // Same containment, same reason: on its own this arm accepted a clicked いいえ row as carrying
+      // an expected はい, because the row that was clicked and the answer that was wanted both
+      // normalised to nothing. The row-includes-shown gate above is a raw-text check and holds up
+      // fine on any script; it was only ever this last comparison that could not tell them apart.
+      return optionMatches(row, expected) || carriesAnswer(row, expected);
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
