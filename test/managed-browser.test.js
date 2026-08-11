@@ -930,6 +930,170 @@ test('an unanswered React Select does not borrow its answer from the question la
   assert.equal(await verifyChoiceInContainer(untouched, 'No'), false);
 });
 
+/* ---------------------------------------------------------------------------------------------
+ * THE NON-LATIN FALSE ACCEPT, measured in Chromium on 2026-08-11.
+ *
+ * normalized() keeps only [a-z0-9]. Handed two non-Latin strings it returns the empty string for
+ * both, and the containment arm of verifyChoiceInContainer then asked ''.includes(''), which is
+ * true. Every non-Latin rendered value matched every non-Latin expected value, so a control
+ * rendering いいえ verified as holding はい and the field was recorded as correctly filled.
+ *
+ * On a Japanese, Arabic or Cyrillic employer form that is the opposite answer to a yes/no
+ * eligibility or work-authorisation question, submitted under her name, with the run reporting it
+ * as filled. The Latin control at the bottom of each case is the proof that the defect was the
+ * normalisation and not the comparison.
+ * ------------------------------------------------------------------------------------------- */
+
+test('a non-Latin answer does not verify as the opposite non-Latin answer', async () => {
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  // Japanese. はい is yes, いいえ is no.
+  assert.equal(await verifyChoiceInContainer(showing('いいえ'), 'はい'), false, 'いいえ is not はい');
+  assert.equal(await verifyChoiceInContainer(showing('はい'), 'いいえ'), false, 'はい is not いいえ');
+  // Cyrillic. Да is yes, Нет is no.
+  assert.equal(await verifyChoiceInContainer(showing('Нет'), 'Да'), false, 'Нет is not Да');
+  assert.equal(await verifyChoiceInContainer(showing('Да'), 'Нет'), false, 'Да is not Нет');
+  // Arabic, which her own forms include. نعم is yes, لا is no.
+  assert.equal(await verifyChoiceInContainer(showing('لا'), 'نعم'), false, 'لا is not نعم');
+  assert.equal(await verifyChoiceInContainer(showing('نعم'), 'لا'), false, 'نعم is not لا');
+  // And a non-Latin answer that shares nothing with the question it was asked.
+  assert.equal(await verifyChoiceInContainer(showing('日本国籍'), '就労ビザが必要です'), false);
+});
+
+test('a correct non-Latin answer still verifies, rather than being handed back as unverified', async () => {
+  /* THE HALF THAT MAKES THIS A REPAIR. Refusing every comparison whose operands normalise away
+   * would also refuse the CORRECT non-Latin selection, and Litos would report a form it answered
+   * properly as unverified and hand every control back to her. So the comparison falls back to the
+   * cleaned text, which is what the employer rendered and what she asked for, and a right answer
+   * verifies on its own merits.
+   *
+   * optionMatches cannot carry this: it returns false on its first line for anything that
+   * normalises empty. This arm is the only place a non-Latin choice can verify at all.
+   */
+  const { verifyChoiceInContainer, optionMatches } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  assert.equal(await verifyChoiceInContainer(showing('はい'), 'はい'), true);
+  assert.equal(await verifyChoiceInContainer(showing('いいえ'), 'いいえ'), true);
+  assert.equal(await verifyChoiceInContainer(showing('Да'), 'Да'), true);
+  assert.equal(await verifyChoiceInContainer(showing('نعم'), 'نعم'), true);
+  // Case-folded the same way the Latin path is: a widget that renders да verifies against a stored Да.
+  assert.equal(await verifyChoiceInContainer(showing('да'), 'Да'), true);
+  // The widget rendering a fuller sentence than the stored answer is the same widening the Latin
+  // arm already allows, and it has to keep working on a script normalisation cannot see.
+  assert.equal(await verifyChoiceInContainer(showing('はい、必要です'), 'はい'), true);
+  // Stated out loud so the reason this arm exists cannot be optimised away: optionMatches refuses.
+  assert.equal(optionMatches('はい', 'はい'), false, 'optionMatches still cannot see a non-Latin answer');
+});
+
+test('a mixed-script value is judged on the script that carries the answer', async () => {
+  // A board that renders "いいえ (No)" gives normalized() something to work with - "no" - while the
+  // stored はい still normalises away. The old arm asked 'no'.includes('') and said yes, so the
+  // bilingual rendering was the worst case of all: it looks verifiable and is not.
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  assert.equal(await verifyChoiceInContainer(showing('いいえ (No)'), 'はい'), false);
+  assert.equal(await verifyChoiceInContainer(showing('はい (Yes)'), 'はい'), true);
+  // Latin on both sides of a mixed value is untouched: it never reaches the fallback at all.
+  assert.equal(await verifyChoiceInContainer(showing('はい (Yes)'), 'Yes'), true);
+  assert.equal(await verifyChoiceInContainer(showing('いいえ (No)'), 'Yes'), false);
+});
+
+test('a blank widget does not verify as a non-Latin answer', async () => {
+  // readChoiceState reports kind 'chosen' for a value node that renders whitespace, and clean()
+  // takes that to ''. Two empty strings used to satisfy the containment arm, so an EMPTY control
+  // reported itself as holding はい. The 'empty' kind never had to be involved.
+  const { verifyChoiceInContainer } = choiceHelpers();
+  assert.equal(await verifyChoiceInContainer(reactSelectContainer({ chosen: ' ' }), 'はい'), false);
+});
+
+test('the clicked-row rule cannot launder a non-Latin answer either', async () => {
+  /* The third rule verifies against the menu row that was clicked rather than against the rendered
+   * value, and it ended in the same containment expression. Clicking いいえ and then asking whether
+   * that row carries はい compared two blanks and said yes, so the widening built for Greenhouse's
+   * "+971" would have re-admitted every case the arm above now refuses.
+   *
+   * Its row-includes-shown gate is raw text and was always sound on any script; only the last
+   * comparison could not tell the two answers apart.
+   */
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  assert.equal(await verifyChoiceInContainer(showing('いいえ'), 'はい', 'いいえ'), false);
+  assert.equal(await verifyChoiceInContainer(showing('Нет'), 'Да', 'Нет'), false);
+  // The row that genuinely carries the requested answer still widens, exactly as it does in Latin:
+  // Japan's row names the country and the widget renders only the dial code.
+  assert.equal(await verifyChoiceInContainer(showing('+81'), '日本', '日本 +81'), true);
+});
+
+test('Latin choice verification is unchanged by the non-Latin repair', async () => {
+  /* THE THING TO BE MOST CAREFUL ABOUT. Containment still runs on the normalised strings whenever
+   * both sides survive normalising, which is every Latin comparison, so these are the same verdicts
+   * as before the change - including the widenings that legitimately depend on this arm.
+   */
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  // Positives.
+  assert.equal(await verifyChoiceInContainer(showing('No'), 'No'), true);
+  assert.equal(await verifyChoiceInContainer(showing('Yes'), 'Yes'), true);
+  assert.equal(await verifyChoiceInContainer(showing('YES'), 'yes'), true, 'case is not an answer');
+  // The containment arm's own reason to exist: the widget renders more than the stored answer.
+  assert.equal(await verifyChoiceInContainer(showing('No, I am not a protected veteran'), 'No'), true);
+  assert.equal(await verifyChoiceInContainer(showing('I agree'), 'Yes'), true, 'a yes synonym still carries');
+  // Punctuation is still collapsed before containment, which is the whole reason this arm compares
+  // the NORMALISED text on a Latin pair and not the raw text.
+  assert.equal(await verifyChoiceInContainer(showing("Yes, I'm authorized."), 'Yes'), true);
+  // Negatives.
+  assert.equal(await verifyChoiceInContainer(showing('No'), 'Yes'), false);
+  assert.equal(await verifyChoiceInContainer(showing('Yes'), 'No'), false);
+  assert.equal(await verifyChoiceInContainer(showing('Male'), 'Female'), false);
+  assert.equal(await verifyChoiceInContainer(showing('I decline to self-identify'), 'Male'), false);
+  /* NOT ASSERTED HERE, and said out loud rather than quietly fixed: the reverse of the line above,
+   * a widget showing "Female" against an expected "Male", verifies TRUE on this arm and did so
+   * before this change too, because "female" contains "male" and this arm has no minimum length.
+   * That is a separate pre-existing Latin defect with its own blast radius, and Latin behaviour is
+   * preserved exactly here, so it is left standing and reported rather than changed under cover of
+   * a non-Latin repair. optionMatches alone would refuse it: its substring clauses need 7 chars.
+   */
+  // The 43-packet widening, end to end: chosen from the row "United Arab Emirates +971" and rendered
+  // as "+971". This is the case the third rule was built for and it is untouched.
+  assert.equal(
+    await verifyChoiceInContainer(showing('+971'), 'United Arab Emirates', 'United Arab Emirates +971'),
+    true
+  );
+  // And its guard: a control showing an answer that is not part of the row we clicked still fails.
+  assert.equal(
+    await verifyChoiceInContainer(showing('+1'), 'United Arab Emirates', 'United Arab Emirates +971'),
+    false
+  );
+});
+
+// verifyFilled reads a control's own value rather than a widget's rendered answer, and its equality
+// arm carried the identical defect one function away: normalized(candidate) === normalized(expected)
+// is '' === '' for any two non-Latin strings.
+const filledHelpers = () => sandboxScope(['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'verifyFilled']);
+
+// The element read is a DOM branch exercised in the replay suites against real markup; what these
+// cases are about is the comparison it feeds, so the field hands back the value list directly.
+const holding = (...values) => ({ evaluate: async () => values });
+
+test('a filled field holding one non-Latin answer does not verify as another', async () => {
+  const { verifyFilled } = filledHelpers();
+  assert.equal(await verifyFilled(holding('いいえ'), 'はい'), false);
+  assert.equal(await verifyFilled(holding('Нет'), 'Да'), false);
+  assert.equal(await verifyFilled(holding('لا'), 'نعم'), false);
+  // An empty control normalised away too, so it verified as holding whatever non-Latin answer was
+  // asked for. That is a blank field reported as a filled one.
+  assert.equal(await verifyFilled(holding(''), 'はい'), false);
+  // Still useful: the right answer, and a native select's [label, value] pair, both verify.
+  assert.equal(await verifyFilled(holding('はい'), 'はい'), true);
+  assert.equal(await verifyFilled(holding('نعم'), 'نعم'), true);
+  assert.equal(await verifyFilled(holding('いいえ', 'no'), 'いいえ'), true);
+  // Latin, unchanged: equality is still judged on the normalised text.
+  assert.equal(await verifyFilled(holding('Yes'), 'yes'), true);
+  assert.equal(await verifyFilled(holding('Computer Science.'), 'Computer Science'), true);
+  assert.equal(await verifyFilled(holding('No'), 'Yes'), false);
+  assert.equal(await verifyFilled(holding(''), 'Yes'), false);
+});
+
 test('Enter is withheld from a choice control whose menu is shut', async () => {
   const { choiceControlIsClosed } = choiceHelpers();
   const combobox = (expanded) => ({
