@@ -194,6 +194,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   <p class="legend">* indicates a required field</p>
   <button id="submit-btn" type="submit">Submit application</button>
 </form>
+<form id="delayed-receipt-form" novalidate style="display:none">
+  <label for="delayed-receipt-email">Email</label>
+  <input id="delayed-receipt-email" type="email" required>
+  <button id="delayed-receipt-submit" type="submit">Submit Application</button>
+</form>
+<div id="delayed-receipt-result"></div>
+<div id="delayed-receipt-submit-count">submission-count:0</div>
 <div id="submitted"></div>
 <script>
   // fill() sets the value PROPERTY, which no attribute read can see, so the page echoes it into a
@@ -212,6 +219,20 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   document.getElementById('app-form').addEventListener('submit', function (event) {
     event.preventDefault();
     document.getElementById('submitted').textContent = 'yes';
+  });
+  if (new URLSearchParams(location.search).get('receipt') === 'ashby') {
+    document.getElementById('app-form').style.display = 'none';
+    document.getElementById('delayed-receipt-form').style.display = 'block';
+  }
+  document.getElementById('delayed-receipt-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var countNode = document.getElementById('delayed-receipt-submit-count');
+    var count = Number(countNode.textContent.split(':')[1] || '0') + 1;
+    countNode.textContent = 'submission-count:' + count;
+    setTimeout(function () {
+      document.getElementById('delayed-receipt-form').remove();
+      document.getElementById('delayed-receipt-result').innerHTML = '<div class="ashby-application-form-success-container"><div role="status" aria-live="polite">Success. Thank you for submitting your application to kos.ai.</div></div>';
+    }, 3600);
   });
   document.getElementById('apply').addEventListener('click', function () {
     setTimeout(function () {
@@ -939,6 +960,72 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(continued, '#plain-echo'), 'same-page-proof', 'continuation must retain page state from phase one');
   const exitCode = await new Promise((resolve) => child.on('close', resolve));
   assert.equal(exitCode, 0, `continuation runner exited ${exitCode}: ${stderr}`);
+}
+
+/* A PRESSED UNKNOWN RESULT GETS ONE EMPTY-ACTION SECOND READ.
+ *
+ * The fixture delays kos.ai's published Ashby success container until after the runner's bounded
+ * initial wait. Phase zero must report pressed+unknown and offer a 15-second one-shot capability.
+ * Phase one carries no actions. Its confirmed result therefore proves two things together: the
+ * same page was retained, and finalSubmitPressed survived from phase zero rather than being
+ * manufactured by another click. */
+{
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(continuationInput, { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: `${base}?receipt=ashby`,
+    actions: [
+      { type: 'fill', selector: '#delayed-receipt-email', value: 'routing@example.test', label: 'email' },
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+    ],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 120,
+    continuationExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const waitForFile = async (file, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(first.submitOutcome.pressed, true);
+  assert.equal(first.submitOutcome.state, 'unknown');
+  assert.match(first.text, /submission-count:1/, 'phase zero must dispatch exactly one submit');
+  assert.equal(first.continuationOffered, true);
+  const remainingMs = Date.parse(first.continuationExpiresAt) - Date.now();
+  assert.ok(remainingMs > 10_000 && remainingMs <= 15_000,
+    'receipt observation must use its own short lifetime, got ' + remainingMs + 'ms');
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  fs.writeFileSync(continuationInput, JSON.stringify({ actions: [], screenshot: false, fullPage: false }));
+  await waitForFile(result1);
+  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  assert.equal(second.submitOutcome.pressed, true, 'empty phase one retains the phase-zero click fact');
+  assert.equal(second.submitOutcome.state, 'confirmed');
+  assert.equal(second.submitOutcome.source, 'ats_state');
+  assert.equal(second.submitOutcome.evidence, '.ashby-application-form-success-container');
+  assert.match(second.text, /submission-count:1/, 'the empty observation must not dispatch another submit');
+  assert.equal(second.url, first.url, 'the empty observation must retain the same employer page URL');
+  assert.deepEqual(second.requiredFieldConfirmation, null, 'phase one ran no confirmation or submit action');
+  const exitCode = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(exitCode, 0, `receipt observation runner exited ${exitCode}: ${stderr}`);
 }
 
 /* 12. THE ASHBY GRADUATION DATE PICKER, end to end, against the markup the live board serves.
