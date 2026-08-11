@@ -232,7 +232,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     // A client-rendered ATS can commit the verification step on a later task. The submit click is
     // already real at this point, but there is briefly no navigation, receipt, or code control to
     // observe. The delayed query pins that production shape without slowing the other replay cases.
-    if (location.search.includes('delayed=1')) setTimeout(renderChallenge, 250);
+    if (location.search.includes('delayed=slow')) setTimeout(renderChallenge, 3600);
+    else if (location.search.includes('delayed=1')) setTimeout(renderChallenge, 250);
     else renderChallenge();
   });
   if (location.search.includes('challenge=1')) renderChallenge();
@@ -370,7 +371,121 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'this replay did not request a continuation, so detecting the challenge must not invent one');
 }
 
-/* 3c. THE WINDOW OPENS ON THE CHALLENGE, NOT ON THE FORK.
+// 3c. A RETAINED CODE WALL IS NOT A SECOND APPLICATION SUBMIT.
+{
+  const result = await replay([
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+    { type: 'extract', selector: '#submitted' },
+    { type: 'extract', selector: '#filed' }
+  ], { allowSubmit: true, pathSuffix: '?challenge=1' });
+  assert.equal(result.humanVerification?.fieldCount, 8, 'the retained wall must be returned as a challenge');
+  assert.equal(result.submitOutcome?.pressed, false, 'no application submit is pressed against a standing code wall');
+  assert.equal(result.submitOutcome?.state, 'not_attempted');
+  assert.equal(valueOf(result, '#submitted'), 'no', 'the application submit count must stay unchanged');
+  assert.equal(valueOf(result, '#filed'), 'no');
+  assert.ok(result.skipped.includes('confirm_and_submit: employer security code challenge already standing'));
+}
+
+// 3b-continued. GREENHOUSE PHASE ZERO WAITS FOR ITS EXACT SLOW CODE WALL.
+{
+  const result = await replay([
+    { type: 'fill', selector: '#email', value: 'mehekmandal05@gmail.com', label: 'email' },
+    { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+  ], {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 15,
+    origin: greenhouseBase,
+    pathSuffix: '?delayed=slow'
+  });
+  assert.equal(result.humanVerification?.kind, 'security_code');
+  assert.equal(result.humanVerification?.fieldCount, 8);
+  assert.equal(result.continuationOffered, true,
+    'the original phase-zero challenge capability must survive the delayed Greenhouse render');
+  assert.equal(result.submitOutcome?.pressed, true, 'the one authorized application click remains recorded');
+  assert.notEqual(result.submitOutcome?.state, 'confirmed');
+}
+
+/* 3c-continued. THE SAME RETAINED PAGE ACCEPTS ONLY THE VERIFICATION SUBMIT.
+ *
+ * Phase zero starts on the exact Greenhouse control already measured in production. Its application
+ * action must return the challenge and hold the Page without clicking. Phase one receives only the
+ * atomic verification action after the caller has obtained the routing-alias code. The two result
+ * files make the click count observable across the retained Page: zero before the code, exactly one
+ * after it, and a confirmed receipt rather than an inferred disappearance. */
+{
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(continuationInput, { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: `${base}?challenge=1`,
+    actions: [
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
+      { type: 'extract', selector: '#submitted' },
+      { type: 'extract', selector: '#filed' }
+    ],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 15,
+    continuationExpiresAt: new Date(Date.now() + 15_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const waitForFile = async (file, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(first.humanVerification?.kind, 'security_code');
+  assert.equal(first.humanVerification?.fieldCount, 8);
+  assert.equal(first.continuationOffered, true, 'the exact challenge must retain a one-shot continuation');
+  assert.equal(first.submitOutcome?.pressed, false, 'phase zero must not press the application submit');
+  assert.equal(first.submitOutcome?.state, 'not_attempted');
+  assert.equal(valueOf(first, '#submitted'), 'no');
+  assert.equal(valueOf(first, '#filed'), 'no');
+  fs.writeFileSync(continuationInput, JSON.stringify({
+    actions: [
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
+      { type: 'extract', selector: '#submitted' },
+      { type: 'extract', selector: '#filed' },
+      { type: 'extract', selector: '#box-values' },
+      { type: 'extract', selector: '#empty-code-submits' }
+    ],
+    screenshot: false,
+    fullPage: false
+  }));
+  await waitForFile(result1);
+  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  assert.equal(valueOf(second, '#submitted'), '1', 'only the atomic verification continuation may click');
+  assert.equal(valueOf(second, '#filed'), 'yes');
+  assert.equal(valueOf(second, '#box-values'), CODE.split('').join('|'));
+  assert.equal(valueOf(second, '#empty-code-submits'), '0');
+  assert.deepEqual(second.securityCodeAttempt, {
+    supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
+  });
+  assert.equal(second.submitOutcome?.state, 'confirmed');
+  assert.equal(second.requiredFieldConfirmation?.passes.length, 1);
+  assert.equal(second.requiredFieldConfirmation?.passes[0]?.submitKind, 'verification');
+  const exitCode = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(exitCode, 0, `verification continuation runner exited ${exitCode}: ${stderr}`);
+}
+
+/* 3d. THE WINDOW OPENS ON THE CHALLENGE, NOT ON THE FORK.
  *
  * This is the case that decides whether a held session is usable at all. The window used to be
  * fixed before phase 0 started, so the fill spent it: a real Greenhouse packet is a hundred-odd

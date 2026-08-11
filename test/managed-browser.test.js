@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   ATOMIC_SUBMIT_POLICY,
+  CLAIM_CONTINUATION_SCRIPT,
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
@@ -217,6 +222,43 @@ test('sandbox continuation is project-bound and single-use without exposing a se
     executeSandboxRun({ continuationToken: first.continuationToken, actions: [] }, { sandboxApi, urlValidator, projectBinding: 'project-b' }),
     (error) => error.code === 'CONTINUATION_REJECTED'
   );
+});
+
+test('the continuation claim script allows one concurrent winner and rejects wrong-project and expired claims', async () => {
+  const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-claim-'));
+  const tokenHash = digest('receipt-observation-token');
+  const projectHash = digest('project-a');
+  const markerPath = path.join(workDir, 'stratus-continuation.json');
+  const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
+  const usedPath = path.join(workDir, 'stratus-continuation-used.json');
+  const writeMarker = (expiresAt) => {
+    fs.rmSync(usedPath, { force: true });
+    fs.writeFileSync(markerPath, JSON.stringify({ tokenHash, projectHash, expiresAt, used: false }));
+    fs.writeFileSync(readyPath, '{}');
+  };
+  const claim = (claimedProjectHash = projectHash) => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', CLAIM_CONTINUATION_SCRIPT, tokenHash, claimedProjectHash], {
+      cwd: workDir,
+      stdio: 'ignore',
+    });
+    child.on('close', resolve);
+  });
+
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(digest('project-b')), 5, 'a token from another project must not be consumed');
+  assert.equal(fs.existsSync(markerPath), true);
+
+  writeMarker(new Date(Date.now() - 1).toISOString());
+  assert.equal(await claim(), 6, 'the short receipt token must refuse a claim after expiry');
+  assert.equal(fs.existsSync(markerPath), true);
+
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  const outcomes = await Promise.all([claim(), claim()]);
+  assert.equal(outcomes.filter((code) => code === 0).length, 1, `exactly one claim may win: ${outcomes}`);
+  assert.equal(outcomes.filter((code) => code !== 0).length, 1, `the racing claim must fail: ${outcomes}`);
+  assert.equal(fs.existsSync(markerPath), false, 'the winner atomically consumes the only marker');
+  assert.equal(fs.existsSync(usedPath), true);
 });
 
 // The runner ships to the sandbox as a string, so nothing type-checks it and a regression only
@@ -1180,6 +1222,16 @@ test('the runner decides whether a continuation is held open, not the caller\'s 
   assert.equal('continuationToken' in result, false, 'no challenge means no continuation to offer');
   assert.equal(fake.sandboxes[0].stopped, true, 'and the sandbox is released rather than left idling');
   assert.equal(result.submitOutcome.state, 'confirmed');
+});
+
+test('only a phase-zero pressed unknown outcome adds the short receipt observation capability', () => {
+  assert.match(SANDBOX_RUNNER, /const pressedUnknown = phase === 0\s*&& submitOutcome\.pressed === true\s*&& submitOutcome\.state === 'unknown'/s);
+  assert.match(
+    SANDBOX_RUNNER,
+    /continuationOffered = input\.requestContinuation === true\s*&& \(Boolean\(humanVerification\) \|\| input\.continuationCheckpoint === true \|\| pressedUnknown\)/s,
+  );
+  assert.match(SANDBOX_RUNNER, /receiptObservationOnly\s*\? 15\s*: Math\.max/s);
+  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) break/);
 });
 
 test('the runner reads the submit outcome off the page and reports it', () => {
