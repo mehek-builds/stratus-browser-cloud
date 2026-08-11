@@ -193,14 +193,28 @@ const { chromium } = require('playwright');
      *   "I do not want to answer"                     <- want, not wish. No synonym on the list.
      * Enumerating spellings is a losing game on this family: an opt-out is the one entry on an EEO
      * list an employer can word however it likes, because it means the same thing regardless.
+     *
+     * WHAT IS NEGATED IS THE WANTING, NEVER THE FACT, and that is the whole rule. The previous
+     * pattern made the volition verb optional - '(?:want|wish|like)? ?' - so "do not" followed by
+     * any stating verb read as a refusal, and Greenhouse's ordinary EEO row
+     *
+     *   "I do not identify with any of the above"
+     *
+     * matched. That row is not a refusal. It is a substantive claim about her: it says she is none
+     * of the listed races, or none of the listed veteran classifications, which is an answer an
+     * employer records and reports. Measured on this tree before the change: with
+     * "Decline to self-identify" on file and that row on the list and no true opt-out beside it, the
+     * row was selected and the field reported filled. A stored refusal must never be able to state
+     * something about her, so the volition is now required: "do not WANT to answer" is a refusal,
+     * "do not identify" is a claim, and only the first of them reaches this matcher.
      */
-    const DECLINE_TO_STATE = new RegExp([
-      'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
-      '(?:do not|do nt|don t|dont|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
-        + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-      'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+    const DECLINE_TO_STATE = ((stating) => new RegExp([
+      'declines? to ' + stating,
+      '(?:do not|do nt|don t|dont|does not|does nt|doesn t) (?:want|wish|like|care|choose|prefer)s? (?:to )?' + stating,
+      '(?:would rather not|rather not|prefers? not|chooses? not|wishes? not|wants? not) (?:to )?' + stating,
+      'not (?:want|wish|choose|prefer)(?:ing)? to ' + stating,
       '^(?:declined?|declines|i decline|no answer|not disclosed|not specified|undisclosed)$'
-    ].join('|'));
+    ].join('|')))('(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)');
     const answerOptions = (value) => {
       const base = clean(value);
       const lower = base.toLowerCase();
@@ -256,12 +270,19 @@ const { chromium } = require('playwright');
      * applicant's own name, and neither she nor Litos would ever see it. So on a native select the
      * answer must be the answer: exact after case and punctuation are normalised away, or nothing.
      *
-     * Two loosenings survive because neither can produce a false claim:
+     * Two loosenings survive, and each is bounded by something other than its own looseness:
      *   - answerOptions synonyms, which are authorised restatements of the same answer (yes / agree,
      *     and the enumerated refusals), compared by exact equality and never by containment;
      *   - decline-to-decline intent, which requires BOTH texts to read independently as a refusal to
-     *     state. A refusal cannot be a near miss of a claim, and an employer words its opt-out
-     *     however it likes.
+     *     state under DECLINE_TO_STATE, and then requires the list to offer only ONE refusal.
+     *     Stating it as "a refusal cannot be a near miss of a claim" was wrong, and wrong in the
+     *     direction that matters: it is the matcher, not the concept, that keeps the two apart, and
+     *     until DECLINE_TO_STATE was corrected above it read "I do not identify with any of the
+     *     above" as a refusal and let a stored opt-out select a substantive claim. What is actually
+     *     true is narrower and is worth writing down as it is: an employer words its opt-out however
+     *     it likes, so intent is the only way to reach it; a refusal carries no fact about her, so
+     *     one refusal standing for another costs her nothing; and where a list offers two refusals
+     *     that are not the same string, this tier declines rather than choosing between them.
      * Anything else is left for the applicant, which is what an unanswerable field already does. */
     const optionMatchesExactly = (candidate, wanted) => {
       const a = normalized(candidate);
@@ -270,19 +291,75 @@ const { chromium } = require('playwright');
     };
     const declineMatches = (candidate, wanted) =>
       DECLINE_TO_STATE.test(normalized(candidate)) && DECLINE_TO_STATE.test(normalized(wanted));
-    // THE FIRST OF SEVERAL IS NEVER AN ANSWER. The exact tier is ranked by what the CALLER asked for
-    // rather than by where the employer put it: her own words first, then the authorised
-    // restatements in the order answerOptions lists them, and inside one rank the list is searched
-    // whole. So DOM order can never beat an exact match found later, and a widened match sits
-    // strictly below every exact one. A widened match is used only when the list offers exactly one;
-    // two candidates fail closed rather than being resolved by position.
+    /* THE FIRST OF SEVERAL IS NEVER AN ANSWER, and this is the one place that rule is written down.
+     *
+     * The exact tier is ranked by what the CALLER asked for rather than by where the employer put
+     * it: her own words first, then the authorised restatements in the order answerOptions lists
+     * them, and inside one rank the list is searched whole. So DOM order can never beat an exact
+     * match found later, and every widened match sits strictly below every exact one.
+     *
+     * ONE FUNCTION FOR THE THREE RENDERINGS THAT CAN HAND IT A LIST. A sponsorship question is the
+     * same question whether the board serves it as a native select, a radio group or a row of pills,
+     * and before this it was answered by three different rules: the native path ranked exactly, and
+     * the other two each looped and took the first optionMatches hit, which on the ordinary Lever and
+     * Greenhouse vocabulary means the first line the employer happened to list. So the same stored
+     * answer produced different declarations on different boards. Those three differ only in how a
+     * candidate's text is READ, a native option's label, a radio's label element, a pill's text, and
+     * that read is the caller's job. Ranking is not.
+     *
+     * THE FOURTH RENDERING IS NOT THIS FUNCTION, and the difference is worth stating rather than
+     * implying. A React Select menu is not a list of strings this file may read: its rows are named
+     * by aria-labelledby, aria-label and content in that order, and reading them here reintroduces
+     * five defects that test/option-click-dom.test.js pins. clickMatchingOption therefore asks
+     * Playwright's role engine the same questions in the same order, literal name before
+     * punctuation-tolerant name before anything widened, and it keeps a widened tier this function
+     * does not have. See the comment there for what that costs and what bounds it.
+     *
+     * THERE IS NO CONTAINMENT TIER HERE AT ALL, and that is the change this comment exists for. It
+     * used to have one, used by the radio and pill paths and taken whenever the list offered exactly
+     * ONE containment relative of the answer. That is precisely the shape of the defect this file is
+     * about: a stored "I do not require sponsorship now, but will in the future" against a list
+     * offering "I do not require sponsorship" and "I require sponsorship now" has exactly one
+     * containment relative, and it is the false one. Two of them was never the dangerous number; one
+     * was. Neither the radio path nor the pill path has any verification stage behind it, so a row
+     * clicked here goes straight into filledFields and is never looked at again. Exact, an
+     * unambiguous refusal, or nothing.
+     */
     const chooseOptionIndex = (texts, wanted) => {
       if (!clean(wanted)) return -1;
+      /* THE LITERAL MATCH IS TAKEN BEFORE ANYTHING IS NORMALISED, and that ordering is the whole of
+       * this tier's safety. normalized() keeps only [a-z0-9], which is what lets "Yes," reach a
+       * stored "Yes", and it is also what makes "C++", "C#" and "C" one string, and "10+" and "10"
+       * one string. Comparing normalised first meant a literal, unambiguous answer could be thrown
+       * away by a collision that does not exist in the text the employer actually wrote: on a skills
+       * list offering C++ and C#, a stored "C++" matched both and was refused, and on an experience
+       * list offering "10+" and "10", a stored "10" was refused when the row saying exactly 10 was
+       * sitting right there. Case is folded because an employer printing "COMPUTER SCIENCE" is
+       * spelling the same answer; nothing else is touched.
+       *
+       * Several rows carrying the SAME literal text are not a collision. They say the same thing, so
+       * which one is taken cannot change what the employer reads. */
+      for (const option of answerOptions(wanted)) {
+        const want = clean(option).toLowerCase();
+        if (!want) continue;
+        const literal = texts.findIndex((text) => clean(text).toLowerCase() === want);
+        if (literal !== -1) return literal;
+      }
       for (const option of answerOptions(wanted)) {
         const want = normalized(option);
         if (!want) continue;
-        const exact = texts.findIndex((text) => normalized(text) === want);
-        if (exact !== -1) return exact;
+        const exact = [];
+        for (let index = 0; index < texts.length; index += 1) {
+          if (normalized(texts[index]) === want) exact.push(index);
+        }
+        if (exact.length === 1) return exact[0];
+        /* A COLLISION IS NOT A TIE, IT IS A QUESTION, and by here no literal match exists to settle
+         * it. Two rows that normalise to the answer differ only in the punctuation normalising threw
+         * away, and punctuation is exactly what tells "10" from "10+" and "C" from "C++". Taking the
+         * first is how a stored "10" ended up sending "10+", with verifyFilled agreeing because the
+         * same normalisation is symmetric across the collision that caused it. The decline tier below
+         * has always deduped and refused; this tier did not. */
+        if (exact.length > 1) return -1;
       }
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
@@ -297,7 +374,12 @@ const { chromium } = require('playwright');
         if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return { kind: 'other', actual: [element.checked ? 'checked' : ''] };
         if (element instanceof HTMLSelectElement) {
           const selected = element.selectedOptions && element.selectedOptions[0];
-          return { kind: 'select', actual: selected ? [selected.textContent || '', selected.value || ''] : [element.value || ''] };
+          // THE SAME THREE STRINGS THE SNAPSHOT READ. selectNativeOption's snapshot names an option
+          // by 'option.label || option.textContent', so an <option label="X">Y</option> is chosen as
+          // X and was then read back here as Y and '' only. The write had landed and the field was
+          // reported unfilled: a verification that reads a different attribute from the one the
+          // chooser read is the same defect class as one that reads a different element.
+          return { kind: 'select', actual: selected ? [selected.textContent || '', selected.value || '', selected.label || ''] : [element.value || ''] };
         }
         return { kind: 'other', actual: ['value' in element ? String(element.value || '') : (element.textContent || '')] };
       }).catch(() => ({ kind: 'other', actual: [] }));
@@ -356,9 +438,21 @@ const { chromium } = require('playwright');
      * The snapshot is also what makes the choice answerable: chooseOptionIndex reads the WHOLE list
      * before it commits, so an exact answer beats a looser candidate that happens to sit above it,
      * and an ambiguous list is refused instead of resolved by position. See chooseOptionIndex for
-     * why a select cannot be allowed the containment rule the rest of the runner uses. The chosen
-     * option is then selected by its index in that same snapshot, so the option that was inspected
-     * is exactly the option that is taken. */
+     * why a select cannot be allowed the containment rule the rest of the runner uses.
+     *
+     * WHAT THE WRITE IS ADDRESSED BY, and why the two tiers differ. The snapshot and the write are
+     * separated by an await, and a board that re-renders its options in that gap moves every index.
+     * Writing by index takes whatever now sits at that position, which on a reordered list is a
+     * different declaration; writing by label makes Playwright re-resolve the name against the live
+     * DOM, so a reorder either finds the same option or finds nothing. Measured on this tree: with
+     * the option list reordered in that window, the index write landed on "I do not require
+     * sponsorship" for a stored "I do not require sponsorship now, but will in the future", and the
+     * label write landed on the stored answer. verifyFilled catches the index case and the field
+     * fails closed, so nothing false is submitted, but a fill that could have been right should be
+     * right. So each tier writes by the thing it MATCHED on - the label tier by label, the value
+     * tier by value - and neither carries a position across the await. The exact tier already
+     * refuses a list where two options normalise to the same label or share one value, so the string
+     * each tier hands back is unique in the list it was read from. */
     const selectNativeOption = async (field, wanted) => {
       const choices = await field.evaluate((element) => {
         if (!(element instanceof HTMLSelectElement)) return [];
@@ -369,10 +463,16 @@ const { chromium } = require('playwright');
       }).catch(() => []);
       if (!choices.length) return false;
       const byLabel = chooseOptionIndex(choices.map((choice) => choice.label), wanted);
-      const index = byLabel === -1 ? chooseOptionIndex(choices.map((choice) => choice.value), wanted) : byLabel;
-      if (index === -1) return false;
+      const byValue = byLabel === -1 ? chooseOptionIndex(choices.map((choice) => choice.value), wanted) : -1;
+      if (byLabel === -1 && byValue === -1) return false;
+      const address = byLabel === -1
+        ? { value: choices[byValue].value }
+        : { label: choices[byLabel].label };
       try {
-        await field.selectOption({ index });
+        // Bounded, because addressing by string means Playwright AUTO-WAITS for that string. An
+        // option that is genuinely gone from the live list would otherwise spend the full default
+        // timeout proving it, on a field the run is about to hand back anyway.
+        await field.selectOption(address, { timeout: 8000 });
         return true;
       } catch {
         return false;
@@ -790,60 +890,173 @@ const { chromium } = require('playwright');
     // A verification that reads a different place from the one the value lands in is worse than no
     // verification, because it turns a good fill into a reported failure and a real failure into
     // noise indistinguishable from it.
-    /* THE ROW THAT WAS CLICKED, so the third rule below has something to verify against.
+    /* THE ROW THAT WAS CLICKED, and THE ANSWER IT WAS CLICKED FOR, so the second rule below has
+     * something to verify against.
      *
      * Written by fillCustomChoice and read only by the call that immediately follows it. Never
-     * consulted anywhere else: the third rule is worth nothing without the click that produced it,
+     * consulted anywhere else: the second rule is worth nothing without the click that produced it,
      * and a leftover row from an earlier control would be exactly the kind of verification-by-
-     * coincidence the two rules above exist to avoid.
+     * coincidence the rule above it exists to avoid.
      */
     let lastClickedOptionText = '';
-    const verifyChoiceInContainer = async (container, expected, clickedOptionText) => {
-      /* CONTAINMENT THAT TWO BLANKS CANNOT SATISFY, AND A JAPANESE ANSWER IS NOT A BLANK.
+    let lastClickedOptionAnswer = '';
+    /* WHY A REFUSAL NEEDS WORDS. Every chooser below can now decline a control it could once resolve
+     * by position, and "no option matched" is the wrong sentence for a list that offered two. The
+     * applicant reads these lines and finishes the field herself, and the two cases ask different
+     * things of her: one means her answer is not on the list, the other means the list holds two
+     * answers and Litos will not pick between them. Written here, read by whichever branch of the
+     * action loop ends up reporting the field.
+     */
+    let lastChoiceRefusal = '';
+    const refuseChoice = (reason) => { lastChoiceRefusal = reason; return false; };
+    // ONE SENTENCE FOR ONE VERDICT, whatever the board rendered the question as. A radio group, a
+    // row of pills and a React Select that all offer two near matches and no exact one are the same
+    // situation, and the applicant should not have to work out from three different wordings that
+    // they are.
+    /* ONE SENTENCE FOR ONE VERDICT, whatever the board rendered the question as, and the count is in
+     * it because the two cases read differently to the person finishing the field. One near match is
+     * "this list has something close to your answer and it is not your answer"; several is "this
+     * list has several and Litos will not pick between them". Neither is "your answer is not here",
+     * which is what she used to be told, and neither is a reason to click anything: on the
+     * sponsorship and work-authorisation family a near match IS a different declaration. */
+    const nearMissChoiceReason = (value, count) => (count > 1
+      ? 'more than one of the options offered is a near match for "' + clean(value)
+        + '" and none of them is it exactly, so choosing between them would be a guess,'
+        + ' left for you to choose'
+      : 'the closest option offered is a near match for "' + clean(value)
+        + '" rather than exactly it, so it may be a different answer, left for you to choose');
+    // WHAT A CHOICE THAT COULD NOT BE READ BACK IS TOLD, as opposed to one that was lost. The runner
+    // clicked a row and the control does not publish what it is holding, so the honest report is
+    // "confirm this", not "this did not take". See verifyChoiceInContainer.
+    const unreadableChoiceReason = 'the answer was entered but this control does not report what it'
+      + ' is holding, so Litos could not read it back: please confirm it';
+    // The sentence an unanswerable control comes back with, and the one place a chooser's own
+    // refusal is allowed to replace it. lastChoiceRefusal is cleared at the top of every action, so
+    // this can only ever report an attempt made for THIS field.
+    const unmatchedReason = (value) => lastChoiceRefusal
+      || ('no option matched "' + clean(value) + '", left for you to choose');
+    /* A VERIFICATION THAT CAN ONLY AGREE WITH THE CHOOSER IS NOT A VERIFICATION, and this one could
+     * only agree. Its first rule was optionMatches - the same bidirectional containment predicate
+     * that had just chosen the row - plus a second containment clause on top of it. So on exactly
+     * the family this whole file is about, sponsorship and work authorisation, where every option is
+     * a containment relative of its neighbours, it was a tautology: whatever the chooser picked, this
+     * agreed, and a control left holding "I do not require sponsorship" for a stored "I do not
+     * require sponsorship now, but will in the future" was reported filled. That is the same defect
+     * verifyFilled was fixed for on the native path, and it is fixed the same way here.
+     *
+     * FIRST RULE, and it mirrors verifyFilled's select branch exactly: the control has to hold the
+     * ANSWER, by the exact rule that was allowed to choose it.
+     *
+     * THEN A NEAR MISS FAILS CLOSED, EXPLICITLY. optionMatches is still consulted, but only ever to
+     * REFUSE. A control showing something that is a containment relative of the answer without being
+     * the answer is showing a different declaration, and no rule below may rescue it.
+     *
+     * WHAT THIS GIVES UP, SAID PLAINLY, AND IT IS NOT A NARROW CASE. readChoiceState only recognises
+     * a React Select: select__single-value, select__multi-value__label, select__placeholder. Every
+     * OTHER custom combobox that reaches here, Select2 among them, comes back 'unknown', and what
+     * 'unknown' hands over is the whole block's text, which on some blocks is the question and every
+     * option at once. The clause that went accepted exactly that: any blob containing the answer
+     * counted as the answer. So this now refuses on a shape where the answer may well have landed:
+     * measured on a Select2-shaped combobox, the runner clicks the RIGHT row and this returns false.
+     *
+     * Which is why that case does not get the "did not persist" sentence. It did persist; it could
+     * not be read back, and those are two different things to tell someone who is about to go and
+     * redo the field. lastChoiceUnreadable carries the difference out to the caller. What is not
+     * negotiable is the verdict: readChoiceState's own contract says no conclusion may be drawn from
+     * 'unknown' either way, and drawing a positive one out of a blob was the part that was wrong.
+     */
+    let lastChoiceUnreadable = false;
+    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer) => {
+      lastChoiceUnreadable = false;
+      /* AND A JAPANESE ANSWER IS NOT A BLANK. normalized() keeps only [a-z0-9], so it erases a
+       * Japanese, Arabic, Cyrillic, Greek or Chinese string entirely, and optionMatchesExactly
+       * refuses anything that normalises away on its first line. On a non-Latin form that would
+       * verify nowhere and every correctly answered control would come back as lost, which is the
+       * defect the sibling non-Latin fix exists to prevent, arriving through the exact tier instead
+       * of the containment one. So when either side normalises away, the comparison falls back to
+       * the CLEANED text, lowercased, so \u0414\u0430 still matches \u0434\u0430. It stays an EQUALITY at both
+       * tiers: raw equality is strictly stricter than normalised equality, it is only ever reached
+       * on pairs the normalised comparison could not judge, and two blanks can no longer satisfy it
+       * because a blank rendered value never equals a non-empty answer. */
+      const holdsAnswer = (shownText, wanted) => answerOptions(wanted).some((option) => {
+        const shownNormal = normalized(shownText);
+        const optionNormal = normalized(option);
+        if (shownNormal && optionNormal) return shownNormal === optionNormal;
+        const shownRaw = clean(shownText).toLowerCase();
+        return Boolean(shownRaw) && shownRaw === clean(option).toLowerCase();
+      });
+      /* A NEAR MISS ON A SCRIPT normalized() ERASES, which optionMatches cannot see.
        *
-       * THE DEFECT. This arm used to read, plainly:
-       *   answerOptions(expected).some((option) => normalized(text).includes(normalized(option)))
-       * normalized() keeps only [a-z0-9], so both sides of a non-Latin comparison come back as the
-       * empty string, and ''.includes('') is true. Every non-Latin rendered value therefore matched
-       * every non-Latin expected value. Measured in Chromium on 2026-08-11: a control rendering
-       * いいえ verified as holding はい; Нет verified as Да; لا verified as نعم; while the same
-       * control rendering "No" against an expected "Yes" correctly returned false. A blank widget
-       * verified as holding either. On a work-authorisation or eligibility question that is a
-       * materially wrong answer, put on a real employer form under her name and then recorded as a
-       * field that filled correctly, which is the one failure she cannot see and cannot undo.
+       * optionMatches returns false on its first line for anything that normalises to nothing, so
+       * the refusal below it fired for every Latin near miss and for no non-Latin one. That gap is
+       * not theoretical and it is not symmetric with Latin, because of how the languages negate:
        *
-       * It was unreachable in practice only because labelOf discarded non-Latin labels outright, so
-       * a non-Latin form never got this far. That gate is being removed, so this is repaired first.
+       *   English  "I do not require sponsorship"  does NOT contain  "I require sponsorship"
+       *   Chinese  "不需要工作签证担保"              DOES contain      "需要工作签证担保"
+       *   Japanese "ビザのサポートは必要ありません"    DOES contain      "ビザのサポートは必要"
+       *   Korean   "스폰서십이 필요하지 않습니다"      DOES contain      "스폰서십이 필요"
        *
-       * THE REPAIR, and why it is a repair rather than a refusal. Containment runs on the normalised
-       * strings only when BOTH survived normalising, which is every Latin comparison and leaves them
-       * bit-identical. When either side normalises away, the comparison falls back to the CLEANED
-       * text: what the employer actually rendered against what she actually asked for, lowercased
-       * so Да still matches да.
+       * Chinese, Japanese and Korean negate with a bound prefix or a trailing auxiliary rather than
+       * a separate leading word, so the negation of an answer is a SUPERSTRING of it. Every guard
+       * this file has was off at once on that shape: optionMatches saw nothing, and the clicked-row
+       * rule below then accepted it, because the row and the rendered value are the same string and
+       * the provenance clause is true by construction. Measured through the four-argument call the
+       * action loop actually makes, all five pairs verified TRUE.
        *
-       * That fallback cannot loosen anything. A string with no [a-z0-9] in it cannot contain one
-       * that has, so every pair the old expression rejected is still rejected; the only pairs whose
-       * verdict changes are the ones the old expression accepted on two blanks, and those now have
-       * to actually overlap. So a wrong non-Latin answer is refused AND a correct one still
-       * verifies, instead of the whole script degrading to "unverified, hand it back to her".
-       * optionMatches cannot do this job: it returns false on its first line for anything that
-       * normalises empty, so without this arm a correct non-Latin choice would verify nowhere.
+       * So containment is asked again, raw, and only for pairs normalising cannot judge. It is
+       * containment WITHOUT equality: equality is holdsAnswer's job and has already answered.
+       *
+       * NO LENGTH FLOOR, which is where this deliberately differs from the Latin rule it mirrors.
+       * optionMatches only counts containment above six normalised characters, and that floor is
+       * what lets a widget rendering "No, I am not a protected veteran" verify against a stored
+       * "No". There is no equivalent number here: a Japanese affirmative is two characters and a
+       * Chinese one is one, so any floor that admits "はい" inside "はい、必要です" also admits
+       * "需要工作签証担保" inside its own negation. On a script this file cannot read, "the widget
+       * said more than the answer" and "the widget said the opposite of the answer" are the same
+       * shape, so both are handed back. That costs a confirmation on a correct fill and it is the
+       * only direction worth failing in.
+       *
+       * WHAT SEPARATES A RENDERING FROM A STATEMENT IS LETTERS, and it is the same discriminator
+       * paddedWholeName uses on the chooser side, which is the point: the two halves agree on what
+       * "extra material" means. A widget that renders the answer plus a dial code has added no
+       * letters and is showing the answer; every negator in these scripts is a letter. So
+       * "日本 +81" still verifies against "日本" while "不需要工作签証担保" does not verify against
+       * "需要工作签証担保".
        */
-      const carriesAnswer = (haystack, wanted) => {
-        const normalizedHaystack = normalized(haystack);
-        const rawHaystack = clean(haystack).toLowerCase();
+      const addsOnlyNonLetters = (longer, shorter) => {
+        const index = longer.indexOf(shorter);
+        if (index === -1) return false;
+        return !/\p{L}/u.test(longer.slice(0, index) + longer.slice(index + shorter.length));
+      };
+      const nearMiss = (shownText, wanted) => {
+        if (optionMatches(shownText, wanted)) return true;
+        const shownRaw = clean(shownText).toLowerCase();
+        if (!shownRaw) return false;
         return answerOptions(wanted).some((option) => {
-          const normalizedOption = normalized(option);
-          if (normalizedHaystack && normalizedOption) return normalizedHaystack.includes(normalizedOption);
-          const rawOption = clean(option).toLowerCase();
-          return Boolean(rawHaystack) && Boolean(rawOption) && rawHaystack.includes(rawOption);
+          const optionRaw = clean(option).toLowerCase();
+          if (!optionRaw || optionRaw === shownRaw) return false;
+          // Latin pairs are optionMatches's business and its verdict above is final for them.
+          if (normalized(shownText) && normalized(option)) return false;
+          if (shownRaw.includes(optionRaw)) return !addsOnlyNonLetters(shownRaw, optionRaw);
+          if (optionRaw.includes(shownRaw)) return !addsOnlyNonLetters(optionRaw, shownRaw);
+          return false;
         });
       };
       const state = await readChoiceState(container);
       if (state.kind === 'empty') return false;
+      lastChoiceUnreadable = state.kind === 'unknown';
       const text = state.value;
-      if (optionMatches(text, expected) || carriesAnswer(text, expected)) return true;
-      /* THIRD RULE: A WIDGET MAY RENDER WHAT IT IS HOLDING IN A SHORTER FORM THAN THE MENU ROW THAT
+      if (holdsAnswer(text, expected) || declineMatches(text, expected)) { lastChoiceUnreadable = false; return true; }
+      /* A near miss is a refusal, and it only counts as a READ the runner managed when the widget
+       * published its chosen value. On an 'unknown' container what came back is the whole block's
+       * text, which routinely contains the answer somewhere, so treating that as a near miss would
+       * clear the unreadable flag on exactly the shape the flag exists for and send her the wrong
+       * sentence. Measured: a correctly clicked Select2 control reported "value did not persist". */
+      if (nearMiss(text, expected)) {
+        if (state.kind === 'chosen') lastChoiceUnreadable = false;
+        return false;
+      }
+      /* SECOND RULE: A WIDGET MAY RENDER WHAT IT IS HOLDING IN A SHORTER FORM THAN THE MENU ROW THAT
        * SET IT, AND THAT IS NOT A LOST ANSWER.
        *
        * Measured 2026-08-09 against the live employer forms behind this user's stored reports, all
@@ -859,11 +1072,22 @@ const { chromium } = require('playwright');
        * on the form as one it had lost. That single control accounts for 43 of the 45 stored
        * "choice value did not persist after fill" reports across 133 packets.
        *
-       * So the third rule verifies against the row that was CLICKED instead of against the answer
-       * text, and only when both halves hold: that row had to carry the requested answer, and what
-       * the control now shows has to be part of that same row. A control that was never clicked has
-       * no row and fails; an empty control never reaches here; a control showing some other option
-       * cannot be a substring of the row we clicked.
+       * So this rule verifies against the row that was CLICKED instead of against the answer text.
+       * The old version re-asked optionMatches whether that row carried the answer, which is the
+       * tautology again one level down.
+       *
+       * WHAT THE PROVENANCE CLAUSE ACTUALLY DOES, and it is not the tightening. clickMatchingOption
+       * is only ever called with the value this action is filling, and it only ever records a member
+       * of answerOptions of that value, so for any click made during this call the clause is true by
+       * construction. It is a STALENESS check: it is what stops a row left behind by an earlier
+       * control, or by a fillCustomChoice that returned true without clicking anything, from standing
+       * in for a click that never happened on this one. That is worth having and it is all it is.
+       *
+       * THE TIGHTENING IS THE NEAR-MISS REFUSAL two lines above, which runs before this rule and
+       * cannot be reached past. "+971" has nothing in common with "United Arab Emirates" and reaches
+       * here; "I am authorized to work" is a containment relative of "I am authorized to work only
+       * with a student visa" and never does, even though it too is a substring of the row that was
+       * clicked. That line is the one that makes this verifier able to disagree with the chooser.
        *
        * Compared on the CLEANED text rather than the normalised text, because normalising strips
        * punctuation and "+1" would then read as a substring of "united arab emirates 971". The
@@ -873,11 +1097,21 @@ const { chromium } = require('playwright');
       const row = clean(clickedOptionText || '').toLowerCase();
       const shown = clean(text).toLowerCase();
       if (!row || shown.length < 2 || !row.includes(shown)) return false;
-      // Same containment, same reason: on its own this arm accepted a clicked いいえ row as carrying
-      // an expected はい, because the row that was clicked and the answer that was wanted both
-      // normalised to nothing. The row-includes-shown gate above is a raw-text check and holds up
-      // fine on any script; it was only ever this last comparison that could not tell them apart.
-      return optionMatches(row, expected) || carriesAnswer(row, expected);
+      // Script-aware for the same reason the first rule is: comparing the clicked answer against the
+      // expected one through normalized() alone reads two non-Latin strings as one blank, and this
+      // rule would then accept a row clicked for a different answer entirely.
+      if (!holdsAnswer(clickedForAnswer, expected)) return false;
+      /* AND THE ROW HAS TO CARRY THE ANSWER IT WAS CLICKED FOR. Without this the rule reads "some
+       * row was clicked for this answer and the control is showing part of that row", which says
+       * nothing about whether the row was ever the answer. Raw containment of the answer in the row,
+       * which is a property every tier that can click already guarantees: the exact tiers match the
+       * whole name, the padded tier adds only non-letters, and the Latin widened tier is that
+       * containment asked forwards. It is not the predicate that made the choice, so it can and does
+       * disagree with one, and it is what stops the clicked-row rule being the tautology one level
+       * down that the first rule used to be. */
+      if (!row.includes(clean(clickedForAnswer).toLowerCase())) return false;
+      lastChoiceUnreadable = false;
+      return true;
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
@@ -909,14 +1143,39 @@ const { chromium } = require('playwright');
       const total = await pills.count();
       if (total === 0) return false;
       const ACTION_TEXT = /upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i;
-      let match = null;
+      /* EVERY CANDIDATE IS READ BEFORE ANY IS TAKEN. This loop used to break on the first
+       * optionMatches hit, which is bidirectional containment, so on the ordinary sponsorship and
+       * work-authorisation vocabulary it took whichever line the employer rendered first. Both
+       * directions of that are a false declaration under her name. The whole list now goes to
+       * chooseOptionIndex, which is the same ranking the native path uses and, since the containment
+       * tier came out of it, the same floor: exact or nothing.
+       *
+       * THE LENGTH CEILING WAS PART OF THE DEFECT AND IS RAISED, AND RAISING IT ALONE WAS NOT SAFE.
+       * It was 40 characters, which is shorter than every truthful answer on this family: "I do not
+       * require sponsorship now, but will in the future" is 56. It was never ranking anything, it was
+       * deleting whichever candidate happened to be long, so a two-row list under the ceiling still
+       * clicked the false row and a list where the ceiling hid the false row only refused by
+       * accident. Measured while this was being fixed: raising the ceiling to 200 with a containment
+       * tier still in place turned one of those accidental refusals into a false work-authorisation
+       * declaration, because the newly admitted row was then the only containment relative on the
+       * list. The ceiling now only has to exclude prose; exactness does the rest.
+       */
+      const texts = [];
+      const eligible = [];
       for (let index = 0; index < total; index += 1) {
         const pill = pills.nth(index);
         if (!await pill.isVisible().catch(() => false)) continue;
         const text = clean(await pill.textContent().catch(() => ''));
-        if (!text || text.length > 40 || ACTION_TEXT.test(text)) continue;
-        if (optionMatches(text, wanted)) { match = pill; break; }
+        if (!text || text.length > 200 || ACTION_TEXT.test(text)) continue;
+        texts.push(text);
+        eligible.push(pill);
       }
+      const chosen = chooseOptionIndex(texts, wanted);
+      if (chosen === -1) {
+        const near = texts.filter((text) => optionMatches(text, wanted)).length;
+        return near ? refuseChoice(nearMissChoiceReason(wanted, near)) : false;
+      }
+      const match = eligible[chosen];
       if (!match) return false;
       const press = async () => {
         await match.evaluate((element) => {
@@ -990,13 +1249,22 @@ const { chromium } = require('playwright');
       if (!clean(wanted)) return 'no-answer';
       const choices = scope.locator('input[type=checkbox], input[type=radio]');
       const total = await choices.count();
-      let match = null;
+      // Same change as pickOptionPill, for the same reason and through the same function: every
+      // option's label is read before any option is ticked. The old break-on-first-hit was
+      // containment in DOM order, and an EEO or work-authorisation group is exactly where that
+      // picks a neighbouring declaration.
+      const texts = [];
       for (let index = 0; index < total; index += 1) {
-        const option = choices.nth(index);
-        const optionText = await optionTextOf(option);
-        if (optionText && optionMatches(optionText, wanted)) { match = option; break; }
+        texts.push(await optionTextOf(choices.nth(index)));
       }
-      if (!match) return 'no-option';
+      const chosen = chooseOptionIndex(texts, wanted);
+      if (chosen === -1) {
+        const near = texts.filter((text) => text && optionMatches(text, wanted)).length;
+        if (!near) return 'no-option';
+        refuseChoice(nearMissChoiceReason(wanted, near));
+        return 'near-miss';
+      }
+      const match = choices.nth(chosen);
       const isChecked = async () => await match.evaluate((element) => element.checked === true).catch(() => false);
       await match.check({ timeout: 5000 }).catch(() => undefined);
       if (!await isChecked()) {
@@ -1072,6 +1340,7 @@ const { chromium } = require('playwright');
       // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
       lastClickedOptionText = '';
+      lastClickedOptionAnswer = '';
       const alreadyAnswered = await readChoiceState(container);
       if (alreadyAnswered.kind === 'chosen' && optionMatches(alreadyAnswered.value, wanted)) return true;
       const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
@@ -1142,84 +1411,221 @@ const { chromium } = require('playwright');
         return true;
       };
       const menuRoot = () => scopedMenu ?? page;
+      /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
+       *
+       * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
+       * whole PAGE for every other control, and a widened query against the whole page is a query
+       * for "some row, anywhere, that contains her answer". That is how a job-description bullet got
+       * clicked before the menu scoping landed, and the rule that was removed above ran page-wide
+       * against fragments of her answer on Ashby and Workday, where nothing sets scopedMenu.
+       *
+       * An EXACT name is safe to look for widely: a row named exactly her answer is her answer
+       * wherever it is rendered, and portals put real menus outside their control on purpose. A
+       * widened name is not, so it is bounded to this question's own block. The cost is real and
+       * worth writing down: an unscoped control whose menu renders in a portal loses the widened
+       * tier entirely and is handed back. That is the direction this file fails in.
+       */
+      const widenRoot = () => scopedMenu ?? container;
+      /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
+       *
+       * The ambiguity guards below refuse a tier that offers two, so counting NODES rather than rows
+       * would refuse controls that are working, and clicking .first() of the nodes would click
+       * something that is not a row at all. Select2 v3 is the case that forces this, and it is in
+       * OPTION_NODES because Greenhouse serves it:
+       *
+       *   <ul class="select2-results">
+       *     <li class="select2-result"><div class="select2-result-label">Computer Science</div></li>
+       *     <li class="select2-result"><div class="select2-result-label">Economics</div></li>
+       *
+       * '[class*="select2-result"]' matches the LIST, every row, and every row's own label. Measured
+       * on this markup: a hasText query matched three nodes for one answer, the first of them was the
+       * whole list, and clicking it landed on whichever row happened to sit under the list's centre
+       * point. That is the row-by-position defect wearing different clothes, and it predates the
+       * ambiguity guard.
+       *
+       * Two rules, and between them they name the row:
+       *   - a match that holds another match saying something DIFFERENT is a container of rows and
+       *     is not itself an offer;
+       *   - a match whose ancestor match says exactly the SAME thing is that ancestor's own label
+       *     rather than a second offer, so the OUTERMOST of an identical chain is what is returned.
+       *     On a one-row Select2 list that is the <ul> and not the <li>, which is correct to click
+       *     because a one-row list is entirely its row, and is worth knowing rather than assuming.
+       * Hidden nodes are dropped first, and 'hidden' has to mean all three ways a duplicate hides:
+       * display:none has no client rects, visibility:hidden HAS them, and a zero-size measurement
+       * node has a rect of zero area. Testing rect count alone counted the last two as offers and
+       * refused controls that were working, which is the failure this helper exists to prevent.
+       *
+       * WHAT IT STILL CANNOT SEE, said plainly rather than claimed away: a VIRTUALISED menu only
+       * renders the rows in view, so a second near match scrolled out of the viewport is not in
+       * 'nodes' at all and the guard above cannot fire for it. This helper counts what the page has
+       * rendered, and on a virtualised list that is a floor and not a total. React Select virtualises
+       * only above a row threshold most employer question menus never reach, and the tiers that lead
+       * here are anchored on the answer rather than on position, but a long virtualised taxonomy is
+       * a list where a widened tier can still take one of two.
+       * Indices are returned rather than a count so the caller clicks the row it counted.
+       */
+      const offeredRows = async (rows) => await rows.evaluateAll((nodes) => {
+        const textOf = (node) => (node.textContent || '').replace(/\s+/g, ' ').trim();
+        const shown = (node) => {
+          if (node.closest('[aria-hidden="true"]')) return false;
+          const view = node.ownerDocument && node.ownerDocument.defaultView;
+          if (view && view.getComputedStyle(node).visibility === 'hidden') return false;
+          return [...node.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
+        };
+        const live = nodes.filter(shown);
+        return live.filter((node) => {
+          if (live.some((other) => other !== node && node.contains(other) && textOf(other) !== textOf(node))) return false;
+          return !live.some((other) => other !== node && other.contains(node) && textOf(other) === textOf(node));
+        }).map((node) => nodes.indexOf(node));
+      }).catch(() => []);
       const escapeName = (value) => String(value).replace(/[.*+?^{}()|[\]\\$]/g, '\\$&');
       // A whole-name match, case-insensitive. Playwright's own exact:true is case SENSITIVE, and an
       // employer who prints "COMPUTER SCIENCE" is spelling the same answer. Matches here are a
       // strict subset of the inexact query on the very same string, so this can only choose a
       // different row among rows that were already acceptable. It cannot reach a new one.
       const wholeName = (option) => new RegExp('^\\s*' + escapeName(option) + '\\s*$', 'i');
-      /* THE ROWS AN EMPLOYER OFFERS THAT ARE SHORTER THAN THE STORED ANSWER.
+      /* THE SAME WHOLE-NAME MATCH, WITH THE EMPLOYER'S PUNCTUATION FORGIVEN, and it is the tier that
+       * was missing.
        *
-       * This is optionMatches's third clause, 'a.length > 6 && b.includes(a)', asked forwards. The
-       * predicate asks "is this row a substring of the answer", which needs the row's name in hand;
-       * asking it that way is what drove the previous attempt to compute names itself. Enumerated
-       * instead: a row that is a contiguous run of the answer's own words IS such a substring, so
-       * the runs are generated here and Playwright is asked whether any row is named one of them.
-       * Same six-character floor as optionMatches, and slightly stricter than it, because these runs
-       * keep their punctuation where normalized() would have dissolved it.
+       * wholeName is a literal, so it asks the employer to have typed the answer character for
+       * character. The other three renderings do not: chooseOptionIndex normalises punctuation away
+       * before comparing, so a stored "I do not require sponsorship now, but will in the future"
+       * reaches an employer's row written without the comma on a native select, a radio group and a
+       * pill row, and missed it on the React Select. That miss was not a refusal. It fell through to
+       * the widened tiers, whose query still carries the comma, and then to the shorter-name rule,
+       * which clicked "I do not require sponsorship". One character of employer punctuation flipped
+       * the answer on the highest-volume Greenhouse rendering.
        *
-       * Bucketed longest first so a more specific row still wins: "Bachelor's Degree" is preferred
-       * over "Degree" for a stored "Bachelor's Degree in Computer Science". One query per bucket,
-       * and the twelve-word ceiling bounds that at eleven. Beyond twelve words a stored answer is a
-       * sentence, and the runs inside a sentence are common phrases that belong to no option.
+       * Built as a pattern rather than by reading the rows, because the row's NAME is Playwright's
+       * to compute: see clickIfPresent for the five defects that reading them here produced. The
+       * pattern accepts exactly what normalized() equality accepts, its own alphanumeric words in
+       * order with any run of non-alphanumerics between them, so this tier and chooseOptionIndex's
+       * normalised tier are the same rule expressed twice for two different engines.
+       *
+       * An answer with no [a-z0-9] in it at all, which is every non-Latin answer, produces no pattern
+       * and is skipped: the literal tier above already matches those exactly, and a pattern built
+       * from nothing would match everything.
        */
-      const shorterOptionNames = (target) => {
-        const buckets = new Map();
+      const looseWholeName = (option) => {
+        const words = normalized(option).split(' ').filter(Boolean);
+        if (!words.length) return null;
+        return new RegExp('^[^a-z0-9]*' + words.map(escapeName).join('[^a-z0-9]+') + '[^a-z0-9]*$', 'i');
+      };
+      /* THE WIDENED TIER, FOR AN ANSWER normalized() CANNOT SEE, AND WHY IT IS A DIFFERENT QUERY.
+       *
+       * The widened tier below asks Playwright for a row whose name CONTAINS the answer. In Latin
+       * that is survivable and load-bearing: it is how a stored "Yes" reaches "Yes, I am authorized
+       * to work in the United States", and how "United Arab Emirates" reaches the row
+       * "United Arab Emirates +971" that 43 of 45 stored reports turn on.
+       *
+       * On Chinese, Japanese and Korean it is the defect. Those languages negate with a bound prefix
+       * or a trailing auxiliary, so the row that says the OPPOSITE of the answer contains the answer:
+       * 不需要工作签证担保 contains 需要工作签证担保. A substring query matches exactly one row, the
+       * ambiguity guard sees nothing to guard, and the runner clicks the negation and reports it
+       * filled. Measured in Chromium on four languages before this change.
+       *
+       * So for an answer that normalises away, the row may carry EXTRA MATERIAL BUT NO EXTRA
+       * LETTERS. That keeps the one case the widening exists for, a dial code or a code in brackets
+       * appended to the answer, and refuses the one that reverses it, because every negator in these
+       * scripts is a letter. It is expressed as a pattern rather than by reading the rows, for the
+       * same reason every other tier here is: the row's name is Playwright's to compute.
+       */
+      const paddedWholeName = (option) => new RegExp(
+        '^[^\\p{L}]*' + escapeName(clean(option)) + '[^\\p{L}]*$', 'iu'
+      );
+      const clickMatchingOption = async (target) => {
+        const took = (option) => { lastClickedOptionAnswer = clean(option); return true; };
+        /* EXACT FIRST, ACROSS THE WHOLE LIST AND ACROSS EVERY ANSWER, before any widened tier runs.
+         *
+         * This used to interleave: for one answer it tried exact, then the two widened queries, and
+         * only then moved to the next answer. So a row named exactly "I agree" lost to a row merely
+         * containing "Yes", which is DOM position deciding a declaration again, one level up from
+         * the case below. chooseOptionIndex ranks the native path the same way and this is the same
+         * ranking: her own words first, then the authorised restatements in order, and inside one
+         * rank the whole list is searched before anything looser is considered.
+         *
+         * The rows themselves are still named by Playwright and never by this file: see the comment
+         * on clickIfPresent for the five defects that reading them here produced. wholeName is
+         * exactness expressed as a role query, and it is not vulnerable to the normalise collision
+         * chooseOptionIndex has to guard against, because it never normalises: "10+" and "10" are
+         * two different names to the role engine.
+         */
         for (const option of answerOptions(target)) {
-          const words = clean(option).split(' ').filter(Boolean);
-          if (words.length < 2 || words.length > 12) continue;
-          for (let size = words.length - 1; size >= 1; size -= 1) {
-            for (let start = 0; start + size <= words.length; start += 1) {
-              const span = words.slice(start, start + size).join(' ');
-              if (normalized(span).length <= 6) continue;
-              if (!buckets.has(size)) buckets.set(size, []);
-              if (!buckets.get(size).includes(span)) buckets.get(size).push(span);
-            }
+          if (await clickIfPresent(menuRoot().getByRole('option', { name: wholeName(option) }))) return took(option);
+        }
+        for (const option of answerOptions(target)) {
+          const pattern = looseWholeName(option);
+          if (!pattern) continue;
+          const rows = menuRoot().getByRole('option', { name: pattern });
+          const offers = await offeredRows(rows);
+          if (offers.length === 0) continue;
+          /* THE SAME COLLISION REFUSAL chooseOptionIndex makes, for the same reason and at the same
+           * point. Forgiving punctuation is what makes "C++", "C#" and "C" one pattern, so a menu
+           * offering two of them has been asked a question this tier cannot answer, and the literal
+           * tier above has already had its chance to settle it. */
+          if (offers.length > 1) return refuseChoice(nearMissChoiceReason(option, offers.length));
+          if (await clickIfPresent(rows.nth(offers[0]))) return took(option);
+        }
+        /* THEN THE WIDENED TIERS, AND A WIDENED TIER MAY NOT GUESS.
+         *
+         * These are the two queries that shipped, in the order they shipped, and both ask the same
+         * thing: is there a row that CONTAINS this answer. What they did not ask is how many, and
+         * clickIfPresent takes .first(). Measured: a stored "I am authorized to work in the United
+         * States" against a menu offering "I am authorized to work in the United States for any
+         * employer" and "I am authorized to work in the United States only with a student visa"
+         * matched both and clicked the first, which is a false work-authorisation declaration
+         * decided by the employer's rendering order.
+         *
+         * So a widened tier is used only when the menu offers exactly one row, and two rows end the
+         * whole attempt rather than falling through to a looser rule: a menu that is ambiguous under
+         * containment is not made less ambiguous by asking it something vaguer. Exactly the refusal
+         * the shorter-name rule below already made, applied to the tiers above it.
+         */
+        for (const option of answerOptions(target)) {
+          // Two substring queries for an answer normalising can judge, and one padded-name query for
+          // an answer it cannot. See paddedWholeName: on a script where the negation of an answer
+          // contains the answer, a substring query is a query for the opposite of what was asked.
+          const queries = normalized(option)
+            ? [
+              widenRoot().getByRole('option', { name: option, exact: false }),
+              widenRoot().locator(OPTION_NODES).filter({ hasText: option })
+            ]
+            : [widenRoot().getByRole('option', { name: paddedWholeName(option) })];
+          for (const rows of queries) {
+            const offers = await offeredRows(rows);
+            if (offers.length === 0) continue;
+            if (offers.length > 1) return refuseChoice(nearMissChoiceReason(option, offers.length));
+            if (await clickIfPresent(rows.nth(offers[0]))) return took(option);
           }
         }
-        return [...buckets.keys()].sort((left, right) => right - left).map((size) => buckets.get(size));
-      };
-      const clickMatchingOption = async (target) => {
-        // The caller's own order of preference stays dominant: every rule is tried for one answer
-        // before the next answer is considered at all. Inside one answer, the row that IS that
-        // answer is taken before a row that merely contains it, which is the only reordering here.
-        // The second and third rules are the two queries that shipped, in the order they shipped.
-        for (const option of answerOptions(target)) {
-          if (await clickIfPresent(menuRoot().getByRole('option', { name: wholeName(option) }))) return true;
-          if (await clickIfPresent(menuRoot().getByRole('option', { name: option, exact: false }))) return true;
-          if (await clickIfPresent(optionsRoot().filter({ hasText: option }))) return true;
-        }
-        /* THE FIX, and it is last on purpose.
+        /* THE RULE THAT USED TO RUN LAST, AND WHY IT IS GONE INSTEAD OF GUARDED.
          *
-         * Every rule above requires the EMPLOYER'S row to contain the answer. optionMatches, which
-         * is what verifyChoiceInContainer uses to decide whether a control ended up holding the
-         * right answer, also accepts a row that is a substring of the stored answer. So an employer
-         * offering "Bachelor's Degree" against a stored "Bachelor's Degree in Computer Science"
-         * could never be clicked, while that identical row would have been accepted as correct had
-         * the form arrived with it already selected.
+         * It clicked a menu row named by a contiguous run of the answer's own words, so that an
+         * employer offering "Bachelor's Degree" against a stored "Bachelor's Degree in Computer
+         * Science" could be answered. Its guard was the same two-rows refusal every tier above has.
          *
-         * It runs last because it is the loosest thing optionMatches permits, and it is bounded to
-         * exactly what optionMatches permits and no further. A control this rule cannot answer is
-         * still reported for a person to finish, which is what the caller does with false.
+         * That guard cannot fire on the case that matters, and this is the whole reason it is
+         * removed rather than tightened. The guard needs TWO runs on the menu; the dangerous shape
+         * is a menu that simply does not offer her full answer, where exactly one run matches:
+         *
+         *   stored: "No, I do not require sponsorship now, but will in the future"
+         *   menu:   "No, I do not require sponsorship" / "Yes, I require sponsorship now"
+         *
+         * Measured in Chromium: one run matched, it was clicked, optionMatches' third clause then
+         * verified it, and the field was reported filled. The prefix is the exact reversal of the
+         * answer. Same shape for "I am authorized to work" against a stored "I am authorized to
+         * work only with a student visa".
+         *
+         * There is no structural test that separates that from the degree case, because they are
+         * the same structure: a prefix run of the answer with the remainder dropped. What differs is
+         * whether the dropped remainder was material, and "now, but will in the future" is material
+         * by definition while "in Computer Science" is not. Deciding that here would mean a list of
+         * qualifying words, which fails OPEN on every word not on the list, on the one family where
+         * failing open is a false legal declaration.
+         *
+         * So the reach goes. A menu that offers only a part of her answer is handed back, which is
+         * what this function does with false, and which is what it did before this rule was added.
          */
-        for (const bucket of shorterOptionNames(target)) {
-          const names = new RegExp('^\\s*(?:' + bucket.map(escapeName).join('|') + ')\\s*$', 'i');
-          const rows = menuRoot().getByRole('option', { name: names });
-          const found = await rows.count();
-          if (found === 0) continue;
-          /* TWO ROWS IS A QUESTION THIS RULE CANNOT ANSWER, so it does not guess.
-           *
-           * A stored "Bachelor's Degree in Computer Science" contains both "Bachelor's Degree" and
-           * "Computer Science", and on a menu offering both there is nothing here that knows
-           * whether the employer asked for the degree or the discipline. Every rule above is
-           * anchored on the answer as the applicant stated it and cannot be ambiguous this way;
-           * this one is asking which PART of her answer the employer wanted. Declining costs her a
-           * minute. Guessing puts the wrong word on a real application under her name, and
-           * verifyChoiceInContainer would accept either row and report it as filled.
-           */
-          if (found > 1) return false;
-          if (await clickIfPresent(rows)) return true;
-        }
         return false;
       };
       const searchFor = async (control, target) => {
@@ -3032,6 +3438,10 @@ const { chromium } = require('playwright');
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
     for (const action of currentInput.actions || []) {
+     // Cleared once per ACTION rather than once per chooser, so a question that goes through two of
+     // them keeps the refusal whichever one produced it, and no answer inherits a sentence from the
+     // field before it. A chooser that succeeds never has its reason read.
+     lastChoiceRefusal = '';
      try {
       const locator = action.selector ? page.locator(action.selector).first() : null;
       // Recorded before the action runs, and recorded whether or not it succeeds. What this list
@@ -3586,7 +3996,7 @@ const { chromium } = require('playwright');
         if (fillShape.tag === 'select') {
           const selected = await selectNativeOption(target, action.value || '');
           if (!selected) {
-            if (action.label) skipped.push(action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+            if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
           if (action.label && await verifyFilled(target, action.value || '')) filledFields.push(action.label);
@@ -3598,8 +4008,11 @@ const { chromium } = require('playwright');
             'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
           );
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText)) filledFields.push(action.label);
-            else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
+            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer)) filledFields.push(action.label);
+            else if (action.label) {
+              skipped.push(action.label + ': '
+                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fill'));
+            }
             continue;
           }
           // No option matched, and this is a widget whose answered state can be read. Falling
@@ -3613,7 +4026,7 @@ const { chromium } = require('playwright');
             if (action.label) {
               skipped.push(state.kind === 'chosen'
                 ? action.label + ': left the answer already on the form, "' + clean(state.value) + '"'
-                : action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+                : action.label + ': ' + unmatchedReason(action.value || ''));
             }
             continue;
           }
@@ -3682,6 +4095,13 @@ const { chromium } = require('playwright');
             if (action.label) filledFields.push(action.label);
             continue;
           }
+          // A picker that DECLINED found the control perfectly well. Reporting "field not found"
+          // there would tell the applicant the opposite of what happened and hide the one sentence
+          // that lets her finish it.
+          if (lastChoiceRefusal) {
+            skipped.push((action.label || action.type) + ': ' + lastChoiceRefusal);
+            continue;
+          }
           const message = 'fillByLabelText: field not found';
           if (action.optional) {
             skipped.push((action.label || action.type) + ': ' + message);
@@ -3716,11 +4136,22 @@ const { chromium } = require('playwright');
         if (shape.tag === 'select') {
           const customSelected = await fillCustomChoice(container, action.value || '');
           const selected = customSelected || await selectNativeOption(field, action.value || '');
-          if (!selected) continue;
+          // SAID OUT LOUD, because a silent 'continue' is a dropped answer. This branch left an
+          // unmatched select with nothing in filledFields and nothing in skipped, so the run
+          // reported neither a filled field nor a reason, and the only trace was the employer's own
+          // validator later calling it empty. The tightened exact rule above makes this arm fire
+          // more often, not less, which is exactly why it has to speak.
+          if (!selected) {
+            if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
+            continue;
+          }
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText)) filledFields.push(action.label);
-            else if (action.label) skipped.push(action.label + ': choice value did not persist after fillByLabelText');
+            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer)) filledFields.push(action.label);
+            else if (action.label) {
+              skipped.push(action.label + ': '
+                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText'));
+            }
             continue;
           }
           /* NAME THE ANSWER THAT WAS NOT ON THE LIST, the way the fill branch above already does.
@@ -3737,7 +4168,7 @@ const { chromium } = require('playwright');
             const unmatched = await readChoiceState(container);
             skipped.push(unmatched.kind === 'chosen'
               ? action.label + ': left the answer already on the form, "' + clean(unmatched.value) + '"'
-              : action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+              : action.label + ': ' + unmatchedReason(action.value || ''));
           }
           continue;
         } else if (shape.type === 'checkbox' || shape.type === 'radio') {
@@ -3769,6 +4200,14 @@ const { chromium } = require('playwright');
             if (action.label) filledFields.push(action.label);
             continue;
           }
+          if (outcome === 'near-miss') {
+            // Ends the action rather than falling through to the pill and lone-checkbox arms below.
+            // Those arms exist for a block this one could not READ; a block it read and declined is
+            // a block where a second, looser attempt would tick exactly the option the refusal was
+            // protecting her from.
+            if (action.label) skipped.push(action.label + ': ' + lastChoiceRefusal);
+            continue;
+          }
           if (outcome === 'not-checked') {
             // The option exists, it was clicked, and the page did not keep it. Said plainly, because
             // the applicant can finish it in one click and nothing else on the run can tell her.
@@ -3794,7 +4233,7 @@ const { chromium } = require('playwright');
           // No exact option match means the answer does not belong to this control. Leaving it
           // unticked is correct: it surfaces as a required-field blocker for the applicant, which is
           // far cheaper than guessing a checkbox on their behalf.
-          if (action.label) skipped.push(action.label + ': no option matched "' + clean(wanted) + '", left for you to choose');
+          if (action.label) skipped.push(action.label + ': ' + unmatchedReason(wanted));
           continue;
         } else {
           // No date arm here any more. input[type=date] and every picker this runner can recognise
@@ -3828,11 +4267,15 @@ const { chromium } = require('playwright');
             // Same row hint as the two branches above, for the same reason: the fill that just
             // succeeded is the one whose row this is, and a widget on this path abbreviates its
             // chosen value exactly as readily as one on the others.
-            persisted = await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText);
+            persisted = await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer);
+            if (!persisted && lastChoiceUnreadable) lastChoiceRefusal = unreadableChoiceReason;
           }
         }
         if (action.label && persisted) filledFields.push(action.label);
-        else if (action.label) skipped.push(action.label + ': value did not persist after fillByLabelText');
+        // A refusal from either of the two choice fills above outranks the generic sentence: it says
+        // what was actually wrong, and this arm is reached precisely when the plain text fill was the
+        // wrong dispatch for the control.
+        else if (action.label) skipped.push(action.label + ': ' + (lastChoiceRefusal || 'value did not persist after fillByLabelText'));
       }
       if (action.type === 'upload') {
         await locator.setInputFiles({

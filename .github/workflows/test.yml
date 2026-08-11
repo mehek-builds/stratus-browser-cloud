@@ -65,6 +65,9 @@ jobs:
       - name: Managed runner replay
         run: npm run test:runner
 
+      - name: Choice parity replay
+        run: npm run test:choice-parity
+
       - name: Security code replay
         run: npm run test:security-code
 

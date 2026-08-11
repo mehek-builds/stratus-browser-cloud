@@ -9,10 +9,11 @@
     "start": "node src/server.js",
     "test": "NODE_ENV=test node --test --test-concurrency=1 test/*.test.js",
     "test:runner": "NODE_ENV=test node test/managed-runner-replay.mjs",
+    "test:choice-parity": "NODE_ENV=test node test/choice-parity-replay.mjs",
     "test:security-code": "NODE_ENV=test node test/security-code-replay.mjs",
     "test:required-confirmation": "NODE_ENV=test node test/required-confirmation-replay.mjs",
     "test:e2e": "NODE_ENV=test node test/e2e.mjs",
-    "verify": "npm test && npm run test:runner && npm run test:security-code && npm run test:required-confirmation && npm run test:e2e",
+    "verify": "npm test && npm run test:runner && npm run test:choice-parity && npm run test:security-code && npm run test:required-confirmation && npm run test:e2e",
     "dev:vercel": "vercel dev"
   },
   "dependencies": {

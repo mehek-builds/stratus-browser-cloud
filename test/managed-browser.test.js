@@ -293,7 +293,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
-  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -383,7 +383,7 @@ test('a widget that renders its answer shorter than the row that set it is not a
   assert.match(SANDBOX_RUNNER, /const row = clean\(clickedOptionText \|\| ''\)\.toLowerCase\(\);/);
   assert.match(SANDBOX_RUNNER, /const shown = clean\(text\)\.toLowerCase\(\);/);
   // And the two call sites that have a row to offer are the only ones that pass one.
-  assert.match(SANDBOX_RUNNER, /verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText\)/);
+  assert.match(SANDBOX_RUNNER, /verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText, lastClickedOptionAnswer\)/);
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
@@ -394,7 +394,10 @@ test('a choice option that is not on the list names the answer that went looking
   // The emission, not the words: the sentence survives in the comment that explains why it went.
   assert.doesNotMatch(SANDBOX_RUNNER, /': choice option not found'/);
   assert.match(SANDBOX_RUNNER, /const unmatched = await readChoiceState\(container\);/);
-  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(action\.value \|\| ''\) \+ '", left for you to choose/);
+  // The sentence now lives in one helper, so a chooser that DECLINED an ambiguous list can replace
+  // it with what actually happened rather than claiming her answer was absent.
+  assert.match(SANDBOX_RUNNER, /const unmatchedReason = \(value\) => lastChoiceRefusal/);
+  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(value\) \+ '", left for you to choose/);
 });
 
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
@@ -411,7 +414,7 @@ test('plain fill actions dispatch native selects through selectOption', () => {
   const helper = SANDBOX_RUNNER.slice(helperStart, helperEnd);
   assert.match(SANDBOX_RUNNER, /fillShape\.tag === 'select'/);
   assert.match(SANDBOX_RUNNER, /selectNativeOption\(target, action\.value \|\| ''\)/);
-  assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| ''\]/);
+  assert.match(SANDBOX_RUNNER, /\[selected\.textContent \|\| '', selected\.value \|\| '', selected\.label \|\| ''\]/);
   assert.match(helper, /const choices = await field\.evaluate/);
   assert.match(helper, /const byLabel = chooseOptionIndex\(choices\.map\(\(choice\) => choice\.label\), wanted\)/);
   assert.equal((helper.match(/field\.evaluate/g) || []).length, 1, 'native options are inspected once');
@@ -434,7 +437,11 @@ test('decline style EEO answers can match common portal option text', () => {
   assert.match(SANDBOX_RUNNER, /const answerOptions = \(value\) =>/);
   assert.match(SANDBOX_RUNNER, /i do not wish to answer/);
   assert.match(SANDBOX_RUNNER, /prefer not to answer/);
-  assert.match(SANDBOX_RUNNER, /optionMatches\(optionText, wanted\)/);
+  // And a row that says something about her is never one of them, however much it looks like a
+  // negation. "I do not identify with any of the above" is a claim an employer records.
+  const { optionMatches } = choiceHelpers();
+  assert.equal(optionMatches('I do not identify with any of the above', 'Decline to self-identify'), false);
+  assert.equal(optionMatches('I do not wish to identify', 'Decline to self-identify'), true);
 });
 
 test('an opt-out is matched by what it means, not by how the employer spelled it', () => {
@@ -471,7 +478,7 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
   // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
   // exactly as readily as one reached through the two branches above.
-  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText\);/);
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText, lastClickedOptionAnswer\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.
   assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);
@@ -486,7 +493,7 @@ test('choice matching is scoped to the question container, never the page', () =
   assert.match(SANDBOX_RUNNER, /const choices = scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing - and says
   // so, which it used to do silently.
-  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(wanted\) \+ '", left for you to choose/);
+  assert.match(SANDBOX_RUNNER, /skipped\.push\(action\.label \+ ': ' \+ unmatchedReason\(wanted\)\)/);
   assert.match(SANDBOX_RUNNER, /total === 1 && \/\^yes\$\/i\.test\(wanted\)/);
   assert.match(SANDBOX_RUNNER, /actual\.includes\('checked'\) && \/\^yes\$\/i\.test\(clean\(expected\)\)/);
 });
@@ -887,7 +894,7 @@ function sandboxScope(names, indent = 4) {
   return Function(`${sources}\nreturn { ${names.join(', ')} };`)();
 }
 
-const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'readChoiceState', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
+const choiceHelpers = () => sandboxScope(['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'optionMatchesExactly', 'declineMatches', 'readChoiceState', 'verifyChoiceInContainer', 'choiceControlIsClosed']);
 
 function reactSelectContainer({ chosen = '', placeholder = false, ownText = '', widgetText = '' } = {}) {
   const widget = {
@@ -977,9 +984,21 @@ test('a correct non-Latin answer still verifies, rather than being handed back a
   assert.equal(await verifyChoiceInContainer(showing('نعم'), 'نعم'), true);
   // Case-folded the same way the Latin path is: a widget that renders да verifies against a stored Да.
   assert.equal(await verifyChoiceInContainer(showing('да'), 'Да'), true);
-  // The widget rendering a fuller sentence than the stored answer is the same widening the Latin
-  // arm already allows, and it has to keep working on a script normalisation cannot see.
-  assert.equal(await verifyChoiceInContainer(showing('はい、必要です'), 'はい'), true);
+  /* A WIDGET SAYING MORE THAN THE ANSWER IS HANDED BACK ON THIS SCRIPT, and that is a deliberate
+     narrowing rather than an oversight. The Latin arm allows it because optionMatches only counts
+     containment above six normalised characters, which admits "No, I am not a protected veteran"
+     for a stored "No" while refusing a longer declaration for a longer answer. There is no
+     equivalent number here: a Japanese affirmative is two characters, so any floor that admits はい
+     inside はい、必要です also admits 需要工作签証担保 inside its own negation, which is the exact
+     shape that put a reversed sponsorship declaration on a form and reported it filled. On a script
+     this file cannot read, "said more than the answer" and "said the opposite of the answer" are
+     one shape, and it fails closed. The cost is a confirmation on a fill that was correct. */
+  assert.equal(await verifyChoiceInContainer(showing('はい、必要です'), 'はい', 'はい、必要です', 'はい'), false);
+  assert.equal(await verifyChoiceInContainer(showing('はい、必要です'), 'はい'), false);
+  /* THE WIDENING THAT DOES SURVIVE, on both scripts, because the extra material carries no letters:
+     the row names the country and the widget renders only its dial code. That is the case the
+     clicked-row rule was built for and it is untouched. */
+  assert.equal(await verifyChoiceInContainer(showing('+81'), '日本', '日本 +81', '日本'), true);
   // Stated out loud so the reason this arm exists cannot be optimised away: optionMatches refuses.
   assert.equal(optionMatches('はい', 'はい'), false, 'optionMatches still cannot see a non-Latin answer');
 });
@@ -991,10 +1010,57 @@ test('a mixed-script value is judged on the script that carries the answer', asy
   const { verifyChoiceInContainer } = choiceHelpers();
   const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
   assert.equal(await verifyChoiceInContainer(showing('いいえ (No)'), 'はい'), false);
-  assert.equal(await verifyChoiceInContainer(showing('はい (Yes)'), 'はい'), true);
+  // Same narrowing as above: the rendered value contains the answer and adds letters to it, so on a
+  // script normalising erases it is handed back rather than assumed. Reached through the Latin side
+  // of the same string it still verifies, which the next line asserts.
+  assert.equal(await verifyChoiceInContainer(showing('はい (Yes)'), 'はい', 'はい (Yes)', 'はい'), false);
   // Latin on both sides of a mixed value is untouched: it never reaches the fallback at all.
   assert.equal(await verifyChoiceInContainer(showing('はい (Yes)'), 'Yes'), true);
   assert.equal(await verifyChoiceInContainer(showing('いいえ (No)'), 'Yes'), false);
+});
+
+test('a negation is not the answer it negates, on a script normalisation erases', async () => {
+  /* THE OTHER HALF OF THE NON-LATIN REPAIR, and it was open in two places at once.
+   *
+   * ASSERTED THROUGH THE FOUR-ARGUMENT CALL, which is the only call the action loop makes. An
+   * earlier version of this test used the two-argument form and passed while the defect stood: with
+   * the clicked row and the answer it was clicked for supplied, the clicked-row rule accepted every
+   * pair below, because the row and the rendered value are the same string and the provenance clause
+   * is true by construction for any click made in the same call. A test that pins a call shape
+   * production never makes is worth less than no test, because it reports the hazard as closed.
+   *
+   * WHY THE LATIN GUARD MISSES THESE. optionMatches returns false on its first line for anything
+   * that normalises to nothing, so the near-miss refusal that catches this exact shape in English
+   * never fired. And the shape only exists outside English: Chinese, Japanese and Korean negate with
+   * a bound prefix or a trailing auxiliary, so the negation of an answer CONTAINS the answer, while
+   * "I do not require sponsorship" does not contain "I require sponsorship". That is why nobody
+   * testing on English forms could have seen it.
+   */
+  const { verifyChoiceInContainer } = choiceHelpers();
+  const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
+  for (const [held, wanted] of [
+    ['不需要工作签证担保', '需要工作签证担保'],
+    ['没有工作授权', '有工作授权'],
+    ['不是', '是'],
+    ['ビザのサポートは必要ありません', 'ビザのサポートは必要'],
+    ['스폰서십이 필요하지 않습니다', '스폰서십이 필요']
+  ]) {
+    assert.equal(
+      await verifyChoiceInContainer(showing(held), wanted, held, wanted), false,
+      `a control holding ${held} must not verify as holding ${wanted}, through the call the runner makes`
+    );
+    // And the same control holding what was actually asked for still verifies, so this is a repair
+    // and not a blanket refusal of the script.
+    assert.equal(await verifyChoiceInContainer(showing(wanted), wanted, wanted, wanted), true);
+  }
+  // The Latin pair from the same family, which never had the defect and must keep not having it.
+  assert.equal(
+    await verifyChoiceInContainer(
+      showing('I do not require sponsorship'), 'I require sponsorship',
+      'I do not require sponsorship', 'I require sponsorship'
+    ),
+    false
+  );
 });
 
 test('a blank widget does not verify as a non-Latin answer', async () => {
@@ -1020,13 +1086,21 @@ test('the clicked-row rule cannot launder a non-Latin answer either', async () =
   assert.equal(await verifyChoiceInContainer(showing('Нет'), 'Да', 'Нет'), false);
   // The row that genuinely carries the requested answer still widens, exactly as it does in Latin:
   // Japan's row names the country and the widget renders only the dial code.
-  assert.equal(await verifyChoiceInContainer(showing('+81'), '日本', '日本 +81'), true);
+  assert.equal(await verifyChoiceInContainer(showing('+81'), '日本', '日本 +81', '日本'), true);
 });
 
 test('Latin choice verification is unchanged by the non-Latin repair', async () => {
-  /* THE THING TO BE MOST CAREFUL ABOUT. Containment still runs on the normalised strings whenever
-   * both sides survive normalising, which is every Latin comparison, so these are the same verdicts
-   * as before the change - including the widenings that legitimately depend on this arm.
+  /* THE THING TO BE MOST CAREFUL ABOUT. The comparison still runs on the normalised strings whenever
+   * both sides survive normalising, which is every Latin comparison, so the non-Latin repair changes
+   * no Latin verdict.
+   *
+   * What DID change here, separately and deliberately, is that the first rule is now an equality
+   * rather than containment, and every widening is anchored on the row that was clicked. Containment
+   * cannot tell "the widget rendered more than the answer" from "the widget is holding a different,
+   * longer declaration", and on sponsorship and work authorisation those are the same shape: a
+   * control left holding "I do not require sponsorship" for a stored "I do not require sponsorship
+   * now, but will in the future" verified TRUE on the old arm. So the widening cases below now pass
+   * the clicked row, which is what the runner passes on every path that reaches them.
    */
   const { verifyChoiceInContainer } = choiceHelpers();
   const showing = (chosen) => reactSelectContainer({ chosen, ownText: '' });
@@ -1034,33 +1108,51 @@ test('Latin choice verification is unchanged by the non-Latin repair', async () 
   assert.equal(await verifyChoiceInContainer(showing('No'), 'No'), true);
   assert.equal(await verifyChoiceInContainer(showing('Yes'), 'Yes'), true);
   assert.equal(await verifyChoiceInContainer(showing('YES'), 'yes'), true, 'case is not an answer');
-  // The containment arm's own reason to exist: the widget renders more than the stored answer.
-  assert.equal(await verifyChoiceInContainer(showing('No, I am not a protected veteran'), 'No'), true);
+  // The widening's own reason to exist: the widget renders more than the stored answer, and the row
+  // that was clicked is what says that is a rendering rather than a different answer.
+  assert.equal(
+    await verifyChoiceInContainer(showing('No, I am not a protected veteran'), 'No', 'No, I am not a protected veteran', 'No'),
+    true
+  );
   assert.equal(await verifyChoiceInContainer(showing('I agree'), 'Yes'), true, 'a yes synonym still carries');
   // Punctuation is still collapsed before containment, which is the whole reason this arm compares
   // the NORMALISED text on a Latin pair and not the raw text.
-  assert.equal(await verifyChoiceInContainer(showing("Yes, I'm authorized."), 'Yes'), true);
+  assert.equal(
+    await verifyChoiceInContainer(showing("Yes, I'm authorized."), 'Yes', "Yes, I'm authorized.", 'Yes'),
+    true
+  );
   // Negatives.
   assert.equal(await verifyChoiceInContainer(showing('No'), 'Yes'), false);
   assert.equal(await verifyChoiceInContainer(showing('Yes'), 'No'), false);
   assert.equal(await verifyChoiceInContainer(showing('Male'), 'Female'), false);
   assert.equal(await verifyChoiceInContainer(showing('I decline to self-identify'), 'Male'), false);
-  /* NOT ASSERTED HERE, and said out loud rather than quietly fixed: the reverse of the line above,
-   * a widget showing "Female" against an expected "Male", verifies TRUE on this arm and did so
-   * before this change too, because "female" contains "male" and this arm has no minimum length.
-   * That is a separate pre-existing Latin defect with its own blast radius, and Latin behaviour is
-   * preserved exactly here, so it is left standing and reported rather than changed under cover of
-   * a non-Latin repair. optionMatches alone would refuse it: its substring clauses need 7 chars.
-   */
+  /* THE ONE THIS FILE PREVIOUSLY REPORTED AND LEFT STANDING. A widget showing "Female" against an
+   * expected "Male" used to verify TRUE, because "female" contains "male" and the containment arm
+   * had no minimum length. Replacing that arm with an equality closes it as a side effect, so it is
+   * asserted now rather than described. */
+  assert.equal(await verifyChoiceInContainer(showing('Female'), 'Male'), false);
   // The 43-packet widening, end to end: chosen from the row "United Arab Emirates +971" and rendered
   // as "+971". This is the case the third rule was built for and it is untouched.
   assert.equal(
-    await verifyChoiceInContainer(showing('+971'), 'United Arab Emirates', 'United Arab Emirates +971'),
+    await verifyChoiceInContainer(showing('+971'), 'United Arab Emirates', 'United Arab Emirates +971', 'United Arab Emirates'),
     true
   );
   // And its guard: a control showing an answer that is not part of the row we clicked still fails.
   assert.equal(
-    await verifyChoiceInContainer(showing('+1'), 'United Arab Emirates', 'United Arab Emirates +971'),
+    await verifyChoiceInContainer(showing('+1'), 'United Arab Emirates', 'United Arab Emirates +971', 'United Arab Emirates'),
+    false
+  );
+  /* AND THE ONE THE EXACTNESS RULES ARE FOR. The row that was clicked carries the long answer, the
+   * control ends up showing its short prefix, and that prefix is a substring of the row, so the
+   * clicked-row widening would have accepted it. A near miss of the answer fails closed ahead of
+   * every widening, because it is a different statement about visa status and not a rendering. */
+  assert.equal(
+    await verifyChoiceInContainer(
+      showing('I am authorized to work'),
+      'I am authorized to work only with a student visa',
+      'I am authorized to work only with a student visa',
+      'I am authorized to work only with a student visa'
+    ),
     false
   );
 });
