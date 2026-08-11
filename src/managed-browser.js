@@ -232,17 +232,41 @@ const { chromium } = require('playwright');
     };
     const verifyFilled = async (field, expected) => {
       const actual = await field.evaluate((element) => {
-        if (element instanceof HTMLInputElement && element.type === 'file') return element.files?.length ? 'file' : '';
-        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return element.checked ? 'checked' : '';
+        if (element instanceof HTMLInputElement && element.type === 'file') return [element.files?.length ? 'file' : ''];
+        if (element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio')) return [element.checked ? 'checked' : ''];
         if (element instanceof HTMLSelectElement) {
           const selected = element.selectedOptions && element.selectedOptions[0];
-          return selected ? (selected.textContent || selected.value || '') : element.value || '';
+          return selected ? [selected.textContent || '', selected.value || ''] : [element.value || ''];
         }
-        return 'value' in element ? String(element.value || '') : (element.textContent || '');
-      }).catch(() => '');
-      if (!clean(expected)) return Boolean(clean(actual));
-      if (actual === 'checked' && /^yes$/i.test(clean(expected))) return true;
-      return optionMatches(actual, expected) || normalized(actual) === normalized(expected);
+        return ['value' in element ? String(element.value || '') : (element.textContent || '')];
+      }).catch(() => []);
+      if (!clean(expected)) return actual.some((candidate) => Boolean(clean(candidate)));
+      if (actual.includes('checked') && /^yes$/i.test(clean(expected))) return true;
+      return actual.some((candidate) => optionMatches(candidate, expected) || normalized(candidate) === normalized(expected));
+    };
+    /* A NATIVE SELECT IS A CHOICE CONTROL EVEN WHEN THE CALLER SAYS FILL.
+     *
+     * Discovery gives the caller a durable selector and the control type, but a later action still
+     * arrives as an ordinary fill when the selector identifies one exact field. The runner owns the
+     * DOM and must dispatch from the element it actually reached. locator.fill() cannot operate on a
+     * select, so the three profile-backed Lever questions on production packet c1ddd420 were all
+     * resolved correctly and then left empty by the final write.
+     *
+     * One helper serves both selector-based fill and fillByLabelText so the two paths cannot choose
+     * different option semantics. Label first, value second: Lever uses the same text for both,
+     * while other native forms may expose only one of them. */
+    const selectNativeOption = async (field, wanted) => {
+      for (const option of answerOptions(wanted)) {
+        try {
+          await field.selectOption({ label: option });
+          return true;
+        } catch {}
+        try {
+          await field.selectOption(option);
+          return true;
+        } catch {}
+      }
+      return false;
     };
     /* THE SELECTOR NAMED A QUESTION, NOT A CONTROL.
      *
@@ -3017,10 +3041,21 @@ const { chromium } = require('playwright');
           continue;
         }
         const fillShape = await target.evaluate((element) => ({
+          tag: element.tagName.toLowerCase(),
           role: element.getAttribute('role') || '',
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
-        })).catch(() => ({ role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
+        })).catch(() => ({ tag: '', role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
+        if (fillShape.tag === 'select') {
+          const selected = await selectNativeOption(target, action.value || '');
+          if (!selected) {
+            if (action.label) skipped.push(action.label + ': no option matched "' + clean(action.value || '') + '", left for you to choose');
+            continue;
+          }
+          if (action.label && await verifyFilled(target, action.value || '')) filledFields.push(action.label);
+          else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
+          continue;
+        }
         if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true' || fillShape.ariaAutocomplete === 'list') {
           const container = target.locator(
             'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
@@ -3143,22 +3178,7 @@ const { chromium } = require('playwright');
         }
         if (shape.tag === 'select') {
           const customSelected = await fillCustomChoice(container, action.value || '');
-          let selected = false;
-          if (!customSelected) {
-            for (const option of answerOptions(action.value || '')) {
-              try {
-                await field.selectOption({ label: option });
-                selected = true;
-                break;
-              } catch {}
-              try {
-                await field.selectOption(option);
-                selected = true;
-                break;
-              } catch {}
-            }
-          }
-          if (customSelected) selected = true;
+          const selected = customSelected || await selectNativeOption(field, action.value || '');
           if (!selected) continue;
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
           if (await fillCustomChoice(container, action.value || '')) {
