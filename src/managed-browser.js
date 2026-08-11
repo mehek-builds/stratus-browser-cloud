@@ -2099,7 +2099,110 @@ const { chromium } = require('playwright');
       if (chooserHash !== action.chooserPolicy.grammarHash) {
         throw new Error('Atomic submit chooser grammar hash mismatch');
       }
-      const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => elements.map((element, index) => {
+      /* THE SUBMISSION SCOPE IS NOT ALWAYS A <form>, AND ON ASHBY IT NEVER IS.
+       *
+       * This filter used to require element.closest('form'). Measured on the live kos.ai Ashby
+       * application page: document.querySelectorAll('form').length === 0, with 4 inputs, 1 textarea
+       * and 2 file inputs fully rendered, and the Submit Application button sitting inside a plain
+       * div#form. Every Ashby application therefore produced an empty viable list and threw
+       * "Atomic submit control was missing or ambiguous" before anything was clicked.
+       *
+       * The scope is what the whole pass binds to: the required-field scan root, the readiness
+       * scan root, the fingerprint subject and the sameNode witness. So it is resolved once, here,
+       * and stamped onto the DOM so Playwright addresses the exact node rather than re-deriving it.
+       * Four rules, in order, and the last three all exist to keep a container from being trusted
+       * on a page that has not earned it:
+       *
+       *   1. a form ancestor, and then this behaves exactly as it does today;
+       *   2. otherwise a container, but ONLY if no candidate anywhere on the page is viable under
+       *      rule 1, so a page the current code can already submit is untouched;
+       *   3. the container is the nearest ancestor holding a field control, and it is accepted only
+       *      when every required field on its own tree, outside any form, is inside it;
+       *   4. never body and never documentElement, because "the whole page" is not a scope. */
+      const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => {
+        const FIELD_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], input[type="file"]';
+        const REQUIRED_CONTROLS = 'input:not([type="hidden"])[required], textarea[required], select[required], [aria-required="true"]';
+        const WIDGET = '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
+          + ' [data-field-path], [class*="_fieldEntry_"]';
+        const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
+        const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+        /* The clear has to cross shadow roots because the READ-BACK does. document.querySelectorAll
+         * stops at a shadow boundary, a Playwright CSS locator pierces it, so a marker written
+         * inside a shadow tree used to survive every later clear and be found again on the next
+         * pass. A retained page that binds and clicks once would then see two nodes carrying the
+         * same index and throw for the rest of the session. The candidate marker is cleared for the
+         * same reason: it is read back by exactly the same kind of locator. */
+        const clearMarkers = (root) => {
+          for (const attribute of ['data-litos-submit-scope-v2', 'data-litos-submit-candidate-v2']) {
+            for (const stale of root.querySelectorAll('[' + attribute + ']')) stale.removeAttribute(attribute);
+          }
+          for (const node of root.querySelectorAll('*')) if (node.shadowRoot) clearMarkers(node.shadowRoot);
+        };
+        clearMarkers(document);
+        const isVisible = (element) => {
+          if (!element || !element.getBoundingClientRect) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
+        };
+        const widgetOf = (element) => element.closest(WIDGET) || element.parentElement || element;
+        /* WHAT MAKES A CONTAINER THE APPLICATION, rather than merely a box that holds a field.
+         *
+         * The innermost box holding one field can be smaller than the application: a consent block,
+         * or a final section with the submit in it. Binding that box would scan its one field, find
+         * it answered, and click with an employer's required question elsewhere on the page still
+         * empty. So a container is only accepted when every required field on its own tree, outside
+         * any form, is inside it.
+         *
+         * Climbing until that is true was the alternative, and it is worse. A required field
+         * outside the innermost box is either part of the application or someone else's furniture,
+         * and nothing in a formless DOM says which. Climbing answers "part of the application"
+         * every time, which swallows a job-alert email into the scope and then blocks on it
+         * forever, with no stopping point short of body. Refusing answers "this run does not know",
+         * which is true, and it fails closed exactly as an unresolvable submit already does.
+         *
+         * Controls inside a <form> are exempt: they belong to that form's own submission, so a
+         * newsletter form beside a formless application cannot veto the application. */
+        const requiredOutside = (scopeNode) => {
+          const root = scopeNode.getRootNode();
+          const byId = (id) => (root.getElementById ? root.getElementById(id) : document.getElementById(id));
+          const required = new Set();
+          const add = (control) => {
+            if (!control || control.closest('form')) return;
+            if (!isVisible(widgetOf(control))) return;
+            required.add(control);
+          };
+          const fromMarker = (marker) => {
+            const named = marker.getAttribute('for');
+            return (named && byId(named)) || widgetOf(marker).querySelector(FIELD_CONTROLS) || null;
+          };
+          for (const control of root.querySelectorAll(REQUIRED_CONTROLS)) add(control);
+          for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+            add(fromMarker(marker));
+          }
+          for (const marker of root.querySelectorAll('label, legend')) {
+            const text = String(marker.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
+            add(fromMarker(marker));
+          }
+          return [...required].some((control) => !scopeNode.contains(control));
+        };
+        const containerOf = (element) => {
+          let node = element.parentElement;
+          while (node) {
+            if (node === document.body || node === document.documentElement) return null;
+            if (node.querySelector(FIELD_CONTROLS)) return node;
+            node = node.parentElement;
+          }
+          return null;
+        };
+        const markScope = (node, index) => {
+          const current = node.getAttribute('data-litos-submit-scope-v2');
+          const tokens = current ? current.split(/\s+/).filter(Boolean) : [];
+          if (!tokens.includes(String(index))) tokens.push(String(index));
+          node.setAttribute('data-litos-submit-scope-v2', tokens.join(' '));
+        };
+        const rows = elements.map((element, index) => {
         const rect = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const visible = (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
@@ -2118,32 +2221,68 @@ const { chromium } = require('playwright');
         else if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(text)) score = 2;
         else if (finalIntent) score = 1;
         element.setAttribute('data-litos-submit-candidate-v2', String(index));
-        return { index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), hasForm: Boolean(form), finalIntent, text, score };
-      }), { ...action.chooserPolicy, submitKind: action.submitKind }).catch(() => null);
-      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm && choice.finalIntent) : [];
+        return { element, index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), form, finalIntent, text, score };
+        });
+        /* THE CONTAINER PATH ENGAGES ONLY WHERE THE FORM PATH FOUND NOTHING AT ALL.
+         *
+         * A page that declares a form and puts a plausible final control inside it has told us
+         * where its application is. Letting a formless control compete there is how a page-level
+         * "Apply Now" in a header, which outscores an in-form "Submit", takes the click off the
+         * real submit that shipped code presses today. So the container path is disabled outright
+         * as soon as any candidate is viable under the form rule, which makes this change a strict
+         * addition: on every page the current code can already submit, it still selects exactly
+         * what it selects today. */
+        const formCandidateExists = rows.some((row) => row.visible && !row.disabled && row.finalIntent && Boolean(row.form));
+        const containerCache = new Map();
+        return rows.map((row) => {
+          let scopeNode = row.form || null;
+          let scopeKind = row.form ? 'form' : null;
+          if (!scopeNode && !formCandidateExists) {
+            const container = containerOf(row.element);
+            if (container) {
+              if (!containerCache.has(container)) containerCache.set(container, !requiredOutside(container));
+              if (containerCache.get(container)) {
+                scopeNode = container;
+                scopeKind = 'container';
+              }
+            }
+          }
+          if (scopeNode) markScope(scopeNode, row.index);
+          return {
+            index: row.index, visible: row.visible, disabled: row.disabled,
+            hasScope: Boolean(scopeNode), scopeKind, finalIntent: row.finalIntent, text: row.text, score: row.score
+          };
+        });
+      }, { ...action.chooserPolicy, submitKind: action.submitKind }).catch(() => null);
+      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent) : [];
       viable.sort((a, b) => b.score - a.score || a.index - b.index);
       const selected = viable[0];
       const ambiguous = !selected || (viable[1] && viable[1].score === selected.score);
       if (ambiguous) throw new Error('Atomic submit control was missing or ambiguous');
       const submitLocator = page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
       const submitHandle = await submitLocator.elementHandle();
-      const scope = submitLocator.locator('xpath=ancestor::form[1]');
+      const scopeKind = selected.scopeKind;
+      // The marker is written by the same pass that scored the control, so this addresses the exact
+      // node the walk resolved. The count check is the one that was here before: exactly one scope,
+      // or nothing is clicked.
+      const scope = page.locator('[data-litos-submit-scope-v2~="' + selected.index + '"]');
       if (!submitHandle || await scope.count() !== 1) throw new Error('Atomic submit control had no exact application form');
-      const formHandle = await scope.elementHandle();
-      const binding = await submitHandle.evaluate((element) => {
-        const form = element.closest('form');
+      const scopeHandle = await scope.elementHandle();
+      const binding = await submitHandle.evaluate((element, bound) => {
+        const root = bound.scope;
         const formShape = {
-          id: form.id || null,
-          action: form.getAttribute('action') || null,
-          method: form.getAttribute('method') || null,
-          controls: [...form.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
+          scopeKind: bound.scopeKind,
+          id: root.id || null,
+          action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
+          method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
+          controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
             tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
             type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
           }))
         };
         const submitShape = { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() };
         return { formShape, submitShape };
-      });
+      }, { scope: scopeHandle, scopeKind });
       const formFingerprint = crypto.createHash('sha256').update(JSON.stringify(binding.formShape)).digest('hex');
       const submitFingerprint = crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
       const candidates = await scope.evaluate((root, boundFingerprint) => {
@@ -2420,30 +2559,35 @@ const { chromium } = require('playwright');
       unresolved.push(...scopedReadiness.blocking, ...scopedReadiness.unmatched.map(
         (text) => 'The bound application form still shows an unmatched validation error: ' + text
       ));
-      const sameNode = Boolean(formHandle) && await submitHandle.evaluate(
-        (element, boundForm) => element.isConnected && element.closest('form') === boundForm,
-        formHandle
+      const sameNode = Boolean(scopeHandle) && await submitHandle.evaluate(
+        (element, bound) => {
+          if (!element.isConnected) return false;
+          if (bound.scopeKind === 'form') return element.closest('form') === bound.scope;
+          return bound.scope.isConnected && bound.scope.contains(element);
+        },
+        { scope: scopeHandle, scopeKind }
       ).catch(() => false);
       let blockerReason = null;
       if (!sameNode) {
         blockerReason = 'submit_node_replaced';
         unresolved.push('Bound submit control or application form was replaced before submission');
       } else {
-        const currentBinding = await submitHandle.evaluate((element) => {
-          const form = element.closest('form');
+        const currentBinding = await submitHandle.evaluate((element, bound) => {
+          const root = bound.scope;
           return {
             formShape: {
-              id: form.id || null,
-              action: form.getAttribute('action') || null,
-              method: form.getAttribute('method') || null,
-              controls: [...form.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
+              scopeKind: bound.scopeKind,
+              id: root.id || null,
+              action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
+              method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
+              controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
                 tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
                 type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
               }))
             },
             submitShape: { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() }
           };
-        }).catch(() => null);
+        }, { scope: scopeHandle, scopeKind }).catch(() => null);
         const currentFormFingerprint = currentBinding && crypto.createHash('sha256').update(JSON.stringify(currentBinding.formShape)).digest('hex');
         const currentSubmitFingerprint = currentBinding && crypto.createHash('sha256').update(currentFormFingerprint + ':' + JSON.stringify(currentBinding.submitShape)).digest('hex');
         if (currentFormFingerprint !== formFingerprint || currentSubmitFingerprint !== submitFingerprint) {
@@ -2460,6 +2604,7 @@ const { chromium } = require('playwright');
         pass: {
           submitKind: action.submitKind,
           scope: {
+            scopeKind,
             formFingerprint,
             submitFingerprint,
             formMatchCount: 1,
