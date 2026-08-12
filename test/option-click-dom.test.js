@@ -96,6 +96,14 @@ async function choose(rows, target, extra = '') {
     let lastClickedOptionText = '';
     let lastClickedOptionAnswer = '';
     let lastChoiceRefusal = '';
+    // Counted so a refusal can be made final for the whole control rather than only for the tier
+    // that made it. Declared here for the same reason as the three above.
+    let choiceRefusals = 0;
+    /* The menu the opened control declared it owns, through aria-controls. Null here on purpose:
+       this harness always injects a scopedMenu, which is what menuRoot prefers, so the declared
+       menu is never consulted. Declaring it keeps a runner that reads it executable, and pins that
+       a scoped widget does not depend on it. */
+    let declaredMenu = null;
     ${BASE}
     ${INNER}
     return async (target) => ({

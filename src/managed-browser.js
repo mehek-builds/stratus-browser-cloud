@@ -903,6 +903,9 @@ const { chromium } = require('playwright');
     /* THE STATE THE CONTROL WAS IN WHEN THIS RUN REACHED IT, written by fillCustomChoice and read by
      * the withdrawal below. A refused click has to be put back, and "back" is this. */
     let lastChoiceArrival = { kind: 'empty', value: '' };
+    // See fillCustomChoice: true once this call has opened a candidate control, so a caller can tell
+    // a block with no drivable control from a control whose list did not carry the answer.
+    let lastChoiceControlOpened = false;
     /* WHY A REFUSAL NEEDS WORDS. Every chooser below can now decline a control it could once resolve
      * by position, and "no option matched" is the wrong sentence for a list that offered two. The
      * applicant reads these lines and finishes the field herself, and the two cases ask different
@@ -911,7 +914,20 @@ const { chromium } = require('playwright');
      * action loop ends up reporting the field.
      */
     let lastChoiceRefusal = '';
-    const refuseChoice = (reason) => { lastChoiceRefusal = reason; return false; };
+    /* AND WHY A REFUSAL NEEDS A COUNT AS WELL AS WORDS. A refusal is final for the tier that made it,
+     * because every tier returns straight out of clickMatchingOption. It was NOT final for the
+     * control: fillCustomChoice went on to run searchFor, which types into the widget and re-enters
+     * the same tier stack against a menu the search has filtered, and a filtered menu can offer one
+     * row where the whole menu offered two. So the ambiguity that produced the refusal could be
+     * narrowed away by the very next step, and the answer the refusal was protecting her from could
+     * then be clicked. Nothing measured had reached it, which is exactly why it is worth closing
+     * structurally rather than waiting for the case that does.
+     *
+     * A counter rather than a comparison of the sentence, because two controls in one block can
+     * refuse for the same reason and produce the same string, and 'lastChoiceRefusal' is deliberately
+     * not cleared between them. */
+    let choiceRefusals = 0;
+    const refuseChoice = (reason) => { lastChoiceRefusal = reason; choiceRefusals += 1; return false; };
     // ONE SENTENCE FOR ONE VERDICT, whatever the board rendered the question as. A radio group, a
     // row of pills and a React Select that all offer two near matches and no exact one are the same
     // situation, and the applicant should not have to work out from three different wordings that
@@ -1139,11 +1155,27 @@ const { chromium } = require('playwright');
      * clicking it wiped a correct answer - and the same reading is what finds it here. One regex,
      * two opposite jobs, and they cannot drift apart.
      *
+     * IT IS SEARCHED FOR OVER A WIDER SET OF NODES THAN THE OPENERS, and that is not symmetry for
+     * its own sake. CHOICE_CONTROLS is a list of things that might OPEN a menu, so it is buttons and
+     * comboboxes; the real react-select clear is neither. Read out of react-select's own source
+     * (packages/react-select/src/components/indicators.tsx): ClearIndicator renders a plain '<div>'
+     * carrying 'aria-hidden="true"', an SVG with no text, and no aria-label or title of any kind. It
+     * is not a button, it is not focusable, and it has no accessible name, so nothing in the opener
+     * list can see it and nothing that reads a name can identify it. The class is the only handle it
+     * gives, which is why the search below is over class-shaped selectors too.
+     *
      * WHAT IS DELIBERATELY NOT TOUCHED: a control readChoiceState calls 'unknown'. It publishes
      * nothing, so there is no evidence the click landed on it at all, and clearing it would as
      * readily destroy a correct answer as remove a false one. That case is marked and not touched,
      * which is the same verdict its skip sentence already gives: confirm it.
-     */
+     *
+     * AND THE UPLOADER'S OWN REMOVE CONTROL IS EXCLUDED BY NAME. Widening the search from buttons to
+     * '[class*="remove"]' and '[aria-label]' puts '<button aria-label="Remove file">' in reach, which
+     * is the node readSubmitReadiness reads as PROOF that a resume was uploaded. A withdrawal that
+     * deletes her resume to take back a menu row has done far more damage than the row it was
+     * cleaning up, and an upload is not something this runner can redo. So a candidate that names a
+     * file is never pressed, whatever else its class says. */
+    const NOT_A_CHOICE_CLEAR = /(?<![a-z0-9])(?:file|files|resume|cv|upload|attach|attachment|document)(?![a-z0-9])/;
     const markChoice = async (container, kind) => await container.evaluate(
       (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
     ).catch(() => undefined);
@@ -1151,27 +1183,52 @@ const { chromium } = require('playwright');
       (element) => element.removeAttribute('data-litos-unverified-choice')
     ).catch(() => undefined);
     const clearChoiceControl = async (container) => {
-      const controls = container.locator(CHOICE_CONTROLS);
+      const controls = container.locator(CLEAR_CONTROLS);
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
         if (!await control.isVisible().catch(() => false)) continue;
         const hay = await control.evaluate((element) => ['aria-label', 'title', 'class', 'data-testid', 'name']
           .map((attribute) => element.getAttribute(attribute) || '').join(' ').toLowerCase()).catch(() => '');
-        if (!CLEAR_CONTROL_RE.test(hay)) continue;
+        if (!CLEAR_CONTROL_RE.test(hay) || NOT_A_CHOICE_CLEAR.test(hay)) continue;
         await control.click().catch(() => undefined);
         await page.waitForTimeout(150).catch(() => undefined);
         if ((await readChoiceState(container)).kind !== 'chosen') return true;
       }
       return false;
     };
-    const withdrawRefusedChoice = async (container, clickedOptionText) => {
+    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer) => {
       // Nothing was clicked during this call, so this call has nothing on the form to take back. The
       // provenance rule the clicked-row tier already relies on, asked for the opposite purpose.
       if (!clean(clickedOptionText || '')) return;
       const arrival = lastChoiceArrival;
       const now = await readChoiceState(container);
-      if (now.kind === 'unknown') { await markChoice(container, 'unreadable'); return; }
+      /* THE ROW THAT WAS CLICKED WAS THE ANSWER, ON A CONTROL THAT CANNOT SAY SO.
+       *
+       * readChoiceState only recognises a React Select, so every other custom combobox comes back
+       * 'unknown' and the verifier refuses it whatever it is holding. Marking all of those stopped
+       * the submit, and that cost was measured and is too high: Greenhouse serves Select2, the runner
+       * clicks the RIGHT row, and the application was then withheld. On a required control the block
+       * predates this branch, so the new cost fell entirely on non-required unreadable controls, on
+       * every board that renders any question as a combobox that is not a React Select.
+       *
+       * The row this run clicked and the answer it was clicked FOR are both already recorded, and
+       * when they are the same string the exact tier matched a row named exactly her answer. There is
+       * nothing to withhold a submit over: what is on the control is what she asked for, and the only
+       * thing missing is the widget's willingness to read it back, which is what the skip sentence
+       * already tells her.
+       *
+       * Asked of the strings and not of which tier ran, deliberately. Select2's rows carry no
+       * role=option at all, so an exactly-named Select2 row can only ever be reached by a widened
+       * query, and a tier flag would mark exactly the case this exists to spare.
+       */
+      if (now.kind === 'unknown') {
+        const clickedTheAnswer = clean(clickedOptionText).toLowerCase()
+          === clean(clickedForAnswer || '').toLowerCase();
+        if (clickedTheAnswer) await unmarkChoice(container);
+        else await markChoice(container, 'unreadable');
+        return;
+      }
       // Positively empty. Either the click never took or something already undid it, and either way
       // there is no false answer sitting on the form.
       if (now.kind === 'empty') { await unmarkChoice(container); return; }
@@ -1203,7 +1260,7 @@ const { chromium } = require('playwright');
         await unmarkChoice(container);
         return true;
       }
-      await withdrawRefusedChoice(container, lastClickedOptionText);
+      await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer);
       return false;
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
@@ -1427,18 +1484,47 @@ const { chromium } = require('playwright');
     // This is one of the two ways '"Discipline" is required and is still empty' was reaching real
     // applications: the right answer was selected and then thrown away by a candidate that matched
     // nothing. The other is the unscoped option click documented inside fillCustomChoice below.
-    const CLEAR_CONTROL_RE = /\bclear\b|\bremove\b|\bdeselect\b|\breset\b/;
-    // The one list of things that might open a choice menu, and it is shared with the withdrawal
-    // above on purpose: the control fillCustomChoice must never click is the control a withdrawal
-    // has to find, so both read the same nodes and the same regex and cannot disagree about which
-    // node is the clear.
+    /* AND \b IS THE WRONG BOUNDARY FOR A CLASS NAME, which is where these words actually live.
+     *
+     * '_' is a word character to a JavaScript regex, so \b does not match between '__' and 'clear'.
+     * Every real clear control this runner meets is named with underscores or hyphens, and the two
+     * that were checked against their own sources both failed the old pattern:
+     *
+     *   " select__indicator select__clear-indicator css-1xc3v61-indicatorContainer "   react-select
+     *   " select2-search-choice-close "                                                select2
+     *
+     * The fixture that was supposed to be covering this had been written with an aria-label the real
+     * widget does not have, so the pattern was being tested against a string only the fixture
+     * produced. react-select's ClearIndicator carries 'aria-hidden="true"' and NO accessible name at
+     * all (packages/react-select/src/components/indicators.tsx), so the class is the only thing there
+     * is to match on, and this pattern could not match it.
+     *
+     * The boundary is therefore "not a letter or digit on either side", which treats '_' and '-' as
+     * the separators they are in a class name while still refusing a word that merely starts the same
+     * way: 'closest-office' does not match 'close', and 'select__control--menu-is-closed' does not
+     * either. 'close' is new to the list and is select2's word for this.
+     */
+    const CLEAR_CONTROL_RE = /(?<![a-z0-9])(?:clear|remove|deselect|reset|close)(?![a-z0-9])/;
+    // The one list of things that might OPEN a choice menu. Openers are buttons and comboboxes, which
+    // is why the withdrawal above does not reuse this list: the real react-select clear is a bare
+    // div and appears in none of these.
     const CHOICE_CONTROLS = '[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]';
+    // What a withdrawal may press. The openers, plus the class-named indicators that are not
+    // controls in any accessible sense, plus anything carrying a name at all so a widget that does
+    // label its clear is still found. Every candidate is still filtered by CLEAR_CONTROL_RE and by
+    // NOT_A_CHOICE_CLEAR before it is touched; this selector only decides what gets read.
+    const CLEAR_CONTROLS = CHOICE_CONTROLS
+      + ', [class*="clear"], [class*="close"], [class*="remove"], [class*="deselect"], [class*="reset"], [aria-label], [title]';
     const fillCustomChoice = async (container, wanted) => {
       // Cleared on every call, so the row this function publishes can only ever be the row THIS call
       // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
       lastClickedOptionText = '';
       lastClickedOptionAnswer = '';
+      // Whether this call ever got as far as OPENING something. It separates "this block holds no
+      // control I can drive" from "I drove the control and its list does not carry her answer",
+      // which are the same 'false' to the caller and are opposite sentences to the applicant.
+      lastChoiceControlOpened = false;
       const alreadyAnswered = await readChoiceState(container);
       // Published for the withdrawal above, which has to know what "put it back" means before this
       // function has clicked anything.
@@ -1468,6 +1554,28 @@ const { chromium } = require('playwright');
         'xpath=ancestor-or-self::*[contains(@class,"select__container") or contains(@class,"select-shell") or contains(@class,"select2-container")][1]'
       );
       const scopedMenu = (await menuScope.count()) > 0 ? menuScope : undefined;
+      /* THE MENU THE OPENED CONTROL SAYS IS ITS OWN, read off the control after it is opened and
+       * never guessed. See menuRoot below for what it replaces and why.
+       *
+       * Set from aria-controls, falling back to aria-owns for the ARIA 1.1 spelling. The APG's
+       * combobox pattern makes this the author's own statement of which element is the popup: "The
+       * combobox element has aria-controls set to a value that refers to the element that serves as
+       * the popup. Note that aria-controls only needs to be set when the popup is visible." Which is
+       * exactly when this is read: after the click, after the menu wait.
+       *
+       * react-select sets it, conditionally and correctly, in its own source
+       * (packages/react-select/src/Select.tsx): '...(menuIsOpen && { "aria-controls":
+       * this.getElementId("listbox") })'. A widget that does NOT declare its menu simply gets no
+       * page-wide arm and is handed back, which is the direction this file fails in.
+       */
+      let declaredMenu = null;
+      const readDeclaredMenu = async (control) => {
+        const owns = await control.evaluate((element) => (
+          element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || ''
+        )).catch(() => '');
+        const id = String(owns).trim().split(/\s+/)[0] || '';
+        declaredMenu = id ? page.locator('[id="' + id.replace(/["\\]/g, '\\$&') + '"]') : null;
+      };
       // Anything that is genuinely part of an option list. A bare 'li' still qualifies, but only
       // inside a listbox or a select2 results panel, never loose in the page.
       const OPTION_NODES = '[role="option"], [class*="select__option"], [role="listbox"] li,'
@@ -1511,7 +1619,37 @@ const { chromium } = require('playwright');
         await first.click();
         return true;
       };
-      const menuRoot = () => scopedMenu ?? page;
+      /* NEVER THE PAGE. The widest this can be is a menu the opened control DECLARED it owns.
+       *
+       * Bounding the exact tier to the question's own block first, and reaching wider only when the
+       * block offered nothing, was not enough, and the reasoning that said it was is worth keeping
+       * because it is a nice-sounding piece of nonsense: "a question whose own block holds no rows
+       * is exactly the shape a portal produces". True, and it is ALSO exactly the shape of a question
+       * that simply does not offer her answer. The two are indistinguishable from inside the block,
+       * so the fallback fired on both.
+       *
+       * Measured in Chromium: Q1 an always-rendered background-check consent listbox offering
+       * Yes / No, Q2 a button combobox whose menu is portalled to <body> and offers only "Maybe" and
+       * "Prefer not to say", one action asking for Q2 = "No". Q2's block holds no rows, so the
+       * fallback ran, and the only "No" on the page was Q1's. Q1 came back holding "No". The submit
+       * gate stopped the run, so nothing false was filed, but a consent she never gave was ticked on
+       * the form, the withdrawal and its mark are bound to Q2's container so neither could reach it,
+       * and no line in the report named Q1 at all. The skip line then sends her to finish the form by
+       * hand, on a form carrying a consent she did not give.
+       *
+       * So the fallback is not "the page". It is the element the control names through aria-controls,
+       * which is the author's own statement of which popup belongs to this combobox and is required
+       * to be present exactly while the popup is visible. A portalled menu is still reached, because
+       * a portalling widget has to name its menu to be operable at all; a control that names nothing
+       * loses the wider arm and is handed back. Q1's rows are no longer reachable from Q2 by any
+       * query, which is the property that was missing.
+       *
+       * KNOWN AND UNCHANGED: a React Select that portals its menu has a '.select__container'
+       * ancestor, so scopedMenu is set and wins here, and scopedMenu does not contain the portalled
+       * menu. That control was handed back before this change and still is. It is not made worse by
+       * the line below and is not fixed by it either.
+       */
+      const menuRoot = () => scopedMenu ?? declaredMenu;
       /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
        *
        * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
@@ -1529,17 +1667,15 @@ const { chromium } = require('playwright');
        * .first(), and the run ticked a consent it was never asked about while leaving the question it
        * WAS asked about empty and reporting that question filled. Changing Q1's rows to "Yes, I
        * consent" / "No, I do not consent" so the exact tier cannot fire made the same run answer Q2
-       * correctly and leave Q1 alone, which isolates the page-wide query as the mechanism.
+       * correctly and leave Q1 alone, which isolates the wide query as the mechanism.
        *
-       * So exactness is looked for in THIS question's own block first, and the page is reached only
-       * when the block offers nothing at all. That order is what keeps both halves: a portalled menu
-       * (normal on Ashby and on any React Select with menuPortalTarget) is still reachable, because a
-       * question whose own block holds no rows is exactly the shape a portal produces; and a question
-       * whose block DOES hold its rows can no longer be answered out of somebody else's.
+       * So exactness is looked for in THIS question's own block first, and anything wider is reached
+       * only when the block offers nothing at all AND the control named its own menu. See menuRoot
+       * above for why "the block offered nothing" was not on its own a safe reason to look further.
        *
-       * The ambiguity guard on the page-wide arm is not sufficient on its own and is not what makes
-       * this safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls
-       * that work today; the scoping is what makes the refusal rare and the answer right.
+       * The ambiguity guard on the wider arm is not sufficient on its own and is not what makes this
+       * safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls that
+       * work today; the scoping is what makes the refusal rare and the answer right.
        */
       const widenRoot = () => scopedMenu ?? container;
       /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
@@ -1666,17 +1802,17 @@ const { chromium } = require('playwright');
          * chooseOptionIndex has to guard against, because it never normalises: "10+" and "10" are
          * two different names to the role engine.
          */
-        /* THIS QUESTION'S OWN BLOCK FIRST, THE PAGE ONLY WHEN THE BLOCK OFFERS NOTHING. See the
-         * comment on widenRoot for the measurement: a page-wide exact query answered a different
-         * question than the one it was asked about, and the harm class is the one this file calls
-         * the worst outcome available here, a consent ticked under her name that nobody asked for.
+        /* THIS QUESTION'S OWN BLOCK FIRST, AND THE CONTROL'S OWN DECLARED MENU AFTER THAT. See the
+         * comments on menuRoot and widenRoot for the two measurements behind that order: a page-wide
+         * exact query answered a different question than the one it was asked about, and the harm
+         * class is the one this file calls the worst outcome available here, a consent ticked under
+         * her name that nobody asked for.
          *
-         * Both arms count offered rows before clicking, because the page-wide arm can reach two
-         * questions at once and .first() would pick between them by DOM order. Two rows named
-         * exactly the same thing inside ONE block is a different situation from two rows named
-         * exactly the same thing on one PAGE, and only the second is a question this tier cannot
-         * answer, but it is refused in both places: inside one block it means the block holds two
-         * questions, which is the shape D-02 already refuses everywhere else in this file.
+         * Both arms count offered rows before clicking, because even a declared menu can hold two
+         * rows of one name and .first() would pick between them by DOM order. Two rows named exactly
+         * the same thing inside ONE block is a different situation from two anywhere else, but it is
+         * refused in both places: inside one block it means the block holds two questions, which is
+         * the shape D-02 already refuses everywhere else in this file.
          *
          * THREE VERDICTS AND NOT TWO, because "no row anywhere is named this" and "the rows named
          * this cannot be told apart" have to travel differently: the first moves on to the next
@@ -1688,7 +1824,10 @@ const { chromium } = require('playwright');
           const mine = await offeredRows(own);
           if (mine.length > 1) { refuseChoice(nearMissChoiceReason(option, mine.length)); return 'refused'; }
           if (mine.length === 1) return await clickIfPresent(own.nth(mine[0])) ? 'took' : 'none';
-          const anywhere = menuRoot().getByRole('option', { name });
+          // No declared menu means there is nowhere wider this is allowed to look. See menuRoot.
+          const wide = menuRoot();
+          if (!wide) return 'none';
+          const anywhere = wide.getByRole('option', { name });
           const offers = await offeredRows(anywhere);
           if (offers.length === 0) return 'none';
           if (offers.length > 1) { refuseChoice(nearMissChoiceReason(option, offers.length)); return 'refused'; }
@@ -1700,9 +1839,9 @@ const { chromium } = require('playwright');
           if (verdict === 'refused') return false;
         }
         /* THE SAME TWO ROOTS IN THE SAME ORDER for the punctuation-tolerant name, and for the same
-         * reason: this tier is exactness with the employer's commas forgiven, so a page-wide query
-         * here reaches another question's rows exactly as the literal one did. It already refused a
-         * page offering two, which is what kept it out of the measurement above; refusing is not
+         * reason: this tier is exactness with the employer's commas forgiven, so a wide query here
+         * reaches another question's rows exactly as the literal one did. It already refused a page
+         * offering two, which is what kept it out of the measurement above; refusing is not
          * answering, and a question whose own block holds its rows should be answered from them. */
         for (const option of answerOptions(target)) {
           const pattern = looseWholeName(option);
@@ -1792,7 +1931,11 @@ const { chromium } = require('playwright');
           // showing the pre-filter list, so waiting for "a visible option" would return instantly and
           // match against rows the search is about to replace.
           await page.waitForTimeout(1200).catch(() => undefined);
+          const refusalsBefore = choiceRefusals;
           if (await clickMatchingOption(target)) return true;
+          // And a refusal ends the search too, rather than being narrowed away by the next query.
+          // See the control loop below for the shape this closes.
+          if (choiceRefusals !== refusalsBefore) return false;
         }
         return false;
       };
@@ -1810,13 +1953,33 @@ const { chromium } = require('playwright');
           return hay;
         }).catch(() => '');
         if (CLEAR_CONTROL_RE.test(clears)) continue;
+        lastChoiceControlOpened = true;
         await control.click().catch(() => undefined);
         // Sized on measurement, not a guess: on a live Greenhouse education form the asynchronously
         // loaded School and Discipline menus arrived 563ms and 555ms after the control was touched.
         // The old flat 150ms expired before either, which is how the page-wide sweep was reached.
         await waitForMenu(1200);
+        // Read AFTER the wait, because aria-controls is only required to be there while the popup is
+        // visible and react-select adds it from the same state that renders the menu.
+        await readDeclaredMenu(control);
+        const refusalsBefore = choiceRefusals;
         if (await clickMatchingOption(wanted)) return true;
+        /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
+         * into the widget and re-entered the whole tier stack against a menu the search had filtered,
+         * and a filtered menu can offer one row where the full menu offered two: the ambiguity that
+         * caused the refusal gets narrowed away and the row it was protecting her from gets clicked.
+         * Nothing measured had reached that, and it is closed here because it is one line and the
+         * alternative is finding out. The next control in the loop is skipped for the same reason:
+         * one question is being answered, and a refusal is this function's answer for it. */
+        if (choiceRefusals !== refusalsBefore) {
+          await page.keyboard.press('Escape').catch(() => undefined);
+          return false;
+        }
         if (await searchFor(control, wanted)) return true;
+        if (choiceRefusals !== refusalsBefore) {
+          await page.keyboard.press('Escape').catch(() => undefined);
+          return false;
+        }
         await page.keyboard.press('Escape').catch(() => undefined);
       }
       // Belt and braces for anything the two rules above did not anticipate: if this control was
@@ -2883,13 +3046,21 @@ const { chromium } = require('playwright');
        * published a value and it is not her answer and the withdrawal could not take it back;
        * 'unreadable' means the control publishes nothing, so the run genuinely does not know what it
        * left there. Neither is evidence that the form is safe to send.
+       *
+       * NAMED FROM THE MARKED BLOCK ITSELF FIRST, because the mark is written on the question's own
+       * container and that container already holds the question's label. Going through widgetOf
+       * first gets this wrong whenever the container matches none of the widget selectors: it falls
+       * back to parentElement, which on a Select2 block is the FORM, and the form's first label is
+       * somebody else's question. Measured on this repo's own select2 gate fixture, where a blocker
+       * about the field of study came back named "Full name". A wrong name is worse than no name.
        */
       const marked = [...root.querySelectorAll('[data-litos-unverified-choice]')];
       if (root.nodeType === 1 && root.hasAttribute('data-litos-unverified-choice')) marked.unshift(root);
       for (const element of marked) {
         if (!isVisible(element)) continue;
         const widget = widgetOf(element);
-        const named = labelOf(widget, element);
+        const inner = element.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
+        const named = labelOf(element, inner || element) || labelOf(widget, element);
         const subject = named ? '"' + named + '"' : 'A choice field on the form';
         required.push({
           label: named,
@@ -4322,6 +4493,22 @@ const { chromium } = require('playwright');
           // that lets her finish it.
           if (lastChoiceRefusal) {
             skipped.push((action.label || action.type) + ': ' + lastChoiceRefusal);
+            continue;
+          }
+          /* AND NEITHER DID A PICKER THAT OPENED THE CONTROL AND FOUND THE ANSWER MISSING, which is
+           * the same complaint one clause up and was still being answered with "field not found".
+           * The field was found. It was opened, its list was read, and her answer is not on it, and
+           * that is a sentence she can act on in one click. The other two combobox branches in this
+           * loop have said so since D-01; this branch is the copy that was left behind.
+           *
+           * It matters more since the exact tier stopped being allowed to look across the page: a
+           * portalling control that does not offer her answer used to click somebody else's row and
+           * is now correctly handed back, so this is the sentence that reports it. */
+          if (lastChoiceControlOpened && action.label) {
+            const unmatched = await readChoiceState(container);
+            skipped.push(unmatched.kind === 'chosen'
+              ? action.label + ': left the answer already on the form, "' + clean(unmatched.value) + '"'
+              : action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
           const message = 'fillByLabelText: field not found';
