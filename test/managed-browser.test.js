@@ -382,8 +382,14 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // would then read as a substring of "united arab emirates 971".
   assert.match(SANDBOX_RUNNER, /const row = clean\(clickedOptionText \|\| ''\)\.toLowerCase\(\);/);
   assert.match(SANDBOX_RUNNER, /const shown = clean\(text\)\.toLowerCase\(\);/);
-  // And the two call sites that have a row to offer are the only ones that pass one.
-  assert.match(SANDBOX_RUNNER, /verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText, lastClickedOptionAnswer\)/);
+  // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
+  // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
+  // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
+  assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
+    'every fillCustomChoice call site reads the control back through the same helper');
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 1,
+    'and none of them reaches the verifier directly, which is how the withdrawal cannot be skipped');
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
@@ -478,7 +484,7 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
   // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
   // exactly as readily as one reached through the two branches above.
-  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await verifyChoiceInContainer\(container, action\.value \|\| '', lastClickedOptionText, lastClickedOptionAnswer\);/);
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(container, action\.value \|\| ''\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.
   assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);

@@ -38,7 +38,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -111,8 +111,18 @@ function pillBlock(id, question, options) {
    own .select__single-value node rather than on the input, the placeholder is its own node so an
    untouched control can be told from an answered one, and the menu renders LATE and inside the
    widget's own container. 'renders' is what the widget displays once a row is taken, which is the
-   row text everywhere except the one case that exists to show a widget abbreviating it. */
-function reactBlock(id, question, options, renders = null) {
+   row text everywhere except the one case that exists to show a widget abbreviating it.
+
+   THE CLEAR INDICATOR IS PART OF THE SHAPE and is not decoration. Greenhouse's React Selects carry
+   one, the runner's CLEAR_CONTROL_RE exists solely because clicking it wiped a correct answer, and
+   it is what a withdrawal presses when a clicked row turns out not to be the answer. A fixture
+   without it cannot show either half: not the chooser leaving it alone, and not the withdrawal
+   finding it. 'clearable' is false for the one block that exists to show what happens when a
+   control offers no way back. */
+function reactBlock(id, question, options, renders = null, clearable = true) {
+  const clear = clearable
+    ? `<button type="button" class="select__clear-indicator" aria-label="Clear selection"></button>`
+    : '';
   return `<div class="select__container" data-block="${id}" data-react-select="${id}">
     <label for="${id}-input">${escapeHtml(question)}</label>
     <div class="select__control">
@@ -121,9 +131,37 @@ function reactBlock(id, question, options, renders = null) {
         <div class="select__input-container">
           <input id="${id}-input" class="select__input" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off"></div>
       </div>
+      ${clear}
     </div>
     <script type="application/json" class="select__rows">${JSON.stringify({ options, renders })}</script>
-    <div id="${id}-answer"></div></div>`;
+    <div id="${id}-answer"></div><div id="${id}-shown"></div></div>`;
+}
+
+/* A COMBOBOX THAT IS NOT AN INPUT, which is the shape that had no verifier behind it.
+ *
+ * fillByLabelText resolves the question's block, then looks inside it for a textarea, an input or a
+ * select. Every other block in this file has one - the pill block its mirror checkbox, the React
+ * block its .select__input, the Select2 block its #s2-input - so the branch taken when the block
+ * has NONE was never entered by this suite, and that branch was the one reporting a field filled
+ * without ever reading the control back.
+ *
+ * The markup is the shape Ashby and Workday serve: a '<div role="combobox" aria-haspopup="listbox">'
+ * that displays its own chosen value, a menu that renders in the block a beat later, a clear
+ * affordance, and not one input, textarea or select anywhere in the block. The value is published
+ * in a .select__single-value node because that is the one rendering readChoiceState can read; a
+ * control that publishes nothing is a different case and the Select2 block already covers it. */
+function ariaBlock(id, question, options, clearable = true) {
+  const clear = clearable
+    ? `<button type="button" class="clear-answer" aria-label="Clear selection"></button>`
+    : '';
+  return `<div class="select-shell" data-block="${id}" data-aria-select="${id}">
+    <label id="${id}-label">${escapeHtml(question)}</label>
+    <div class="aria-control" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="${id}-label" tabindex="0">
+      <div class="select__placeholder">Select...</div>
+    </div>
+    ${clear}
+    <script type="application/json" class="select__rows">${JSON.stringify({ options })}</script>
+    <div id="${id}-answer"></div><div id="${id}-shown"></div></div>`;
 }
 
 // One case rendered all three ways, so a single replay proves the three paths agree rather than
@@ -180,6 +218,28 @@ ${trio('opt-out', 'Veteran status, an opt-out on the list', [VETERAN_CLAIM, NOT_
      different declaration and not an abbreviation. Contrast the country control, whose rendering
      ("+971" for "United Arab Emirates +971") has no words in common with the answer at all. -->
 ${reactBlock('react-shortens', 'Work authorization (the widget shortens what it holds)', [AUTH_STUDENT], { [AUTH_STUDENT]: AUTH_SHORT })}
+<!-- THE BLOCK WITH NO INPUT IN IT. Both cases are the same control and the same menu; only the list
+     differs, so the pair separates "this branch verifies" from "this branch refuses everything". -->
+${ariaBlock('aria-near-miss', 'Work authorization, combobox that is not an input', [AUTH_US_STUDENT])}
+${ariaBlock('aria-exact', 'Work authorization, combobox that is not an input, exact row present', [AUTH_US_ANY, AUTH_US_STUDENT, AUTH_US])}
+<!-- TWO QUESTIONS, ONE VOCABULARY, which is every form that asks anything twice.
+     Q1's listbox is always rendered, the way a consent block is; Q2 opens its own menu on demand.
+     Both offer a row named exactly "No". Nothing about Q1 is unusual and nothing about it is being
+     filled: the run is asked for Q2 only. -->
+<div class="consent-block" data-block="consent">
+  <div id="consent-label">Do you consent to a background check</div>
+  <div role="listbox" aria-labelledby="consent-label">
+    <div role="option" id="consent-yes">Yes</div>
+    <div role="option" id="consent-no">No</div>
+  </div>
+  <div id="consent-answer"></div>
+</div>
+<div class="sponsor-block" data-block="sponsor-combobox">
+  <label id="sponsor-combobox-label">Will you now or in the future require sponsorship</label>
+  <button type="button" id="sponsor-combobox-control" aria-haspopup="listbox" aria-expanded="false">Select...</button>
+  <div id="sponsor-combobox-menu"></div>
+  <div id="sponsor-combobox-answer"></div>
+</div>
 <!-- Native selects. Every case below is the same defect family reached through selectNativeOption. -->
 <label for="native_long_second">Sponsorship, native select</label>
 <select id="native_long_second">
@@ -282,8 +342,11 @@ ${reactBlock('react-shortens', 'Work authorization (the widget shortens what it 
   // aria-pressed is one of the selected-state signals the runner reads back before it will report a
   // pill as answered, and setting rather than toggling is deliberate: the runner presses a second
   // time only when the first press left no signal, and a toggle would then turn the answer off.
+  // Scoped to the pill row itself. Every block in this file carries data-block, and the React and
+  // combobox blocks now carry a clear button, so a bare 'button' query would have wired their clear
+  // indicator up as an option and had it publish an answer.
   Array.prototype.forEach.call(document.querySelectorAll('div[data-block]._pillHost, div[data-block]'), function (block) {
-    var pills = block.querySelectorAll('button');
+    var pills = block.querySelectorAll('._pills_ button');
     if (!pills.length) return;
     Array.prototype.forEach.call(pills, function (pill) {
       pill.addEventListener('click', function () {
@@ -316,6 +379,12 @@ ${reactBlock('react-shortens', 'Work authorization (the widget shortens what it 
       node.textContent = shown;
       values.prepend(node);
       answer.textContent = shown;
+      // A WITNESS THE WITHDRAWAL CANNOT ERASE. '-answer' is what the control is holding NOW and is
+      // the thing an employer would receive; '-shown' is what it was ever made to hold, and it is
+      // never cleared. Without it a case asserting an empty control cannot tell a row that was
+      // clicked and taken back from a row that was never clicked at all, and those are the two
+      // outcomes it exists to distinguish.
+      document.getElementById(shell.getAttribute('data-block') + '-shown').textContent = shown;
     }
     function closeMenu() {
       if (timer) { clearTimeout(timer); timer = null; }
@@ -358,6 +427,123 @@ ${reactBlock('react-shortens', 'Work authorization (the widget shortens what it 
     input.addEventListener('input', function () { openMenu(); });
     document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeMenu(); });
   });
+
+  // ---- The combobox that is not an input ----
+  //
+  // Same lifecycle as the React Selects above and the same late menu, minus the search input. The
+  // clear button is what a withdrawal presses; it carries no text, only an aria-label, exactly as a
+  // React Select's SVG indicator does, so nothing that reads button TEXT can mistake it for an
+  // option.
+  Array.prototype.forEach.call(document.querySelectorAll('[data-aria-select]'), function (shell) {
+    var config = JSON.parse(shell.querySelector('.select__rows').textContent);
+    var control = shell.querySelector('[role="combobox"]');
+    var answer = document.getElementById(shell.getAttribute('data-block') + '-answer');
+    var clear = shell.querySelector('.clear-answer');
+    var timer = null;
+    function renderChosen(row) {
+      var existing = shell.querySelector('.select__single-value');
+      if (existing) existing.remove();
+      var placeholder = shell.querySelector('.select__placeholder');
+      if (!row) { if (placeholder) placeholder.style.display = ''; answer.textContent = ''; return; }
+      if (placeholder) placeholder.style.display = 'none';
+      var node = document.createElement('div');
+      node.className = 'select__single-value';
+      node.textContent = row;
+      control.appendChild(node);
+      answer.textContent = row;
+      // See the React block above: '-shown' records what this control was ever made to hold and is
+      // never cleared, so an empty '-answer' can be told from a click that never happened.
+      document.getElementById(shell.getAttribute('data-block') + '-shown').textContent = row;
+    }
+    function closeMenu() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      var menu = shell.querySelector('.select__menu');
+      if (menu) menu.remove();
+      control.setAttribute('aria-expanded', 'false');
+    }
+    function openMenu() {
+      closeMenu();
+      control.setAttribute('aria-expanded', 'true');
+      timer = setTimeout(function () {
+        timer = null;
+        var menu = document.createElement('div');
+        menu.className = 'select__menu';
+        menu.setAttribute('role', 'listbox');
+        config.options.forEach(function (row, index) {
+          var option = document.createElement('div');
+          option.className = 'select__option';
+          option.setAttribute('role', 'option');
+          option.id = shell.getAttribute('data-block') + '-option-' + index;
+          option.textContent = row;
+          option.addEventListener('mousedown', function (event) {
+            event.preventDefault();
+            renderChosen(row);
+            closeMenu();
+          });
+          menu.appendChild(option);
+        });
+        shell.appendChild(menu);
+      }, ${MENU_RENDER_MS});
+    }
+    control.addEventListener('mousedown', function () {
+      if (control.getAttribute('aria-expanded') === 'true') closeMenu(); else openMenu();
+    });
+    if (clear) clear.addEventListener('click', function () { closeMenu(); renderChosen(''); });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeMenu(); });
+  });
+
+  // ---- The clear indicator the React Selects carry ----
+  Array.prototype.forEach.call(document.querySelectorAll('[data-react-select] .select__clear-indicator'), function (clear) {
+    clear.addEventListener('click', function () {
+      var shell = clear.closest('[data-react-select]');
+      var existing = shell.querySelector('.select__single-value');
+      if (existing) existing.remove();
+      var placeholder = shell.querySelector('.select__placeholder');
+      if (placeholder) placeholder.style.display = '';
+      document.getElementById(shell.getAttribute('data-block') + '-answer').textContent = '';
+    });
+  });
+
+  // ---- Two questions that share a vocabulary ----
+  //
+  // Q1 is a listbox that is on the page from the start, which is what a consent block looks like.
+  // Nothing here is special: it publishes what it is given, exactly as the radio blocks do.
+  Array.prototype.forEach.call(document.querySelectorAll('.consent-block [role="option"]'), function (row) {
+    row.addEventListener('click', function () {
+      document.getElementById('consent-answer').textContent = row.textContent;
+    });
+    row.addEventListener('mousedown', function (event) {
+      event.preventDefault();
+      document.getElementById('consent-answer').textContent = row.textContent;
+    });
+  });
+  (function () {
+    var control = document.getElementById('sponsor-combobox-control');
+    var menu = document.getElementById('sponsor-combobox-menu');
+    var answer = document.getElementById('sponsor-combobox-answer');
+    // Rendered synchronously, for the same reason the Select2 block below is: nothing about this
+    // block scopes a menu for it, so the runner gives it the flat 150ms settle rather than waiting
+    // on a widget it recognises. A fixture whose menu arrives after that window would be measuring
+    // the wait instead of the scoping, and the scoping is the thing under test.
+    function open() {
+      if (control.getAttribute('aria-expanded') === 'true') { menu.innerHTML = ''; control.setAttribute('aria-expanded', 'false'); return; }
+      control.setAttribute('aria-expanded', 'true');
+      menu.innerHTML = '<div role="listbox">'
+        + '<div role="option" id="sponsor-yes">Yes</div><div role="option" id="sponsor-no">No</div></div>';
+      Array.prototype.forEach.call(menu.querySelectorAll('[role="option"]'), function (row) {
+        function take(event) {
+          if (event) event.preventDefault();
+          control.textContent = row.textContent;
+          answer.textContent = row.textContent;
+          menu.innerHTML = '';
+          control.setAttribute('aria-expanded', 'false');
+        }
+        row.addEventListener('mousedown', take);
+        row.addEventListener('click', take);
+      });
+    }
+    control.addEventListener('click', open);
+  }());
 
   // ---- Select2 v3, rendered synchronously because nothing scopes a menu for it ----
   (function () {
@@ -408,10 +594,95 @@ ${reactBlock('react-shortens', 'Work authorization (the widget shortens what it 
   });
 </script>`;
 
+/* THE SAME NEAR MISS, ON A FORM WITH A SUBMIT BUTTON, so the last step can be measured rather than
+ * read.
+ *
+ * A refused choice leaves the false row selected. The withdrawal takes it back where the control
+ * offers a way; this control deliberately offers none, which is why reactBlock's clear indicator is
+ * switched off here. So the question is what the PRE-SUBMIT GATE does with a required control that
+ * is holding an answer nobody chose: it is not empty, and empty was the only thing that gate knew
+ * how to stop on.
+ *
+ * Served separately from the fixture above because a form carrying a submit control changes what
+ * every other replay's end-of-run readiness scan sees, and none of those cases is about submitting.
+ *
+ * Everything else on the form is answered before the run starts, so the only thing that can block
+ * this submit is the work-authorisation control. A gate that blocked because the name field was
+ * empty would prove nothing about the case.
+ */
+const gateFixture = `<!doctype html><meta charset="utf-8"><title>Choice Gate Fixture</title>
+<form id="application" novalidate>
+  <div class="field"><label for="full-name">Full name</label><input id="full-name" required value="Mehek Mandal"></div>
+  <div class="field"><label for="email-field">Email</label><input id="email-field" type="email" required value="mehek@example.com"></div>
+  ${reactBlock('gate-auth', 'Work authorization, required and unclearable', [AUTH_US_STUDENT], null, false)
+    .replace('role="combobox"', 'role="combobox" aria-required="true"')}
+  <button id="application-submit" type="submit">Submit application</button>
+</form>
+<div id="submitted"></div>
+<script>
+  Array.prototype.forEach.call(document.querySelectorAll('[data-react-select]'), function (shell) {
+    var config = JSON.parse(shell.querySelector('.select__rows').textContent);
+    var input = shell.querySelector('input[role="combobox"]');
+    var control = shell.querySelector('.select__control');
+    var values = shell.querySelector('.select__value-container');
+    var answer = document.getElementById(shell.getAttribute('data-block') + '-answer');
+    var chosen = '';
+    function renderChosen() {
+      var existing = shell.querySelector('.select__single-value');
+      if (existing) existing.remove();
+      var placeholder = shell.querySelector('.select__placeholder');
+      if (!chosen) { if (placeholder) placeholder.style.display = ''; answer.textContent = ''; return; }
+      if (placeholder) placeholder.style.display = 'none';
+      var node = document.createElement('div');
+      node.className = 'select__single-value';
+      node.textContent = chosen;
+      values.prepend(node);
+      answer.textContent = chosen;
+    }
+    function closeMenu() {
+      var menu = shell.querySelector('.select__menu');
+      if (menu) menu.remove();
+      input.setAttribute('aria-expanded', 'false');
+    }
+    function openMenu() {
+      closeMenu();
+      input.setAttribute('aria-expanded', 'true');
+      var menu = document.createElement('div');
+      menu.className = 'select__menu';
+      menu.setAttribute('role', 'listbox');
+      config.options.forEach(function (row, index) {
+        var option = document.createElement('div');
+        option.className = 'select__option';
+        option.setAttribute('role', 'option');
+        option.id = shell.getAttribute('data-block') + '-option-' + index;
+        option.textContent = row;
+        option.addEventListener('mousedown', function (event) {
+          event.preventDefault();
+          chosen = row;
+          input.value = '';
+          renderChosen();
+          closeMenu();
+        });
+        menu.appendChild(option);
+      });
+      shell.appendChild(menu);
+    }
+    control.addEventListener('mousedown', function () {
+      if (input.getAttribute('aria-expanded') === 'true') closeMenu(); else openMenu();
+    });
+    input.addEventListener('input', function () { openMenu(); });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeMenu(); });
+  });
+  document.getElementById('application').addEventListener('submit', function (event) {
+    event.preventDefault();
+    document.getElementById('submitted').textContent = 'yes';
+  });
+</script>`;
+
 const server = http.createServer((request, response) => {
   // 'close' matters: a keep-alive socket stops Chromium ever reporting networkidle.
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
-  response.end(fixture);
+  response.end(request.url && request.url.startsWith('/gate') ? gateFixture : fixture);
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}/`;
@@ -419,10 +690,17 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-choice-'));
 fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 
-async function replay(actions) {
+/* allowSubmit is off for every case but the gate one, and that is not a detail. With it off the
+ * runner installs a hard document-level guard that swallows every submit event, so #submitted stays
+ * empty no matter what the gate decides and a case asserting it would pass on a runner that presses
+ * the button with a false declaration on the form. The gate case turns the guard OFF so the form's
+ * own handler is the thing that answers, which is the only way to measure whether the click was
+ * withheld or merely absorbed. */
+async function replay(actions, { url = base, allowSubmit = false } = {}) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
-    url: base,
+    url,
     actions,
+    allowSubmit,
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 2400 }
@@ -575,11 +853,17 @@ const unmatchedReason = (value) => `no option matched "${value}", left for you t
       label: 'question:shortened',
       optional: true
     },
-    { type: 'extract', selector: '#react-shortens-answer' }
+    { type: 'extract', selector: '#react-shortens-answer' },
+    { type: 'extract', selector: '#react-shortens-shown' }
   ]);
-  assert.equal(valueOf(result, '#react-shortens-answer'), AUTH_SHORT,
+  assert.equal(valueOf(result, '#react-shortens-shown'), AUTH_SHORT,
     'the fixture must actually shorten the value, or this case proves nothing');
   assert.deepEqual(result.filledFields, [], 'a control holding a different declaration is not a filled field');
+  // And the different declaration does not stay on the form. "I am authorized to work" left
+  // standing for a stored "...only with a student visa" is the same false statement whether or not
+  // the run also reported it, and the report is not what the employer reads.
+  assert.equal(valueOf(result, '#react-shortens-answer'), '',
+    'a control the verifier refused is put back the way the run found it');
   assert.deepEqual(result.skipped, ['question:shortened: choice value did not persist after fillByLabelText']);
 }
 
@@ -726,10 +1010,15 @@ const unmatchedReason = (value) => `no option matched "${value}", left for you t
  * below, and both are asserted as they are rather than as anyone would like them. Here the rows are
  * SHORTER than the answer, so no widened tier matches at all and the menu is simply refused. In the
  * case after this one the row is LONGER and contains the answer, so the widened tier does match: it
- * clicks, and the verifier then refuses the near miss, so the field still comes back for her. That
- * widening stays because it is the only way to reach "United Arab Emirates +971" for a stored
- * "United Arab Emirates", and it is indistinguishable by text from this. filledFields is empty in
- * both, which is the guarantee.
+ * clicks, and the verifier then refuses the near miss. That widening stays because it is the only
+ * way to reach "United Arab Emirates +971" for a stored "United Arab Emirates", and it is
+ * indistinguishable by text from this.
+ *
+ * BOTH CASES ASSERT THE PAGE, and the second one used to slice its React column off before
+ * comparing, with a note saying filledFields being empty was the guarantee. It is not. An empty
+ * filledFields describes the REPORT; the employer reads the FORM, and the form was left holding the
+ * row the verifier had just refused. What makes the guarantee real is that the refusal is now
+ * withdrawn from the control as well as from the report.
  * ------------------------------------------------------------------------------------------- */
 {
   const result = await replay([
@@ -755,9 +1044,13 @@ const unmatchedReason = (value) => `no option matched "${value}", left for you t
 {
   const result = await replay([
     ...ask('long-near-miss', 'Work authorization, only a near match on the list', AUTH_US),
-    ...readBack('long-near-miss')
+    ...readBack('long-near-miss'),
+    { type: 'extract', selector: '#react-long-near-miss-shown' }
   ]);
-  assert.deepEqual(answers(result, 'long-near-miss').slice(0, 2), ['', '']);
+  assert.equal(valueOf(result, '#react-long-near-miss-shown'), AUTH_US_ANY,
+    'the React column must really have clicked the near miss, or the empty control below proves nothing');
+  assert.deepEqual(answers(result, 'long-near-miss'), ['', '', ''],
+    'and a row the verifier refused must not still be selected when the run walks away');
   assert.deepEqual(result.filledFields, []);
   assert.deepEqual(result.skipped, [
     `question:long-near-miss:radio: ${oneNearMissReason(AUTH_US)}`,
@@ -895,6 +1188,175 @@ for (const entry of NEGATED) {
   assert.deepEqual(result.filledFields, [], 'a control that cannot be read back is not reported answered');
   assert.deepEqual(result.skipped, ['question:select2 major: the answer was entered but this control'
     + ' does not report what it is holding, so Litos could not read it back: please confirm it']);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 16. A COMBOBOX THAT IS NOT AN INPUT, WHICH IS THE BRANCH THAT NEVER READ THE CONTROL BACK.
+ *
+ * fillByLabelText looks inside the question's block for a textarea, an input or a select, and when
+ * it finds none it hands the block to fillCustomChoice. Three of the four fillCustomChoice call
+ * sites in the runner then verify what landed; this one reported the field filled the moment the
+ * chooser said it had clicked. Every other block in this file carries an input of some kind - the
+ * pill block its mirror checkbox, the React block its .select__input, the Select2 block its
+ * #s2-input - so no case here had ever entered it.
+ *
+ * Measured on this page before the repair, one stored answer against one menu offering only its
+ * false superstring: radio, pill and checkbox all refused it as a near match, the React Select
+ * clicked and its verifier took it back, and this branch clicked the same row and reported the
+ * field answered. The identical menu was refused on every rendering the suite had a fixture for and
+ * accepted on the one it did not.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Work authorization, combobox that is not an input',
+      value: AUTH_US,
+      label: 'question:aria-near-miss',
+      optional: true
+    },
+    { type: 'extract', selector: '#aria-near-miss-answer' },
+    { type: 'extract', selector: '#aria-near-miss-shown' }
+  ]);
+  assert.equal(valueOf(result, '#aria-near-miss-shown'), AUTH_US_STUDENT,
+    'the widened tier must really have clicked the false row, or nothing below is being measured');
+  // Asserted as one object so a regression reports the whole verdict rather than whichever half of
+  // it happened to be checked first. The page is what the employer receives and the two lists are
+  // what the applicant is told, and this defect got past review by having them disagree.
+  assert.deepEqual({
+    page: valueOf(result, '#aria-near-miss-answer'),
+    filled: result.filledFields,
+    skipped: result.skipped
+  }, {
+    page: '',
+    filled: [],
+    skipped: ['question:aria-near-miss: choice value did not persist after fillByLabelText']
+  });
+}
+
+/* And the same control, the same branch and the same stored answer, on a menu that DOES offer it.
+ * Without this the repair above is indistinguishable from a branch that refuses everything, which
+ * would be its own defect: a question this runner can answer exactly and hands back instead is a
+ * field the applicant fills by hand for no reason. The exact row is listed last, under two rows
+ * that contain the answer, so position cannot be what finds it. */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Work authorization, combobox that is not an input, exact row present',
+      value: AUTH_US,
+      label: 'question:aria-exact',
+      optional: true
+    },
+    { type: 'extract', selector: '#aria-exact-answer' }
+  ]);
+  assert.equal(valueOf(result, '#aria-exact-answer'), AUTH_US,
+    'the exact row is taken from below two containment relatives, and the control keeps it');
+  assert.deepEqual(result.filledFields, ['question:aria-exact']);
+  assert.deepEqual(result.skipped, []);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 17. ONE ANSWER MUST LAND ON THE QUESTION IT WAS ASKED ABOUT.
+ *
+ * Two questions, both offering a row named exactly "No": an always-rendered consent listbox, and a
+ * sponsorship combobox that opens its own menu. The run is asked for the sponsorship question only.
+ *
+ * The exact tier was the only tier in the chooser with no ambiguity guard AND the only one still
+ * allowed to search the whole page, on a comment claiming a row named exactly her answer is her
+ * answer wherever it is rendered. Measured before the repair: the consent question was answered
+ * "No", the sponsorship question was left empty, and the sponsorship question was reported filled.
+ * A consent nobody asked for, ticked under her name, is what this file calls the worst outcome
+ * available to it.
+ *
+ * THE SPONSORSHIP CONTROL PUBLISHES NOTHING readChoiceState can read - it is a button, not a React
+ * Select - so the right row lands and the run still asks her to confirm it. That is the existing
+ * verdict for an unreadable control and it is asserted as it is rather than as anyone would like
+ * it. What is not negotiable is the consent row.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Will you now or in the future require sponsorship',
+      value: 'No',
+      label: 'question:sponsor-combobox',
+      optional: true
+    },
+    { type: 'extract', selector: '#consent-answer' },
+    { type: 'extract', selector: '#sponsor-combobox-answer' }
+  ]);
+  assert.deepEqual({
+    consent: valueOf(result, '#consent-answer'),
+    sponsorship: valueOf(result, '#sponsor-combobox-answer'),
+    filled: result.filledFields,
+    skipped: result.skipped
+  }, {
+    consent: '',
+    sponsorship: 'No',
+    filled: [],
+    skipped: ['question:sponsor-combobox: the answer was entered but this control does not report'
+      + ' what it is holding, so Litos could not read it back: please confirm it']
+  });
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 18. A CONTROL HOLDING A WRONG ANSWER IS NOT AN EMPTY ONE, AND THE GATE ONLY KNEW ABOUT EMPTY.
+ *
+ * This is the whole path, driven end to end: a required React Select whose menu offers only the
+ * false superstring of the stored answer, on a form with a real submit control, through the atomic
+ * confirm-and-submit protocol that production uses.
+ *
+ * The widened tier clicks the row, the verifier refuses it, and the withdrawal cannot take it back
+ * because this control has no clear affordance. So the control is left holding a work-authorisation
+ * declaration nobody chose. Measured before the repair: readSubmitReadiness read the rendered value,
+ * called the field answered, returned zero blockers, and the run pressed Submit. The applicant's
+ * only notice was one line saying the choice value did not persist.
+ *
+ * The submit is what makes this measurable rather than argued: #submitted is written by the form's
+ * own handler and by nothing else.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Work authorization, required and unclearable',
+      value: AUTH_US,
+      label: 'question:gate-auth',
+      optional: true
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY,
+      label: 'final_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'application'
+    },
+    { type: 'extract', selector: '#submitted' },
+    { type: 'extract', selector: '#gate-auth-answer' }
+  ], { url: `${base}gate`, allowSubmit: true });
+  assert.equal(valueOf(result, '#gate-auth-answer'), AUTH_US_STUDENT,
+    'the fixture must actually leave the false row on an unclearable control, or this case proves nothing');
+  assert.deepEqual({
+    submitted: valueOf(result, '#submitted'),
+    pressed: result.submitOutcome.pressed,
+    status: result.requiredFieldConfirmation.status,
+    outcome: result.requiredFieldConfirmation.passes[0].submissionOutcome,
+    filled: result.filledFields
+  }, {
+    submitted: '',
+    pressed: false,
+    status: 'blocked',
+    outcome: 'blocked',
+    filled: []
+  }, 'a form holding a work-authorisation answer nobody chose must not be submitted');
+  assert.ok(
+    result.blockers.some((message) => /Work authorization.*is now showing something that is not that answer/.test(message)),
+    'and the run names the control rather than calling it empty, got ' + JSON.stringify(result.blockers)
+  );
 }
 
 server.close();

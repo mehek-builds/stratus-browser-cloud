@@ -900,6 +900,9 @@ const { chromium } = require('playwright');
      */
     let lastClickedOptionText = '';
     let lastClickedOptionAnswer = '';
+    /* THE STATE THE CONTROL WAS IN WHEN THIS RUN REACHED IT, written by fillCustomChoice and read by
+     * the withdrawal below. A refused click has to be put back, and "back" is this. */
+    let lastChoiceArrival = { kind: 'empty', value: '' };
     /* WHY A REFUSAL NEEDS WORDS. Every chooser below can now decline a control it could once resolve
      * by position, and "no option matched" is the wrong sentence for a list that offered two. The
      * applicant reads these lines and finishes the field herself, and the two cases ask different
@@ -1112,6 +1115,96 @@ const { chromium } = require('playwright');
       if (!row.includes(clean(clickedForAnswer).toLowerCase())) return false;
       lastChoiceUnreadable = false;
       return true;
+    };
+    /* A REFUSED ROW IS STILL SELECTED ON THE FORM, AND UNTIL NOW NOTHING TOOK IT BACK.
+     *
+     * The widened tier clicks a row that contains the answer and the verifier above then refuses it,
+     * so the run reports the field as one it could not fill. What it does not say, and what was
+     * true, is that the FALSE row is now the control's answer. Measured on the React Select
+     * rendering of a stored "I am authorized to work in the United States" against a menu offering
+     * only "...only with a student visa": filled=false, skipped said the value did not persist, and
+     * the page was left holding the student-visa declaration. fillCustomChoice's own belt and braces
+     * cannot help, because it only fires for a control that was ALREADY answered when the run
+     * arrived, and the ordinary case is an empty one.
+     *
+     * TWO THINGS, BECAUSE ONE OF THEM CAN FAIL. The withdrawal below undoes the click where the
+     * control offers a way to undo it; the mark it leaves when it cannot is what the pre-submit gate
+     * reads, so a control still holding something this run could not confirm stops the submit
+     * instead of riding along inside it. A wrong answer is worse than a blank one, and blank was the
+     * only thing that stopped a run.
+     *
+     * THE UNDO IS THE CONTROL'S OWN CLEAR AFFORDANCE, which is the one place in this file where
+     * clicking one is right. CLEAR_CONTROL_RE exists so that fillCustomChoice never touches these -
+     * a React Select's "Clear selections" indicator sits in the same container as its combobox and
+     * clicking it wiped a correct answer - and the same reading is what finds it here. One regex,
+     * two opposite jobs, and they cannot drift apart.
+     *
+     * WHAT IS DELIBERATELY NOT TOUCHED: a control readChoiceState calls 'unknown'. It publishes
+     * nothing, so there is no evidence the click landed on it at all, and clearing it would as
+     * readily destroy a correct answer as remove a false one. That case is marked and not touched,
+     * which is the same verdict its skip sentence already gives: confirm it.
+     */
+    const markChoice = async (container, kind) => await container.evaluate(
+      (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
+    ).catch(() => undefined);
+    const unmarkChoice = async (container) => await container.evaluate(
+      (element) => element.removeAttribute('data-litos-unverified-choice')
+    ).catch(() => undefined);
+    const clearChoiceControl = async (container) => {
+      const controls = container.locator(CHOICE_CONTROLS);
+      const total = await controls.count();
+      for (let index = 0; index < total; index += 1) {
+        const control = controls.nth(index);
+        if (!await control.isVisible().catch(() => false)) continue;
+        const hay = await control.evaluate((element) => ['aria-label', 'title', 'class', 'data-testid', 'name']
+          .map((attribute) => element.getAttribute(attribute) || '').join(' ').toLowerCase()).catch(() => '');
+        if (!CLEAR_CONTROL_RE.test(hay)) continue;
+        await control.click().catch(() => undefined);
+        await page.waitForTimeout(150).catch(() => undefined);
+        if ((await readChoiceState(container)).kind !== 'chosen') return true;
+      }
+      return false;
+    };
+    const withdrawRefusedChoice = async (container, clickedOptionText) => {
+      // Nothing was clicked during this call, so this call has nothing on the form to take back. The
+      // provenance rule the clicked-row tier already relies on, asked for the opposite purpose.
+      if (!clean(clickedOptionText || '')) return;
+      const arrival = lastChoiceArrival;
+      const now = await readChoiceState(container);
+      if (now.kind === 'unknown') { await markChoice(container, 'unreadable'); return; }
+      // Positively empty. Either the click never took or something already undid it, and either way
+      // there is no false answer sitting on the form.
+      if (now.kind === 'empty') { await unmarkChoice(container); return; }
+      /* Re-entering fillCustomChoice to put an earlier answer back would overwrite the two sentences
+       * the caller is about to read, so they are held across the withdrawal. The verdict is already
+       * made; what happens here can only change the FORM, never the report. */
+      const heldRefusal = lastChoiceRefusal;
+      const heldUnreadable = lastChoiceUnreadable;
+      let restored = await clearChoiceControl(container);
+      if (arrival.kind === 'chosen') {
+        await fillCustomChoice(container, arrival.value).catch(() => undefined);
+        const after = await readChoiceState(container);
+        restored = after.kind === 'chosen'
+          && clean(after.value).toLowerCase() === clean(arrival.value).toLowerCase();
+      }
+      lastChoiceRefusal = heldRefusal;
+      lastChoiceUnreadable = heldUnreadable;
+      if (restored) await unmarkChoice(container);
+      else await markChoice(container, 'different');
+    };
+    /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
+     * take the first without the second. Every fillCustomChoice call site in this file goes through
+     * this and none of them calls the verifier directly: the defect that made this necessary is
+     * exactly one call site of four doing something the other three did, and a fifth is only a
+     * matter of time. verifyChoiceInContainer stays a pure reading of the control, which is what
+     * lets it be unit-tested against a container that is nothing but a state. */
+    const choiceLanded = async (container, expected) => {
+      if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
+        await unmarkChoice(container);
+        return true;
+      }
+      await withdrawRefusedChoice(container, lastClickedOptionText);
+      return false;
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
@@ -1335,6 +1428,11 @@ const { chromium } = require('playwright');
     // applications: the right answer was selected and then thrown away by a candidate that matched
     // nothing. The other is the unscoped option click documented inside fillCustomChoice below.
     const CLEAR_CONTROL_RE = /\bclear\b|\bremove\b|\bdeselect\b|\breset\b/;
+    // The one list of things that might open a choice menu, and it is shared with the withdrawal
+    // above on purpose: the control fillCustomChoice must never click is the control a withdrawal
+    // has to find, so both read the same nodes and the same regex and cannot disagree about which
+    // node is the clear.
+    const CHOICE_CONTROLS = '[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]';
     const fillCustomChoice = async (container, wanted) => {
       // Cleared on every call, so the row this function publishes can only ever be the row THIS call
       // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
@@ -1342,8 +1440,11 @@ const { chromium } = require('playwright');
       lastClickedOptionText = '';
       lastClickedOptionAnswer = '';
       const alreadyAnswered = await readChoiceState(container);
+      // Published for the withdrawal above, which has to know what "put it back" means before this
+      // function has clicked anything.
+      lastChoiceArrival = alreadyAnswered;
       if (alreadyAnswered.kind === 'chosen' && optionMatches(alreadyAnswered.value, wanted)) return true;
-      const controls = container.locator('[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]');
+      const controls = container.locator(CHOICE_CONTROLS);
       // Wait for the menu THIS control owns, then only ever click inside it.
       //
       // The old fallback locator swept the whole page for 'li, [data-value]' and clicked the first
@@ -1419,11 +1520,26 @@ const { chromium } = require('playwright');
        * clicked before the menu scoping landed, and the rule that was removed above ran page-wide
        * against fragments of her answer on Ashby and Workday, where nothing sets scopedMenu.
        *
-       * An EXACT name is safe to look for widely: a row named exactly her answer is her answer
-       * wherever it is rendered, and portals put real menus outside their control on purpose. A
-       * widened name is not, so it is bounded to this question's own block. The cost is real and
-       * worth writing down: an unscoped control whose menu renders in a portal loses the widened
-       * tier entirely and is handed back. That is the direction this file fails in.
+       * AN EXACT NAME IS NOT SAFE TO LOOK FOR WIDELY EITHER, and the comment that used to stand here
+       * said it was. It read: "a row named exactly her answer is her answer wherever it is rendered".
+       * That is false on every form that asks two questions with the same rows, which is every form
+       * carrying a Yes/No pair. Measured in Chromium: Q1 an always-rendered background-check consent
+       * listbox offering Yes / No, Q2 a button combobox for sponsorship offering Yes / No, one action
+       * asking for Q2 = "No". The page-wide exact query matched Q1's row first, clickIfPresent takes
+       * .first(), and the run ticked a consent it was never asked about while leaving the question it
+       * WAS asked about empty and reporting that question filled. Changing Q1's rows to "Yes, I
+       * consent" / "No, I do not consent" so the exact tier cannot fire made the same run answer Q2
+       * correctly and leave Q1 alone, which isolates the page-wide query as the mechanism.
+       *
+       * So exactness is looked for in THIS question's own block first, and the page is reached only
+       * when the block offers nothing at all. That order is what keeps both halves: a portalled menu
+       * (normal on Ashby and on any React Select with menuPortalTarget) is still reachable, because a
+       * question whose own block holds no rows is exactly the shape a portal produces; and a question
+       * whose block DOES hold its rows can no longer be answered out of somebody else's.
+       *
+       * The ambiguity guard on the page-wide arm is not sufficient on its own and is not what makes
+       * this safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls
+       * that work today; the scoping is what makes the refusal rare and the answer right.
        */
       const widenRoot = () => scopedMenu ?? container;
       /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
@@ -1550,21 +1666,54 @@ const { chromium } = require('playwright');
          * chooseOptionIndex has to guard against, because it never normalises: "10+" and "10" are
          * two different names to the role engine.
          */
+        /* THIS QUESTION'S OWN BLOCK FIRST, THE PAGE ONLY WHEN THE BLOCK OFFERS NOTHING. See the
+         * comment on widenRoot for the measurement: a page-wide exact query answered a different
+         * question than the one it was asked about, and the harm class is the one this file calls
+         * the worst outcome available here, a consent ticked under her name that nobody asked for.
+         *
+         * Both arms count offered rows before clicking, because the page-wide arm can reach two
+         * questions at once and .first() would pick between them by DOM order. Two rows named
+         * exactly the same thing inside ONE block is a different situation from two rows named
+         * exactly the same thing on one PAGE, and only the second is a question this tier cannot
+         * answer, but it is refused in both places: inside one block it means the block holds two
+         * questions, which is the shape D-02 already refuses everywhere else in this file.
+         *
+         * THREE VERDICTS AND NOT TWO, because "no row anywhere is named this" and "the rows named
+         * this cannot be told apart" have to travel differently: the first moves on to the next
+         * answer and then to the widened tiers, the second ends the whole attempt with a sentence,
+         * exactly as the widened tiers below already end it. Returning a bare false conflated them
+         * and would have let a refusal fall through into a looser rule. */
+        const takeNamed = async (name, option) => {
+          const own = widenRoot().getByRole('option', { name });
+          const mine = await offeredRows(own);
+          if (mine.length > 1) { refuseChoice(nearMissChoiceReason(option, mine.length)); return 'refused'; }
+          if (mine.length === 1) return await clickIfPresent(own.nth(mine[0])) ? 'took' : 'none';
+          const anywhere = menuRoot().getByRole('option', { name });
+          const offers = await offeredRows(anywhere);
+          if (offers.length === 0) return 'none';
+          if (offers.length > 1) { refuseChoice(nearMissChoiceReason(option, offers.length)); return 'refused'; }
+          return await clickIfPresent(anywhere.nth(offers[0])) ? 'took' : 'none';
+        };
         for (const option of answerOptions(target)) {
-          if (await clickIfPresent(menuRoot().getByRole('option', { name: wholeName(option) }))) return took(option);
+          const verdict = await takeNamed(wholeName(option), option);
+          if (verdict === 'took') return took(option);
+          if (verdict === 'refused') return false;
         }
+        /* THE SAME TWO ROOTS IN THE SAME ORDER for the punctuation-tolerant name, and for the same
+         * reason: this tier is exactness with the employer's commas forgiven, so a page-wide query
+         * here reaches another question's rows exactly as the literal one did. It already refused a
+         * page offering two, which is what kept it out of the measurement above; refusing is not
+         * answering, and a question whose own block holds its rows should be answered from them. */
         for (const option of answerOptions(target)) {
           const pattern = looseWholeName(option);
           if (!pattern) continue;
-          const rows = menuRoot().getByRole('option', { name: pattern });
-          const offers = await offeredRows(rows);
-          if (offers.length === 0) continue;
           /* THE SAME COLLISION REFUSAL chooseOptionIndex makes, for the same reason and at the same
            * point. Forgiving punctuation is what makes "C++", "C#" and "C" one pattern, so a menu
            * offering two of them has been asked a question this tier cannot answer, and the literal
            * tier above has already had its chance to settle it. */
-          if (offers.length > 1) return refuseChoice(nearMissChoiceReason(option, offers.length));
-          if (await clickIfPresent(rows.nth(offers[0]))) return took(option);
+          const verdict = await takeNamed(pattern, option);
+          if (verdict === 'took') return took(option);
+          if (verdict === 'refused') return false;
         }
         /* THEN THE WIDENED TIERS, AND A WIDENED TIER MAY NOT GUESS.
          *
@@ -2712,6 +2861,45 @@ const { chromium } = require('playwright');
         // so a field already reported is not reported twice for carrying the matching error line.
         note(widget, culprit, 'error');
       }
+      /* A CONTROL THIS RUN ANSWERED AND COULD NOT CONFIRM, which every rule above is blind to.
+       *
+       * Everything else in this scan asks "is this required field EMPTY". A choice control holding a
+       * wrong answer is not empty, so it passed the gate: hasAnswer reads the rendered value, finds
+       * one, and says yes. Measured on a React Select offering only "I am authorized to work in the
+       * United States only with a student visa" against that stored answer without the last four
+       * words - the widened tier clicked the row, the verifier refused it, the field was reported to
+       * the applicant as one whose "choice value did not persist", the control was left holding the
+       * student-visa declaration, and this scan returned zero blockers. The run then pressed Submit.
+       * A wrong answer is worse than a blank one and blank was the only thing that stopped a run.
+       *
+       * NOT READ OFF THE PAGE, and that distinction is the whole reason this is allowed to block.
+       * The attribute is written by the runner itself at the moment a click is refused, exactly like
+       * the submit-scope and security-code markers, so this is the run reading its own record rather
+       * than a gate keying on employer text - which is the 2026-08-08 mistake that would have
+       * refused every Greenhouse application there is. Nothing an employer renders can produce it,
+       * and a control that verifies clean has its mark removed in the same breath.
+       *
+       * TWO KINDS, because the applicant is told different things. 'different' means the control
+       * published a value and it is not her answer and the withdrawal could not take it back;
+       * 'unreadable' means the control publishes nothing, so the run genuinely does not know what it
+       * left there. Neither is evidence that the form is safe to send.
+       */
+      const marked = [...root.querySelectorAll('[data-litos-unverified-choice]')];
+      if (root.nodeType === 1 && root.hasAttribute('data-litos-unverified-choice')) marked.unshift(root);
+      for (const element of marked) {
+        if (!isVisible(element)) continue;
+        const widget = widgetOf(element);
+        const named = labelOf(widget, element);
+        const subject = named ? '"' + named + '"' : 'A choice field on the form';
+        required.push({
+          label: named,
+          why: 'unconfirmed',
+          message: element.getAttribute('data-litos-unverified-choice') === 'unreadable'
+            ? subject + ' was answered by Litos and this control does not report what it is holding,'
+              + ' so what it is now carrying could not be confirmed'
+            : subject + ' was answered by Litos and is now showing something that is not that answer'
+        });
+      }
       return {
         // Deduped by message, because keying on the control means one React Select can be flagged
         // twice: an unanswered one carries aria-required on BOTH its combobox input and the hidden
@@ -3496,8 +3684,13 @@ const { chromium } = require('playwright');
           // NOT pressed, and the run says why. Sending here is the one failure that cannot be
           // undone: an employer keeps the first application it receives.
           submitGateBlockers.push(...blocking);
+          // "or could not be confirmed" is not padding: since the readiness scan learned to read the
+          // run's own unconfirmed-choice marks, a field can block this gate while being visibly full,
+          // and telling the applicant it is empty would send her looking for a blank box that is not
+          // there.
           skipped.push((action.label || 'final_submit')
-            + ': submit withheld, ' + blocking.length + ' required field(s) on the form are still empty');
+            + ': submit withheld, ' + blocking.length
+            + ' required field(s) on the form are still empty or could not be confirmed');
           continue;
         }
       }
@@ -4007,8 +4200,13 @@ const { chromium } = require('playwright');
           const container = target.locator(
             'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
           );
+          // Read before the label is consulted, never behind it. Written as one short-circuit, a
+          // labelless action skipped the verification entirely and, with it, the withdrawal that
+          // takes a refused row back off the form. Nothing about whether the caller named a field
+          // changes what this run owes the form.
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer)) filledFields.push(action.label);
+            const landed = await choiceLanded(container, action.value || '');
+            if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
                 + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fill'));
@@ -4084,8 +4282,32 @@ const { chromium } = require('playwright');
         );
         const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
+          /* THE FOURTH CALL SITE, AND IT WAS THE ONE WITHOUT A VERIFIER.
+           *
+           * The three other fillCustomChoice calls in this loop read the control back before
+           * reporting it; this one reported the label the moment the chooser said it had clicked
+           * something. A chooser that clicked is not a chooser that was right: the widened tier
+           * clicks a row that CONTAINS the answer, and verifyChoiceInContainer is the only thing in
+           * this file that can disagree with it.
+           *
+           * The gap was invisible because of what reaches here. This branch is entered only when the
+           * question's block holds no input, no textarea and no select at all, so every fixture with
+           * a mirror checkbox, a search box or a hidden input goes down one of the verified branches
+           * instead. A combobox that is not an input - '<div role="combobox">' on Ashby, '<button
+           * aria-haspopup="listbox">' on Workday - is the shape that lands here, and it is the shape
+           * that had no verification. Measured on one page, one stored answer of "I am authorized to
+           * work in the United States" against a menu offering only "...only with a student visa":
+           * the radio, pill and checkbox renderings refused it as a near miss, the React Select
+           * clicked and was then refused by its verifier, and this branch clicked the same row and
+           * reported the field filled.
+           */
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label) filledFields.push(action.label);
+            const landed = await choiceLanded(container, action.value || '');
+            if (action.label && landed) filledFields.push(action.label);
+            else if (action.label) {
+              skipped.push(action.label + ': '
+                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText'));
+            }
             continue;
           }
           // A question whose only controls are option buttons has no field to find, by construction.
@@ -4147,7 +4369,8 @@ const { chromium } = require('playwright');
           }
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
           if (await fillCustomChoice(container, action.value || '')) {
-            if (action.label && await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer)) filledFields.push(action.label);
+            const landed = await choiceLanded(container, action.value || '');
+            if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
                 + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText'));
@@ -4267,7 +4490,7 @@ const { chromium } = require('playwright');
             // Same row hint as the two branches above, for the same reason: the fill that just
             // succeeded is the one whose row this is, and a widget on this path abbreviates its
             // chosen value exactly as readily as one on the others.
-            persisted = await verifyChoiceInContainer(container, action.value || '', lastClickedOptionText, lastClickedOptionAnswer);
+            persisted = await choiceLanded(container, action.value || '');
             if (!persisted && lastChoiceUnreadable) lastChoiceRefusal = unreadableChoiceReason;
           }
         }
