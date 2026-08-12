@@ -1169,13 +1169,40 @@ const { chromium } = require('playwright');
      * readily destroy a correct answer as remove a false one. That case is marked and not touched,
      * which is the same verdict its skip sentence already gives: confirm it.
      *
-     * AND THE UPLOADER'S OWN REMOVE CONTROL IS EXCLUDED BY NAME. Widening the search from buttons to
-     * '[class*="remove"]' and '[aria-label]' puts '<button aria-label="Remove file">' in reach, which
-     * is the node readSubmitReadiness reads as PROOF that a resume was uploaded. A withdrawal that
-     * deletes her resume to take back a menu row has done far more damage than the row it was
-     * cleaning up, and an upload is not something this runner can redo. So a candidate that names a
-     * file is never pressed, whatever else its class says. */
-    const NOT_A_CHOICE_CLEAR = /(?<![a-z0-9])(?:file|files|resume|cv|upload|attach|attachment|document)(?![a-z0-9])/;
+     * AND IT IS BOUNDED TO THE WIDGET, NOT TO THE QUESTION'S BLOCK, WHICH IS THE WHOLE SAFETY ARGUMENT.
+     *
+     * A wide search over the block plus a list of words to avoid was tried and leaked twice. First it
+     * pressed '<button aria-label="Remove file">', the node readSubmitReadiness reads as proof that a
+     * resume was uploaded, so a withdrawal could delete her resume to take back a menu row. That was
+     * answered by naming files in a deny-list. Then, measured on the next pass, the same search
+     * pressed "Remove education", "Remove this employment entry" and "Close": Greenhouse and Lever
+     * render a repeated-section remove beside the very row that carries the School and Discipline
+     * selects, and a run that pressed it destroyed an education entry and reported only that a choice
+     * did not persist. Mehek cannot see that happened and this runner cannot put it back.
+     *
+     * A deny-list is the wrong instrument for that, and its failure mode is exactly what happened: it
+     * has to enumerate every destructive neighbour anyone will ever render, and the next reader will
+     * add a word rather than fix the scope. The list is gone. What replaces it is the one true
+     * statement available here: A CHOICE CONTROL'S CLEAR LIVES INSIDE THAT CHOICE CONTROL. So the
+     * search is bounded to the widget shell, and a node outside the widget is not a candidate however
+     * it is named. "Remove education" is not inside the select, so it cannot be pressed, and neither
+     * can whatever the next board renders next to a select.
+     *
+     * BOTH DIRECTIONS, because the two call paths hand in different containers. The fill branch
+     * resolves the nearest ancestor holding a combobox, which on a React Select is
+     * '.select__input-container', so the shell is an ANCESTOR of the container; fillByLabelText
+     * resolves the question's block, so the shell is a DESCENDANT. Searching one direction only would
+     * silently lose the withdrawal on the other path, which fails closed but for no reason. The
+     * ancestor wins on ties because it is the widget the container is part of.
+     *
+     * AND WHERE NO SHELL CAN BE IDENTIFIED, NOTHING IS PRESSED. That is not a gap left open: the
+     * shell test and readChoiceState's own test are the same substring test over the same three class
+     * families, so a control whose value this runner can read has a shell this can find, and one it
+     * cannot read never reaches here at all. If that ever stops being true, the honest answer is that
+     * the withdrawal does not know what belongs to this control, and the mark plus the pre-submit gate
+     * are what carry it from there. */
+    const CHOICE_SHELL_CLASSES = 'contains(@class,"select__container") or contains(@class,"select-shell")'
+      + ' or contains(@class,"select2-container")';
     const markChoice = async (container, kind) => await container.evaluate(
       (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
     ).catch(() => undefined);
@@ -1183,14 +1210,17 @@ const { chromium } = require('playwright');
       (element) => element.removeAttribute('data-litos-unverified-choice')
     ).catch(() => undefined);
     const clearChoiceControl = async (container) => {
-      const controls = container.locator(CLEAR_CONTROLS);
+      const shell = container.locator('xpath=(ancestor-or-self::*[' + CHOICE_SHELL_CLASSES + ']'
+        + ' | descendant::*[' + CHOICE_SHELL_CLASSES + '])[1]');
+      if ((await shell.count()) === 0) return false;
+      const controls = shell.locator(CLEAR_CONTROLS);
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
         if (!await control.isVisible().catch(() => false)) continue;
         const hay = await control.evaluate((element) => ['aria-label', 'title', 'class', 'data-testid', 'name']
           .map((attribute) => element.getAttribute(attribute) || '').join(' ').toLowerCase()).catch(() => '');
-        if (!CLEAR_CONTROL_RE.test(hay) || NOT_A_CHOICE_CLEAR.test(hay)) continue;
+        if (!CLEAR_CONTROL_RE.test(hay)) continue;
         await control.click().catch(() => undefined);
         await page.waitForTimeout(150).catch(() => undefined);
         if ((await readChoiceState(container)).kind !== 'chosen') return true;
@@ -1509,10 +1539,12 @@ const { chromium } = require('playwright');
     // is why the withdrawal above does not reuse this list: the real react-select clear is a bare
     // div and appears in none of these.
     const CHOICE_CONTROLS = '[role="combobox"], [aria-haspopup="listbox"], .select2-choice, .select2-container, [class*="select2-choice"], [class*="select2-container"], button, [role="button"]';
-    // What a withdrawal may press. The openers, plus the class-named indicators that are not
-    // controls in any accessible sense, plus anything carrying a name at all so a widget that does
-    // label its clear is still found. Every candidate is still filtered by CLEAR_CONTROL_RE and by
-    // NOT_A_CHOICE_CLEAR before it is touched; this selector only decides what gets read.
+    // What a withdrawal may press, and it is deliberately loose because it is no longer what bounds
+    // the search. The openers, plus the class-named indicators that are not controls in any
+    // accessible sense, plus anything carrying a name at all so a widget that does label its clear is
+    // still found. What keeps this safe is WHERE it is applied: clearChoiceControl runs it inside the
+    // widget shell and nowhere else, so a destructive neighbour sitting in the same question block is
+    // not a candidate however it is named. CLEAR_CONTROL_RE then decides which of these is the clear.
     const CLEAR_CONTROLS = CHOICE_CONTROLS
       + ', [class*="clear"], [class*="close"], [class*="remove"], [class*="deselect"], [class*="reset"], [aria-label], [title]';
     const fillCustomChoice = async (container, wanted) => {

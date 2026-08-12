@@ -265,6 +265,25 @@ ${ariaBlock('aria-exact', 'Work authorization, combobox that is not an input, ex
      would see exactly one candidate and no ambiguity left to guard. No clear affordance, so anything
      clicked here stays clicked. -->
 ${reactBlock('narrowing', 'Work authorization, menu narrows when searched', [AUTH_US_ANY, AUTH_US_STUDENT], null, false, 1)}
+<!-- A REPEATED SECTION, WITH ITS REMOVE CONTROL INSIDE THE QUESTION'S BLOCK.
+     Greenhouse and Lever render education and employment as repeatable rows, each with its own
+     remove control beside the very selects that carry School and Discipline. The remove sits BEFORE
+     the select here because that is where a section control goes, and because it is what makes this
+     adversary able to win: a search over the block in document order reaches it first and never gets
+     as far as the widget's own clear.
+     The question's label is outside the select shell, so the container the runner resolves is the
+     whole row rather than the widget, which is the layout that puts the remove in reach at all. -->
+<div class="education-row">
+  <label id="repeat-education-label">Work authorization, education row with a remove control</label>
+  <button type="button" class="remove-entry" aria-label="Remove education">Remove education</button>
+  ${reactBlock('repeat-education', '', [AUTH_US_ANY])}
+</div>
+<div id="repeat-education-removed">no</div>
+<!-- The same widget reached through the FILL branch instead, which hands in the nearest ancestor
+     holding a combobox: on a React Select that is .select__input-container, so the shell is an
+     ANCESTOR of the container rather than a descendant of it. A withdrawal that searched only
+     downwards would find no shell here and press nothing. -->
+${reactBlock('fill-branch', 'Work authorization, reached through the fill branch', [AUTH_US_ANY])}
 <!-- TWO QUESTIONS, ONE VOCABULARY, which is every form that asks anything twice.
      Q1's listbox is always rendered, the way a consent block is; Q2 opens its own menu on demand.
      Both offer a row named exactly "No". Nothing about Q1 is unusual and nothing about it is being
@@ -559,6 +578,30 @@ ${reactBlock('narrowing', 'Work authorization, menu narrows when searched', [AUT
       clear.addEventListener('click', wipe);
     }
   );
+
+  // ---- The repeated section's remove control ----
+  //
+  // What the real one does: the whole row goes, and everything answered in it goes with it. Modelled
+  // as "the row's fields are wiped and a witness records that it happened", rather than by detaching
+  // the node, so a later extract still has somewhere to read from. The witness lives OUTSIDE the row
+  // and is never reset: it is the only way to tell a select that was cleared by its own indicator
+  // from a select that was emptied by having its entry deleted underneath it.
+  (function () {
+    var remove = document.querySelector('.education-row .remove-entry');
+    if (!remove) return;
+    function destroy(event) {
+      if (event) event.preventDefault();
+      var row = remove.closest('.education-row');
+      var value = row.querySelector('.select__single-value');
+      if (value) value.remove();
+      var placeholder = row.querySelector('.select__placeholder');
+      if (placeholder) placeholder.style.display = '';
+      document.getElementById('repeat-education-answer').textContent = '';
+      document.getElementById('repeat-education-removed').textContent = 'yes';
+    }
+    remove.addEventListener('mousedown', destroy);
+    remove.addEventListener('click', destroy);
+  }());
 
   // ---- Two questions that share a vocabulary ----
   //
@@ -1648,6 +1691,84 @@ for (const entry of NEGATED) {
     filled: [],
     skipped: [`question:narrowing: ${ambiguousReason(AUTH_US)}`]
   }, 'a refused control must not be talked round by searching it');
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 19c. THE WITHDRAWAL PRESSES THE CONTROL'S OWN CLEAR AND NOTHING ELSE ON THE ROW.
+ *
+ * Taking a refused row back means clicking something, and the question of WHAT it may click was
+ * answered twice with a list of words to avoid. Both answers leaked. The first pressed
+ * '<button aria-label="Remove file">', which is the node the readiness scan reads as proof that a
+ * resume was uploaded; that was patched by naming files. The second, measured on the head after
+ * that patch, pressed "Remove education", "Remove this employment entry" and "Close".
+ *
+ * Greenhouse and Lever render education and employment as repeatable rows, and the remove control
+ * for the row sits beside the very selects carrying School and Discipline. So the run deleted an
+ * education entry and reported one line saying a choice did not persist. She cannot see that it
+ * happened and this runner cannot put it back.
+ *
+ * The remove sits BEFORE the select, which is where a section control goes and is also what makes
+ * this adversary able to win: a search over the block in document order reaches it first and never
+ * gets as far as the widget's own clear. The select carries a real react-select clear indicator, so
+ * this case pins both halves at once, that the neighbour is not pressed and that the right thing
+ * still is.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Work authorization, education row with a remove control',
+      value: AUTH_US,
+      label: 'question:repeat-education',
+      optional: true
+    },
+    { type: 'extract', selector: '#repeat-education-removed' },
+    { type: 'extract', selector: '#repeat-education-answer' },
+    { type: 'extract', selector: '#repeat-education-shown' }
+  ]);
+  assert.equal(valueOf(result, '#repeat-education-shown'), AUTH_US_ANY,
+    'the widened tier must really have clicked the false row, or nothing below is being measured');
+  assert.deepEqual({
+    rowDestroyed: valueOf(result, '#repeat-education-removed'),
+    page: valueOf(result, '#repeat-education-answer'),
+    filled: result.filledFields,
+    skipped: result.skipped
+  }, {
+    rowDestroyed: 'no',
+    page: '',
+    filled: [],
+    skipped: ['question:repeat-education: choice value did not persist after fillByLabelText']
+  }, 'a withdrawal may press the select\'s own clear and must not touch the row it sits in');
+}
+
+/* And the same widget reached through the FILL branch, which hands in the nearest ancestor holding a
+ * combobox rather than the question's block. On a React Select that is '.select__input-container',
+ * so the widget shell is an ANCESTOR of the container instead of a descendant of it. A withdrawal
+ * that looked only downwards for the shell would find none here, press nothing, and leave the false
+ * row on the form. Both directions, or the scoping quietly costs a path. */
+{
+  const result = await replay([
+    {
+      type: 'fill',
+      selector: '#fill-branch-input',
+      value: AUTH_US,
+      label: 'question:fill-branch',
+      optional: true
+    },
+    { type: 'extract', selector: '#fill-branch-answer' },
+    { type: 'extract', selector: '#fill-branch-shown' }
+  ]);
+  assert.equal(valueOf(result, '#fill-branch-shown'), AUTH_US_ANY,
+    'the fill branch must really have clicked the false row, or this case proves nothing');
+  assert.deepEqual({
+    page: valueOf(result, '#fill-branch-answer'),
+    filled: result.filledFields,
+    skipped: result.skipped
+  }, {
+    page: '',
+    filled: [],
+    skipped: ['question:fill-branch: choice value did not persist after fill']
+  }, 'the withdrawal reaches a shell above the container as well as one below it');
 }
 
 /* ---------------------------------------------------------------------------------------------
