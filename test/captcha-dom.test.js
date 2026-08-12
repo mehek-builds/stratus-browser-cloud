@@ -477,3 +477,117 @@ test('both modes share ONE definition of visible, mechanism by mechanism', async
   assert.deepEqual(await visibleValues(SITEKEY_SELECTOR, 'data-sitekey'), [],
     'mode 2 disagrees on an ancestor-hidden widget');
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * A BORDER BOX IS NOT WHAT A PERSON SEES.
+ *
+ * The first version of mode 2 asked isVisible of the MATCHED NODE ONLY, and that was wrong in the
+ * one direction this file exists to prevent, on the exact geometry the sweep measured.
+ *
+ * The caller's selectors match widget CONTAINERS and reCAPTCHA frames. Nothing in them can match an
+ * hCaptcha or a Turnstile frame, so on those providers the container is the caller's only channel.
+ * `height:0` under the default `overflow:visible` leaves that container's border box at 1380x0 while
+ * its 303x78 checkbox is in flow, painted, and waiting to be clicked. The node-only rule reported
+ * nothing, the caller discarded a correct blocker, and the run walked into a challenge it cannot
+ * clear. That direction costs an application outright; the false alarm this file was written about
+ * only strands one.
+ *
+ * THE FIXTURE THAT MISSED IT is worth naming, because it is this project's signature failure. The
+ * visible-hCaptcha case used to hand-write its container as `303x78`. Nothing in the 30-posting
+ * sweep measured a visible hCaptcha; the one thing measured about that container is that its height
+ * is 0 while it holds non-zero children, so the height is IMPOSED rather than derived from content.
+ * Assuming it goes away in the visible state was the entire safety margin, and it was an assumption,
+ * not a measurement. The cases below use the geometry that was measured.
+ * ------------------------------------------------------------------------------------------- */
+
+const ZERO_HEIGHT_CONTAINER_STYLE = 'width:1380px;height:0';
+
+test('a zero-height container that PAINTS a child is reported', async () => {
+  const html = `${FORM}
+    <div id="h-captcha" class="h-captcha" data-sitekey="e33f87f8-88ec-4e1a-9a13-df9bbb1d8120"
+      style="${ZERO_HEIGHT_CONTAINER_STYLE}">
+      <iframe src="/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox" width="303" height="78"></iframe>
+    </div>`;
+  assert.deepEqual(await readVisible(html, SITEKEY_SELECTOR, 'data-sitekey'),
+    ['e33f87f8-88ec-4e1a-9a13-df9bbb1d8120']);
+});
+
+test('the SAME container painting nothing is still withheld', async () => {
+  /* The pair that makes the rule above mean something rather than "report everything". Identical
+     container, identical attributes, identical 1380x0 box: the only difference is what the children
+     are doing, which is the whole question. This is the live Lever shape, and the PR that added mode
+     2 exists to keep it silent. */
+  assert.deepEqual(await readVisible(`${FORM}${LEVER_INVISIBLE_HCAPTCHA}`, SITEKEY_SELECTOR, 'data-sitekey'), []);
+});
+
+test('a Turnstile container is reachable through the same rule', async () => {
+  // Turnstile is the second provider with no frame-level selector of its own, so the container is
+  // the only channel and a node-only rule is blind here for the same reason.
+  const html = `${FORM}
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAAADnPIDROrmt1Wwj" style="${ZERO_HEIGHT_CONTAINER_STYLE}">
+      <iframe src="/challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2"
+        width="300" height="65"></iframe>
+    </div>`;
+  assert.deepEqual(await readVisible(html, SITEKEY_SELECTOR, 'data-sitekey'), ['0x4AAAAAAADnPIDROrmt1Wwj']);
+});
+
+test('an ESCALATED challenge overlay inside a zero-height container is reported', async () => {
+  // The post-click state. hCaptcha mounts the image grid as a fixed-position overlay inside the same
+  // container, so the container geometry never changes and a person is looking at a grid right now.
+  const html = `${FORM}
+    <div id="h-captcha" class="h-captcha" data-sitekey="K" style="${ZERO_HEIGHT_CONTAINER_STYLE}">
+      <iframe src="/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox" style="visibility:hidden" width="1" height="1"></iframe>
+      <iframe src="/captcha/v1/9d2/static/hcaptcha.html#frame=challenge" width="400" height="580"
+        style="position:fixed;top:0;left:0"></iframe>
+    </div>`;
+  assert.deepEqual(await readVisible(html, SITEKEY_SELECTOR, 'data-sitekey'), ['K']);
+});
+
+test('the subtree rule does not reach across an iframe boundary', async () => {
+  /* REGRESSION D, which the subtree widening could have undone and does not. reCAPTCHA leaves the
+     popup iframe mounted and collapsed after it closes, and an iframe's document is not in this
+     document's querySelectorAll, so a collapsed bframe has no visible descendants to find here
+     whatever is inside it. Pinned because "or any descendant" is exactly the kind of widening that
+     quietly re-opens a closed hole. */
+  const bframe = 'iframe[src*="/recaptcha/"][src*="bframe"]';
+  assert.deepEqual(await readVisible(`${FORM}
+    <iframe src="/recaptcha/api2/bframe?k=K" width="400" height="580" style="display:none"></iframe>`,
+  bframe, 'src'), []);
+});
+
+test('a hidden container whose children are all hidden stays withheld, mechanism by mechanism', async () => {
+  /* The floor under the widening. Each mechanism is applied to the CHILD while the container is the
+     measured 1380x0, so the only thing that can report a value is a child the browser is painting.
+     A subtree rule that forgot any one of these arms would report a page showing nobody anything. */
+  for (const style of ['display:none', 'visibility:hidden', 'opacity:0']) {
+    const html = `${FORM}
+      <div class="h-captcha" data-sitekey="K" style="${ZERO_HEIGHT_CONTAINER_STYLE}">
+        <iframe src="/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox" width="303" height="78"
+          style="${style}"></iframe>
+      </div>`;
+    assert.deepEqual(await readVisible(html, SITEKEY_SELECTOR, 'data-sitekey'), [],
+      `a child hidden by ${style} must not report its container`);
+  }
+});
+
+test('a child collapsed by SIZE ALONE still has an iframe border box, and is reported', async () => {
+  /* A RESIDUAL, pinned rather than hidden, and it was found by writing this list before writing the
+     rule. An <iframe> carries a 2px inset border by default, so `width:0;height:0` still lays out a
+     4x4 border box and every isVisible in this runner has always called that painted. The rule keys
+     on whether the browser paints a box, not on whether the box is big enough to use.
+     WHY IT IS LEFT ALONE. An area floor is exactly the kind of number nothing in the sweep measured,
+     and picking one would be guessing at the boundary between a collapsed widget and a small one.
+     The measured Lever page does not depend on it either way: its frames carry visibility:hidden, so
+     the arms above are what keep it silent, and a provider that switched to size-only collapsing
+     would fail toward the blocker rather than toward a submit under a live challenge. */
+  const html = `${FORM}
+    <div class="h-captcha" data-sitekey="K" style="${ZERO_HEIGHT_CONTAINER_STYLE}">
+      <iframe src="/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox" width="303" height="78"
+        style="width:0;height:0"></iframe>
+    </div>`;
+  assert.deepEqual(await readVisible(html, SITEKEY_SELECTOR, 'data-sitekey'), ['K']);
+  // And the same node with its border removed has no box at all, which is what makes the reading
+  // above a statement about the border box rather than about the size attributes.
+  const borderless = html.replace('style="width:0;height:0"', 'style="width:0;height:0;border:0"');
+  assert.deepEqual(await readVisible(borderless, SITEKEY_SELECTOR, 'data-sitekey'), []);
+});

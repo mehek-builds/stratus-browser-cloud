@@ -1668,10 +1668,16 @@ const { chromium } = require('playwright');
      * managed path was the outlier, and it was the outlier because it was the one layer with no
      * layout read.
      *
-     * A SECOND copy of isVisible next to the extract handler would have closed that gap and left the
-     * next one open, because two copies drift and nothing would notice. This is one definition,
-     * serialized into the page by both callers, so the two answers cannot disagree about what
-     * "visible" means. */
+     * ONE COPY OF THE CAPTCHA VISIBILITY RULE, and the claim is deliberately that narrow. This file
+     * holds seven isVisible helpers, at roughly lines 1326, 1440, 1676, 1829, 1913, 2415 and 2694,
+     * and they are NOT redundant: the submit-outcome reader disqualifies a node parked off screen,
+     * the security-code reader treats one zero dimension as still visible, and this one disqualifies
+     * either zero dimension. They answer different questions and their differences are load-bearing.
+     * What must not exist is a second copy of THIS one, because the two callers below are answering
+     * the same question about the same page, and a second copy is how the managed path and this
+     * runner came to disagree in the first place. So the rule lives here once and is serialized into
+     * the page by both of them. Consolidating the other five would be a separate change and a worse
+     * one; it would flatten distinctions each of them was measured into. */
     const captchaSnapshot = (nodes, request) => {
       const isVisible = (element) => {
         if (!element) return false;
@@ -1682,17 +1688,39 @@ const { chromium } = require('playwright');
         if (Number(style.opacity) === 0) return false;
         return true;
       };
-      /* ONE ENTRY PER VISIBLE NODE, and the cardinality is as load-bearing as the filter.
+      /* THE NODE OR ANYTHING IT PAINTS, and the difference between those two readings is a defect
+       * that was measured rather than imagined.
        *
-       * The plain extract reads locator.first(), so a page holding two widgets returns one value and
-       * the backend cannot tell which one it got. Every rule it writes that subtracts one list of
-       * site keys from another then degenerates on exactly the page it was written for, because
-       * reCAPTCHA keys are issued per domain and two widgets on one employer page usually SHARE a
-       * key. Returning every visible match, in DOM order, is what makes that subtraction a multiset
+       * The caller's selectors here match widget CONTAINERS and reCAPTCHA frames. Nothing in them
+       * can match an hCaptcha or a Turnstile frame, so on those two providers the container is the
+       * caller's ONLY channel. A container carrying height:0 under the default overflow:visible has
+       * a border box of 1380x0 while its 303x78 checkbox sits in flow, fully painted, and waiting to
+       * be clicked. Asking isVisible of the container alone answers "nothing here" about a page a
+       * person is looking at, and THIS runner's own predicate, which walks the frames as nodes in
+       * their own right, says the opposite on the same DOM.
+       *
+       * That is the same failure this whole mode exists to end, pointed the other way: one layer
+       * blind to what another can see. A caller that discards a correct blocker sends an application
+       * into a challenge it cannot clear, which is the direction that costs an application outright
+       * rather than stranding one.
+       *
+       * The measured Lever page is unaffected, and that is what makes the widened rule safe rather
+       * than a retreat: every descendant there is visibility:hidden or 1x1, so the subtree answer is
+       * false exactly where the node answer was. querySelectorAll does not cross an iframe boundary,
+       * so a bframe that is mounted and collapsed still reports nothing, and regression D holds.
+       *
+       * ONE ENTRY PER VISIBLE NODE, and the cardinality is as load-bearing as the filter. The plain
+       * extract reads locator.first(), so a page holding two widgets returns one value and the
+       * backend cannot tell which one it got. Every rule it writes that subtracts one list of site
+       * keys from another then degenerates on exactly the page it was written for, because reCAPTCHA
+       * keys are issued per domain and two widgets on one employer page usually SHARE a key.
+       * Returning every visible match, in DOM order, is what makes that subtraction a multiset
        * operation over nodes instead of a guess about the runner's echo semantics. */
       if (request.mode === 'visibleValues') {
+        const paintsAnything = (element) => isVisible(element)
+          || Array.prototype.some.call(element.querySelectorAll('*'), isVisible);
         return nodes
-          .filter(isVisible)
+          .filter(paintsAnything)
           .map((node) => (request.attribute
             ? node.getAttribute(request.attribute)
             : (node.innerText || node.textContent || '')));
