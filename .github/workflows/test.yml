@@ -74,6 +74,13 @@ jobs:
       - name: Required confirmation replay
         run: npm run test:required-confirmation
 
+      # The producer half of the cross-repo captcha contract. It has to run HERE rather than only
+      # locally: the file it pins is committed byte-identical in student-outreach-backend, and a
+      # change to this runner's extract handling that the backend is not expecting is precisely the
+      # class of drift a pull request has to catch.
+      - name: Captcha visibility contract
+        run: npm run test:captcha-visibility
+
       - name: Browser end to end
         run: npm run test:e2e
 
