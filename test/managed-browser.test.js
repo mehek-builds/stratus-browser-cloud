@@ -434,7 +434,10 @@ test('decline style EEO answers can match common portal option text', () => {
   assert.match(SANDBOX_RUNNER, /const answerOptions = \(value\) =>/);
   assert.match(SANDBOX_RUNNER, /i do not wish to answer/);
   assert.match(SANDBOX_RUNNER, /prefer not to answer/);
-  assert.match(SANDBOX_RUNNER, /optionMatches\(optionText, wanted\)/);
+  // The radio and pill paths read the WHOLE option list and then ask for one verdict over it, so the
+  // decline vocabulary above reaches them through chooseFromTexts rather than through a per-option
+  // optionMatches call that stopped at the first hit.
+  assert.match(SANDBOX_RUNNER, /const chosen = chooseFromTexts\(texts, wanted\)/);
 });
 
 test('an opt-out is matched by what it means, not by how the employer spelled it', () => {

@@ -43,8 +43,12 @@ function constSource(name, indent, required = false) {
 
 const BASE = ['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches']
   .map((name) => constSource(name, 4, true))
+  // The exact tier the native select already answers by, now shared with the menu. Tolerant like
+  // INNER and for the same reason: a runner that predates these helpers does not reference them, and
+  // this file has to be able to execute that runner too.
+  .concat(['optionMatchesExactly', 'declineMatches', 'chooseOptionIndex'].map((name) => constSource(name, 4)))
   .join('\n');
-const INNER = ['clickIfPresent', 'menuRoot', 'escapeName', 'wholeName', 'shorterOptionNames']
+const INNER = ['clickIfPresent', 'menuRoot', 'escapeName', 'wholeName', 'clickIfUnique', 'shorterOptionNames']
   .map((name) => constSource(name, 6))
   .concat(constSource('clickMatchingOption', 6, true))
   .join('\n');
