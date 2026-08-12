@@ -60,6 +60,17 @@ async function read(html) {
   return page.evaluate(`(${READER})()`);
 }
 
+async function readAt(url, html) {
+  await page.route(url, async (route) => {
+    await route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html><body>${html}</body></html>`,
+    });
+  }, { times: 1 });
+  await page.goto(url);
+  return page.evaluate(`(${READER})()`);
+}
+
 test('an empty success container over a live form is NOT a submitted application', async () => {
   // An empty div collapses to zero height, so this one is caught by the visibility rule rather than
   // by the corroboration rule. Both roads have to lead to 'unknown', which is why the assertion is
@@ -159,4 +170,30 @@ test('an ordinary unsubmitted application page is unknown, not confirmed', async
     <h1>Software Engineering Intern</h1>
     <p>Thanks for your interest in Deepgram. We review every application.</p>${FORM}`);
   assert.equal(outcome.state, 'unknown');
+});
+
+test('the exact German Recruitee receipt confirms only on its direct application route with the form gone', async () => {
+  const url = 'https://cbsconsulting.recruitee.com/o/manager-sap-s4hana-service-mwd/c/new';
+  const receipt = `
+    <section role="tabpanel">
+      <div aria-live="assertive">
+        <h3>Alles erledigt!</h3>
+        <p>Deine Bewerbung wurde eingesendet!</p>
+      </div>
+    </section>`;
+  const confirmed = await readAt(url, receipt);
+  assert.equal(confirmed.state, 'confirmed');
+  assert.equal(confirmed.source, 'ats_state');
+  assert.equal(confirmed.evidence, 'recruitee:[role="tabpanel"] div[aria-live="assertive"]');
+  assert.equal(confirmed.formStillPresent, false);
+
+  const stillLive = await readAt(url, `${receipt}${FORM}`);
+  assert.equal(stillLive.state, 'unknown');
+  assert.equal(stillLive.formStillPresent, true);
+
+  const duplicate = await readAt(url, `${receipt}${receipt}`);
+  assert.equal(duplicate.state, 'unknown');
+
+  const arbitraryPage = await readAt('https://example.com/o/job/c/new', receipt);
+  assert.equal(arbitraryPage.state, 'unknown');
 });

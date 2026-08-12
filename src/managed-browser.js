@@ -1509,6 +1509,33 @@ const { chromium } = require('playwright');
           formStillPresent
         };
       }
+      /* RECRUITEE KEEPS THE APPLICANT ON THE APPLICATION ROUTE and replaces the form with a
+       * localized tab panel. The CBS German tenant measured on 2026-08-11 publishes one assertive
+       * live region inside that panel. Trust only that exact container on a direct Recruitee
+       * application route, require the exact observed receipt, require one visible instance, and
+       * require the form to be gone. German words elsewhere on a page are never receipt proof. */
+      const recruiteeApplicationRoute = /^(?!www\.)(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,61}[a-z0-9])\.recruitee\.com$/i.test(location.hostname)
+        && /^\/o\/[^/]+\/c\/new\/?$/i.test(location.pathname);
+      const recruiteeReceiptSelector = '[role="tabpanel"] div[aria-live="assertive"]';
+      const recruiteeReceipts = recruiteeApplicationRoute
+        ? [...document.querySelectorAll(recruiteeReceiptSelector)].filter(isVisible)
+        : [];
+      if (recruiteeReceipts.length > 0) {
+        const message = recruiteeReceipts.length === 1 ? clean(recruiteeReceipts[0].innerText).slice(0, 600) : '';
+        const exactReceipt = /^Alles erledigt!\s+Deine Bewerbung wurde eingesendet!$/i.test(message);
+        if (recruiteeReceipts.length !== 1 || !exactReceipt || formStillPresent) {
+          return {
+            state: 'unknown', source: 'ats_state_unconfirmed',
+            evidence: 'recruitee:' + recruiteeReceiptSelector,
+            message: message || null, formStillPresent
+          };
+        }
+        return {
+          state: 'confirmed', source: 'ats_state',
+          evidence: 'recruitee:' + recruiteeReceiptSelector,
+          message, formStillPresent
+        };
+      }
       /* A CONTAINER IS NOT A CONFIRMATION. Ashby's success container is mounted by the same React
        * tree that renders the form, and an empty one over a live form was being read as a filed
        * application: the worst output this system can produce, because she is told it went and never
@@ -2550,11 +2577,20 @@ const { chromium } = require('playwright');
         const exclusionPattern = new RegExp(chooser.exclusionPattern, 'i');
         const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code))$/i.test(text);
         const canonicalFinal = finalPattern.test(text) && !exclusionPattern.test(text);
+        /* Recruitee localizes the visible label, so the chooser grammar cannot identify its German
+         * "Senden" button. Bind the exception to Recruitee's exact tenant route and published final
+         * test id on a native submit button. No German text is added to the generic click grammar. */
+        const recruiteeApplicationRoute = /^(?!www\.)(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,61}[a-z0-9])\.recruitee\.com$/i.test(location.hostname)
+          && /^\/o\/[^/]+\/c\/new\/?$/i.test(location.pathname);
+        const recruiteeFinal = chooser.submitKind === 'application'
+          && recruiteeApplicationRoute
+          && element.matches('button[type="submit"][data-testid="submit-application-form-button"]');
         const finalIntent = chooser.submitKind === 'verification'
           ? finalVerification || canonicalFinal
-          : canonicalFinal;
+          : canonicalFinal || recruiteeFinal;
         let score = 0;
         if (chooser.submitKind === 'verification' && finalVerification) score = 3;
+        else if (recruiteeFinal) score = 3;
         else if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(text)) score = 3;
         else if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(text)) score = 2;
         else if (finalIntent) score = 1;

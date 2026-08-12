@@ -32,6 +32,50 @@ function extractFunctionSource(name) {
   throw new Error(`Could not extract ${name}`);
 }
 
+function sandboxSubmitChooser(hostname, pathname) {
+  const marker = 'page.locator(action.selector).evaluateAll(';
+  const start = SANDBOX_RUNNER.indexOf(marker);
+  assert.notEqual(start, -1, 'submit chooser must exist in the sandbox runner');
+  const callbackStart = start + marker.length;
+  const callbackEnd = SANDBOX_RUNNER.indexOf('), { ...action.chooserPolicy, submitKind: action.submitKind }', callbackStart);
+  assert.notEqual(callbackEnd, -1, 'submit chooser callback must have a stable boundary');
+  const source = SANDBOX_RUNNER.slice(callbackStart, callbackEnd + 1);
+  return Function(
+    'location',
+    'getComputedStyle',
+    `return (${source});`,
+  )(
+    { hostname, pathname },
+    () => ({ display: 'block', visibility: 'visible' }),
+  );
+}
+
+function mockSubmitControl({ text, testId = null, form = true, nativeSubmit = true }) {
+  const attributes = { 'data-testid': testId };
+  return {
+    disabled: false,
+    innerText: text,
+    value: '',
+    matches(selector) {
+      return selector === 'button[type="submit"][data-testid="submit-application-form-button"]'
+        && testId === 'submit-application-form-button'
+        && nativeSubmit;
+    },
+    closest(selector) {
+      return selector === 'form' && form ? {} : null;
+    },
+    getAttribute(name) {
+      return attributes[name] ?? null;
+    },
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    setAttribute(name, value) {
+      attributes[name] = value;
+    },
+  };
+}
+
 function sandboxQuestionLabel() {
   // blockOf as well as questionLabel: an anonymous control (Ashby's location combobox has no id, no
   // name and no aria-label) now resolves its question from the block that owns it rather than from
@@ -769,6 +813,49 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
   assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
   assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
+});
+
+test('the exact Recruitee final control is eligible only on the direct application route', () => {
+  const exactControl = mockSubmitControl({
+    text: 'Senden',
+    testId: 'submit-application-form-button',
+  });
+  const decoy = mockSubmitControl({ text: 'Senden' });
+  const score = sandboxSubmitChooser(
+    'cbsconsulting.recruitee.com',
+    '/o/manager-sap-s4hana-service-mwd/c/new',
+  );
+  const choices = score(
+    [decoy, exactControl],
+    { ...ATOMIC_SUBMIT_POLICY, submitKind: 'application' },
+  );
+  assert.equal(choices[0].finalIntent, false, 'German text alone is never a click path');
+  assert.equal(choices[1].finalIntent, true);
+  assert.equal(choices[1].score, 3);
+  assert.equal(
+    choices.filter((choice) => choice.visible && !choice.disabled && choice.hasForm && choice.finalIntent).length,
+    1,
+    'the CBS fixture exposes one physical final control',
+  );
+  assert.match(SANDBOX_RUNNER, /const ambiguous = !selected \|\| \(viable\[1\] && viable\[1\]\.score === selected\.score\)/);
+
+  const nonNative = score(
+    [mockSubmitControl({ text: 'Senden', testId: 'submit-application-form-button', nativeSubmit: false })],
+    { ...ATOMIC_SUBMIT_POLICY, submitKind: 'application' },
+  );
+  assert.equal(nonNative[0].finalIntent, false);
+
+  for (const [hostname, pathname] of [
+    ['example.com', '/o/manager-sap-s4hana-service-mwd/c/new'],
+    ['cbsconsulting.recruitee.com', '/o/manager-sap-s4hana-service-mwd'],
+    ['www.recruitee.com', '/o/manager-sap-s4hana-service-mwd/c/new'],
+  ]) {
+    const outsideRoute = sandboxSubmitChooser(hostname, pathname)(
+      [mockSubmitControl({ text: 'Senden', testId: 'submit-application-form-button' })],
+      { ...ATOMIC_SUBMIT_POLICY, submitKind: 'application' },
+    );
+    assert.equal(outsideRoute[0].finalIntent, false, `${hostname}${pathname}`);
+  }
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {
