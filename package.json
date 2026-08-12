@@ -12,8 +12,9 @@
     "test:security-code": "NODE_ENV=test node test/security-code-replay.mjs",
     "test:required-confirmation": "NODE_ENV=test node test/required-confirmation-replay.mjs",
     "test:e2e": "NODE_ENV=test node test/e2e.mjs",
-    "verify": "npm test && npm run test:runner && npm run test:security-code && npm run test:required-confirmation && npm run test:e2e",
-    "dev:vercel": "vercel dev"
+    "verify": "npm test && npm run test:runner && npm run test:security-code && npm run test:required-confirmation && npm run test:captcha-visibility && npm run test:e2e",
+    "dev:vercel": "vercel dev",
+    "test:captcha-visibility": "NODE_ENV=test node test/captcha-visibility-replay.mjs"
   },
   "dependencies": {
     "@vercel/sandbox": "^2.8.0",

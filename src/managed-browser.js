@@ -1650,10 +1650,29 @@ const { chromium } = require('playwright');
     };
 
     /* Pure, and separated from the locator on purpose: this is the half that decides, so it is the
-     * half a test has to be able to drive with real nodes. It takes the selector table as an
-     * argument rather than closing over it because evaluateAll serializes the function into the
-     * page, where nothing from this scope exists. */
-    const captchaSnapshot = (nodes, sel) => {
+     * half a test has to be able to drive with real nodes. It takes its whole request as an
+     * argument rather than closing over anything because evaluateAll serializes the function into
+     * the page, where nothing from this scope exists.
+     *
+     * TWO MODES, ONE COPY OF isVisible, and the single copy is the whole reason the second mode
+     * lives in here rather than beside the extract handler that calls it.
+     *
+     * 'unresolvedCaptcha' is this runner's own blocker predicate. 'visibleValues' answers the
+     * question the BACKEND could not ask: its managed path reads captcha evidence through the
+     * extract contract, which returns attribute values and nothing else, so it had no way to learn
+     * that a widget container has no box. It therefore read "a data-sitekey is present" as "a person
+     * is being shown something", and on 2026-08-12 a read-only sweep of 30 live postings measured
+     * the consequence: three Lever postings permanently blocked on an hCaptcha container that is
+     * 1380x0, holds two visibility:hidden iframes, and shows nobody anything. This runner's own
+     * predicate said false on all three, and so did the backend's direct-Playwright predicate. The
+     * managed path was the outlier, and it was the outlier because it was the one layer with no
+     * layout read.
+     *
+     * A SECOND copy of isVisible next to the extract handler would have closed that gap and left the
+     * next one open, because two copies drift and nothing would notice. This is one definition,
+     * serialized into the page by both callers, so the two answers cannot disagree about what
+     * "visible" means. */
+    const captchaSnapshot = (nodes, request) => {
       const isVisible = (element) => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
@@ -1663,6 +1682,22 @@ const { chromium } = require('playwright');
         if (Number(style.opacity) === 0) return false;
         return true;
       };
+      /* ONE ENTRY PER VISIBLE NODE, and the cardinality is as load-bearing as the filter.
+       *
+       * The plain extract reads locator.first(), so a page holding two widgets returns one value and
+       * the backend cannot tell which one it got. Every rule it writes that subtracts one list of
+       * site keys from another then degenerates on exactly the page it was written for, because
+       * reCAPTCHA keys are issued per domain and two widgets on one employer page usually SHARE a
+       * key. Returning every visible match, in DOM order, is what makes that subtraction a multiset
+       * operation over nodes instead of a guess about the runner's echo semantics. */
+      if (request.mode === 'visibleValues') {
+        return nodes
+          .filter(isVisible)
+          .map((node) => (request.attribute
+            ? node.getAttribute(request.attribute)
+            : (node.innerText || node.textContent || '')));
+      }
+      const sel = request.selectors;
       const bframeOpen = nodes.some((node) => node.matches(sel.bframe) && isVisible(node));
       let visibleChallenges = 0;
       for (const node of nodes) {
@@ -1683,7 +1718,7 @@ const { chromium } = require('playwright');
 
     const readUnresolvedCaptcha = () => page
       .locator([CAPTCHA_SELECTORS.challenge, CAPTCHA_SELECTORS.response, CAPTCHA_SELECTORS.bframe].join(', '))
-      .evaluateAll(captchaSnapshot, CAPTCHA_SELECTORS)
+      .evaluateAll(captchaSnapshot, { mode: 'unresolvedCaptcha', selectors: CAPTCHA_SELECTORS })
       // Fails OPEN, and it is the only probe in this file that does. Everywhere else "we could not
       // see" means "assume the worse state"; here the worse state IS the false alarm, because it is
       // the one that strands a finished application. A read that throws saw no widget, no token and
@@ -3875,8 +3910,37 @@ const { chromium } = require('playwright');
         if (action.label) filledFields.push(action.label);
       }
       if (action.type === 'extract') {
-        const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
-        extracted.push({ selector: action.selector, label: action.label, value });
+        /* 'requireVisible' answers a different question from the plain read above, and the caller
+         * has to say which one it wants because the two disagree on real employer pages.
+         *
+         * The plain read is locator.first().getAttribute(): it says what the FIRST matching node
+         * carries, whether or not that node has a box, and says nothing about the nodes behind it.
+         * That is the right shape for reading a value off a control the caller already located. It
+         * is the wrong shape for asking whether a person is being shown something, which is what the
+         * backend's captcha evidence reads are for, and it is why those reads called a 1380x0
+         * hCaptcha container on three live Lever postings a rendered challenge.
+         *
+         * Under 'requireVisible' the read goes through captchaSnapshot, which owns this runner's one
+         * definition of visible, and returns one entry per VISIBLE match in DOM order. Nothing
+         * visible is reported the same way an unmatched optional action is: a line in 'skipped' and
+         * no extracted entry, so "we looked and saw nothing on screen" and "we never looked" stay
+         * distinguishable by the presence of the line rather than by the absence of a value.
+         *
+         * The locator is rebuilt WITHOUT .first(): the whole point is the nodes behind the first. */
+        if (action.requireVisible) {
+          const values = await page.locator(action.selector).evaluateAll(captchaSnapshot, {
+            mode: 'visibleValues',
+            attribute: action.attribute || null
+          });
+          if (values.length === 0) {
+            skipped.push((action.label || 'extract') + ': nothing visible matched ' + action.selector);
+          } else {
+            for (const value of values) extracted.push({ selector: action.selector, label: action.label, value });
+          }
+        } else {
+          const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
+          extracted.push({ selector: action.selector, label: action.label, value });
+        }
       }
      } catch (actionError) {
       // 'optional' previously meant only "skip if the element is missing", and it was checked via
@@ -3976,9 +4040,21 @@ const { chromium } = require('playwright');
       && input.continuationCheckpoint !== true;
     const continuationOffered = input.requestContinuation === true
       && (Boolean(humanVerification) || input.continuationCheckpoint === true || pressedUnknown);
-    const discoveryCapabilities = currentInput.actions.some((action) => action.type === 'discover')
-      ? ['discovery-control-role-v1']
-      : null;
+    /* WHAT THIS RESULT'S SHAPE ACTUALLY MEANS, said out loud rather than inferred from its contents.
+     *
+     * 'extract-require-visible-v1' is the one the caller cannot work out for itself. A runner that
+     * has never heard of requireVisible drops the unknown field in normalizeManagedActions and
+     * returns the ordinary first-match read under the same label, so the RESULT of an honoured
+     * requireVisible and the result of an ignored one are the same shape carrying different
+     * meanings. Advertising it is what lets a caller tell "this evidence was filtered by a real
+     * layout read, one entry per visible node" from "this runner is older than that", which matters
+     * because the two answers differ on live pages and the caller deploys on its own schedule. */
+    const runnerCapabilities = [
+      ...(currentInput.actions.some((action) => action.type === 'discover') ? ['discovery-control-role-v1'] : []),
+      ...(currentInput.actions.some((action) => action.type === 'extract' && action.requireVisible === true)
+        ? ['extract-require-visible-v1']
+        : [])
+    ];
     /* THE WINDOW OPENS HERE, on the page that raised the challenge, not back when the sandbox was
      * forked.
      *
@@ -4011,7 +4087,7 @@ const { chromium } = require('playwright');
       }
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(discoveryCapabilities ? { capabilities: discoveryCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
@@ -4112,6 +4188,15 @@ export function normalizeManagedActions(actions = []) {
         throw inputError('A security code must be 4 to 12 letters or digits', 'INVALID_SECURITY_CODE');
       }
       normalized.securityCode = action.securityCode;
+    }
+    // A FIELD rather than a new action type, and the choice is a rollout constraint rather than a
+    // preference. An unknown action TYPE is rejected outright by the check at the top of this
+    // function, so a caller that shipped one before this runner did would have every run 400 and
+    // every submission stop. An unknown FIELD is dropped here and the run proceeds on the older
+    // reading, which is the pre-existing behaviour rather than an outage. The result advertises
+    // 'extract-require-visible-v1' so the caller can tell the two apart instead of guessing.
+    if (action.type === 'extract' && action.requireVisible != null) {
+      normalized.requireVisible = Boolean(action.requireVisible);
     }
     if (action.type === 'extract' && action.attribute != null) {
       if (typeof action.attribute !== 'string' || action.attribute.length > 100) {
