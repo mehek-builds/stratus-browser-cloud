@@ -3166,14 +3166,49 @@ const { chromium } = require('playwright');
         const text = clean(element.textContent);
         if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
         if (!isVisible(element)) continue;
-        // The label of a required question reads "... *", never "is required", so this does not pick
-        // up labels. It picks up the error line the form renders under the control.
+        // What this loop is looking for is the error line the form renders under a control. The
+        // test below is what keeps it from reading the control's own question instead.
         const widget = widgetOf(element);
         if (!widget || widget === element) { unmatched.push(text); continue; }
         // A message sitting in a block that holds no control at all is not a field error. It is the
         // form's legend or a page-level notice, and attributing it to a field invents a blocker.
         const controls = [...widget.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')];
         if (controls.length === 0) continue;
+        /* THE FIELD'S OWN QUESTION IS NOT THE FIELD'S OWN COMPLAINT.
+         *
+         * A <label for="..."> naming a control in this very block is the employer ASKING, and
+         * reading it as the employer REFUSING blocks a field on the strength of its own wording.
+         *
+         * THE COMMENT THAT USED TO STAND HERE SAID THIS COULD NOT HAPPEN: "the label of a required
+         * question reads '... *', never 'is required', so this does not pick up labels". Half of
+         * that is true and it is the wrong half. A REQUIRED Greenhouse label carries
+         * <span aria-hidden="true">*</span> inside it, so it is not a leaf and never reaches this
+         * loop at all. An OPTIONAL one is a bare leaf <label>, and ERROR_TEXT contains
+         * "please provide". So the assumption held for exactly the fields it was written about and
+         * failed on every other one.
+         *
+         * Measured read-only against the live Greenhouse markup on 2026-08-13. Scale AI's
+         * question_8788020005 is labelled "If yes, please provide further explanation below." and
+         * carries aria-required="false", no required attribute and no asterisk; DV Trading's
+         * question_8954179005 is the same shape. Four Scale AI packets and three DV Trading packets
+         * stopped on a field neither employer requires, and each was additionally told "1 required
+         * field has no question you can answer in Litos" about it, because a field the employer
+         * left optional correctly has no question record.
+         *
+         * THIS OPENS NO HOLE ON A REQUIRED FIELD. Every field this loop can reach that the employer
+         * really does mark required is already reached by the three loops above it - the native and
+         * aria-required scan, the _required_ class marker, and the asterisk marker - and note()
+         * keys on the control, so a genuinely required field caught there is untouched by anything
+         * skipped here. Akuna's question_67727968 is that case, character for character: the same
+         * "please provide" wording, aria-required="true" and an asterisk, and it still blocks. What
+         * is given up is a field whose ONLY evidence of being required is that its own label happens
+         * to contain a word from ERROR_TEXT, which was never evidence.
+         *
+         * The same test, on the same loop, as the backend's copy of this gate in portalSubmission.ts
+         * (PR #527). That copy is not the one that runs a managed application, which is why the
+         * sentences above went on being produced after it merged. */
+        const named = element.tagName === 'LABEL' ? element.getAttribute('for') : null;
+        if (named && controls.some((candidate) => candidate.id === named)) continue;
         // WHICH control does the message accuse? A block can hold several: Greenhouse's phone field
         // is a fieldset holding the country select and the number, and its uploader holds both the
         // resume and the cover letter. Reading the block as a whole gets this wrong in both
