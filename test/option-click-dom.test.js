@@ -43,8 +43,11 @@ function constSource(name, indent, required = false) {
 
 const BASE = ['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches']
   .map((name) => constSource(name, 4, true))
+  // Optional on purpose: a runner from before the ambiguity guard has neither, and its
+  // clickMatchingOption never reaches for them, so this file still executes it.
+  .concat(['refuseChoice', 'nearMissChoiceReason'].map((name) => constSource(name, 4)))
   .join('\n');
-const INNER = ['clickIfPresent', 'menuRoot', 'escapeName', 'wholeName', 'shorterOptionNames']
+const INNER = ['clickIfPresent', 'menuRoot', 'widenRoot', 'offeredRows', 'escapeName', 'wholeName', 'looseWholeName']
   .map((name) => constSource(name, 6))
   .concat(constSource('clickMatchingOption', 6, true))
   .join('\n');
@@ -81,38 +84,87 @@ async function choose(rows, target, extra = '') {
     }, true);
   });
   const scopedMenu = page.locator('#menu');
+  // The question's own block. Injected because widenRoot falls back to it: a widened query is
+  // bounded to one question, and only an exact name is allowed to be looked for page-wide.
+  const container = scopedMenu;
   const optionsRoot = () => scopedMenu.locator(OPTION_NODES);
-  const run = Function('scopedMenu', 'page', 'optionsRoot', `
-    ${BASE}
+  /* The three pieces of run-level state clickMatchingOption publishes into are declared HERE rather
+     than pulled out of the runner, for the same reason lastClickedOptionText always has been: they
+     belong to the whole run, not to this helper, and declaring them keeps this file able to execute
+     an older clickMatchingOption that writes only some of them. */
+  const run = Function('scopedMenu', 'container', 'page', 'optionsRoot', 'OPTION_NODES', `
     let lastClickedOptionText = '';
+    let lastClickedOptionAnswer = '';
+    let lastChoiceRefusal = '';
+    // Counted so a refusal can be made final for the whole control rather than only for the tier
+    // that made it. Declared here for the same reason as the three above.
+    let choiceRefusals = 0;
+    /* The menu the opened control declared it owns, through aria-controls. Null here on purpose:
+       this harness always injects a scopedMenu, which is what menuRoot prefers, so the declared
+       menu is never consulted. Declaring it keeps a runner that reads it executable, and pins that
+       a scoped widget does not depend on it. */
+    let declaredMenu = null;
+    ${BASE}
     ${INNER}
-    return async (target) => ({ hit: await clickMatchingOption(target), text: lastClickedOptionText });
-  `)(scopedMenu, page, optionsRoot);
+    return async (target) => ({
+      hit: await clickMatchingOption(target),
+      text: lastClickedOptionText,
+      answer: lastClickedOptionAnswer,
+      refusal: lastChoiceRefusal
+    });
+  `)(scopedMenu, container, page, optionsRoot, OPTION_NODES);
   const result = await run(target);
   const clicked = await page.evaluate(() => window.__clicked);
-  return { hit: result.hit, text: result.text, clicked: clicked[0] ?? null };
+  return { hit: result.hit, text: result.text, answer: result.answer, refusal: result.refusal, clicked: clicked[0] ?? null };
 }
 
 /* ---------------------------------------------------------------------------------------------
- * THE DEFECT. Every rule that shipped requires the EMPLOYER'S row to contain the answer, and
- * optionMatches, which is what verifyChoiceInContainer uses to decide whether the control ended up
- * holding the right answer, also accepts a row that is a substring of the stored answer. So this
- * row could never be clicked and would have been called correct had the form arrived with it
- * already selected.
+ * A ROW THAT IS ONLY PART OF HER ANSWER IS NOT HER ANSWER.
+ *
+ * A rule used to click a menu row named by a contiguous run of the stored answer's own words, so
+ * that an employer offering "Bachelor's Degree" against a stored "Bachelor's Degree in Computer
+ * Science" could be answered. Measured in Chromium, that same rule clicked the exact reversal of a
+ * sponsorship declaration whenever the menu did not carry her full answer, and its two-rows guard
+ * cannot fire there because only one run matches. The two shapes are structurally identical: a
+ * prefix run with the remainder dropped. So the reach is gone, and these three pin that it is.
+ *
+ * optionMatches still ACCEPTS such a row, which is the asymmetry this file used to describe as the
+ * defect. It is the safe direction of it: accepting a row an employer had already selected is not
+ * the same act as selecting it for her.
  * ------------------------------------------------------------------------------------------- */
-test('a row that is a substring of the stored answer is clickable', async () => {
+test('a row that is only part of the stored answer is not clicked', async () => {
   const { optionMatches } = Function(`${BASE}\nreturn { optionMatches };`)();
   const stored = "Bachelor's Degree in Computer Science";
-  assert.equal(optionMatches("Bachelor's Degree", stored), true, 'the verifier accepts this row');
+  assert.equal(optionMatches("Bachelor's Degree", stored), true, 'the verifier still accepts this row');
   const menu = await choose([
     option('masters', { text: "Master's Degree" }),
     option('bachelors', { text: "Bachelor's Degree" }),
     option('doctorate', { text: 'Doctorate' })
   ], stored);
-  assert.equal(menu.hit, true);
-  assert.equal(menu.clicked, 'bachelors');
-  // Recorded, because verifyChoiceInContainer's third rule verifies against the row that was clicked.
-  assert.equal(menu.text, "Bachelor's Degree");
+  assert.equal(menu.hit, false, 'but choosing it is a different act from accepting it');
+  assert.equal(menu.clicked, null);
+});
+
+test('a prefix of a sponsorship answer is never clicked when the answer itself is absent', async () => {
+  /* Measured in Chromium against the merged runner: this clicked the first row and the field was
+     reported filled. "No, I do not require sponsorship" is the exact reversal of a stored answer
+     that says she WILL require it, sent to an employer under her name. Only one run matched, so
+     nothing that counts rows could have stopped it. */
+  const menu = await choose([
+    option('short', { text: 'No, I do not require sponsorship' }),
+    option('yes', { text: 'Yes, I require sponsorship now' })
+  ], 'No, I do not require sponsorship now, but will in the future');
+  assert.equal(menu.hit, false);
+  assert.equal(menu.clicked, null, 'the prefix says the opposite of the answer');
+});
+
+test('a prefix of a work authorisation answer is never clicked either', async () => {
+  const menu = await choose([
+    option('short', { text: 'I am authorized to work' }),
+    option('none', { text: 'I am not authorized to work' })
+  ], 'I am authorized to work only with a student visa');
+  assert.equal(menu.hit, false);
+  assert.equal(menu.clicked, null);
 });
 
 test('a menu offering two different parts of the answer is handed back, not guessed at', async () => {
@@ -128,6 +180,40 @@ test('a menu offering two different parts of the answer is handed back, not gues
   ], "Bachelor's Degree in Computer Science");
   assert.equal(menu.hit, false);
   assert.equal(menu.clicked, null);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * TWO ROWS THAT BOTH CONTAIN THE ANSWER, AND NEITHER OF THEM IS IT.
+ *
+ * The widened tier is 'is there a row containing this answer', and it took .first() of however many
+ * there were. On this pair that is a work-authorisation declaration decided by the employer's
+ * rendering order, and verifyChoiceInContainer would have reported either as filled.
+ * ------------------------------------------------------------------------------------------- */
+test('two rows that both contain the answer are handed back, not resolved by position', async () => {
+  const menu = await choose([
+    option('any', { text: 'I am authorized to work in the United States for any employer' }),
+    option('student', { text: 'I am authorized to work in the United States only with a student visa' })
+  ], 'I am authorized to work in the United States');
+  assert.equal(menu.hit, false);
+  assert.equal(menu.clicked, null, 'no row is clicked when two of them are near matches');
+  assert.match(menu.refusal, /more than one of the options offered is a near match/);
+});
+
+/* A row and its own label are ONE offer. Select2 v3 renders
+ * '<li class="select2-result"><div class="select2-result-label">Text</div></li>', and OPTION_NODES
+ * is a CSS list carrying '[class*="select2-result"]', so a node count sees two. Refusing there would
+ * break a control that is working, which is the cost of an ambiguity guard that counts nodes rather
+ * than rows. */
+test('a Select2 row and its own label count as one offer', async () => {
+  const menu = await choose([
+    '<ul class="select2-results">'
+      + '<li class="select2-result" data-row="cs"><div class="select2-result-label">Computer Science</div></li>'
+      + '<li class="select2-result" data-row="econ"><div class="select2-result-label">Economics</div></li>'
+      + '</ul>'
+  ], 'Computer Science');
+  assert.equal(menu.hit, true);
+  assert.equal(menu.clicked, 'cs');
+  assert.equal(menu.text, 'Computer Science');
 });
 
 test('a row that is exactly the answer beats a row that merely contains it', async () => {
@@ -246,35 +332,4 @@ test('a menu holding no answer leaves the control untouched', async () => {
   assert.equal(menu.hit, false);
   assert.equal(menu.clicked, null);
   assert.equal(menu.text, '');
-});
-
-test('the runs offered to the browser are the ones optionMatches would accept', async () => {
-  /* The substring rule is optionMatches's third clause asked forwards: rather than reading a row
-     and testing it, the answer's own word runs are generated and Playwright is asked whether a row
-     is named one of them. The two have to stay the same rule, so every run this generates is
-     required to be one optionMatches accepts, and the six-character floor has to hold. */
-  // Checked before the scope is built, so a runner without this helper fails with a sentence rather
-  // than with a ReferenceError out of the generated source.
-  assert.ok(/\n {6}const shorterOptionNames = /.test(SANDBOX_RUNNER), 'shorterOptionNames must exist in the sandbox runner');
-  const scope = Function(`${BASE}\n${INNER}\nreturn { shorterOptionNames, optionMatches, normalized };`)(
-    undefined, undefined, undefined,
-  );
-  for (const answer of [
-    "Bachelor's Degree in Computer Science",
-    'Yes, I am authorized to work in the United States',
-    'Decline to self-identify',
-    'C++',
-    'はい'
-  ]) {
-    for (const bucket of scope.shorterOptionNames(answer)) {
-      for (const span of bucket) {
-        assert.ok(scope.normalized(span).length > 6, `"${span}" must clear the six character floor`);
-        assert.equal(scope.optionMatches(span, answer), true, `optionMatches must accept "${span}" for "${answer}"`);
-      }
-    }
-  }
-  // And an answer whose meaning is entirely punctuation offers nothing at all, which is why C++
-  // cannot reach a Computer Science row through this rule either.
-  assert.deepEqual(scope.shorterOptionNames('C++'), []);
-  assert.deepEqual(scope.shorterOptionNames('はい'), []);
 });
