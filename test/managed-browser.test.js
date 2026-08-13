@@ -385,11 +385,21 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+for \(let attempt = 0; attempt <= CHOICE_SETTLE_RETRIES; attempt \+= 1\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
   assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
-  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 1,
-    'and none of them reaches the verifier directly, which is how the withdrawal cannot be skipped');
+  /* TWO CALLS TO THE VERIFIER, AND BOTH OF THEM ARE INSIDE THE HELPER PAIR.
+   *
+   * The invariant this line has always asserted is that no branch of the ACTION LOOP reaches the
+   * verifier directly, because the call site that did was the one that skipped the withdrawal
+   * entirely. That is unchanged and is what the count is counting: choiceLanded's settle loop, and
+   * withdrawRefusedChoice's confirmed-wrong gate, which is the verifier asked once more against the
+   * state the clear is about to act on. A third occurrence means somebody has verified somewhere
+   * that cannot withdraw. */
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 2,
+    'only the landing helper and the withdrawal it owns reach the verifier');
+  assert.match(SANDBOX_RUNNER, /const withdrawRefusedChoice = async \(container, clickedOptionText, clickedForAnswer, expected\) => \{/);
+  assert.match(SANDBOX_RUNNER, /return await withdrawRefusedChoice\(container, lastClickedOptionText, lastClickedOptionAnswer, expected\);/);
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
@@ -1067,6 +1077,229 @@ test('a negation is not the answer it negates, on a script normalisation erases'
     ),
     false
   );
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE VERIFICATION THAT RACED REACT AND THEN DESTROYED THE ANSWER IT HAD NOT WAITED FOR.
+ *
+ * The choice set is a plain Playwright click. It returns the moment the event is dispatched;
+ * React's state update, and with it the '.select__single-value' node readChoiceState is looking
+ * for, lands on a later paint. choiceLanded judged the control on the very next line, with no
+ * settle of any kind, while every other set/verify pair in the runner already waited: the option
+ * pill presses, waits 200ms and re-reads; clearChoiceControl waits 150ms before reading the
+ * control back; fillCustomChoice gives a menu 1200ms.
+ *
+ * Read inside that window the control is still showing its placeholder, which readChoiceState
+ * correctly calls 'empty', and 'empty' is the one state verifyChoiceInContainer refuses on its
+ * first line. That alone would be a false report. What made it a destroyed answer is the second
+ * line: withdrawRefusedChoice re-read the SAME control, by then repainted and by then holding the
+ * CORRECT value, saw 'chosen', asked nothing about WHAT it was holding, and pressed the widget's
+ * clear indicator. The applicant was then told the answer "did not persist after fill", on a field
+ * the run had itself emptied. 31 packets.
+ *
+ * The container below is the whole mechanism, and it is the only honest way to test it: a control
+ * whose published state CHANGES between reads. Nothing else about the widget moves.
+ * ------------------------------------------------------------------------------------------- */
+
+// One entry per read of the control, the last entry repeating for every read after it. This is a
+// React Select that has been clicked and has not repainted yet, said in the only terms the runner
+// can observe.
+function settlingChoiceContainer(sequence) {
+  let reads = 0;
+  const elementFor = (state) => {
+    const widget = {
+      textContent: state.widgetText || '',
+      querySelector(selector) {
+        if (/single-value|multi-value__label/.test(selector)) return state.chosen ? { textContent: state.chosen } : null;
+        if (/placeholder/.test(selector)) return state.placeholder ? { textContent: 'Select...' } : null;
+        return null;
+      }
+    };
+    return {
+      textContent: state.ownText || '',
+      closest: (selector) => (/select__container|select-shell/.test(selector) ? widget : null),
+      querySelector: () => null
+    };
+  };
+  return {
+    reads: () => reads,
+    evaluate: async (fn) => {
+      const state = sequence[Math.min(reads, sequence.length - 1)];
+      reads += 1;
+      return fn(elementFor(state));
+    }
+  };
+}
+
+/* The landing helper and the withdrawal it owns, pulled out of the runner string and run against
+ * injected doubles for the four things that touch the PAGE rather than read it. clearChoiceControl
+ * is a double on purpose: whether it was CALLED is the entire question this file is about, and a
+ * real one would need a live react-select clear indicator to answer it. */
+function choiceLandingScope({
+  arrival = { kind: 'empty', value: '' },
+  clickedOptionText = '',
+  clickedOptionAnswer = '',
+  clearSucceeds = true
+} = {}) {
+  const names = [
+    'clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'optionMatches', 'optionMatchesExactly',
+    'declineMatches', 'readChoiceState', 'verifyChoiceInContainer', 'withdrawRefusedChoice',
+    'CHOICE_SETTLE_MS', 'CHOICE_SETTLE_RETRIES', 'choiceLanded'
+  ];
+  const sources = names.map((name) => extractConstSource(name, 4)).join('\n');
+  const calls = { cleared: 0, waits: [], marks: [], unmarks: 0, refilled: [] };
+  const page = { waitForTimeout: async (ms) => { calls.waits.push(ms); } };
+  const markChoice = async (container, kind) => { calls.marks.push(kind); };
+  const unmarkChoice = async () => { calls.unmarks += 1; };
+  const clearChoiceControl = async () => { calls.cleared += 1; return clearSucceeds; };
+  const fillCustomChoice = async (container, value) => { calls.refilled.push(value); return true; };
+  const built = Function(
+    'page', 'markChoice', 'unmarkChoice', 'clearChoiceControl', 'fillCustomChoice', 'seed',
+    `let lastChoiceUnreadable = false;
+     let lastChoiceRefusal = '';
+     let lastChoiceArrival = seed.arrival;
+     let lastClickedOptionText = seed.clickedOptionText;
+     let lastClickedOptionAnswer = seed.clickedOptionAnswer;
+${sources}
+     return {
+       choiceLanded,
+       verifyChoiceInContainer,
+       withdrawRefusedChoice,
+       settleMs: CHOICE_SETTLE_MS,
+       retries: CHOICE_SETTLE_RETRIES,
+       unreadable: () => lastChoiceUnreadable
+     };`
+  )(page, markChoice, unmarkChoice, clearChoiceControl, fillCustomChoice, { arrival, clickedOptionText, clickedOptionAnswer });
+  return { ...built, calls };
+}
+
+test('a react-select that repaints a frame late is not reported lost and is not cleared', async () => {
+  /* THE REGRESSION, in the smallest form that carries it. Read once the control says "Select...";
+   * read again a moment later it says "Yes", which is what the click actually did.
+   *
+   * Before the settle: the first read refused, the withdrawal's read found 'chosen', and the clear
+   * indicator was pressed on a control holding the applicant's own correct answer.
+   * After it: the first read refuses, the runner waits, the second read verifies, and nothing on
+   * the page is touched at all. */
+  const scope = choiceLandingScope({ clickedOptionText: 'Yes', clickedOptionAnswer: 'Yes' });
+  const container = settlingChoiceContainer([{ placeholder: true }, { chosen: 'Yes' }]);
+  assert.equal(await scope.choiceLanded(container, 'Yes'), true, 'the answer is on the form and is reported as such');
+  assert.equal(scope.calls.cleared, 0, 'nothing may be pressed on a control that is holding the answer');
+  assert.deepEqual(scope.calls.marks, [], 'and nothing is marked for the pre-submit gate to stop');
+  // The wait is what buys the second read, so it is asserted rather than assumed: a settle of zero
+  // is the defect, whatever the loop around it looks like.
+  assert.deepEqual(scope.calls.waits, [scope.settleMs]);
+  assert.ok(scope.settleMs >= 150 && scope.settleMs <= 200, `settle is ${scope.settleMs}ms`);
+  assert.equal(scope.unreadable(), false);
+});
+
+test('a control that repaints only after the last re-read is still not cleared', async () => {
+  /* THE SECOND HALF OF THE FIX, and it is a different guard from the first.
+   *
+   * A settle loop can only close the window it waits through. This is the control that repaints
+   * between the LAST verifying read and the withdrawal's own read - which is exactly the sequence
+   * that shipped, one attempt later. withdrawRefusedChoice therefore asks the verifier once more
+   * against the state it is about to act on, and a control confirmed to be holding the answer is
+   * neither pressed nor reported lost. */
+  const scope = choiceLandingScope({ clickedOptionText: 'Yes', clickedOptionAnswer: 'Yes' });
+  const container = settlingChoiceContainer([
+    { placeholder: true }, { placeholder: true }, { placeholder: true }, { chosen: 'Yes' }
+  ]);
+  assert.equal(await scope.choiceLanded(container, 'Yes'), true);
+  assert.equal(scope.calls.cleared, 0, 'the withdrawal must not press a clear on a correct answer');
+  assert.deepEqual(scope.calls.marks, []);
+  assert.equal(scope.calls.waits.length, scope.retries, 'the settle is bounded, and this is the bound');
+});
+
+test('the withdrawal will not press a clear without a CONFIRMED wrong value', async () => {
+  /* ASKED DIRECTLY, because through choiceLanded this is reachable only in the narrow window above
+   * and a test that can only reach a hazard by luck is not a test of it.
+   *
+   * The old signature took no expected value at all: it read the control, saw 'chosen', and
+   * cleared. "The verifier did not confirm this" and "this is the wrong answer" are not the same
+   * statement, and only the second licenses pressing anything. */
+  const holdingTheAnswer = choiceLandingScope();
+  assert.equal(
+    await holdingTheAnswer.withdrawRefusedChoice(settlingChoiceContainer([{ chosen: 'Yes' }]), 'Yes', 'Yes', 'Yes'),
+    true,
+    'a control confirmed to hold the answer is reported landed rather than emptied'
+  );
+  assert.equal(holdingTheAnswer.calls.cleared, 0);
+  assert.equal(holdingTheAnswer.calls.unmarks, 1, 'and the pre-submit mark comes off');
+  // With no expected value supplied there is nothing to confirm against, so the old behaviour is
+  // what stands. Stated so that the gate cannot be mistaken for an unconditional refusal to clear.
+  const unjudged = choiceLandingScope();
+  await unjudged.withdrawRefusedChoice(settlingChoiceContainer([{ chosen: 'Yes' }]), 'Yes', 'Yes');
+  assert.equal(unjudged.calls.cleared, 1);
+});
+
+test('a genuinely wrong value is still withdrawn, and still marked when it cannot be', async () => {
+  /* THE DIRECTION THE FIX MUST NOT COST ANYTHING. The widened tier clicks a row that CONTAINS the
+   * answer and the verifier refuses it; the false row is then the control's answer, and taking it
+   * back is the whole reason withdrawRefusedChoice exists. A settle that re-read three times still
+   * reads the same wrong value three times. */
+  const scope = choiceLandingScope({ clickedOptionText: 'No', clickedOptionAnswer: 'Yes' });
+  const stuckOnTheWrongRow = settlingChoiceContainer([{ chosen: 'No' }]);
+  assert.equal(await scope.choiceLanded(stuckOnTheWrongRow, 'Yes'), false, 'a wrong answer is never reported filled');
+  assert.equal(scope.calls.cleared, 1, 'and it comes off the form');
+  // The clear succeeded above, so there is nothing left for the gate to stop. When it cannot, the
+  // mark is what stops the submit instead - a wrong answer is worse than a blank one.
+  const cannotClear = choiceLandingScope({ clickedOptionText: 'No', clickedOptionAnswer: 'Yes', clearSucceeds: false });
+  assert.equal(await cannotClear.choiceLanded(settlingChoiceContainer([{ chosen: 'No' }]), 'Yes'), false);
+  assert.equal(cannotClear.calls.cleared, 1);
+  assert.deepEqual(cannotClear.calls.marks, ['different']);
+});
+
+test('the +971 phone country still verifies on the first read, and nothing waits or clears', async () => {
+  /* THE MEASUREMENT THIS CHANGE HAD TO NOT BREAK. Greenhouse renders the phone Country field as a
+   * React Select whose MENU ROW reads "United Arab Emirates +971" and whose chosen value renders as
+   * a flag element plus the text "+971" and nothing else. That single control accounts for 43 of
+   * the 45 stored "choice value did not persist after fill" reports across 133 packets, and the
+   * clicked-row rule is what answers it.
+   *
+   * Asserted through choiceLanded rather than through the verifier, which is the point: this case
+   * must verify on the FIRST read, so it must spend no settle, and it must never reach the
+   * withdrawal at all. A fix that made this control wait 350ms and then clear itself would have
+   * passed every existing test in this file. */
+  const scope = choiceLandingScope({
+    clickedOptionText: 'United Arab Emirates +971',
+    clickedOptionAnswer: 'United Arab Emirates'
+  });
+  const container = settlingChoiceContainer([{ chosen: '+971' }]);
+  assert.equal(await scope.choiceLanded(container, 'United Arab Emirates'), true);
+  assert.deepEqual(scope.calls.waits, [], 'a control that verifies immediately pays nothing for the settle');
+  assert.equal(scope.calls.cleared, 0);
+  assert.equal(container.reads(), 1, 'and it is read exactly once');
+  // The same widening on the other script, for the same reason: the row names the country and the
+  // widget renders only its dial code.
+  const japan = choiceLandingScope({ clickedOptionText: '日本 +81', clickedOptionAnswer: '日本' });
+  assert.equal(await japan.choiceLanded(settlingChoiceContainer([{ chosen: '+81' }]), '日本'), true);
+  assert.equal(japan.calls.cleared, 0);
+});
+
+test('a control that publishes nothing is still neither cleared nor called lost', async () => {
+  /* THE 'unknown' ARM, unchanged and asserted here because the settle loop now runs in front of it.
+   *
+   * readChoiceState only recognises a React Select, so a Select2 - which Greenhouse serves - comes
+   * back 'unknown', and no conclusion may be drawn from it either way. It gets the softer sentence
+   * ("the answer was entered but this control does not report what it is holding") and it must not
+   * be cleared: there is no evidence the click landed on it at all, so pressing a clear would as
+   * readily destroy a correct answer as remove a false one.
+   *
+   * THE COST IS REAL AND IS NAMED. Re-reading an unreadable control returns 'unknown' again, so
+   * every Select2 on the form now pays the full bounded settle before reaching this arm. That is
+   * the price of not having to decide, from inside the loop, which failures are worth waiting for -
+   * and the runner already spends 1200ms opening each of these menus. */
+  const scope = choiceLandingScope({
+    clickedOptionText: 'Computer Science',
+    clickedOptionAnswer: 'Computer Science'
+  });
+  const select2 = settlingChoiceContainer([{ ownText: 'Discipline Computer Science Economics Physics' }]);
+  assert.equal(await scope.choiceLanded(select2, 'Computer Science'), false);
+  assert.equal(scope.unreadable(), true, 'which is what sends the "please confirm it" sentence rather than "did not persist"');
+  assert.equal(scope.calls.cleared, 0, 'nothing may be pressed on a control this runner cannot read');
+  assert.deepEqual(scope.calls.marks, [], 'and the row clicked was exactly the answer, so no submit is withheld');
+  assert.equal(scope.calls.waits.length, scope.retries);
 });
 
 test('a blank widget does not verify as a non-Latin answer', async () => {

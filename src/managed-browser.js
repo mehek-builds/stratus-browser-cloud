@@ -1364,10 +1364,10 @@ const { chromium } = require('playwright');
       }
       return false;
     };
-    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer) => {
+    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer, expected) => {
       // Nothing was clicked during this call, so this call has nothing on the form to take back. The
       // provenance rule the clicked-row tier already relies on, asked for the opposite purpose.
-      if (!clean(clickedOptionText || '')) return;
+      if (!clean(clickedOptionText || '')) return false;
       const arrival = lastChoiceArrival;
       const now = await readChoiceState(container);
       /* THE ROW THAT WAS CLICKED WAS THE ANSWER, ON A CONTROL THAT CANNOT SAY SO.
@@ -1394,16 +1394,51 @@ const { chromium } = require('playwright');
           === clean(clickedForAnswer || '').toLowerCase();
         if (clickedTheAnswer) await unmarkChoice(container);
         else await markChoice(container, 'unreadable');
-        return;
+        return false;
       }
       // Positively empty. Either the click never took or something already undid it, and either way
       // there is no false answer sitting on the form.
-      if (now.kind === 'empty') { await unmarkChoice(container); return; }
+      if (now.kind === 'empty') { await unmarkChoice(container); return false; }
       /* Re-entering fillCustomChoice to put an earlier answer back would overwrite the two sentences
        * the caller is about to read, so they are held across the withdrawal. The verdict is already
        * made; what happens here can only change the FORM, never the report. */
       const heldRefusal = lastChoiceRefusal;
       const heldUnreadable = lastChoiceUnreadable;
+      /* WHAT IS ON THE CONTROL RIGHT NOW IS ASKED AGAIN, AND NOTHING IS PRESSED UNTIL IT SAYS THE
+       * ANSWER IS WRONG.
+       *
+       * The verdict that brought us here was reached against a read taken BEFORE this one, and on a
+       * React Select those two reads can disagree. The set is a plain Playwright click that returns
+       * the moment the event is dispatched; React's state update, and with it the '.select__single-
+       * value' node readChoiceState looks for, lands a frame or two later. So the sequence that was
+       * shipping was: verify reads a control that has not repainted, refuses it, and this function
+       * then reads the SAME control after it has - finds it 'chosen', asks nothing about WHAT it is
+       * holding, and presses the clear indicator. A correct answer, destroyed by its own
+       * verification, and then reported to the applicant as one that "did not persist after fill".
+       *
+       * choiceLanded now settles and re-reads before it is allowed to fail, which closes the window
+       * for every control that repaints inside it. This is the guard for the one that repaints
+       * between the last of those reads and this one, and it is cheap: it is the verifier the caller
+       * already ran, asked once more against the state the withdrawal is about to act on.
+       *
+       * A CONFIRMED WRONG VALUE IS THE ONLY LICENCE TO PRESS ANYTHING. Not "the verifier did not
+       * confirm it" - that includes every control this file cannot read, and clearing one of those
+       * would as readily destroy a correct answer as remove a false one. The 'unknown' arm above
+       * already refuses to touch them and gives them the softer sentence instead; this is the same
+       * rule applied to the readable ones. When 'expected' is not supplied the old behaviour stands,
+       * because there is then nothing to be confirmed wrong against.
+       *
+       * Returning true rather than merely declining to press: the control publishes its value and
+       * the strict verifier says that value is the answer, which is exactly the evidence choiceLanded
+       * accepts on its own successful path. Reporting the field as lost while leaving the right
+       * answer on the form would send her to redo a question that is already correctly answered. */
+      if (expected !== undefined
+        && await verifyChoiceInContainer(container, expected, clickedOptionText, clickedForAnswer)) {
+        await unmarkChoice(container);
+        lastChoiceRefusal = heldRefusal;
+        lastChoiceUnreadable = false;
+        return true;
+      }
       let restored = await clearChoiceControl(container);
       if (arrival.kind === 'chosen') {
         await fillCustomChoice(container, arrival.value).catch(() => undefined);
@@ -1415,20 +1450,58 @@ const { chromium } = require('playwright');
       lastChoiceUnreadable = heldUnreadable;
       if (restored) await unmarkChoice(container);
       else await markChoice(container, 'different');
+      return false;
     };
+    const CHOICE_SETTLE_MS = 175;
+    const CHOICE_SETTLE_RETRIES = 2;
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
      * this and none of them calls the verifier directly: the defect that made this necessary is
      * exactly one call site of four doing something the other three did, and a fifth is only a
      * matter of time. verifyChoiceInContainer stays a pure reading of the control, which is what
      * lets it be unit-tested against a container that is nothing but a state. */
+    /* AND IT SETTLES BEFORE IT IS ALLOWED TO FAIL, which is the difference between a verification
+     * and a race.
+     *
+     * EVERY OTHER SET/VERIFY PAIR IN THIS FILE ALREADY WAITED, and this one waited zero. pickOptionPill
+     * presses, waits 200ms, reads the selected-state signal and presses again if it did not take.
+     * clearChoiceControl clicks the clear indicator and waits 150ms before reading the control back.
+     * fillCustomChoice gives an asynchronously loaded menu 1200ms. The choice set is a plain
+     * Playwright click, which returns as soon as the event is dispatched, and choiceLanded judged the
+     * control on the very next line.
+     *
+     * On a React Select the '.select__single-value' node that readChoiceState is looking for does not
+     * exist yet at that instant: the click hands the answer to React, React schedules a state update,
+     * and the node appears on the next paint. Read in that window the control is still showing its
+     * placeholder, which readChoiceState correctly and honestly calls 'empty' - and 'empty' is the
+     * one state verifyChoiceInContainer refuses on its first line.
+     *
+     * WHICH WOULD BE MERELY A FALSE REPORT, EXCEPT THAT choiceLanded's SECOND LINE ACTS ON IT.
+     * withdrawRefusedChoice re-reads the control - by now repainted, by now holding the CORRECT
+     * answer - and, seeing 'chosen', presses the widget's clear indicator. So a verification that
+     * arrived a frame early did not just misreport the answer, it removed it, and then told the
+     * applicant it "did not persist after fill" on a field it had itself emptied. 31 packets.
+     *
+     * BOUNDED, AND SPENT ONLY WHERE IT CAN BUY SOMETHING. Three reads at most, two waits at most, and
+     * both waits happen only on the failing path: a control that verified on the first read - which
+     * is every control that was already working, including the whole clicked-row family below - pays
+     * nothing at all. 175ms is the same order as the settles either side of it, comfortably more than
+     * a React commit and comfortably less than the 1200ms this file spends waiting for a menu.
+     *
+     * WHAT THIS DELIBERATELY DOES NOT DO IS RETRY THE FILL. Nothing is clicked, typed or pressed
+     * here; the control is read again and nothing else. A refusal that is real - a near miss, a row
+     * clicked for a different answer, a control that publishes nothing - reads the same on the third
+     * attempt as on the first, and reaches the withdrawal exactly as it did before, three quarters of
+     * a second later. */
     const choiceLanded = async (container, expected) => {
-      if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
-        await unmarkChoice(container);
-        return true;
+      for (let attempt = 0; attempt <= CHOICE_SETTLE_RETRIES; attempt += 1) {
+        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
+          await unmarkChoice(container);
+          return true;
+        }
+        if (attempt < CHOICE_SETTLE_RETRIES) await page.waitForTimeout(CHOICE_SETTLE_MS).catch(() => undefined);
       }
-      await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer);
-      return false;
+      return await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer, expected);
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
