@@ -46,10 +46,11 @@ if (atomicSubmitGrammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash) {
  * with, plus the one structural rule they diverged on, which is in here precisely because a hash
  * over the vocabulary alone would have been green through the whole incident.
  *
- * SCOPE, said out loud: this covers readSubmitReadiness. The confirmAndSubmit pass further down
- * carries its own required-control scan with its own copy of some of these patterns, and that scan
- * has no twin in the backend to drift against, so it is deliberately left out rather than quietly
- * half-covered. */
+ * SCOPE, said out loud: this covers readSubmitReadiness, and this hash is the one the backend pins.
+ * The confirmAndSubmit pass further down reads most of the same patterns, and it has no twin in the
+ * backend to drift against, so it stays out of THIS hash rather than being quietly half-covered.
+ * It is not left hand-written, though: see EMPLOYER_REQUIRED_POLICY below, which aliases the four
+ * fragments the two passes genuinely share and declares the two they do not. */
 export const SUBMIT_READINESS_POLICY = Object.freeze({
   name: 'litos-submit-readiness',
   version: 1,
@@ -79,6 +80,98 @@ const submitReadinessGrammarHash = crypto.createHash('sha256')
   .digest('hex');
 if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
   throw new Error('Submit readiness gate grammar hash mismatch');
+}
+/* THE SAME WORDS, IN THE PASSES THAT DECIDE WHAT TO COMMIT RATHER THAN WHETHER TO CLICK.
+ *
+ * The policy above says out loud that it covers readSubmitReadiness and nothing else, and that the
+ * confirmAndSubmit pass carries its own hand-written copy of some of the same patterns. This is
+ * that copy, declared. It is a SECOND policy and not four more interpolations of the first because
+ * the two vocabularies are not the same vocabulary, and the paragraphs below are the whole of the
+ * difference, written down rather than left to be diffed by eye across four evaluate blocks.
+ *
+ * WHAT IS ACTUALLY SHARED, which is most of it. Four fragments are the same bytes in both: the
+ * required attributes, Ashby's class marker, the asterisk mark and the asterisk legend. They are
+ * ALIASES here, not copies, so the file now holds one spelling of each and intra-file drift in them
+ * is not merely detectable, it is unavailable. That is worth more here than the cross-repo guard
+ * is. readSubmitReadiness decides whether this run may click; confirmAndSubmitPass decides which
+ * controls it commits first, and then calls readSubmitReadiness on its own bound scope and pushes
+ * the result onto the SAME unresolved list. Two answers to "which fields did this employer mark
+ * required", inside one run, over one form, feeding one decision.
+ *
+ * WHAT IS NOT SHARED, and stays unshared deliberately. Two fragments, both this policy's own, both
+ * hashed below:
+ *
+ *   1. `\brequires an answer\b`, which the confirm pass's error vocabulary carries and the gate's
+ *      does not. It arrived in 5ce503b on 2026-08-09, one day after ERROR_TEXT landed in 9289a72,
+ *      as a character-for-character fork of ERROR_TEXT with this one alternative spliced in at
+ *      position two. PR #29 names no employer for it. Every other pattern in this file that reads
+ *      an employer's markup carries a dated live measurement in a comment above it; this one is
+ *      attested nowhere. The string's only other appearances in either repo are the literal
+ *      `reason: 'This requires an answer'` that the runner writes into its OWN attempts record,
+ *      added by that same commit, and the replay fixtures that same commit wrote to prove the
+ *      pattern against. The regex matches a sentence Litos invented.
+ *
+ *      It is neither adopted into the gate nor deleted from here, because unattested is not the
+ *      same as disproved and both moves change what a live form does. Both consumers are equally
+ *      fail-closed: a match here that survives one retry pushes onto `unresolved`, and `unresolved`
+ *      withholds the click exactly as a readiness blocker does. So widening the gate to match is
+ *      the PR #52 failure mode precisely, and narrowing this pass loosens a check nobody has
+ *      measured. What can be fixed today is that the divergence was accidental. Now it is a named
+ *      fragment with its provenance attached.
+ *
+ *   2. `input:not([type="hidden"])[required]`, which only requiredOutside uses. That scan asks
+ *      whether a required control sits OUTSIDE a candidate container, and one that does withholds
+ *      the entire scope. Its visibility test is on the widget alone, so without the exclusion a
+ *      hidden required input inside a visible field wrapper vetoes the container and every formless
+ *      application on that page. The gate's loop tests the element OR its widget, a different
+ *      question, and so does not need the same words. Derived from the shared fragment by explicit
+ *      substitution, and the substitution is asserted, so a future edit to the shared spelling
+ *      cannot silently turn this into a no-op.
+ *
+ * WHAT THE HASH IS FOR HERE, since it is not what the one above is for. There is no second copy of
+ * this pass to pin against. The backend's direct-Playwright path does carry a required-control
+ * commit of its own, COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT in portalSubmission.ts, and it is not a
+ * twin: it selects on '[required], [aria-required="true"]' plus checked ARIA roles, tests the
+ * asterisk with /\*\s*$/ and no legend exclusion at all, reads no error text whatsoever, and
+ * returns {formFound, changed, committed} where this pass returns an attempts[] the backend then
+ * audits. The two were never meant to be byte-identical, and a hash claiming they were would be a
+ * false statement in a file whose hashes are load-bearing. So this literal is pinned in no other
+ * repository and asserts nothing about one. What it does is put a red boot check behind an edit to
+ * the two fragments that are genuinely this pass's own, in the one place where four hand-written
+ * copies of these patterns had already drifted apart from each other. */
+const SCOPE_REQUIRED_ATTRIBUTES = SUBMIT_READINESS_POLICY.requiredAttributes
+  .replace('input[required]', 'input:not([type="hidden"])[required]');
+if (SCOPE_REQUIRED_ATTRIBUTES === SUBMIT_READINESS_POLICY.requiredAttributes) {
+  throw new Error('Scope required-control selector lost its hidden-input exclusion');
+}
+const CONFIRM_ONLY_ERROR_TEXT = String.raw`\brequires an answer\b`;
+export const EMPLOYER_REQUIRED_POLICY = Object.freeze({
+  name: 'litos-employer-required',
+  version: 1,
+  requiredAttributes: SUBMIT_READINESS_POLICY.requiredAttributes,
+  requiredClassMarkers: SUBMIT_READINESS_POLICY.requiredClassMarkers,
+  asteriskMark: SUBMIT_READINESS_POLICY.asteriskMark,
+  asteriskLegend: SUBMIT_READINESS_POLICY.asteriskLegend,
+  scopeRequiredAttributes: SCOPE_REQUIRED_ATTRIBUTES,
+  confirmOnlyErrorText: CONFIRM_ONLY_ERROR_TEXT,
+  /* Appended rather than spliced back into position two. Both copies of this pattern are read only
+   * by `.test()`, in a boolean, with no capture and no exec, so the alternation is a set and its
+   * order cannot reach any caller. Asserted in test/employer-required-policy.test.js against the
+   * exact literals this replaced. */
+  errorText: `${SUBMIT_READINESS_POLICY.errorText}|${CONFIRM_ONLY_ERROR_TEXT}`,
+  deltaHash: '4e85f08f8fdffc6afd32a58e7f6d54a0d76a11d9a67bb76cc47bace207a1bcf5'
+});
+/* Only the fragments this policy owns. The four aliased ones are already covered by the hash above,
+ * and hashing them twice would make an intra-file edit fail two checks that mean the same thing. */
+export const EMPLOYER_REQUIRED_DELTA = [
+  EMPLOYER_REQUIRED_POLICY.scopeRequiredAttributes,
+  EMPLOYER_REQUIRED_POLICY.confirmOnlyErrorText
+].join('\n');
+const employerRequiredDeltaHash = crypto.createHash('sha256')
+  .update(EMPLOYER_REQUIRED_DELTA)
+  .digest('hex');
+if (employerRequiredDeltaHash !== EMPLOYER_REQUIRED_POLICY.deltaHash) {
+  throw new Error('Employer required-marker delta hash mismatch');
 }
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
@@ -3388,11 +3481,13 @@ const { chromium } = require('playwright');
        *   5. never body and never documentElement, because "the whole page" is not a scope. */
       const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => {
         const FIELD_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], input[type="file"]';
-        const REQUIRED_CONTROLS = 'input:not([type="hidden"])[required], textarea[required], select[required], [aria-required="true"]';
+        // The scope veto's own spelling, hidden inputs excluded, because requiredOutside tests
+        // visibility on the widget alone. See EMPLOYER_REQUIRED_POLICY.
+        const REQUIRED_CONTROLS = '${EMPLOYER_REQUIRED_POLICY.scopeRequiredAttributes}';
         const WIDGET = '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
           + ' [data-field-path], [class*="_fieldEntry_"]';
-        const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
-        const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+        const ASTERISK_MARK = /${EMPLOYER_REQUIRED_POLICY.asteriskMark}/;
+        const ASTERISK_LEGEND = /${EMPLOYER_REQUIRED_POLICY.asteriskLegend}/i;
         /* The clear has to cross shadow roots because the READ-BACK does. document.querySelectorAll
          * stops at a shadow boundary, a Playwright CSS locator pierces it, so a marker written
          * inside a shadow tree used to survive every later clear and be found again on the next
@@ -3444,7 +3539,7 @@ const { chromium } = require('playwright');
             return (named && byId(named)) || widgetOf(marker).querySelector(FIELD_CONTROLS) || null;
           };
           for (const control of root.querySelectorAll(REQUIRED_CONTROLS)) add(control);
-          for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+          for (const marker of root.querySelectorAll('${EMPLOYER_REQUIRED_POLICY.requiredClassMarkers}')) {
             add(fromMarker(marker));
           }
           for (const marker of root.querySelectorAll('label, legend')) {
@@ -3737,16 +3832,16 @@ const { chromium } = require('playwright');
         const errorText = (widget) => [...widget.querySelectorAll('*')].some((node) => {
           if (node.children.length > 0 || !isVisible(node)) return false;
           const text = clean(node.textContent);
-          return text.length <= 160 && /\bis required\b|\brequires an answer\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i.test(text);
+          return text.length <= 160 && /${EMPLOYER_REQUIRED_POLICY.errorText}/i.test(text);
         });
         const affected = (element, widget) => {
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
           return nativeMissing || element.getAttribute?.('aria-invalid') === 'true' || errorText(widget);
         };
         const controls = new Set(root.querySelectorAll(
-          'input[required], textarea[required], select[required], [aria-required="true"]'
+          '${EMPLOYER_REQUIRED_POLICY.requiredAttributes}'
         ));
-        for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+        for (const marker of root.querySelectorAll('${EMPLOYER_REQUIRED_POLICY.requiredClassMarkers}')) {
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
           const control = (named && document.getElementById(named))
@@ -3754,8 +3849,8 @@ const { chromium } = require('playwright');
             || block;
           if (control && root.contains(control)) controls.add(control);
         }
-        const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
-        const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+        const ASTERISK_MARK = /${EMPLOYER_REQUIRED_POLICY.asteriskMark}/;
+        const ASTERISK_LEGEND = /${EMPLOYER_REQUIRED_POLICY.asteriskLegend}/i;
         for (const marker of root.querySelectorAll('label, legend')) {
           const text = clean(marker.textContent);
           if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
@@ -3934,10 +4029,12 @@ const { chromium } = require('playwright');
               '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
               + ' [data-field-path], [class*="_fieldEntry_"]'
             ) || element.parentElement || element;
+            // The same vocabulary the candidate scan read, because this decides whether that scan's
+            // complaint has cleared. Two spellings here would let a field be affected and confirmed.
             const hasError = [...widget.querySelectorAll('*')].some((node) => {
               if (node.children.length > 0 || !visible(node)) return false;
               const text = clean(node.textContent);
-              return text.length <= 160 && /\bis required\b|\brequires an answer\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i.test(text);
+              return text.length <= 160 && /${EMPLOYER_REQUIRED_POLICY.errorText}/i.test(text);
             });
             return Boolean((element.validity && element.validity.valueMissing) || element.getAttribute('aria-invalid') === 'true' || hasError);
           }).catch(() => true);
@@ -4363,7 +4460,7 @@ const { chromium } = require('playwright');
           function marksRequired(el, block) {
             if (el.required || el.getAttribute('aria-required') === 'true') return true;
             if (block && block.getAttribute && block.getAttribute('aria-required') === 'true') return true;
-            const label = block && block.querySelector('label[class*="_required_"], legend[class*="_required_"]');
+            const label = block && block.querySelector('${EMPLOYER_REQUIRED_POLICY.requiredClassMarkers}');
             return Boolean(label);
           }
           // A stable way back to this control on a LATER page load. The marker attribute below is
