@@ -1192,15 +1192,46 @@ const { chromium } = require('playwright');
      * resolves the nearest ancestor holding a combobox, which on a React Select is
      * '.select__input-container', so the shell is an ANCESTOR of the container; fillByLabelText
      * resolves the question's block, so the shell is a DESCENDANT. Searching one direction only would
-     * silently lose the withdrawal on the other path, which fails closed but for no reason. The
-     * ancestor wins on ties because it is the widget the container is part of.
+     * silently lose the withdrawal on the other path, which fails closed but for no reason.
      *
-     * AND WHERE NO SHELL CAN BE IDENTIFIED, NOTHING IS PRESSED. That is not a gap left open: the
-     * shell test and readChoiceState's own test are the same substring test over the same three class
-     * families, so a control whose value this runner can read has a shell this can find, and one it
-     * cannot read never reaches here at all. If that ever stops being true, the honest answer is that
-     * the withdrawal does not know what belongs to this control, and the mark plus the pre-submit gate
-     * are what carry it from there. */
+     * DOWNWARDS IS ASKED FIRST, AND THE ORDER IS THE WHOLE OF IT. Asking for both at once, as
+     * '(ancestor-or-self::*[SHELL] | descendant::*[SHELL])[1]', put 19c's defect straight back:
+     * XPath sorts a union in DOCUMENT ORDER, so '[1]' is the OUTERMOST node in it and never the
+     * nearest. This is a substring test on an unbounded ancestor axis, so a layout wrapper whose
+     * class merely CONTAINS a shell name is that outermost node. Measured on a grid of two questions
+     * under '<div class="select-shell-grid">': the withdrawal pressed "Remove education" and wiped
+     * the neighbouring question's already verified answer, and reported only that this question's
+     * choice did not persist.
+     *
+     * Nor does the obvious repair help, and it is named here so it is not tried a third time.
+     * 'ancestor-or-self::*[SHELL][1]' on a reverse axis really does give the NEAREST ancestor, but
+     * it throws the downward direction away with the ordering. Wherever the question's label sits
+     * outside the widget, which is how a repeated section renders and is exactly 19c's education
+     * row, the container is the ROW: the widget is below it and the only thing at or above it is a
+     * wrapper, or nothing shell-shaped at all. Measured on 19c with that repair in place, the
+     * withdrawal pressed nothing and left "...for any employer" sitting on the form.
+     *
+     * What decides it is the direction, before any axis: a DESCENDANT shell means the container is a
+     * question BLOCK holding a widget, so that widget is the one. Only a container with nothing
+     * shell-shaped under it is itself PART of one, which is the fill path.
+     *
+     * AND WHERE NO SHELL CAN BE IDENTIFIED, NOTHING IS PRESSED, INCLUDING ON CONTROLS THIS RUNNER
+     * CAN READ. The two tests are not the same test and it is worth saying so plainly, because an
+     * earlier reading of this comment claimed they were and concluded they could not disagree. The
+     * shell test above is three class families. readChoiceState is two of them, then two further
+     * fallbacks this has no equivalent for: 'closest("[class*=select__control]").parentElement', and
+     * failing that the container element itself. So a widget rendering '.select__control' and
+     * '.select__single-value' with no container class at all reads back 'chosen' here and offers
+     * this no shell to search, and the withdrawal is a silent no-op on it.
+     *
+     * That is not left dangerous, but it is not this function that makes it safe, and the difference
+     * matters to whoever edits either test next. Driven through confirmAndSubmit on exactly that
+     * shape: the withdrawal presses nothing, the control is still holding "...only with a student
+     * visa", the submit button is never clicked, and the run reports "atomic confirmation blocked
+     * submission". What carries it is the mark withdrawRefusedChoice writes when this returns false,
+     * plus the pre-submit gate that refuses to send a form carrying one. A withdrawal that cannot
+     * identify what belongs to this control has nothing honest to press, and pressing anyway is the
+     * defect above. */
     const CHOICE_SHELL_CLASSES = 'contains(@class,"select__container") or contains(@class,"select-shell")'
       + ' or contains(@class,"select2-container")';
     const markChoice = async (container, kind) => await container.evaluate(
@@ -1210,8 +1241,12 @@ const { chromium } = require('playwright');
       (element) => element.removeAttribute('data-litos-unverified-choice')
     ).catch(() => undefined);
     const clearChoiceControl = async (container) => {
-      const shell = container.locator('xpath=(ancestor-or-self::*[' + CHOICE_SHELL_CLASSES + ']'
-        + ' | descendant::*[' + CHOICE_SHELL_CLASSES + '])[1]');
+      // Two asks in a fixed order, not one union. See the direction paragraph above: a union is
+      // sorted in document order, so it hands back the outermost match and a wrapper named like a
+      // shell wins it. Downwards first, and only a container with no shell under it is part of one.
+      const shellDown = container.locator('xpath=(descendant::*[' + CHOICE_SHELL_CLASSES + '])[1]');
+      const shellUp = container.locator('xpath=ancestor-or-self::*[' + CHOICE_SHELL_CLASSES + '][1]');
+      const shell = (await shellDown.count()) > 0 ? shellDown : shellUp;
       if ((await shell.count()) === 0) return false;
       const controls = shell.locator(CLEAR_CONTROLS);
       const total = await controls.count();

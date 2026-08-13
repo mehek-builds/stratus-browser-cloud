@@ -284,6 +284,23 @@ ${reactBlock('narrowing', 'Work authorization, menu narrows when searched', [AUT
      ANCESTOR of the container rather than a descendant of it. A withdrawal that searched only
      downwards would find no shell here and press nothing. -->
 ${reactBlock('fill-branch', 'Work authorization, reached through the fill branch', [AUTH_US_ANY])}
+<!-- A LAYOUT WRAPPER WHOSE CLASS MERELY CONTAINS A SHELL NAME, which is one class away from no
+     scoping at all. The shell test is a substring test on an unbounded ancestor axis, so
+     "select-shell-grid" satisfies it exactly as "select-shell" does. This grid holds TWO questions
+     and one repeated-section remove, which is how Greenhouse renders an education entry: School and
+     Discipline side by side with the control that deletes the entry they belong to.
+     The remove sits between the two selects, so the adversary can win from here in two separate
+     ways at once. A search that resolves the wrapper instead of the widget walks the whole grid in
+     document order and reaches the FIRST question's own clear indicator before it ever reaches the
+     second question's, so it wipes an answer that was already verified correct, and it reaches the
+     remove as well. Neither shows up in the report: the run says only that the second question's
+     choice did not persist. -->
+<div class="select-shell-grid">
+  ${reactBlock('grid-other', 'Field of study, first question in the grid', ['Economics', 'Physics'])}
+  <button type="button" class="grid-remove" aria-label="Remove education">Remove education</button>
+  ${reactBlock('grid-near', 'Work authorization, second question in the grid', [AUTH_US_ANY])}
+</div>
+<div id="grid-removed">no</div>
 <!-- TWO QUESTIONS, ONE VOCABULARY, which is every form that asks anything twice.
      Q1's listbox is always rendered, the way a consent block is; Q2 opens its own menu on demand.
      Both offer a row named exactly "No". Nothing about Q1 is unusual and nothing about it is being
@@ -598,6 +615,32 @@ ${reactBlock('fill-branch', 'Work authorization, reached through the fill branch
       if (placeholder) placeholder.style.display = '';
       document.getElementById('repeat-education-answer').textContent = '';
       document.getElementById('repeat-education-removed').textContent = 'yes';
+    }
+    remove.addEventListener('mousedown', destroy);
+    remove.addEventListener('click', destroy);
+  }());
+
+  // ---- The same remove, inside a wrapper that only LOOKS like a shell ----
+  //
+  // Modelled the same way as the education row above: the entry's fields are wiped and a witness
+  // outside the grid records that it happened, rather than detaching the node, so a later extract
+  // still has somewhere to read from. The witness is never reset, which is what lets a select that
+  // was cleared by its own indicator be told from one emptied by having its entry deleted under it.
+  (function () {
+    var remove = document.querySelector('.select-shell-grid .grid-remove');
+    if (!remove) return;
+    function destroy(event) {
+      if (event) event.preventDefault();
+      var grid = remove.closest('.select-shell-grid');
+      Array.prototype.forEach.call(grid.querySelectorAll('.select__single-value'), function (node) {
+        node.remove();
+      });
+      Array.prototype.forEach.call(grid.querySelectorAll('.select__placeholder'), function (node) {
+        node.style.display = '';
+      });
+      document.getElementById('grid-other-answer').textContent = '';
+      document.getElementById('grid-near-answer').textContent = '';
+      document.getElementById('grid-removed').textContent = 'yes';
     }
     remove.addEventListener('mousedown', destroy);
     remove.addEventListener('click', destroy);
@@ -1769,6 +1812,72 @@ for (const entry of NEGATED) {
     filled: [],
     skipped: ['question:fill-branch: choice value did not persist after fill']
   }, 'the withdrawal reaches a shell above the container as well as one below it');
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 19d. A WRAPPER WHOSE CLASS ONLY CONTAINS A SHELL NAME IS NOT THE WIDGET.
+ *
+ * Scoping the withdrawal to a shell answered 19c, and the first shape of that scoping asked for the
+ * shell with one union XPath, '(ancestor-or-self::*[SHELL] | descendant::*[SHELL])[1]'. XPath sorts
+ * a union in DOCUMENT ORDER, so '[1]' takes the OUTERMOST node in it and not the nearest one. The
+ * shell test is a substring test on an unbounded ancestor axis, so any layout wrapper whose class
+ * merely CONTAINS a shell name is that outermost node, and the search is back outside the widget.
+ *
+ * Measured on this fixture against that shape: the run pressed "Remove education" and cleared the
+ * neighbouring question's already verified "Economics", and reported one line saying the second
+ * question's choice did not persist. That is 19c's defect returned one class away, plus a second
+ * one it never had.
+ *
+ * The obvious repair does not work and is worth naming so it is not tried again:
+ * 'ancestor-or-self::*[SHELL][1]' on a reverse axis really does give the NEAREST ancestor, but here
+ * the wrapper IS an ancestor and the widget is not, so this case still loses. The direction has to
+ * be decided before the axis is: a DESCENDANT shell means the container is a question BLOCK holding
+ * a widget, so that widget is the one. Only a container with no shell under it is itself PART of
+ * one, which is the fill path 19c's second case pins.
+ *
+ * Two things are asserted and they fail independently, because the wrapper puts two different
+ * things in reach: that the destructive neighbour is not pressed, and that the OTHER question keeps
+ * the answer this run had already verified.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Field of study, first question in the grid',
+      value: 'Economics',
+      label: 'question:grid-other',
+      optional: true
+    },
+    {
+      type: 'fillByLabelText',
+      text: 'Work authorization, second question in the grid',
+      value: AUTH_US,
+      label: 'question:grid-near',
+      optional: true
+    },
+    { type: 'extract', selector: '#grid-removed' },
+    { type: 'extract', selector: '#grid-other-answer' },
+    { type: 'extract', selector: '#grid-near-answer' },
+    { type: 'extract', selector: '#grid-near-shown' }
+  ]);
+  // Both halves of the adversary have to be armed or nothing below is being measured: the
+  // neighbouring question must really be holding a verified answer for the withdrawal to destroy,
+  // and the widened tier must really have put the false row on the second control.
+  assert.equal(valueOf(result, '#grid-near-shown'), AUTH_US_ANY,
+    'the widened tier must really have clicked the false row, or this case proves nothing');
+  assert.deepEqual(result.filledFields, ['question:grid-other'],
+    'the neighbouring question must be answered and verified before the withdrawal runs');
+  assert.deepEqual({
+    neighbourPressed: valueOf(result, '#grid-removed'),
+    otherQuestion: valueOf(result, '#grid-other-answer'),
+    thisSelect: valueOf(result, '#grid-near-answer'),
+    skipped: result.skipped
+  }, {
+    neighbourPressed: 'no',
+    otherQuestion: 'Economics',
+    thisSelect: '',
+    skipped: ['question:grid-near: choice value did not persist after fillByLabelText']
+  }, 'a wrapper named like a shell must not widen the withdrawal back over the block');
 }
 
 /* ---------------------------------------------------------------------------------------------
