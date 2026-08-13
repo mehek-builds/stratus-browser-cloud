@@ -207,14 +207,54 @@ const { chromium } = require('playwright');
      * row was selected and the field reported filled. A stored refusal must never be able to state
      * something about her, so the volition is now required: "do not WANT to answer" is a refusal,
      * "do not identify" is a claim, and only the first of them reaches this matcher.
+     *
+     * AND BARE 'identify' IS GONE FROM THE VOLITIONAL BRANCH, WHICH IS THE SAME DEFECT ONE CLAUSE
+     * OVER. Requiring the volition verb fixes the headline row and does nothing for the rows that
+     * spell their claim volitionally:
+     *
+     *   "I choose not to identify with any of the above"
+     *   "I prefer not to identify with any of the above"
+     *
+     * Those reach '(?:chooses? not|prefers? not) (?:to )?identify' and read as refusals, and they
+     * are claims for exactly the reason the headline row is: what follows 'identify' is a
+     * complement naming categories, and naming them is the statement. The refusal idiom is the
+     * compound "self identify", which is kept in every branch it was already in. 'identify' stays
+     * in the plain-negation branch, where the volition verb in front of it ("do not want to
+     * identify") is what makes it a refusal.
+     *
+     * THIS PREDICATE IS DUPLICATED, and this is the third time the two copies have drifted. The
+     * backend carries its own in 'src/lib/selfIdentification.ts' and it is the authority: the
+     * branch shapes below are its merged 5e9317f3 semantics, one alternative at a time. Only the
+     * spelling of the negations differs, and it has to: the backend compares against
+     * comparableOption(), which DELETES apostrophes so "don't" reads "dont", while normalized()
+     * here maps every non-alphanumeric to a space so the same text reads "don t". Both spellings
+     * are accepted below, so the two agree on the wording and not merely on the token. The replay
+     * suite pins the table both sides are supposed to satisfy; if it fails, the copies have drifted
+     * a fourth time and this file is the one that reaches an employer.
      */
-    const DECLINE_TO_STATE = ((stating) => new RegExp([
-      'declines? to ' + stating,
-      '(?:do not|do nt|don t|dont|does not|does nt|doesn t) (?:want|wish|like|care|choose|prefer)s? (?:to )?' + stating,
-      '(?:would rather not|rather not|prefers? not|chooses? not|wishes? not|wants? not) (?:to )?' + stating,
-      'not (?:want|wish|choose|prefer)(?:ing)? to ' + stating,
+    /* Still ONE const, and that is not a style choice. The unit suites lift these declarations out
+       of this string BY NAME and run them, so a helper broken out beside this one is a name they
+       have to be told about in three separate manifests. The parts are arguments instead. */
+    const DECLINE_TO_STATE = ((negation, volitional, object, stating) => new RegExp([
+      'declines? to ' + object,
+      negation + ' (?:want|wish|like|care|choose|prefer|intend)(?:ing)? to ' + stating,
+      volitional + '(?: to)? ' + object,
       '^(?:declined?|declines|i decline|no answer|not disclosed|not specified|undisclosed)$'
-    ].join('|')))('(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)');
+    ].join('|')))(
+      /* The plain negations, which say nothing at all about willingness. Both apostrophe spellings
+         of each, per the note above, because a runner reads whatever the employer typed. */
+      '(?:do not|do nt|don t|dont|does not|does nt|doesn t|doesnt'
+        + '|did not|did nt|didn t|didnt|would not|would nt|wouldn t|wouldnt'
+        + '|will not|wo nt|won t|wont)',
+      /* A negation that is ALREADY volitional and may go straight to the verb. 'wish(?:es)?' and
+         not 'wishes?', which parses as "wishe" plus an optional s and so never matched a bare
+         "wish not": "I wish not to answer" was read as a claim. */
+      '(?:would rather not|rather not|prefers? not|chooses? not|wish(?:es)? not|wants? not)',
+      // What a refusal can be a refusal TO. No bare 'identify': see the branch note above.
+      '(?:answer|say|state|specify|disclose|self identify|respond|provide)',
+      // The same, plus bare 'identify', which only the plain-negation branch may have.
+      '(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)'
+    );
     const answerOptions = (value) => {
       const base = clean(value);
       const lower = base.toLowerCase();

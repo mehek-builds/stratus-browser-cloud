@@ -79,6 +79,50 @@ const VETERAN_CLAIM = 'I identify as one or more of the classifications of prote
 const NOT_ABOVE = 'I do not identify with any of the above';
 const REAL_OPT_OUT = 'I do not want to answer';
 
+/* THE SELF-IDENTIFICATION TABLE, WHICH IS THE ONE PREDICATE THIS RUNTIME DOES NOT OWN ALONE.
+ *
+ * The same refusal-versus-claim test exists in the backend, in src/lib/selfIdentification.ts, and
+ * the two copies have now drifted three times. Whatever the runner decides here is the decision
+ * that reaches an employer, because the runner is what clicks the row, so this table is written
+ * from the WORDING and its truth rather than from either pattern.
+ *
+ * The first two claim rows are the ones that shipped wrong. A pattern that lets bare 'identify'
+ * follow a VOLITIONAL negation reads "choose not to identify" and "prefer not to identify" as
+ * refusals, and they are not: both name the categories that do not describe her, and naming them is
+ * the statement. A stored refusal selecting one of those asserts something about her that she did
+ * not say, on a form she cannot take back. The third row is a plain negation, which case 7 above
+ * already fixed; it is here as a guard, so that reworking this pattern cannot quietly undo that.
+ *
+ * The last two refusal rows are the cheap ones. "I wish not to answer" was unreachable while the
+ * pattern spelled the alternative 'wishes? not', which parses as "wishe" plus an optional s; that
+ * one was broken here and is fixed. The acute-accent row was NOT broken here and is pinned anyway:
+ * normalized() maps every non-alphanumeric to a space, so an apostrophe typed as an acute accent or
+ * a backtick already arrives as "don t" and already matched. The backend's comparableOption deletes
+ * a list of apostrophe characters instead and omits both, so it reads them as claims. This row is
+ * what stops that bug arriving here if this runtime ever adopts that normaliser.
+ *
+ * A refusal read as a claim fails closed, so both of these cost her a blank rather than a false
+ * declaration, which is why they went unnoticed. */
+const SELF_ID_CLAIMS = [
+  { id: 'sid-choose', row: 'I choose not to identify with any of the above' },
+  { id: 'sid-prefer', row: 'I prefer not to identify with any of the above' },
+  { id: 'sid-trans', row: 'I do not identify as transgender' }
+];
+/* 'searched' is whether the React rendering reaches this row too, and it is a property of the ROW
+   rather than of the predicate. The radio and pill paths are handed the whole list and rank it, so
+   chooseOptionIndex's intent tier reaches any refusal however worded. A React Select menu is
+   searched instead, by typing each restatement answerOptions knows, so it reaches a row it can
+   already NAME. "I don´t wish to answer" is one of those, differing from a known restatement only
+   by the character used for the apostrophe, which the punctuation-tolerant name tier forgives. The
+   other two are worded outside that list entirely. */
+const SELF_ID_REFUSALS = [
+  { id: 'sid-would-like', row: 'I would not like to disclose this', searched: false },
+  { id: 'sid-wish-not', row: 'I wish not to answer', searched: false },
+  { id: 'sid-acute', row: 'I don´t wish to answer', searched: true }
+];
+const SELF_ID_ROWS = [...SELF_ID_CLAIMS, ...SELF_ID_REFUSALS];
+const SELF_ID_STORED = 'Decline to self-identify';
+
 const escapeHtml = (value) => String(value)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -249,6 +293,10 @@ ${trio('punctuation', 'Sponsorship, employer drops the comma', [SPONSOR_SHORT, S
 ${trio('punctuation-only', 'Which language do you know best', ['C++', 'C#'])}
 ${trio('not-above', 'Veteran status, no opt-out on the list', [VETERAN_CLAIM, NOT_ABOVE])}
 ${trio('opt-out', 'Veteran status, an opt-out on the list', [VETERAN_CLAIM, NOT_ABOVE, REAL_OPT_OUT])}
+<!-- The self-identification table above, one list per wording. Each offers a claim the stored
+     refusal has no business selecting and the wording under test, and nothing else, so the verdict
+     on that one wording is the whole of what the block measures. -->
+${SELF_ID_ROWS.map((entry) => trio(entry.id, `Veteran status, ${entry.id}`, [VETERAN_CLAIM, entry.row])).join('\n')}
 <!-- The widget renders what it is holding as a SHORTER RELATIVE of the row that set it, which is a
      different declaration and not an abbreviation. Contrast the country control, whose rendering
      ("+971" for "United Arab Emirates +971") has no words in common with the answer at all. -->
@@ -1198,6 +1246,70 @@ const unmatchedReason = (value) => `no option matched "${value}", left for you t
   assert.equal(valueOf(result, '#native_opt_out option:checked'), REAL_OPT_OUT);
   assert.deepEqual(result.filledFields, [...labels('opt-out'), 'question:opt-out:native']);
   assert.deepEqual(result.skipped, []);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 7b. THE SAME RULE ACROSS THE WHOLE SELF-IDENTIFICATION TABLE, BECAUSE THE HEADLINE ROW WAS NOT
+ * THE ONLY ONE.
+ *
+ * Case 7 fixed "I do not identify with any of the above" by requiring a volition verb after a
+ * plain negation. That leaves every wording whose negation is ALREADY volitional going straight to
+ * the verb, and bare 'identify' was still reachable there:
+ *
+ *   "I choose not to identify with any of the above"    read as a refusal
+ *   "I prefer not to identify with any of the above"    read as a refusal
+ *
+ * Both are claims for case 7's own reason. Measured on the code before this change, with
+ * "Decline to self-identify" on file and no true opt-out on the list, both were SELECTED on the two
+ * list-reading renderings and the field reported filled, which is the identical false declaration
+ * case 7 exists to stop, one clause over. The React rendering left them alone, for the reason the
+ * refusal block below gives, so this half is asserted on all three and won by two.
+ *
+ * Driven through the shipped runner rather than asserted against the pattern, deliberately. The
+ * pattern is not the thing that reaches an employer; the click is.
+ * ------------------------------------------------------------------------------------------- */
+for (const entry of SELF_ID_CLAIMS) {
+  const result = await replay([
+    ...ask(entry.id, `Veteran status, ${entry.id}`, SELF_ID_STORED),
+    ...readBack(entry.id)
+  ]);
+  assert.deepEqual(answers(result, entry.id), ['', '', ''],
+    `a stored refusal must not select "${entry.row}", which is a claim about her`);
+  assert.deepEqual(result.filledFields, []);
+  assert.deepEqual(result.skipped,
+    labels(entry.id).map((label) => `${label}: ${unmatchedReason(SELF_ID_STORED)}`));
+}
+
+/* And the other direction, which fails closed and so was never noticed: three wordings that ARE
+ * refusals and were not reached. "I would not like to disclose this" is the one the backend's own
+ * comment claimed as an example while its pattern did not catch it, because the negation list held
+ * only the do/does forms. "I wish not to answer" is the 'wishes? not' defect. The third was already
+ * correct here and is a guard rather than a repair, for the reason the table above gives. Each of
+ * these costs her a blank and a line to read rather than a false answer, which is the only reason
+ * they are minor.
+ *
+ * TWO RENDERINGS OF THREE, AND THE THIRD IS NOT A DEFECT IN THIS CHANGE. The radio and pill paths
+ * are handed the whole list and rank it with chooseOptionIndex, whose last tier matches a refusal
+ * to a refusal by intent, so a wording nobody enumerated is still reached. A React Select menu is
+ * not a list this file may read: it is SEARCHED, by typing each restatement answerOptions knows
+ * into the box, so it can only reach a refusal it can already name. That asymmetry predates this
+ * change, is documented at chooseOptionIndex, and fails closed: the control is left blank and she
+ * is told, rather than answered wrongly. Pinned here rather than left implicit, so that closing it
+ * is a deliberate act and not a surprise. */
+for (const entry of SELF_ID_REFUSALS) {
+  const result = await replay([
+    ...ask(entry.id, `Veteran status, ${entry.id}`, SELF_ID_STORED),
+    ...readBack(entry.id)
+  ]);
+  const [radio, pill, react] = answers(result, entry.id);
+  assert.deepEqual([radio, pill], [entry.row, entry.row],
+    `"${entry.row}" is a refusal and a list-reading rendering must reach it`);
+  assert.equal(react, entry.searched ? entry.row : '',
+    'the searched rendering reaches a refusal it can name and says so rather than guessing');
+  assert.deepEqual(result.filledFields,
+    entry.searched ? labels(entry.id) : labels(entry.id).slice(0, 2));
+  assert.deepEqual(result.skipped,
+    entry.searched ? [] : [`question:${entry.id}:react: ${unmatchedReason(SELF_ID_STORED)}`]);
 }
 
 /* ---------------------------------------------------------------------------------------------
