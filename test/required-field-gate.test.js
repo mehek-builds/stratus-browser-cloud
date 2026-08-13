@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import crypto from 'node:crypto';
+import { SANDBOX_RUNNER, SUBMIT_READINESS_GRAMMAR, SUBMIT_READINESS_POLICY } from '../src/managed-browser.js';
 
 /* D-01. THE REQUIRED FIELD NOTHING IN THIS FILE COULD SEE.
  *
@@ -91,6 +92,71 @@ test('the required scan reads a per-control marker and never page text', () => {
   // refused every Greenhouse submission there is.
   assert.match(gate, /LEGEND_TEXT/);
   assert.match(gate, /indicates\?/);
+});
+
+/* THE PIN THAT MAKES THE BACKEND'S COPY OF THIS GATE FINDABLE.
+ *
+ * This gate is written twice, and the other copy is READ_SUBMIT_READINESS_SCRIPT in
+ * student-outreach-backend/src/lib/portalSubmission.ts. On 2026-08-13 a fix for the gate reading an
+ * optional question's own <label> as that field's validation error was written, reviewed and merged
+ * into THAT copy, and production went on producing the same sentence, because this is the copy that
+ * drives a managed application. Four Scale AI packets and three DV Trading packets stopped on a
+ * field neither employer requires. The only thing that had ever asked the two to agree was a
+ * comment, which is the same thing question-label-dom.test.js was written about one gate along.
+ *
+ * The hash below is the atomic chooser's guard applied to this gate: the same literal appears in the
+ * backend's submitReadinessGrammar.test.ts, so an edit on either side leaves a value that is one
+ * string search away in the file that has to match it. It cannot make the other repo change. What it
+ * removes is the silent case.
+ */
+test('the readiness grammar hashes to the value the backend pins, and the gate is built from it', () => {
+  assert.equal(SUBMIT_READINESS_POLICY.name, 'litos-submit-readiness');
+  assert.equal(SUBMIT_READINESS_POLICY.version, 1);
+  /* KEEP THIS IN STEP WITH SUBMIT_READINESS_GRAMMAR_HASH in
+     student-outreach-backend/src/lib/submitReadinessGrammar.ts. */
+  assert.equal(SUBMIT_READINESS_POLICY.grammarHash, '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc');
+  assert.equal(
+    crypto.createHash('sha256').update(SUBMIT_READINESS_GRAMMAR).digest('hex'),
+    SUBMIT_READINESS_POLICY.grammarHash,
+  );
+  /* A hash over a declaration nobody reads guards nothing. Every fragment has to be inside the gate
+     that ships, or the hash is a statement about a constants object rather than about the code that
+     runs against an employer's form. */
+  const gate = SANDBOX_RUNNER.slice(
+    SANDBOX_RUNNER.indexOf('const readSubmitReadiness'),
+    SANDBOX_RUNNER.indexOf('const isFinalSubmitAction'),
+  );
+  for (const fragment of SUBMIT_READINESS_GRAMMAR.split('\n')) {
+    assert.ok(gate.includes(fragment), `the shipped gate no longer carries: ${fragment.slice(0, 60)}`);
+  }
+});
+
+/* THE FRAGMENT THAT IS NOT A WORD LIST, and the reason the hash is worth having at all.
+ *
+ * The two copies of this gate never disagreed about vocabulary. They disagreed about ONE structural
+ * rule, so a hash over the vocabulary alone would have been green through the entire incident.
+ * Asserted on what the statement decides rather than on its spelling: a decision about a LABEL,
+ * against the control that label names, that skips. */
+test('the structural rule the two copies diverged on is inside the hashed bytes', () => {
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /'LABEL'/);
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /getAttribute\('for'\)/);
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\bcontinue\b/);
+  /* AND BOUNDED TO THE QUESTION RATHER THAN TO ANY LABEL NAMING THE CONTROL. jQuery Validation's
+     default errorElement IS `label`, with for=idOrName(element) and "This field is required." for
+     text, so the unbounded rule skipped the very message this gate reads. The element must BE the
+     first label for that control: the one authored with the field, not the one appended to it.
+     Held on real markup by own-question-readiness-dom.test.js. */
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /element === \w+\.querySelector\(/);
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /label\[for=/);
+  /* The shared fragment may only name bindings BOTH copies bind identically. This runner's scan root
+     is `root` and the backend's is `scanRoot`, so either name is a ReferenceError in the other repo
+     on any page rendering an inline error. `widget` is the binding they share. */
+  assert.doesNotMatch(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\broot\b/);
+  assert.doesNotMatch(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\bscanRoot\b/);
+  assert.ok(SUBMIT_READINESS_GRAMMAR.includes(SUBMIT_READINESS_POLICY.ownQuestionSkip));
+  // And the vocabulary that made an employer's question look like an employer's complaint is still
+  // there, unnarrowed. The fix is the structural rule above, never a shorter word list.
+  assert.match(SUBMIT_READINESS_POLICY.errorText, /please[^\n]*provide/);
 });
 
 /* THE LABEL READER INSIDE THIS GATE, RUN RATHER THAN ASSERTED ABOUT.

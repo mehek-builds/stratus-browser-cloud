@@ -22,6 +22,68 @@ const atomicSubmitGrammarHash = crypto.createHash('sha256')
 if (atomicSubmitGrammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash) {
   throw new Error('Atomic submit chooser grammar hash mismatch');
 }
+/* THE PRE-SUBMIT READINESS GATE'S GRAMMAR, UNDER THE SAME GUARD AS THE CHOOSER'S, AND FOR A REASON
+ * THAT HAS ALREADY COST SEVEN PACKETS.
+ *
+ * readSubmitReadiness below is written twice: here, inside the sandbox script, which is what runs a
+ * managed application; and again in the backend as READ_SUBMIT_READINESS_SCRIPT
+ * (student-outreach-backend, src/lib/portalSubmission.ts), for its own direct-Playwright path. Until
+ * now the only thing asking those two to agree was a comment, and on 2026-08-13 that is exactly what
+ * failed: a fix for the gate reading an optional question's own <label> as that field's validation
+ * error was written, reviewed and merged into the BACKEND copy as its PR #527, and production went
+ * on producing the same sentence because this copy never got it. Four Scale AI packets and three DV
+ * Trading packets stopped on a field neither employer requires.
+ *
+ * So the chooser's guard, applied to the gate that needed it. The fragments below are the exact
+ * bytes the two copies share, the hash is over those bytes in that order, and the same literal is
+ * pinned in the backend's submitReadinessGrammar.test.ts. Editing a fragment here fails this boot
+ * check until the literal is updated, and that literal is one string search away in the file that
+ * has to match it. It cannot make the other repo change; what it removes is the SILENT divergence.
+ *
+ * WHY THESE SEVEN AND NOT THE WHOLE GATE. The two copies do not share a body - this one keys note()
+ * on the control and reports `unmatched`, the backend's keys on the widget and does not - so hashing
+ * the gate is not available. What they genuinely share is the vocabulary they read employer markup
+ * with, plus the one structural rule they diverged on, which is in here precisely because a hash
+ * over the vocabulary alone would have been green through the whole incident.
+ *
+ * SCOPE, said out loud: this covers readSubmitReadiness. The confirmAndSubmit pass further down
+ * carries its own required-control scan with its own copy of some of these patterns, and that scan
+ * has no twin in the backend to drift against, so it is deliberately left out rather than quietly
+ * half-covered. */
+export const SUBMIT_READINESS_POLICY = Object.freeze({
+  name: 'litos-submit-readiness',
+  version: 1,
+  requiredAttributes: String.raw`input[required], textarea[required], select[required], [aria-required="true"]`,
+  requiredClassMarkers: String.raw`label[class*="_required_"], legend[class*="_required_"]`,
+  asteriskMark: String.raw`\*(?:\s|$)|(?:^|\s)\*`,
+  asteriskLegend: String.raw`\*\s*(?:indicates|denotes|means|marks|=)`,
+  errorText: String.raw`\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b`,
+  legendText: String.raw`\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b`,
+  /* The field's own question is not the field's own complaint, as one statement of source shared
+   * with the backend rather than as two statements that happened to agree. Each copy supplies
+   * `element`, `controls` and `widget`, and its own indentation; nothing else about it is theirs to
+   * choose. `widget` is in that list deliberately: it is the one scope binding BOTH copies have
+   * under the same name. The runner calls its scan root `root` and the backend calls its own
+   * `scanRoot`, so a fragment reaching for `root` is a ReferenceError in the backend the moment a
+   * page renders any inline error at all, which is precisely the page this gate is for. */
+  ownQuestionSkip: String.raw`if (element.tagName === 'LABEL' && element.getAttribute('for') && controls.some((candidate) => candidate.id === element.getAttribute('for')) && element === widget.querySelector('label[for="' + CSS.escape(element.getAttribute('for')) + '"]')) continue;`,
+  grammarHash: '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc'
+});
+export const SUBMIT_READINESS_GRAMMAR = [
+  SUBMIT_READINESS_POLICY.requiredAttributes,
+  SUBMIT_READINESS_POLICY.requiredClassMarkers,
+  SUBMIT_READINESS_POLICY.asteriskMark,
+  SUBMIT_READINESS_POLICY.asteriskLegend,
+  SUBMIT_READINESS_POLICY.errorText,
+  SUBMIT_READINESS_POLICY.legendText,
+  SUBMIT_READINESS_POLICY.ownQuestionSkip
+].join('\n');
+const submitReadinessGrammarHash = crypto.createHash('sha256')
+  .update(SUBMIT_READINESS_GRAMMAR)
+  .digest('hex');
+if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
+  throw new Error('Submit readiness gate grammar hash mismatch');
+}
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
 const MAX_ACTIONS = 120;
@@ -3057,7 +3119,7 @@ const { chromium } = require('playwright');
       // no a "required" attribute at all, so a gate built only on [required] cannot see an unanswered
       // Greenhouse screener question - which is precisely the control this gate exists to catch.
       for (const element of root.querySelectorAll(
-        'input[required], textarea[required], select[required], [aria-required="true"]'
+        '${SUBMIT_READINESS_POLICY.requiredAttributes}'
       )) {
         if (element.disabled) continue;
         if (securityCodeBoxes.has(element)) continue;
@@ -3108,7 +3170,7 @@ const { chromium } = require('playwright');
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
-      for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+      for (const marker of root.querySelectorAll('${SUBMIT_READINESS_POLICY.requiredClassMarkers}')) {
         // An Ashby question block with no readable control still has to block, which is where PR #22
         // measured this arm.
         noteMarkedLabel(marker, true);
@@ -3143,8 +3205,8 @@ const { chromium } = require('playwright');
        * attribute loop can see: a Greenhouse screener question marked with a red asterisk and
        * nothing else.
        */
-      const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
-      const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+      const ASTERISK_MARK = /${SUBMIT_READINESS_POLICY.asteriskMark}/;
+      const ASTERISK_LEGEND = /${SUBMIT_READINESS_POLICY.asteriskLegend}/i;
       for (const marker of root.querySelectorAll('label, legend')) {
         const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
         if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
@@ -3155,25 +3217,85 @@ const { chromium } = require('playwright');
       // reported.
       const stale = [];
       const unmatched = [];
-      const ERROR_TEXT = /\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i;
+      const ERROR_TEXT = /${SUBMIT_READINESS_POLICY.errorText}/i;
       // A form's own legend says "* indicates a required field", and it matched the line above.
       // Measured on the live Redwood Materials form: that legend was the ONLY thing the gate found
       // on a completely and correctly filled application, so the gate would have refused to submit
       // every Greenhouse application there is. A gate that blocks everything is not caution.
-      const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
+      const LEGEND_TEXT = /${SUBMIT_READINESS_POLICY.legendText}/i;
       for (const element of root.querySelectorAll('*')) {
         if (element.children.length > 0) continue;
         const text = clean(element.textContent);
         if (!text || text.length > 160 || !ERROR_TEXT.test(text) || LEGEND_TEXT.test(text)) continue;
         if (!isVisible(element)) continue;
-        // The label of a required question reads "... *", never "is required", so this does not pick
-        // up labels. It picks up the error line the form renders under the control.
+        // What this loop is looking for is the error line the form renders under a control. The
+        // test below is what keeps it from reading the control's own question instead.
         const widget = widgetOf(element);
         if (!widget || widget === element) { unmatched.push(text); continue; }
         // A message sitting in a block that holds no control at all is not a field error. It is the
         // form's legend or a page-level notice, and attributing it to a field invents a blocker.
         const controls = [...widget.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')];
         if (controls.length === 0) continue;
+        /* THE FIELD'S OWN QUESTION IS NOT THE FIELD'S OWN COMPLAINT.
+         *
+         * A <label for="..."> naming a control in this very block is the employer ASKING, and
+         * reading it as the employer REFUSING blocks a field on the strength of its own wording.
+         *
+         * THE COMMENT THAT USED TO STAND HERE SAID THIS COULD NOT HAPPEN: "the label of a required
+         * question reads '... *', never 'is required', so this does not pick up labels". Half of
+         * that is true and it is the wrong half. A REQUIRED Greenhouse label carries
+         * <span aria-hidden="true">*</span> inside it, so it is not a leaf and never reaches this
+         * loop at all. An OPTIONAL one is a bare leaf <label>, and ERROR_TEXT contains
+         * "please provide". So the assumption held for exactly the fields it was written about and
+         * failed on every other one.
+         *
+         * Measured read-only against the live Greenhouse markup on 2026-08-13. Scale AI's
+         * question_8788020005 is labelled "If yes, please provide further explanation below." and
+         * carries aria-required="false", no required attribute and no asterisk; DV Trading's
+         * question_8954179005 is the same shape. Four Scale AI packets and three DV Trading packets
+         * stopped on a field neither employer requires, and each was additionally told "1 required
+         * field has no question you can answer in Litos" about it, because a field the employer
+         * left optional correctly has no question record.
+         *
+         * THIS OPENS NO HOLE ON A REQUIRED FIELD. Every field this loop can reach that the employer
+         * really does mark required is already reached by the three loops above it - the native and
+         * aria-required scan, the _required_ class marker, and the asterisk marker - and note()
+         * keys on the control, so a genuinely required field caught there is untouched by anything
+         * skipped here. Akuna's question_67727968 is that case, character for character: the same
+         * "please provide" wording, aria-required="true" and an asterisk, and it still blocks. What
+         * is given up is a field whose ONLY evidence of being required is that its own label happens
+         * to contain a word from ERROR_TEXT, which was never evidence.
+         *
+         * AND IT IS BOUNDED TO THE FIRST LABEL NAMING THAT CONTROL, WHICH IS THE QUESTION.
+         *
+         * "Some label names this control" was the first spelling of this rule and it was too wide,
+         * because <label for> is also the most common cross-framework shape for an inline field
+         * ERROR. jQuery Validation's default errorElement IS a label, it sets for=idOrName(element),
+         * and its default text "This field is required." is a member of ERROR_TEXT above. Measured
+         * in a real browser on this branch: '<label class="error" for="q_start">This field is
+         * required.</label>' and '<label class="error-message" for="applicant_phone">Phone cannot be
+         * blank</label>' each blocked before the rule existed and blocked nothing after it, with
+         * both suites green. confirmAndSubmit does not catch what falls through here - its candidate
+         * scan is built from [required], aria-required, the _required_ class and asterisk markers,
+         * and a field required only by the form's rendered message matches none of them.
+         *
+         * The question label is authored WITH the field; the validator's complaint is appended to it
+         * afterwards. So being FIRST is the discrimination, and it is what the querySelector in the
+         * fragment is doing. Held on employer-shaped markup by own-question-readiness-dom.test.js.
+         *
+         * NOT CLOSED, and named rather than left to be rediscovered: a validator that PREPENDS its
+         * error, and a control whose only <label> is the error because its question is rendered as a
+         * <span> or <div>, both put the complaint first and are still skipped. Measured on both
+         * shapes. Neither is a regression from this narrowing, which only ever adds blockers back.
+         *
+         * ONE STATEMENT, SHARED, RATHER THAN TWO THAT AGREE. The same test was written into the
+         * backend's copy of this gate as its PR #527 and never reached here, which is why the
+         * sentences above went on being produced for the whole life of that fix. It is now
+         * interpolated from SUBMIT_READINESS_POLICY at the top of this file, whose hash both repos
+         * pin and this file's boot check enforces. The fragment may only name bindings both copies
+         * share: this scan calls its root 'root' and the backend calls its own 'scanRoot', so it
+         * reaches for 'widget', which is the same name in both. */
+        ${SUBMIT_READINESS_POLICY.ownQuestionSkip}
         // WHICH control does the message accuse? A block can hold several: Greenhouse's phone field
         // is a fieldset holding the country select and the number, and its uploader holds both the
         // resume and the cover letter. Reading the block as a whole gets this wrong in both
