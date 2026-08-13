@@ -114,7 +114,7 @@ test('the readiness grammar hashes to the value the backend pins, and the gate i
   assert.equal(SUBMIT_READINESS_POLICY.version, 1);
   /* KEEP THIS IN STEP WITH SUBMIT_READINESS_GRAMMAR_HASH in
      student-outreach-backend/src/lib/submitReadinessGrammar.ts. */
-  assert.equal(SUBMIT_READINESS_POLICY.grammarHash, '4a020bdf8fce9a00aa4b9edbe99d65fc216d62f02d3d8eaa04bf0b7e1ab8c631');
+  assert.equal(SUBMIT_READINESS_POLICY.grammarHash, '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc');
   assert.equal(
     crypto.createHash('sha256').update(SUBMIT_READINESS_GRAMMAR).digest('hex'),
     SUBMIT_READINESS_POLICY.grammarHash,
@@ -141,6 +141,18 @@ test('the structural rule the two copies diverged on is inside the hashed bytes'
   assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /'LABEL'/);
   assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /getAttribute\('for'\)/);
   assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\bcontinue\b/);
+  /* AND BOUNDED TO THE QUESTION RATHER THAN TO ANY LABEL NAMING THE CONTROL. jQuery Validation's
+     default errorElement IS `label`, with for=idOrName(element) and "This field is required." for
+     text, so the unbounded rule skipped the very message this gate reads. The element must BE the
+     first label for that control: the one authored with the field, not the one appended to it.
+     Held on real markup by own-question-readiness-dom.test.js. */
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /element === \w+\.querySelector\(/);
+  assert.match(SUBMIT_READINESS_POLICY.ownQuestionSkip, /label\[for=/);
+  /* The shared fragment may only name bindings BOTH copies bind identically. This runner's scan root
+     is `root` and the backend's is `scanRoot`, so either name is a ReferenceError in the other repo
+     on any page rendering an inline error. `widget` is the binding they share. */
+  assert.doesNotMatch(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\broot\b/);
+  assert.doesNotMatch(SUBMIT_READINESS_POLICY.ownQuestionSkip, /\bscanRoot\b/);
   assert.ok(SUBMIT_READINESS_GRAMMAR.includes(SUBMIT_READINESS_POLICY.ownQuestionSkip));
   // And the vocabulary that made an employer's question look like an employer's complaint is still
   // there, unnarrowed. The fix is the structural rule above, never a shorter word list.

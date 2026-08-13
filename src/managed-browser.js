@@ -61,9 +61,13 @@ export const SUBMIT_READINESS_POLICY = Object.freeze({
   legendText: String.raw`\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b`,
   /* The field's own question is not the field's own complaint, as one statement of source shared
    * with the backend rather than as two statements that happened to agree. Each copy supplies
-   * `element` and `controls` and its own indentation; nothing else about it is theirs to choose. */
-  ownQuestionSkip: String.raw`if (element.tagName === 'LABEL' && element.getAttribute('for') && controls.some((candidate) => candidate.id === element.getAttribute('for'))) continue;`,
-  grammarHash: '4a020bdf8fce9a00aa4b9edbe99d65fc216d62f02d3d8eaa04bf0b7e1ab8c631'
+   * `element`, `controls` and `widget`, and its own indentation; nothing else about it is theirs to
+   * choose. `widget` is in that list deliberately: it is the one scope binding BOTH copies have
+   * under the same name. The runner calls its scan root `root` and the backend calls its own
+   * `scanRoot`, so a fragment reaching for `root` is a ReferenceError in the backend the moment a
+   * page renders any inline error at all, which is precisely the page this gate is for. */
+  ownQuestionSkip: String.raw`if (element.tagName === 'LABEL' && element.getAttribute('for') && controls.some((candidate) => candidate.id === element.getAttribute('for')) && element === widget.querySelector('label[for="' + CSS.escape(element.getAttribute('for')) + '"]')) continue;`,
+  grammarHash: '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc'
 });
 export const SUBMIT_READINESS_GRAMMAR = [
   SUBMIT_READINESS_POLICY.requiredAttributes,
@@ -3262,11 +3266,35 @@ const { chromium } = require('playwright');
          * is given up is a field whose ONLY evidence of being required is that its own label happens
          * to contain a word from ERROR_TEXT, which was never evidence.
          *
+         * AND IT IS BOUNDED TO THE FIRST LABEL NAMING THAT CONTROL, WHICH IS THE QUESTION.
+         *
+         * "Some label names this control" was the first spelling of this rule and it was too wide,
+         * because <label for> is also the most common cross-framework shape for an inline field
+         * ERROR. jQuery Validation's default errorElement IS a label, it sets for=idOrName(element),
+         * and its default text "This field is required." is a member of ERROR_TEXT above. Measured
+         * in a real browser on this branch: '<label class="error" for="q_start">This field is
+         * required.</label>' and '<label class="error-message" for="applicant_phone">Phone cannot be
+         * blank</label>' each blocked before the rule existed and blocked nothing after it, with
+         * both suites green. confirmAndSubmit does not catch what falls through here - its candidate
+         * scan is built from [required], aria-required, the _required_ class and asterisk markers,
+         * and a field required only by the form's rendered message matches none of them.
+         *
+         * The question label is authored WITH the field; the validator's complaint is appended to it
+         * afterwards. So being FIRST is the discrimination, and it is what the querySelector in the
+         * fragment is doing. Held on employer-shaped markup by own-question-readiness-dom.test.js.
+         *
+         * NOT CLOSED, and named rather than left to be rediscovered: a validator that PREPENDS its
+         * error, and a control whose only <label> is the error because its question is rendered as a
+         * <span> or <div>, both put the complaint first and are still skipped. Measured on both
+         * shapes. Neither is a regression from this narrowing, which only ever adds blockers back.
+         *
          * ONE STATEMENT, SHARED, RATHER THAN TWO THAT AGREE. The same test was written into the
          * backend's copy of this gate as its PR #527 and never reached here, which is why the
          * sentences above went on being produced for the whole life of that fix. It is now
          * interpolated from SUBMIT_READINESS_POLICY at the top of this file, whose hash both repos
-         * pin and this file's boot check enforces. */
+         * pin and this file's boot check enforces. The fragment may only name bindings both copies
+         * share: this scan calls its root 'root' and the backend calls its own 'scanRoot', so it
+         * reaches for 'widget', which is the same name in both. */
         ${SUBMIT_READINESS_POLICY.ownQuestionSkip}
         // WHICH control does the message accuse? A block can hold several: Greenhouse's phone field
         // is a fieldset holding the country select and the number, and its uploader holds both the

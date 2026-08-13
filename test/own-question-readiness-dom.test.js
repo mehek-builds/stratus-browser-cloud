@@ -155,6 +155,53 @@ test('a validation message rendered under an empty control still blocks', async 
   assert.deepEqual(readiness.blocking, ['"Cover letter" is required and is still empty']);
 });
 
+/* ADVERSARIAL, AND THE ONE THAT NEARLY SHIPPED: <label for> IS ALSO HOW FORMS RENDER ERRORS.
+ *
+ * The first version of the skip above keyed on tagName plus `for` plus a matching id, and nothing
+ * else. That is too wide, because it never asks whether the label is the field's QUESTION or the
+ * form's COMPLAINT about it, and a <label for> is the single most common cross-framework shape for
+ * an inline field error there is. jQuery Validation's DEFAULT errorElement is `label`; it sets
+ * for=idOrName(element); and its default message, "This field is required.", is a member of this
+ * gate's own ERROR_TEXT vocabulary. So the widest possible reading of "a label naming this control"
+ * swallowed the exact sentence the gate exists to read.
+ *
+ * Measured in a real browser against the shipped scan: both cases below blocked before the skip
+ * existed and blocked NOTHING with the unbounded version, and both suites stayed green while that
+ * was true, which is why they are here. confirmAndSubmit does not cover the gap either - its
+ * candidate scan is built from [required], aria-required, label[class*="_required_"] and asterisk
+ * markers, so a field that is required only by the form's own rendered message matches none of them
+ * and reaches Submit unblocked.
+ *
+ * WHAT THE FIX TURNS ON. The question label is authored WITH the field; a validator's complaint is
+ * appended to it afterwards. So the skip is bounded to the FIRST label naming that control, and
+ * these two cases are the half of the file that holds it there. The asymmetry at the top of this
+ * file is why they are worth their length: an employer that receives an incomplete application
+ * keeps it, and the applicant cannot take it back.
+ */
+test('a jQuery-Validation error label is a complaint, not the question, and still blocks', async () => {
+  const readiness = await readinessOf(`
+    <div class="field">
+      <label for="q_start" class="label label">Start date</label>
+      <input id="q_start" name="q_start" type="text" value="" />
+      <label id="q_start-error" class="error" for="q_start">This field is required.</label>
+    </div>`);
+  assert.deepEqual(readiness.blocking, ['"Start date" is required and is still empty']);
+});
+
+test('a second validator’s error label, in its own words, still blocks', async () => {
+  /* Not the same fixture twice: a different class, a different message, and no id at all, so the
+     rule cannot be satisfied by keying on jQuery's '-error' id suffix or on one class name. What is
+     shared is only the shape - a <label for> naming the control it accuses - which is the thing
+     being discriminated. */
+  const readiness = await readinessOf(`
+    <div class="field">
+      <label for="applicant_phone" class="label label">Phone</label>
+      <input id="applicant_phone" name="applicant_phone" type="text" value="" />
+      <label class="error-message" for="applicant_phone">Phone cannot be blank</label>
+    </div>`);
+  assert.deepEqual(readiness.blocking, ['"Phone" is required and is still empty']);
+});
+
 /* ADVERSARIAL: the skip is bounded to the field's OWN control, which is the whole of its claim.
  *
  * A <label for="..."> naming something in a different block says nothing about the block it is
