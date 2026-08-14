@@ -220,6 +220,17 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
      echoes each one into the node named after it, and 'extract' reads that back. -->
 <div id="req_phone-echo"></div>
 <div id="lone_phone-echo"></div>
+<!-- Workable's separate dial-code button and list option, with a standalone phone value property.
+     The duplicate pair measures that requireUnique rejects two plausible exact targets. -->
+<button id="workable-country-trigger" type="button" aria-label="Telephone country code" aria-controls="iti-7__country-listbox">+971</button>
+<div id="iti-7__country-listbox" role="listbox">
+  <div id="iti-7__country-listbox__item-ae" role="option" data-country-code="ae" data-dial-code="971">United Arab Emirates +971</div>
+</div>
+<div class="duplicate-uae-option" role="option">United Arab Emirates +971</div>
+<div class="duplicate-uae-option" role="option">United Arab Emirates +971</div>
+<input id="workable-phone" name="phone" type="tel">
+<input id="workable-phone-racy" name="phone-racy" type="tel">
+<input id="workable-phone-wrong" name="phone-wrong" type="tel">
 <!-- A job description, copied in shape from the live DRW and Virtu Greenhouse postings. The bullet
      contains the answer text and is a plain <li> loose in the page. Sweeping the document for
      'li' containing the answer clicked exactly this and called the Discipline field answered. -->
@@ -305,6 +316,24 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   document.addEventListener('input', function (event) {
     var echo = document.getElementById(event.target.id + '-echo');
     if (echo) echo.textContent = event.target.value;
+  });
+  var racyPhoneTimer = null;
+  document.getElementById('workable-phone-racy').addEventListener('input', function (event) {
+    if (!event.target.value) return;
+    if (racyPhoneTimer) clearTimeout(racyPhoneTimer);
+    racyPhoneTimer = setTimeout(function () {
+      event.target.value = '';
+      event.target.dispatchEvent(new Event('input', { bubbles: true }));
+    }, 850);
+  });
+  var wrongPhoneTimer = null;
+  document.getElementById('workable-phone-wrong').addEventListener('input', function (event) {
+    if (!event.target.value) return;
+    if (wrongPhoneTimer) clearTimeout(wrongPhoneTimer);
+    wrongPhoneTimer = setTimeout(function () {
+      event.target.value = '0501234567';
+      event.target.dispatchEvent(new Event('input', { bubbles: true }));
+    }, 850);
   });
   // A form that rewrites its own choice on change. Real boards do this to collapse answers they
   // treat as equivalent; here it is the only way to put a control into a state the chooser did not
@@ -594,7 +623,7 @@ fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 // `options` carries whatever the run-level input needs, which today means allowSubmit. It defaults
 // to absent, so every case below that does not ask for it runs under the default-deny submit guard,
 // which is the shape of a real prepare run.
-async function replay(actions, options = {}) {
+async function replay(actions, options = {}, expectFailure = false) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
     url: base,
     actions,
@@ -604,6 +633,7 @@ async function replay(actions, options = {}) {
     ...options
   }));
   fs.rmSync(path.join(workDir, 'stratus-result-0.json'), { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
   // spawn, never spawnSync: the fixture server lives in this process, and spawnSync would block the
   // event loop so the page could never load.
   const { status, stderr } = await new Promise((resolve) => {
@@ -616,11 +646,90 @@ async function replay(actions, options = {}) {
     child.stdout.resume();
     child.on('close', (code) => resolve({ status: code, stderr: captured }));
   });
+  if (expectFailure) {
+    assert.notEqual(status, 0, 'runner unexpectedly accepted a fail-closed action');
+    return { stderr };
+  }
   assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
   return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
 }
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
+
+// The Workable phone contract is executed, not just serialized. The read of attribute=value must
+// see the live property that fill changed, and a missing or duplicate exact target must stop the run.
+{
+  const trigger = 'button[aria-label="Telephone country code"][aria-controls]:visible';
+  const option = '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible';
+  const phone = '#workable-phone';
+  const result = await replay([
+    { type: 'requireCapability', value: 'extract-assertions-v1', optional: false },
+    { type: 'click', selector: trigger, label: 'phone_country_open', optional: false, requireUnique: true },
+    { type: 'click', selector: option, label: 'phone_country_option', optional: false, requireUnique: true },
+    { type: 'fill', selector: phone, value: '0567417451', label: 'phone', optional: false, requireUnique: true },
+    {
+      type: 'extract', selector: trigger, label: 'filled_field:phone_country', optional: false,
+      requireUnique: true, requireNonEmpty: true, expectedValueIncludes: '+971',
+      expectedValueDigits: '971', stabilityWindowMs: 1200
+    },
+    {
+      type: 'extract', selector: phone, attribute: 'value', label: 'filled_field:phone', optional: false,
+      requireUnique: true, requireNonEmpty: true, expectedValueDigits: '0567417451', stabilityWindowMs: 1200
+    }
+  ]);
+  assert.equal(valueOf(result, trigger), '+971');
+  assert.equal(valueOf(result, phone), '0567417451',
+    'attribute=value must read the live input property, got ' + JSON.stringify(result.extracted));
+  assert.deepEqual(result.capabilities, ['extract-assertions-v1']);
+  assert.equal(
+    result.extracted.find((entry) => entry.selector === phone)?.expectedValueDigits,
+    '0567417451'
+  );
+  assert.deepEqual(result.filledFields, ['phone']);
+
+  const duplicate = await replay([
+    { type: 'click', selector: '.duplicate-uae-option', optional: false, requireUnique: true }
+  ], {}, true);
+  assert.match(duplicate.stderr, /expected exactly one match.*found 2/);
+
+  const missing = await replay([
+    { type: 'click', selector: '.missing-uae-option', optional: false, requireUnique: true }
+  ], {}, true);
+  assert.match(missing.stderr, /expected exactly one match.*found 0/);
+
+  const delayedClear = await replay([
+    { type: 'requireCapability', value: 'extract-assertions-v1', optional: false },
+    {
+      type: 'fill', selector: '#workable-phone-racy', value: '0567417451', label: 'phone',
+      optional: false, requireUnique: true
+    },
+    {
+      type: 'extract', selector: '#workable-phone-racy', attribute: 'value', label: 'filled_field:phone',
+      optional: false, requireUnique: true, requireNonEmpty: true,
+      expectedValueDigits: '0567417451', stabilityWindowMs: 1200
+    }
+  ], {}, true);
+  assert.match(delayedClear.stderr, /filled_field:phone: extracted value is empty/);
+
+  const delayedWrongValue = await replay([
+    { type: 'requireCapability', value: 'extract-assertions-v1', optional: false },
+    {
+      type: 'fill', selector: '#workable-phone-wrong', value: '0567417451', label: 'phone',
+      optional: false, requireUnique: true
+    },
+    {
+      type: 'extract', selector: '#workable-phone-wrong', attribute: 'value', label: 'filled_field:phone',
+      optional: false, requireUnique: true, requireNonEmpty: true,
+      expectedValueDigits: '0567417451', stabilityWindowMs: 1200
+    }
+  ], {}, true);
+  assert.match(delayedWrongValue.stderr, /filled_field:phone: extracted value does not match expected digits/);
+
+  const unsupportedCapability = await replay([
+    { type: 'requireCapability', value: 'extract-assertions-v2', optional: false }
+  ], {}, true);
+  assert.match(unsupportedCapability.stderr, /Unsupported required runner capability: extract-assertions-v2/);
+}
 
 // D-009 provider contract. A React Select remains inputType=text at the DOM layer, so the role and
 // the exact capability must travel together. A non-discovery response must not advertise a

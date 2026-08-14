@@ -8,12 +8,14 @@ import { spawn } from 'node:child_process';
 import {
   ATOMIC_SUBMIT_POLICY,
   CLAIM_CONTINUATION_SCRIPT,
+  EXTRACT_ASSERTIONS_CAPABILITY,
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
   MANAGED_CONTINUATION_CONTRACT,
   normalizeManagedActions,
   normalizeManagedContinuation,
+  normalizeManagedRun,
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
@@ -88,6 +90,104 @@ test('managed actions accept bounded declarative operations', () => {
   assert.throws(() => normalizeManagedActions(Array.from({ length: 121 }, () => ({ type: 'click', selector: 'button' }))), (error) => error.code === 'TOO_MANY_ACTIONS');
 });
 
+test('managed actions preserve unique-match and live extract assertions', () => {
+  assert.deepEqual(normalizeManagedActions([
+    { type: 'requireCapability', value: EXTRACT_ASSERTIONS_CAPABILITY, optional: false },
+    { type: 'click', selector: '#country', optional: false, requireUnique: true },
+    {
+      type: 'extract',
+      selector: '#country',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueIncludes: '+971',
+      expectedValueDigits: '971',
+      stabilityWindowMs: 1200
+    },
+    {
+      type: 'extract',
+      selector: '#phone',
+      attribute: 'value',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueDigits: '0567417451',
+      stabilityWindowMs: 1200
+    }
+  ]), [
+    { type: 'requireCapability', optional: false, value: EXTRACT_ASSERTIONS_CAPABILITY },
+    { type: 'click', selector: '#country', optional: false, requireUnique: true },
+    {
+      type: 'extract',
+      selector: '#country',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueIncludes: '+971',
+      expectedValueDigits: '971',
+      stabilityWindowMs: 1200
+    },
+    {
+      type: 'extract',
+      selector: '#phone',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueDigits: '0567417451',
+      stabilityWindowMs: 1200,
+      attribute: 'value'
+    }
+  ]);
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'click', selector: '#country', requireUnique: 'true' }]),
+    (error) => error.code === 'INVALID_ACTION_ASSERTION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'fill', selector: '#phone', value: '1', requireNonEmpty: true }]),
+    (error) => error.code === 'INVALID_ACTION_ASSERTION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'extract', selector: '#country', expectedValueIncludes: '' }]),
+    (error) => error.code === 'INVALID_ACTION_ASSERTION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'extract', selector: '#phone', requireNonEmpty: true, stabilityWindowMs: 5000 }]),
+    (error) => error.code === 'INVALID_ACTION_ASSERTION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'extract', selector: '#phone', expectedValueDigits: '+971' }]),
+    (error) => error.code === 'INVALID_ACTION_ASSERTION'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'requireCapability', value: 'extract-assertions-v2' }]),
+    (error) => error.code === 'UNSUPPORTED_RUNNER_CAPABILITY'
+  );
+});
+
+test('required unique actions and extract assertions fail closed in the shipped runner', () => {
+  assert.match(SANDBOX_RUNNER, /if \(action\.requireUnique && matchCount !== 1\) \{/);
+  assert.match(SANDBOX_RUNNER, /expected exactly one match for/);
+  assert.match(SANDBOX_RUNNER, /attribute === 'value' && 'value' in element/);
+  assert.match(SANDBOX_RUNNER, /action\.requireNonEmpty && !String\(value \?\? ''\)\.trim\(\)/);
+  assert.match(SANDBOX_RUNNER, /!String\(value \?\? ''\)\.includes\(action\.expectedValueIncludes\)/);
+  assert.match(SANDBOX_RUNNER, /String\(value \?\? ''\)\.replace\(\/\\D\/g, ''\) !== action\.expectedValueDigits/);
+  assert.match(SANDBOX_RUNNER, /values\.length === 0[\s\S]*action\.expectedValueDigits != null/);
+  assert.match(SANDBOX_RUNNER, /const sampleCount = action\.stabilityWindowMs \? 3 : 1;/);
+  assert.match(SANDBOX_RUNNER, /Math\.ceil\(action\.stabilityWindowMs \/ \(sampleCount - 1\)\)/);
+  assert.match(SANDBOX_RUNNER, /assertRequiredCapabilities\(input\.actions\);/);
+  assert.match(SANDBOX_RUNNER, /extractAssertionsCapability/);
+});
+
+test('managed run rejects an unsupported required capability during request normalization', async () => {
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      actions: [{ type: 'requireCapability', value: 'extract-assertions-v2', optional: false }]
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'UNSUPPORTED_RUNNER_CAPABILITY'
+  );
+});
+
 test('managed actions accept reviewed questions and bounded resume uploads', () => {
   assert.deepEqual(normalizeManagedActions([
     { type: 'fillByLabelText', text: 'Why this role?', value: 'I enjoy platform engineering.', label: 'question:Why this role?' },
@@ -108,7 +208,7 @@ test('managed actions accept reviewed questions and bounded resume uploads', () 
 
 test('sandbox runner is syntactically valid and returns labelled extracts', () => {
   assert.doesNotThrow(() => new Function(SANDBOX_RUNNER));
-  assert.match(SANDBOX_RUNNER, /extracted\.push\(\{ selector: action\.selector, label: action\.label, value \}\)/);
+  assert.match(SANDBOX_RUNNER, /extracted\.push\(\{[\s\S]*selector: action\.selector,[\s\S]*expectedValueDigits/);
 });
 
 test('managed run always uses the Stratus Sandbox execution system', async () => {
