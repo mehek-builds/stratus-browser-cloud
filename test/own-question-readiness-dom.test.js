@@ -302,6 +302,70 @@ test('a sibling combobox label cannot rename an empty required phone control', a
   assert.equal(candidates[0].answered, false);
 });
 
+/* The live Workable phone tree, reduced only by removing visual-only flag and arrow children.
+ * Workable puts the dial-code opener before the actual required telephone input inside one
+ * wrapping label. The label's literal asterisk sends it through noteMarkedLabel as well as the
+ * native required scan. Selecting the first matching descendant therefore asks the opener whether
+ * it has an answer, ignores the filled telephone input beside it, and reports "Phone +1" empty. */
+const workablePhone = (value) => `
+  <div class="styles--3IYUq styles--3JEd1">
+    <label class="styles--3aPac">
+      <span><span><strong>*</strong></span><span id="phone_label"><strong>Phone</strong></span></span>
+      <div data-ignore-focus="true" data-ui="phone">
+        <div data-role="illustrated-input">
+          <div>
+            <div class="iti iti--allow-dropdown iti--separate-dial-code iti--show-flags">
+              <div class="iti__flag-container">
+                <div class="iti__selected-flag" role="combobox" aria-haspopup="listbox"
+                  aria-controls="iti-0__country-listbox" aria-expanded="false"
+                  aria-label="Telephone country code" tabindex="0" title="United States">
+                  <div class="iti__selected-dial-code">+1</div>
+                </div>
+              </div>
+              <input aria-required="true" name="phone" required type="tel"
+                class="styles--2e9Cp iti__tel-input" value="${value}">
+            </div>
+          </div>
+        </div>
+      </div>
+    </label>
+  </div>`;
+
+test('a filled required Workable phone is not hidden behind its preceding country combobox', async () => {
+  const readiness = await readinessOf(workablePhone('2135746270'));
+  assert.deepEqual(readiness.blocking, []);
+});
+
+test('an empty required Workable phone still blocks after choosing its real required control', async () => {
+  const readiness = await readinessOf(workablePhone(''));
+  assert.equal(readiness.blocking.length, 1);
+  assert.match(readiness.blocking[0], /required.*still empty/i);
+});
+
+test('a valid for target stays authoritative over one separately marked required descendant', async () => {
+  const readiness = await readinessOf(`
+    <div class="field">
+      <label for="country_code">* Phone</label>
+      <div id="country_code" role="combobox" aria-label="Telephone country code"></div>
+      <input name="phone" required value="2135746270">
+    </div>`);
+  assert.deepEqual(readiness.blocking, ['"* Phone" is required and is still empty']);
+});
+
+test('zero or multiple marked descendants retain the first-control fail-closed fallback', async () => {
+  for (const controls of [
+    `<div role="combobox" aria-label="Unanswered choice"></div><input value="answered">`,
+    `<div role="combobox" aria-label="Unanswered choice"></div>
+     <input required value="first answer"><input aria-required="true" value="second answer">`,
+  ]) {
+    const readiness = await readinessOf(`
+      <div class="field">
+        <label>* Required composite ${controls}</label>
+      </div>`);
+    assert.deepEqual(readiness.blocking, ['"* Required composite" is required and is still empty']);
+  }
+});
+
 test('unique option names still form one Workable checkbox question', async () => {
   const empty = await readinessOf(`
     <span id="experience_label">* Which development experience applies?</span>
