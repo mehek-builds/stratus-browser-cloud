@@ -175,12 +175,12 @@ function readinessConst(name) {
   return rest.slice(0, next === -1 ? rest.length : next);
 }
 
-function submitReadinessLabelOf() {
-  const sources = ['clean', 'wrappingLabelTextOf', 'genericControlText', 'nearestQuestionText', 'labelOf']
+function submitReadinessLabelOf(root = { querySelector: () => null }) {
+  const sources = ['clean', 'renderedText', 'wrappingLabelTextOf', 'genericControlText', 'nearestQuestionText', 'labelOf']
     .map(readinessConst)
     .join('\n');
   return Function('root', 'CSS', `${sources}\nreturn labelOf;`)(
-    { querySelector: () => null },
+    root,
     { escape: (value) => String(value) },
   );
 }
@@ -223,6 +223,72 @@ test('a machine identifier with no letters in any script is still discarded', ()
   assert.equal(labelOf(null, bareControl('5a326a1d-1a9e-42b1-a918-ca74022064dc')), '');
 });
 
+test('the readiness label excludes DOM-only fallback and closed-menu text', () => {
+  const addressLabel = {
+    innerText: '*\nAddress',
+    textContent: '*AddressSVGs not supported by this browser.',
+  };
+  const labelOf = submitReadinessLabelOf({
+    querySelector: (selector) => (selector === 'label[for="address"]' ? addressLabel : null),
+  });
+  const address = {
+    id: 'address',
+    parentElement: null,
+    closest: () => null,
+    getAttribute: () => null,
+  };
+  assert.equal(labelOf(null, address), '* Address');
+
+  const phoneWrapper = {
+    innerText: '*\nPhone\n+971',
+    textContent: '*Phone+971United States+1United Kingdom+44Canada+1',
+    querySelectorAll: () => [],
+  };
+  const phone = {
+    id: '',
+    parentElement: null,
+    closest: (selector) => (selector === 'label' ? phoneWrapper : null),
+    getAttribute: () => null,
+  };
+  assert.equal(labelOf(null, phone), '* Phone +971');
+  assert.doesNotMatch(labelOf(null, phone), /United States|United Kingdom|Canada/);
+});
+
+test('an implemented empty innerText does not fall back to hidden SVG copy', () => {
+  const hiddenFallbackLabel = {
+    innerText: '',
+    textContent: 'SVGs not supported by this browser.',
+  };
+  const labelOf = submitReadinessLabelOf({
+    querySelector: (selector) => (selector === 'label[for="custom"]' ? hiddenFallbackLabel : null),
+  });
+  const custom = {
+    id: 'custom',
+    parentElement: null,
+    closest: () => null,
+    getAttribute: () => null,
+  };
+  assert.equal(labelOf(null, custom), '');
+});
+
+test('atomic confirmation uses the same Workable label and group boundaries', () => {
+  const confirmation = SANDBOX_RUNNER.slice(
+    SANDBOX_RUNNER.indexOf('const candidates = await scope.evaluate'),
+    SANDBOX_RUNNER.indexOf('const scopedReadiness = await readSubmitReadiness(scope)'),
+  );
+  assert.match(confirmation, /\[data-input-type\]/);
+  assert.match(confirmation, /const renderedText = /);
+  assert.match(confirmation, /\[role="combobox"\]\[aria-labelledby\]/);
+  assert.match(
+    confirmation,
+    /renderedText\(byFor\)[\s\S]*renderedText\(proxyReferenced\)/,
+  );
+  assert.match(confirmation, /const semanticChoiceGroup = /);
+  assert.match(confirmation, /\[role="group"\]\[aria-labelledby\]/);
+  assert.match(confirmation, /semanticChoiceGroup\(element\) \|\| element\.name/);
+  assert.doesNotMatch(confirmation, /\[role="radiogroup"\], fieldset/);
+});
+
 test('an Ashby yes/no is read from its pills, because its checkbox cannot tell No from unanswered', () => {
   /* Verified live on the Deepgram form, 2026-08-09, by pressing each pill in a throwaway browser:
        press Yes -> the Yes button gains _active_1svni_57, the hidden checkbox becomes checked
@@ -260,7 +326,7 @@ test('discovery reports choice questions, one entry per question, with their opt
   // each input separately once turned three unanswered Greenhouse questions into seventeen blockers
   // named after their options.
   assert.match(discover, /const seenBlocks = new Set\(\)/);
-  assert.match(discover, /const key = el\.name \|\| block/);
+  assert.match(discover, /const key = choiceQuestionKey\(el, block\)/);
   // required and options now travel with the field, so the backend stops having to infer required
   // from a literal "*" in the label text - which Ashby never puts there.
   assert.match(discover, /required: marksRequired\(el, block\)/);

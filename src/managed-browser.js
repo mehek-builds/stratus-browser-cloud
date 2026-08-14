@@ -1575,7 +1575,12 @@ const { chromium } = require('playwright');
     const optionTextOf = async (option) => await option.evaluate((element) => {
       const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
       const wrapping = element.closest('label');
-      return ((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || element.getAttribute('aria-label') || element.value || '').trim();
+      const visibleText = (node) => {
+        if (!node) return '';
+        if (typeof node.innerText === 'string') return node.innerText;
+        return node.textContent || '';
+      };
+      return (visibleText(byFor) || visibleText(wrapping) || element.getAttribute('aria-label') || element.value || '').trim();
     }).catch(() => '');
     /* Ashby paints the radio with a sibling span and leaves the input itself 24x24 and clickable, so
      * check() is enough there. The label click is the fallback for boards that clip the input out of
@@ -2843,6 +2848,14 @@ const { chromium } = require('playwright');
     const readSubmitReadiness = (scope = null) => {
       const scan = (root = document) => {
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+      // An ATS can keep fallback copy and closed-menu options in the DOM without rendering them.
+      // textContent reads those implementation details; innerText reads the label a person sees.
+      // Fall back only in non-layout DOMs where innerText is not implemented. An implemented but
+      // empty innerText is meaningful, as with a successfully rendered <object>'s fallback copy.
+      const renderedText = (node) => {
+        if (!node) return '';
+        return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+      };
       const isVisible = (element) => {
         if (!element) return false;
         const rect = element.getBoundingClientRect();
@@ -2861,7 +2874,7 @@ const { chromium } = require('playwright');
       // board serving an older bundle carries the class and not the attribute.
       const widgetOf = (element) => element.closest(
         '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"],'
-        + ' [data-field-path], [class*="_fieldEntry_"]'
+        + ' [data-field-path], [data-input-type], [class*="_fieldEntry_"]'
       ) || element.parentElement || element;
       /* THE LABEL THAT WRAPS ITS CONTROL AND NEVER NAMES IT.
        *
@@ -2881,7 +2894,7 @@ const { chromium } = require('playwright');
         const wrapper = element && element.closest && element.closest('label');
         if (!wrapper) return '';
         if (wrapper.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
-        return wrapper.textContent;
+        return renderedText(wrapper);
       };
       /* The question a control sits under, when the control itself is labelled with nothing useful.
        *
@@ -2904,7 +2917,7 @@ const { chromium } = require('playwright');
           if (!block.matches || !block.matches('div, section, li, fieldset')) continue;
           if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
           const candidate = block.querySelector('label, legend, .question, h3, h4');
-          const text = clean((candidate && candidate.textContent) || '');
+          const text = clean(renderedText(candidate));
           if (text && !genericControlText(text)) return text;
         }
         return '';
@@ -2912,16 +2925,22 @@ const { chromium } = require('playwright');
       const labelOf = (widget, element) => {
         const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
           || (element && element.getAttribute('aria-labelledby'));
+        const proxyLabelledBy = widget
+          && widget.querySelector('[role="combobox"][aria-labelledby], [aria-haspopup="listbox"][aria-labelledby]')
+            ?.getAttribute('aria-labelledby');
         const referenced = labelledBy && root.querySelector('#' + CSS.escape(labelledBy.split(/\s+/)[0]));
+        const proxyReferenced = proxyLabelledBy
+          && root.querySelector('#' + CSS.escape(proxyLabelledBy.split(/\s+/)[0]));
         const byFor = element && element.id && root.querySelector('label[for="' + CSS.escape(element.id) + '"]');
         const legend = widget && widget.querySelector('legend');
         const own = widget && widget.querySelector('label, .label, .upload-label, legend');
         for (const candidate of [
-          referenced && referenced.textContent,
-          byFor && byFor.textContent,
-          legend && legend.textContent,
-          own && own.textContent,
+          renderedText(referenced),
+          renderedText(byFor),
           wrappingLabelTextOf(element),
+          renderedText(proxyReferenced),
+          renderedText(legend),
+          renderedText(own),
           element && element.getAttribute('aria-label'),
           widget && widget.getAttribute('aria-label'),
           nearestQuestionText(element)
@@ -3075,6 +3094,10 @@ const { chromium } = require('playwright');
           || pill.getAttribute('aria-selected') === 'true'
           || /^(?:on|true|active|selected|checked)$/i.test(pill.getAttribute('data-state') || ''));
       };
+      const semanticChoiceGroup = (element) => element?.closest?.(
+        '[role="group"][aria-labelledby], [role="group"][aria-label],'
+        + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+      ) || null;
       const hasAnswer = (element) => {
         if (!element) return false;
         const select2Answer = select2SourceAnswered(element);
@@ -3094,6 +3117,11 @@ const { chromium } = require('playwright');
             // the peer-group walk because that walk reads the same unchecked inputs.
             const pill = chosenPillOf(widgetOf(element));
             if (pill !== null) return pill;
+            const semanticGroup = semanticChoiceGroup(element);
+            if (semanticGroup) {
+              return [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+                .some((peer) => peer.checked);
+            }
             if (!element.name) return false;
             // One answered radio answers its whole group, and only the checked member carries it.
             for (const peer of (element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')) {
@@ -3137,14 +3165,13 @@ const { chromium } = require('playwright');
         if (!isVisible(widget)) return;
         // After the visibility test, so an invisible member cannot claim the group and silence the
         // visible one beside it.
-        const groupName = element
-          && (element.type === 'checkbox' || element.type === 'radio')
-          && element.name
-          ? element.name
+        const choice = element && (element.type === 'checkbox' || element.type === 'radio');
+        const groupKey = choice
+          ? (semanticChoiceGroup(element) || element.name || '')
           : '';
-        if (groupName) {
-          if (reportedGroups.has(groupName)) return;
-          reportedGroups.add(groupName);
+        if (groupKey) {
+          if (reportedGroups.has(groupKey)) return;
+          reportedGroups.add(groupKey);
         }
         if (hasAnswer(element)) return;
         const label = labelOf(widget, element);
@@ -3792,6 +3819,10 @@ const { chromium } = require('playwright');
       const submitFingerprint = crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
       const candidates = await scope.evaluate((root, boundFingerprint) => {
         const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const renderedText = (node) => {
+          if (!node) return '';
+          return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+        };
         const isVisible = (element) => {
           if (!element) return false;
           const rect = element.getBoundingClientRect();
@@ -3800,20 +3831,26 @@ const { chromium } = require('playwright');
         };
         const widgetOf = (element) => element.closest(
           '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
-          + ' [data-field-path], [class*="_fieldEntry_"]'
+          + ' [data-field-path], [data-input-type], [class*="_fieldEntry_"]'
         ) || element.parentElement || element;
         const labelOf = (element, widget) => {
-          const labelledBy = element.getAttribute && element.getAttribute('aria-labelledby');
+          const labelledBy = (element.getAttribute && element.getAttribute('aria-labelledby'))
+            || (widget.getAttribute && widget.getAttribute('aria-labelledby'));
+          const proxyLabelledBy = widget.querySelector
+            && widget.querySelector('[role="combobox"][aria-labelledby], [aria-haspopup="listbox"][aria-labelledby]')
+              ?.getAttribute('aria-labelledby');
           const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+          const proxyReferenced = proxyLabelledBy && document.getElementById(proxyLabelledBy.split(/\s+/)[0]);
           const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
           const wrapping = element.closest && element.closest('label');
           const own = widget.querySelector && widget.querySelector('legend, label, .question, h3, h4');
           return clean(
-            (referenced && referenced.textContent)
-            || (byFor && byFor.textContent)
-            || (wrapping && wrapping.textContent)
+            renderedText(referenced)
+            || renderedText(byFor)
+            || renderedText(wrapping)
+            || renderedText(proxyReferenced)
             || element.getAttribute?.('aria-label')
-            || (own && own.textContent)
+            || renderedText(own)
           ).slice(0, 120);
         };
         const CHOICE_SHELL = '[class*="select__container"], [class*="select-shell"]';
@@ -3860,9 +3897,18 @@ const { chromium } = require('playwright');
         )].some((candidate) => (
           candidate.closest(CHOICE_CONTROL) || candidate.closest(CHOICE_SHELL)
         ) === binding.scope);
+        const semanticChoiceGroup = (element) => element?.closest?.(
+          '[role="group"][aria-labelledby], [role="group"][aria-label],'
+          + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+        ) || null;
         const chosenValue = (element, widget) => {
           if (element instanceof HTMLInputElement && (element.type === 'radio' || element.type === 'checkbox')) {
             if (element.checked) return true;
+            const semanticGroup = semanticChoiceGroup(element);
+            if (semanticGroup) {
+              return [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+                .some((peer) => peer.checked);
+            }
             if (element.name) {
               return [...(element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')]
                 .some((peer) => peer.checked);
@@ -3985,11 +4031,12 @@ const { chromium } = require('playwright');
         for (const [element, validationSources] of controls) {
           const widget = widgetOf(element);
           if (!isVisible(widget)) continue;
-          const groupName = element instanceof HTMLInputElement && /radio|checkbox/.test(element.type) && element.name
-            ? element.name
+          const choice = element instanceof HTMLInputElement && /radio|checkbox/.test(element.type);
+          const groupKey = choice
+            ? (semanticChoiceGroup(element) || element.name || '')
             : '';
-          if (groupName && seenGroups.has(groupName)) continue;
-          if (groupName) seenGroups.add(groupName);
+          if (groupKey && seenGroups.has(groupKey)) continue;
+          if (groupKey) seenGroups.add(groupKey);
           index += 1;
           const marker = 'litos-required-confirm-' + index;
           element.setAttribute('data-litos-required-confirm', marker);
@@ -4714,6 +4761,14 @@ const { chromium } = require('playwright');
           function clean(s) {
             return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
           }
+          function renderedText(node) {
+            if (!node) return '';
+            return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+          }
+          function labelledByText(el) {
+            const ids = clean(el && el.getAttribute && el.getAttribute('aria-labelledby')).split(/\s+/).filter(Boolean);
+            return clean(ids.map((id) => renderedText(document.getElementById(id))).join(' '));
+          }
           function isVisible(el) {
             const rect = el.getBoundingClientRect();
             if (rect.width === 0 && rect.height === 0) return false;
@@ -4764,7 +4819,7 @@ const { chromium } = require('playwright');
                   'input:not([type="hidden"]), textarea, select, [role="combobox"]'
                 ).length > 1) return '';
                 const candidate = block.querySelector('label, legend, .question, h3, h4');
-                const text = clean((candidate && candidate.textContent) || '').toLowerCase();
+                const text = clean(renderedText(candidate)).toLowerCase();
                 if (text && !genericControlText(text)) return text;
               }
               return '';
@@ -4794,15 +4849,34 @@ const { chromium } = require('playwright');
               for (const stripper of strippers) rest = rest.replace(stripper, ' ');
               return !/\p{L}/u.test(rest);
             }
-            const fieldset = el.closest('fieldset');
-            const legend = fieldset ? fieldset.querySelector('legend') : null;
-            const legendText = legend && legend.textContent ? legend.textContent.trim() : '';
-            if (legendText) return legendText.toLowerCase();
-            const group = el.closest('[role="group"], [role="radiogroup"]');
-            const groupLabel = group ? group.getAttribute('aria-label') : null;
+            const choice = el.type === 'radio' || el.type === 'checkbox';
+            const group = el.closest(
+              '[role="group"][aria-labelledby], [role="group"][aria-label],'
+              + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+            );
+            const groupLabel = labelledByText(group) || (group ? group.getAttribute('aria-label') : null);
             if (groupLabel) return groupLabel.toLowerCase();
+            const fieldset = el.closest('fieldset');
+            const fieldsetChoices = fieldset && choice
+              ? [...fieldset.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+              : [];
+            const referencedLabel = labelledByText(el);
+            const referenceIds = clean(el.getAttribute('aria-labelledby'));
+            const sameNamePeers = choice && el.name
+              ? (fieldsetChoices.length > 0 ? fieldsetChoices : [...(el.form || document).querySelectorAll(
+                  'input[type="radio"][name="' + CSS.escape(el.name) + '"], input[type="checkbox"][name="' + CSS.escape(el.name) + '"]'
+                )]).filter((input) => input.name === el.name)
+              : [el];
+            const sharedChoiceReference = !choice || (referenceIds && sameNamePeers.length > 0
+              && sameNamePeers.every((input) => clean(input.getAttribute('aria-labelledby')) === referenceIds));
+            if (referencedLabel && sharedChoiceReference) return referencedLabel.toLowerCase();
+            const fieldsetNames = new Set(fieldsetChoices.map((input) => input.name).filter(Boolean));
+            const fieldsetOwnsChoice = !choice || fieldsetNames.size <= 1;
+            const legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
+            const legendText = clean(renderedText(legend));
+            if (legendText) return legendText.toLowerCase();
             const labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
-            const labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
+            const labelText = renderedText(labelEl);
             const ariaLabel = el.getAttribute('aria-label') || '';
             // A radio or checkbox is labelled with its OPTION - "Male", "Yes", "Hispanic or Latino" -
             // and the applicant is answering the QUESTION above it. The pre-submit gate already
@@ -4821,7 +4895,7 @@ const { chromium } = require('playwright');
                 const target = document.getElementById(named);
                 return !(target && (target.type === 'radio' || target.type === 'checkbox'));
               });
-              const ownerText = clean((ownerLabel && ownerLabel.textContent) || '').toLowerCase();
+              const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
@@ -4841,7 +4915,7 @@ const { chromium } = require('playwright');
             if (!clean(labelText) && !clean(ariaLabel)) {
               const owner = blockOf(el);
               const ownerLabel = owner && owner.querySelector('label, legend');
-              const ownerText = clean((ownerLabel && ownerLabel.textContent) || '').toLowerCase();
+              const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
             }
             const parts = [labelText || '', ariaLabel, el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
@@ -4895,8 +4969,15 @@ const { chromium } = require('playwright');
           function blockOf(el) {
             return el.closest(
               'fieldset, [role="group"], [role="radiogroup"], [data-field-path],'
-              + ' [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper'
+              + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper'
             ) || el.parentElement || el;
+          }
+          function choiceQuestionKey(el, block) {
+            const semanticGroup = el.closest(
+              '[role="group"][aria-labelledby], [role="group"][aria-label],'
+              + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+            );
+            return semanticGroup || el.name || block;
           }
           /* Whether the EMPLOYER marks this question required, read three ways because the three
            * ATS families spell it three different ways and a gate that knows only one of them is
@@ -4943,13 +5024,17 @@ const { chromium } = require('playwright');
             for (const input of block.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');
-              const text = clean((byFor && byFor.textContent) || (wrapping && wrapping.textContent) || input.getAttribute('aria-label') || '');
+              const text = clean(
+                renderedText(byFor) || renderedText(wrapping) || labelledByText(input)
+                || input.getAttribute('aria-label') || ''
+              );
+              const question = clean(questionLabel(input));
               // Ashby labels its hidden mirror input with the QUESTION, so a single "option" whose
               // text is the question is not an option list at all.
-              if (text && text.length <= 80) texts.push(text);
+              if (text && text.length <= 80 && text.toLowerCase() !== question.toLowerCase()) texts.push(text);
             }
             for (const button of block.querySelectorAll('button')) {
-              const text = clean(button.textContent);
+              const text = clean(renderedText(button));
               if (!text || text.length > 40) continue;
               if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) continue;
               texts.push(text);
@@ -4968,7 +5053,9 @@ const { chromium } = require('playwright');
             .filter((el) => {
               if (el.closest('[id*="litos"]') || el.disabled) return false;
               const choice = el.type === 'radio' || el.type === 'checkbox';
-              if (!choice && (el.readOnly || !isVisible(el))) return false;
+              const choiceOpener = el.getAttribute('role') === 'combobox'
+                || el.getAttribute('aria-haspopup') === 'listbox';
+              if (!choice && ((!choiceOpener && el.readOnly) || !isVisible(el))) return false;
               if (choice && !isVisible(blockOf(el))) return false;
               return !isHoneypot(el) || choice;
             });
@@ -4982,7 +5069,7 @@ const { chromium } = require('playwright');
             // One question, one entry. Keyed on the block for a pill or radio group, and on the
             // group name where several blocks share one; a text input is always its own question.
             if (choice) {
-              const key = el.name || block;
+              const key = choiceQuestionKey(el, block);
               if (seenBlocks.has(key)) continue;
               seenBlocks.add(key);
             }

@@ -1013,11 +1013,42 @@ const select2GateFixture = `<!doctype html><meta charset="utf-8"><title>Choice S
   });
 </script>`;
 
+const workableCheckboxFixture = `<!doctype html><meta charset="utf-8"><title>Workable Checkbox Fixture</title>
+<div data-input-type="checkbox" role="group" aria-labelledby="workable-languages-question">
+  <div id="workable-languages-question">Which languages do you speak?</div>
+  <div><input id="workable-language-english" name="12782" type="checkbox">
+    <label for="workable-language-english"><svg><desc>SVGs not supported by this browser.</desc></svg>English</label></div>
+  <div><input id="workable-language-french" name="12783" type="checkbox">
+    <label for="workable-language-french"><svg><desc>SVGs not supported by this browser.</desc></svg>French</label></div>
+</div>
+<div id="workable-language-answer"></div>
+<script>
+  (function () {
+    var output = document.getElementById('workable-language-answer');
+    function render() {
+      output.textContent = Array.prototype.filter.call(
+        document.querySelectorAll('[data-input-type="checkbox"] input'),
+        function (input) { return input.checked; }
+      ).map(function (input) {
+        return document.querySelector('label[for="' + input.id + '"]').innerText;
+      }).join(', ');
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('input[type="checkbox"]'), function (input) {
+      input.addEventListener('change', render);
+    });
+  }());
+</script>`;
+
 const server = http.createServer((request, response) => {
   // 'close' matters: a keep-alive socket stops Chromium ever reporting networkidle.
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
   const route = String(request.url || '').split('?')[0];
-  const pages = { '/gate': gateFixture, '/gate-select2': select2GateFixture, '/portal': portalFixture };
+  const pages = {
+    '/gate': gateFixture,
+    '/gate-select2': select2GateFixture,
+    '/portal': portalFixture,
+    '/workable-checkbox': workableCheckboxFixture
+  };
   response.end(pages[route] || fixture);
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -2093,6 +2124,35 @@ for (const entry of NEGATED) {
     result.blockers.some((message) => /field of study.*could not be confirmed/.test(message)),
     'and the run names the control, got ' + JSON.stringify(result.blockers)
   );
+}
+
+/* Workable gives every checkbox option its own numeric name and includes SVG fallback copy inside
+ * each label. Multi-select answers arrive as one exact action per option. The second action must
+ * keep the first check in place, and option matching must read only the words a person can see. */
+{
+  const result = await replay([
+    {
+      type: 'fillByLabelText',
+      text: 'Which languages do you speak?',
+      value: 'English',
+      label: 'question:workable-languages:English',
+      optional: true
+    },
+    {
+      type: 'fillByLabelText',
+      text: 'Which languages do you speak?',
+      value: 'French',
+      label: 'question:workable-languages:French',
+      optional: true
+    },
+    { type: 'extract', selector: '#workable-language-answer' }
+  ], { url: `${base}workable-checkbox` });
+  assert.equal(valueOf(result, '#workable-language-answer'), 'English, French');
+  assert.deepEqual(result.filledFields, [
+    'question:workable-languages:English',
+    'question:workable-languages:French'
+  ]);
+  assert.deepEqual(result.skipped, []);
 }
 
 server.close();
