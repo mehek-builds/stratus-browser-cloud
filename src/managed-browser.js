@@ -3088,21 +3088,51 @@ const { chromium } = require('playwright');
        * accepted alongside it because other boards spell the same state those ways, and reading a
        * state that is genuinely set can only make this gate quieter, never louder.
        *
-       * Returns null - not false - when the block has no pills at all, so a caller falls through to
-       * the real controls instead of treating "not a pill group" as "empty".
+       * The broad reader remains for required custom button widgets that have no native control.
+       * Checkbox and radio controls use the stricter Ashby-only reader below instead.
        */
       const PILL_SELECTED = /_active_|_selected_|_checked_/;
       const chosenPillOf = (scope) => {
         if (!scope || !scope.querySelectorAll) return null;
         const pills = [...scope.querySelectorAll('button')].filter((button) => {
           const text = clean(button.textContent);
-          // Same exclusion list the extension's own Ashby adapter uses: the block also holds upload,
-          // remove and submit controls, and a "Submit application" button is not an answer.
           return text.length > 0 && text.length <= 40
             && !/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text);
         });
         if (pills.length === 0) return null;
         return pills.some((pill) => PILL_SELECTED.test(String(pill.className || ''))
+          || pill.getAttribute('aria-pressed') === 'true'
+          || pill.getAttribute('aria-checked') === 'true'
+          || pill.getAttribute('aria-selected') === 'true'
+          || /^(?:on|true|active|selected|checked)$/i.test(pill.getAttribute('data-state') || ''));
+      };
+      // Null means "not this exact Ashby control", so normal checkbox and radio peer logic continues.
+      const chosenAshbyYesNoOf = (subject) => {
+        if (!subject?.closest || !subject?.querySelectorAll) return null;
+        const field = subject.matches?.('[data-field-path], [class*=\"_fieldEntry_\"]')
+          ? subject
+          : subject.closest('[data-field-path], [class*=\"_fieldEntry_\"]');
+        if (!field) return null;
+        const checkboxes = [...field.querySelectorAll('input[type=\"checkbox\"]')].filter((input) => (
+          input.closest('[data-field-path], [class*=\"_fieldEntry_\"]') === field
+        ));
+        const control = subject instanceof HTMLInputElement && subject.type === 'checkbox'
+          ? subject
+          : checkboxes.length === 1 ? checkboxes[0] : null;
+        if (!control || checkboxes.length !== 1 || checkboxes[0] !== control) return null;
+        const fieldPath = field.getAttribute('data-field-path');
+        if (!fieldPath || control.name !== fieldPath) return null;
+        const scope = control.closest('[class*=\"_yesno_\"]');
+        if (!scope || !field.contains(scope)) return null;
+        const answerPills = [...scope.querySelectorAll('button')].filter((pill) => (
+          pill.closest('[class*=\"_yesno_\"]') === scope
+          && isVisible(pill)
+          && /^(?:yes|no)$/i.test(clean(pill.textContent))
+        ));
+        if (answerPills.length !== 2
+          || answerPills.filter((pill) => /^yes$/i.test(clean(pill.textContent))).length !== 1
+          || answerPills.filter((pill) => /^no$/i.test(clean(pill.textContent))).length !== 1) return null;
+        return answerPills.some((pill) => PILL_SELECTED.test(String(pill.className || ''))
           || pill.getAttribute('aria-pressed') === 'true'
           || pill.getAttribute('aria-checked') === 'true'
           || pill.getAttribute('aria-selected') === 'true'
@@ -3129,7 +3159,7 @@ const { chromium } = require('playwright');
             // Ashby's hidden yes/no checkbox is unchecked whether the applicant picked "No" or picked
             // nothing, so the pills beside it are the only place the answer is legible. Asked before
             // the peer-group walk because that walk reads the same unchecked inputs.
-            const pill = chosenPillOf(widgetOf(element));
+            const pill = chosenAshbyYesNoOf(element);
             if (pill !== null) return pill;
             const semanticGroup = semanticChoiceGroup(element);
             if (semanticGroup) {
@@ -3911,6 +3941,41 @@ const { chromium } = require('playwright');
         )].some((candidate) => (
           candidate.closest(CHOICE_CONTROL) || candidate.closest(CHOICE_SHELL)
         ) === binding.scope);
+        /* Ashby stores a yes/no answer in a checkbox, but "No" and unanswered are both unchecked.
+         * The selected sibling pill is the only state that separates them. Bind it to this exact
+         * data-field-path, backing checkbox and visible Yes/No container before trusting that state. */
+        const PILL_SELECTED = /_active_|_selected_|_checked_/;
+        const chosenAshbyYesNoOf = (subject) => {
+          if (!subject?.closest || !subject?.querySelectorAll) return null;
+          const field = subject.matches?.('[data-field-path], [class*=\"_fieldEntry_\"]')
+            ? subject
+            : subject.closest('[data-field-path], [class*=\"_fieldEntry_\"]');
+          if (!field) return null;
+          const checkboxes = [...field.querySelectorAll('input[type=\"checkbox\"]')].filter((input) => (
+            input.closest('[data-field-path], [class*=\"_fieldEntry_\"]') === field
+          ));
+          const control = subject instanceof HTMLInputElement && subject.type === 'checkbox'
+            ? subject
+            : checkboxes.length === 1 ? checkboxes[0] : null;
+          if (!control || checkboxes.length !== 1 || checkboxes[0] !== control) return null;
+          const fieldPath = field.getAttribute('data-field-path');
+          if (!fieldPath || control.name !== fieldPath) return null;
+          const pillScope = control.closest('[class*=\"_yesno_\"]');
+          if (!pillScope || !field.contains(pillScope)) return null;
+          const answerPills = [...pillScope.querySelectorAll('button')].filter((pill) => (
+            pill.closest('[class*=\"_yesno_\"]') === pillScope
+            && isVisible(pill)
+            && /^(?:yes|no)$/i.test(clean(pill.textContent))
+          ));
+          if (answerPills.length !== 2
+            || answerPills.filter((pill) => /^yes$/i.test(clean(pill.textContent))).length !== 1
+            || answerPills.filter((pill) => /^no$/i.test(clean(pill.textContent))).length !== 1) return null;
+          return answerPills.some((pill) => PILL_SELECTED.test(String(pill.className || ''))
+            || pill.getAttribute('aria-pressed') === 'true'
+            || pill.getAttribute('aria-checked') === 'true'
+            || pill.getAttribute('aria-selected') === 'true'
+            || /^(?:on|true|active|selected|checked)$/i.test(pill.getAttribute('data-state') || ''));
+        };
         const semanticChoiceGroup = (element) => element?.closest?.(
           '[role="group"][aria-labelledby], [role="group"][aria-label],'
           + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
@@ -3918,6 +3983,8 @@ const { chromium } = require('playwright');
         const chosenValue = (element, widget) => {
           if (element instanceof HTMLInputElement && (element.type === 'radio' || element.type === 'checkbox')) {
             if (element.checked) return true;
+            const pill = chosenAshbyYesNoOf(element);
+            if (pill !== null) return pill;
             const semanticGroup = semanticChoiceGroup(element);
             if (semanticGroup) {
               return [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]

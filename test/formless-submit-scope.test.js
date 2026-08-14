@@ -70,12 +70,39 @@ const ASHBY = `<!doctype html><meta charset="utf-8"><title>Formless Ashby applic
   <div class="field"><label for="why">Why this role? *</label><textarea id="why" required>Because it fits.</textarea></div>
   <div class="field"><label for="resume">Resume *</label><input id="resume" type="file" required></div>
   <div class="field"><label for="cover">Cover letter</label><input id="cover" type="file"></div>
+  <div class="_fieldEntry_1e3gg_28 ashby-application-form-field-entry" data-field-path="4c3852e7-e63c-44dc-956b-a819f456e945">
+    <label class="_heading_f7cvd_52 _required_f7cvd_91 _label_1e3gg_42 ashby-application-form-question-title" for="4c3852e7-e63c-44dc-956b-a819f456e945">Prior US Government Employment?</label>
+    <div class="_description_1e3gg_48 ashby-application-form-question-description"><p>Have you worked for the US government in the last 10 years?</p></div>
+    <div class="_container_1svni_28 _yesno_1e3gg_148">
+      <button class="_container_pjyt6_1 _option_1svni_32">Yes</button>
+      <button class="_container_pjyt6_1 _option_1svni_32 _active_1svni_57">No</button>
+      <input type="checkbox" class="_input_1svni_78" style="display:none" tabindex="-1" name="4c3852e7-e63c-44dc-956b-a819f456e945">
+    </div>
+  </div>
   <button id="submit" class="_button_zyh3g_28 _primary_zyh3g_97">Submit Application</button>
 </div>
 </div></div></div>
 <div id="submitted"></div>
 <script>${HELPERS}
   attach('resume');
+  var ashbyParams = new URLSearchParams(location.search);
+  if (ashbyParams.has('leave-government-unanswered')) {
+    document.querySelector('button._active_1svni_57').classList.remove('_active_1svni_57');
+  }
+  if (ashbyParams.has('non-ashby-radio-peer')) {
+    document.getElementById('submit').insertAdjacentHTML('beforebegin',
+      '<fieldset id="ordinary-radio"><legend>Preferred shift *</legend>'
+      + '<input id="day-shift" type="radio" name="shift" required><label for="day-shift">Day</label>'
+      + '<input id="night-shift" type="radio" name="shift" checked><label for="night-shift">Night</label>'
+      + '<button type="button">Details</button></fieldset>');
+  }
+  if (ashbyParams.has('fieldset-sibling-checkbox')) {
+    document.getElementById('submit').insertAdjacentHTML('beforebegin',
+      '<fieldset id="ordinary-checkbox"><legend>Applicant consent *</legend>'
+      + '<input id="applicant-consent" type="checkbox" required><label for="applicant-consent">I consent</label>'
+      + '<div class="_yesno_sibling"><button type="button" class="_active_sibling" style="display:none">Yes</button>'
+      + '<button type="button" style="display:none">No</button></div></fieldset>');
+  }
   document.getElementById('submit').addEventListener('click', function () { record('ashby'); });
 </script>`;
 
@@ -614,7 +641,9 @@ test('a formless Ashby application binds the field container and submits exactly
   const { status, result, clicks: recorded } = await run('/ashby', [
     { type: 'extract', selector: '#form', attribute: 'data-litos-submit-scope-v2' },
     { type: 'extract', selector: '#root', attribute: 'data-litos-submit-scope-v2' },
-    { type: 'extract', selector: '.ashby-job-posting-right-pane', attribute: 'data-litos-submit-scope-v2' }
+    { type: 'extract', selector: '.ashby-job-posting-right-pane', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: 'button._active_1svni_57' },
+    { type: 'extract', selector: 'input[name="4c3852e7-e63c-44dc-956b-a819f456e945"]', attribute: 'checked' }
   ]);
   assert.equal(status, 0, 'the run must not abort on a page with no form element');
   assert.deepEqual(recorded, ['ashby'], 'the submit control is pressed exactly once');
@@ -626,10 +655,52 @@ test('a formless Ashby application binds the field container and submits exactly
   assert.equal(pass.scope.scopeKind, 'container');
   assert.equal(pass.scope.sameNode, true);
   assert.deepEqual(pass.unresolved, []);
+  const priorGovernment = pass.attempts.find((attempt) => attempt.label === 'Prior US Government Employment?');
+  assert.equal(priorGovernment?.fieldType, 'checkbox');
+  assert.equal(priorGovernment?.outcome, 'already_committed');
+  assert.equal(valueOf(result, 'button._active_1svni_57'), 'No');
+  assert.equal(valueOf(result, 'input[name="4c3852e7-e63c-44dc-956b-a819f456e945"]'), null,
+    'confirming No must not flip Ashby\'s unchecked boolean backing input to Yes');
   // The nearest ancestor holding field controls is div#form, not the pane above it and not the root.
-  assert.equal(valueOf(result, '#form'), '0');
+  // Ashby's answer pills are buttons too, so the final candidate's DOM index is intentionally opaque.
+  assert.match(valueOf(result, '#form') || '', /^\d+$/);
   assert.equal(valueOf(result, '.ashby-job-posting-right-pane'), null);
   assert.equal(valueOf(result, '#root'), null);
+});
+
+test('an unanswered Ashby yes/no still blocks the atomic submit', async () => {
+  const { status, result, clicks: recorded } = await run('/ashby?leave-government-unanswered');
+  assert.equal(status, 0, 'a truthful atomic refusal is a completed managed run');
+  assert.deepEqual(recorded, [], 'no submit control is pressed while the required pill has no selection');
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.submitOutcome.pressed, false);
+  const pass = result.requiredFieldConfirmation.passes[0];
+  assert.equal(pass.submissionOutcome, 'blocked');
+  assert.ok(pass.unresolved.includes('Prior US Government Employment?'));
+  const priorGovernment = pass.attempts.find((attempt) => attempt.label === 'Prior US Government Employment?');
+  assert.equal(priorGovernment?.fieldType, 'checkbox');
+  assert.equal(priorGovernment?.outcome, 'failed');
+});
+
+test('a non-Ashby radio group keeps its checked peer despite an unrelated button', async () => {
+  const { status, result, clicks: recorded } = await run('/ashby?non-ashby-radio-peer');
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['ashby'], 'an ordinary button must not short-circuit checked radio peers');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].unresolved.length, 0);
+});
+
+test('a hidden active sibling cannot answer an ordinary unchecked fieldset checkbox', async () => {
+  const { status, result, clicks: recorded } = await run('/ashby?fieldset-sibling-checkbox');
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, [], 'selected-looking sibling furniture must not authorize submit');
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.submitOutcome.pressed, false);
+  const pass = result.requiredFieldConfirmation.passes[0];
+  assert.ok(pass.unresolved.includes('I consent'));
+  const consent = pass.attempts.find((attempt) => attempt.label === 'I consent');
+  assert.equal(consent?.fieldType, 'checkbox');
+  assert.equal(consent?.outcome, 'failed');
 });
 
 test('the Greenhouse shape still binds its real form and ignores the Apply button outside it', async () => {

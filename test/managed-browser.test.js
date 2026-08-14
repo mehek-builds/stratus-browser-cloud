@@ -1357,7 +1357,7 @@ const gateScope = () => sandboxScope(
   [
     'clean', 'widgetOf', 'CHOICE_SHELL', 'CHOICE_CONTROL', 'CHOICE_OPENER', 'reactChoiceBinding',
     'chosenValueOf', 'select2SourceAnswered', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf',
-    'semanticChoiceGroup', 'hasAnswer'
+    'chosenAshbyYesNoOf', 'semanticChoiceGroup', 'hasAnswer'
   ],
   6,
 );
