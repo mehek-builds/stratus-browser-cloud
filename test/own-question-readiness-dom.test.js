@@ -38,6 +38,18 @@ function readinessScanSource() {
 
 const SCAN_SOURCE = readinessScanSource();
 
+function atomicCandidateSource() {
+  const marker = 'const candidates = await scope.evaluate(';
+  const start = SANDBOX_RUNNER.indexOf(marker);
+  assert.notEqual(start, -1, 'the atomic candidate scan must still be in the runner');
+  const bodyStart = start + marker.length;
+  const end = SANDBOX_RUNNER.indexOf('}, formFingerprint).catch', bodyStart);
+  assert.ok(end > bodyStart, 'could not bound the atomic candidate scan');
+  return SANDBOX_RUNNER.slice(bodyStart, end + 1);
+}
+
+const ATOMIC_CANDIDATE_SOURCE = atomicCandidateSource();
+
 let browser;
 let page;
 
@@ -55,6 +67,15 @@ async function readinessOf(html) {
     const scan = new Function(`${source}\nreturn scan;`)();
     return scan(document);
   }, SCAN_SOURCE);
+}
+
+async function atomicCandidatesOf(html) {
+  await page.setContent(`<!doctype html><html><body><form>${html}</form></body></html>`);
+  return page.evaluate(([source, fingerprint]) => {
+    // eslint-disable-next-line no-new-func
+    const scan = new Function(`return (${source});`)();
+    return scan(document, fingerprint);
+  }, [ATOMIC_CANDIDATE_SOURCE, 'a'.repeat(64)]);
 }
 
 /* THE DEFECT, ON THE EMPLOYER'S OWN MARKUP.
@@ -235,4 +256,105 @@ test('a complete form reports nothing, with the optional follow-up filled in', a
   assert.deepEqual(readiness.blocking, []);
   assert.deepEqual(readiness.stale, []);
   assert.deepEqual(readiness.unmatched, []);
+});
+
+test('a Workable select proxy is named by its rendered combobox question', async () => {
+  const question = 'Which office would you prefer?';
+  const readiness = await readinessOf(`
+    <span id="QA_100_label">* ${question}</span>
+    <div data-input-type="select" data-ui="QA_100">
+      <label><span hidden>SVGs not supported by this browser.</span>
+        <input id="input_QA_100_input" role="combobox" readonly
+          aria-labelledby="QA_100_label" placeholder="Select an option…"></label>
+      <input name="QA_100" required style="width:1px;height:1px" value="">
+    </div>`);
+
+  assert.deepEqual(readiness.blocking, [`"* ${question}" is required and is still empty`]);
+  assert.doesNotMatch(readiness.blocking[0], /SVGs not supported|input_QA_100_input/);
+});
+
+test('an answered Workable select proxy is ready', async () => {
+  const readiness = await readinessOf(`
+    <span id="QA_100_label">* Which office would you prefer?</span>
+    <div data-input-type="select" data-ui="QA_100">
+      <input id="input_QA_100_input" role="combobox" readonly
+        aria-labelledby="QA_100_label" placeholder="Select an option…">
+      <input name="QA_100" required style="width:1px;height:1px" value="Tokyo">
+    </div>`);
+  assert.deepEqual(readiness.blocking, []);
+});
+
+test('a sibling combobox label cannot rename an empty required phone control', async () => {
+  const markup = `
+    <div class="field">
+      <span id="country_label">Country code</span>
+      <input role="combobox" aria-labelledby="country_label" value="+971">
+      <label for="phone_number">Phone</label>
+      <input id="phone_number" type="tel" required value="">
+    </div>`;
+
+  const readiness = await readinessOf(markup);
+  assert.deepEqual(readiness.blocking, ['"Phone" is required and is still empty']);
+
+  const candidates = await atomicCandidatesOf(markup);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].label, 'Phone');
+  assert.equal(candidates[0].answered, false);
+});
+
+test('unique option names still form one Workable checkbox question', async () => {
+  const empty = await readinessOf(`
+    <span id="experience_label">* Which development experience applies?</span>
+    <div role="group" aria-labelledby="experience_label">
+      <label><input type="checkbox" name="5854742" required>Internship</label>
+      <label><input type="checkbox" name="5854743" required>Hackathon</label>
+      <label><input type="checkbox" name="5854744" required>Individual Development</label>
+    </div>`);
+  assert.deepEqual(empty.blocking, ['"* Which development experience applies?" is required and is still empty']);
+
+  const answered = await readinessOf(`
+    <span id="experience_label">* Which development experience applies?</span>
+    <div role="group" aria-labelledby="experience_label">
+      <label><input type="checkbox" name="5854742" required>Internship</label>
+      <label><input type="checkbox" name="5854743" required checked>Hackathon</label>
+      <label><input type="checkbox" name="5854744" required>Individual Development</label>
+    </div>`);
+  assert.deepEqual(answered.blocking, []);
+});
+
+test('an outer fieldset cannot let one named choice group answer another', async () => {
+  const markup = `
+    <fieldset>
+      <legend>Applicant disclosures</legend>
+      <div class="field">
+        <span id="first_choice_label">* First choice question</span>
+        <label><input type="radio" name="first_choice" required
+          aria-labelledby="first_choice_label" checked>Yes</label>
+        <label><input type="radio" name="first_choice" required
+          aria-labelledby="first_choice_label">No</label>
+      </div>
+      <div class="field">
+        <span id="second_choice_label">* Second choice question</span>
+        <label><input type="radio" name="second_choice" required
+          aria-labelledby="second_choice_label">Yes</label>
+        <label><input type="radio" name="second_choice" required
+          aria-labelledby="second_choice_label">No</label>
+      </div>
+    </fieldset>`;
+
+  const readiness = await readinessOf(markup);
+  assert.deepEqual(readiness.blocking, [
+    '"* Second choice question" is required and is still empty',
+  ]);
+
+  const candidates = await atomicCandidatesOf(markup);
+  const choices = candidates.filter((candidate) => candidate.fieldType === 'radio');
+  assert.equal(choices.length, 2);
+  assert.deepEqual(
+    choices.map(({ label, answered }) => ({ label, answered })),
+    [
+      { label: '* First choice question', answered: true },
+      { label: '* Second choice question', answered: false },
+    ],
+  );
 });

@@ -48,8 +48,16 @@ function extractBraced(prefix) {
 
 const LABEL_SOURCE = [
   extractBraced('function clean(s) {'),
+  extractBraced('function renderedText(node) {'),
+  extractBraced('function labelledByText(el) {'),
   extractBraced('function blockOf(el) {'),
   extractBraced('function questionLabel(el) {'),
+].join('\n');
+
+const CHOICE_SOURCE = [
+  LABEL_SOURCE,
+  extractBraced('function choiceQuestionKey(el, block) {'),
+  extractBraced('function optionsOf(el, block) {'),
 ].join('\n');
 
 /* Transcribed from https://jobs.lever.co/palantir/d5486403-c050-4920-b2e0-91b69b61ebb2/apply on
@@ -110,6 +118,28 @@ async function labelsFor(html, selector) {
     const questionLabel = new Function(`${source}\nreturn questionLabel;`)();
     return [...document.querySelectorAll(sel)].map((el) => questionLabel(el));
   }, [LABEL_SOURCE, selector]);
+}
+
+async function choiceDetailsFor(html) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate((source) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, choiceQuestionKey, optionsOf, questionLabel };`)();
+    const inputs = [...document.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+    const keys = new Set();
+    const labels = [];
+    for (const input of inputs) {
+      const block = helpers.blockOf(input);
+      const key = helpers.choiceQuestionKey(input, block);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      labels.push({
+        label: helpers.questionLabel(input),
+        options: helpers.optionsOf(input, block),
+      });
+    }
+    return labels;
+  }, CHOICE_SOURCE);
 }
 
 /* THE DEFECT, AND THE FIX, ON THE MARKUP THAT CAUSED IT.
@@ -238,4 +268,77 @@ test('a labelled Greenhouse control with a section handle in its id is untouched
     <div class="field"><label for="school--0">School*</label>
       <input type="text" id="school--0" name="school--0" /></div>`, 'input');
   assert.equal(label, 'school* school--0 school--0');
+});
+
+test('a Workable checkbox group is one clean question despite unique option names', async () => {
+  const question = 'Which development experience applies to you?';
+  const rows = await choiceDetailsFor(`
+    <span id="experience_label">* ${question}</span>
+    <div role="group" aria-labelledby="experience_label" data-ui="QA_11143558">
+      <label><span hidden>SVGs not supported by this browser.</span>
+        <input type="checkbox" name="5854742">Internship</label>
+      <label><span hidden>SVGs not supported by this browser.</span>
+        <input type="checkbox" name="5854743">Hackathon</label>
+      <label><span hidden>SVGs not supported by this browser.</span>
+        <input type="checkbox" name="5854744">Individual Development</label>
+      <label><span hidden>SVGs not supported by this browser.</span>
+        <input type="checkbox" name="5854745">No experiences</label>
+    </div>`);
+
+  assert.deepEqual(rows, [{
+    label: `* ${question.toLowerCase()}`,
+    options: ['Internship', 'Hackathon', 'Individual Development', 'No experiences'],
+  }]);
+});
+
+test('an outer fieldset does not merge separately named choice questions', async () => {
+  const rows = await choiceDetailsFor(`
+    <fieldset>
+      <legend>Applicant disclosures</legend>
+      <div class="field">
+        <span id="first_choice_label">First choice question</span>
+        <label><input type="checkbox" name="first_choice"
+          aria-labelledby="first_choice_label">First answer</label>
+      </div>
+      <div class="field">
+        <span id="second_choice_label">Second choice question</span>
+        <label><input type="checkbox" name="second_choice"
+          aria-labelledby="second_choice_label">Second answer</label>
+      </div>
+    </fieldset>`);
+  assert.deepEqual(rows, [
+    { label: 'first choice question', options: ['First answer'] },
+    { label: 'second choice question', options: ['Second answer'] },
+  ]);
+});
+
+test('distinct option references do not replace a shared fieldset question', async () => {
+  const rows = await choiceDetailsFor(`
+    <fieldset>
+      <legend>Are you authorized to work in this location?</legend>
+      <span id="authorized_yes">Yes</span>
+      <input type="radio" name="authorized" aria-labelledby="authorized_yes">
+      <span id="authorized_no">No</span>
+      <input type="radio" name="authorized" aria-labelledby="authorized_no">
+    </fieldset>`);
+
+  assert.deepEqual(rows, [{
+    label: 'are you authorized to work in this location?',
+    options: ['Yes', 'No'],
+  }]);
+});
+
+test('hidden fallback and closed-menu copy never become an employer question', async () => {
+  const [address, phone] = await labelsFor(`
+    <label for="address"><span>* Address</span>
+      <span hidden>SVGs not supported by this browser.</span></label>
+    <input id="address" name="address" aria-labelledby="address_label">
+    <span id="address_label">* Address</span>
+    <label><span>* Phone</span><span>+971</span>
+      <span hidden>United States +1 United Kingdom +44 Canada +1</span>
+      <input name="phone"></label>`, 'input');
+
+  assert.equal(address, '* address');
+  assert.match(phone, /^\* phone\s*\+971/);
+  assert.doesNotMatch(`${address} ${phone}`, /svg|united states|united kingdom|canada/i);
 });

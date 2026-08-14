@@ -38,10 +38,15 @@ function sandboxQuestionLabel() {
   // its placeholder, so the two are built together.
   const source = extractFunctionSource('questionLabel');
   const blockOfSource = extractFunctionSource('blockOf');
+  const renderedTextSource = extractFunctionSource('renderedText');
+  const labelledByTextSource = extractFunctionSource('labelledByText');
   const clean = (value) => (value == null ? '' : value).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   const fakeDocument = { querySelector: () => null };
   const fakeCss = { escape: (value) => String(value) };
-  return Function('clean', 'document', 'CSS', `${blockOfSource}\nreturn (${source});`)(clean, fakeDocument, fakeCss);
+  return Function(
+    'clean', 'document', 'CSS',
+    `${renderedTextSource}\n${labelledByTextSource}\n${blockOfSource}\nreturn (${source});`,
+  )(clean, fakeDocument, fakeCss);
 }
 
 function mockElement({ attrs = {}, textContent = '', parentElement = null, queryResult = null } = {}) {
@@ -1251,7 +1256,8 @@ test('a press lands on the element it names, and is skipped when that element is
 const gateScope = () => sandboxScope(
   [
     'clean', 'widgetOf', 'CHOICE_SHELL', 'CHOICE_CONTROL', 'CHOICE_OPENER', 'reactChoiceBinding',
-    'chosenValueOf', 'select2SourceAnswered', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf', 'hasAnswer'
+    'chosenValueOf', 'select2SourceAnswered', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf',
+    'semanticChoiceGroup', 'hasAnswer'
   ],
   6,
 );
