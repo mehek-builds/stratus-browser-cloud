@@ -9,6 +9,8 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
+export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
+
 export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
   version: 2,
@@ -85,7 +87,7 @@ if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
   throw new Error('Submit readiness gate grammar hash mismatch');
 }
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
-const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'confirmAndSubmit']);
+const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
@@ -145,6 +147,18 @@ const { chromium } = require('playwright');
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
   const startedAt = Date.now();
+  const extractAssertionsCapability = 'extract-assertions-v1';
+  const assertRequiredCapabilities = (actions) => {
+    const required = (actions || [])
+      .filter((action) => action.type === 'requireCapability')
+      .map((action) => action.value);
+    const unsupported = required.filter((capability) => capability !== extractAssertionsCapability);
+    if (unsupported.length > 0) {
+      throw new Error('Unsupported required runner capability: ' + unsupported.join(', '));
+    }
+  };
+  // Reject the contract before Chromium opens or any employer page receives an action.
+  assertRequiredCapabilities(input.actions);
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   try {
     const browserContext = await browser.newContext({ viewport: input.viewport || { width: 1440, height: 900 } });
@@ -4652,6 +4666,7 @@ const { chromium } = require('playwright');
     let phase = 0;
     let currentInput = input;
     while (true) {
+    assertRequiredCapabilities(currentInput.actions);
     extracted.length = 0;
     filledFields.length = 0;
     skipped.length = 0;
@@ -4664,7 +4679,14 @@ const { chromium } = require('playwright');
      // field before it. A chooser that succeeds never has its reason read.
      lastChoiceRefusal = '';
      try {
-      const locator = action.selector ? page.locator(action.selector).first() : null;
+      const matches = action.selector ? page.locator(action.selector) : null;
+      const matchCount = action.requireUnique && matches ? await matches.count() : null;
+      if (action.requireUnique && matchCount !== 1) {
+        throw new Error((action.label || action.type) + ': expected exactly one match for '
+          + action.selector + ', found ' + String(matchCount ?? 0));
+      }
+      if (action.type === 'requireCapability') continue;
+      const locator = matches ? matches.first() : null;
       // Recorded before the action runs, and recorded whether or not it succeeds. What this list
       // claims is only that the caller aimed this run at that control, which is what makes the
       // form around it the application. See the form viability rules in confirmAndSubmitPass.
@@ -5647,19 +5669,67 @@ const { chromium } = require('playwright');
          * distinguishable by the presence of the line rather than by the absence of a value.
          *
          * The locator is rebuilt WITHOUT .first(): the whole point is the nodes behind the first. */
-        if (action.requireVisible) {
-          const values = await page.locator(action.selector).evaluateAll(captchaSnapshot, {
-            mode: 'visibleValues',
-            attribute: action.attribute || null
-          });
-          if (values.length === 0) {
-            skipped.push((action.label || 'extract') + ': nothing visible matched ' + action.selector);
-          } else {
-            for (const value of values) extracted.push({ selector: action.selector, label: action.label, value });
+        const assertExtractedValue = (value) => {
+          if (action.requireNonEmpty && !String(value ?? '').trim()) {
+            throw new Error((action.label || 'extract') + ': extracted value is empty');
           }
+          if (action.expectedValueIncludes != null
+            && !String(value ?? '').includes(action.expectedValueIncludes)) {
+            throw new Error((action.label || 'extract') + ': extracted value does not include '
+              + action.expectedValueIncludes);
+          }
+          if (action.expectedValueDigits != null
+            && String(value ?? '').replace(/\D/g, '') !== action.expectedValueDigits) {
+            throw new Error((action.label || 'extract') + ': extracted value does not match expected digits');
+          }
+        };
+        const readExtractValues = async () => {
+          if (action.requireVisible) {
+            return await page.locator(action.selector).evaluateAll(captchaSnapshot, {
+              mode: 'visibleValues',
+              attribute: action.attribute || null
+            });
+          }
+          const value = await locator.evaluate((element, attribute) => {
+            if (attribute === 'value' && 'value' in element) return String(element.value ?? '');
+            return attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || '');
+          }, action.attribute || null);
+          return [value];
+        };
+        const sampleCount = action.stabilityWindowMs ? 3 : 1;
+        const sampleIntervalMs = sampleCount > 1
+          ? Math.ceil(action.stabilityWindowMs / (sampleCount - 1))
+          : 0;
+        let values = [];
+        for (let sample = 0; sample < sampleCount; sample += 1) {
+          if (sample > 0) await page.waitForTimeout(sampleIntervalMs);
+          if (action.requireUnique) {
+            const currentCount = await page.locator(action.selector).count();
+            if (currentCount !== 1) {
+              throw new Error((action.label || action.type) + ': expected exactly one match for '
+                + action.selector + ', found ' + String(currentCount));
+            }
+          }
+          values = await readExtractValues();
+          if (values.length === 0 && (action.requireNonEmpty || action.expectedValueIncludes
+            || action.expectedValueDigits != null)) {
+            throw new Error((action.label || 'extract') + ': extracted value is empty');
+          }
+          for (const value of values) assertExtractedValue(value);
+        }
+        if (values.length === 0) {
+          skipped.push((action.label || 'extract') + ': nothing visible matched ' + action.selector);
         } else {
-          const value = await locator.evaluate((element, attribute) => attribute ? element.getAttribute(attribute) : (element.innerText || element.textContent || ''), action.attribute || null);
-          extracted.push({ selector: action.selector, label: action.label, value });
+          for (const value of values) {
+            extracted.push({
+              selector: action.selector,
+              label: action.label,
+              value,
+              ...(action.expectedValueDigits != null
+                ? { expectedValueDigits: action.expectedValueDigits }
+                : {})
+            });
+          }
         }
       }
      } catch (actionError) {
@@ -5769,10 +5839,20 @@ const { chromium } = require('playwright');
      * meanings. Advertising it is what lets a caller tell "this evidence was filtered by a real
      * layout read, one entry per visible node" from "this runner is older than that", which matters
      * because the two answers differ on live pages and the caller deploys on its own schedule. */
+    const usesExtractAssertions = currentInput.actions.some((action) => action.requireUnique === true
+      || (action.type === 'extract' && (action.requireNonEmpty === true
+        || action.expectedValueIncludes != null
+        || action.expectedValueDigits != null
+        || action.stabilityWindowMs != null)));
     const runnerCapabilities = [
       ...(currentInput.actions.some((action) => action.type === 'discover') ? ['discovery-control-role-v1'] : []),
       ...(currentInput.actions.some((action) => action.type === 'extract' && action.requireVisible === true)
         ? ['extract-require-visible-v1']
+        : []),
+      ...(currentInput.actions.some((action) => action.type === 'requireCapability'
+        && action.value === extractAssertionsCapability)
+        || usesExtractAssertions
+        ? [extractAssertionsCapability]
         : [])
     ];
     /* THE WINDOW OPENS HERE, on the page that raised the challenge, not back when the sandbox was
@@ -5859,13 +5939,27 @@ export function normalizeManagedActions(actions = []) {
       throw inputError(`Action ${index + 1} has an unsupported type`, 'INVALID_ACTION');
     }
     const normalized = { type: action.type };
-    if (!['press', 'fillByLabelText', 'discover'].includes(action.type)) normalized.selector = validateSelector(action.selector);
+    if (!['press', 'fillByLabelText', 'discover', 'requireCapability'].includes(action.type)) normalized.selector = validateSelector(action.selector);
     // A press keeps the selector it was given. It stays OPTIONAL - a caller may legitimately mean
     // "send this key wherever focus already is" and omit it - but when one is supplied, dropping it
     // here is what turned an aimed keystroke into a page-wide one, and made the optional pre-check
     // (which is guarded on the locator) unreachable for every press ever queued.
     else if (action.type === 'press' && action.selector != null) normalized.selector = validateSelector(action.selector);
     if (action.optional != null) normalized.optional = Boolean(action.optional);
+    if (action.type === 'requireCapability') {
+      if (action.value !== EXTRACT_ASSERTIONS_CAPABILITY) {
+        throw inputError('The required runner capability is unsupported', 'UNSUPPORTED_RUNNER_CAPABILITY');
+      }
+      normalized.value = action.value;
+    }
+    if (action.requireUnique != null) {
+      if (typeof action.requireUnique !== 'boolean'
+        || !['click', 'fill', 'upload', 'select', 'extract', 'press'].includes(action.type)
+        || !normalized.selector) {
+        throw inputError('requireUnique needs a selector-backed action and a boolean value', 'INVALID_ACTION_ASSERTION');
+      }
+      normalized.requireUnique = action.requireUnique;
+    }
     if (action.label != null) {
       if (typeof action.label !== 'string' || action.label.length > 200) throw inputError('Action labels must be strings no longer than 200 characters', 'INVALID_ACTION_LABEL');
       normalized.label = action.label;
@@ -5917,6 +6011,35 @@ export function normalizeManagedActions(actions = []) {
     // 'extract-require-visible-v1' so the caller can tell the two apart instead of guessing.
     if (action.type === 'extract' && action.requireVisible != null) {
       normalized.requireVisible = Boolean(action.requireVisible);
+    }
+    if (action.requireNonEmpty != null) {
+      if (action.type !== 'extract' || typeof action.requireNonEmpty !== 'boolean') {
+        throw inputError('requireNonEmpty is only valid as a boolean on extract actions', 'INVALID_ACTION_ASSERTION');
+      }
+      normalized.requireNonEmpty = action.requireNonEmpty;
+    }
+    if (action.expectedValueIncludes != null) {
+      if (action.type !== 'extract' || typeof action.expectedValueIncludes !== 'string'
+        || !action.expectedValueIncludes || action.expectedValueIncludes.length > 500) {
+        throw inputError('expectedValueIncludes needs non-empty extract text no longer than 500 characters', 'INVALID_ACTION_ASSERTION');
+      }
+      normalized.expectedValueIncludes = action.expectedValueIncludes;
+    }
+    if (action.expectedValueDigits != null) {
+      if (action.type !== 'extract' || typeof action.expectedValueDigits !== 'string'
+        || !/^\d{1,100}$/.test(action.expectedValueDigits)) {
+        throw inputError('expectedValueDigits needs 1 to 100 digits on an extract action', 'INVALID_ACTION_ASSERTION');
+      }
+      normalized.expectedValueDigits = action.expectedValueDigits;
+    }
+    if (action.stabilityWindowMs != null) {
+      if (action.type !== 'extract' || !Number.isInteger(action.stabilityWindowMs)
+        || action.stabilityWindowMs < 300 || action.stabilityWindowMs > 2_000
+        || (action.requireNonEmpty !== true && action.expectedValueIncludes == null
+          && action.expectedValueDigits == null)) {
+        throw inputError('stabilityWindowMs needs an asserted extract and must be 300 to 2000 milliseconds', 'INVALID_ACTION_ASSERTION');
+      }
+      normalized.stabilityWindowMs = action.stabilityWindowMs;
     }
     if (action.type === 'extract' && action.attribute != null) {
       if (typeof action.attribute !== 'string' || action.attribute.length > 100) {
