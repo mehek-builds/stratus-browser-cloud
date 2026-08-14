@@ -385,11 +385,11 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
   assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
-  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 1,
-    'and none of them reaches the verifier directly, which is how the withdrawal cannot be skipped');
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 2,
+    'fill call sites cannot skip withdrawal; the second read only waits for a delayed rollback to settle');
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
@@ -1249,37 +1249,57 @@ test('a press lands on the element it names, and is skipped when that element is
 });
 
 const gateScope = () => sandboxScope(
-  ['clean', 'widgetOf', 'CHOICE_SHELL', 'chosenValueOf', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf', 'hasAnswer'],
+  [
+    'clean', 'widgetOf', 'CHOICE_SHELL', 'CHOICE_CONTROL', 'CHOICE_OPENER', 'reactChoiceBinding',
+    'chosenValueOf', 'select2SourceAnswered', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf', 'hasAnswer'
+  ],
   6,
 );
 
 // A React Select's own shell, the thing its chosen value is rendered into.
 function shellOf({ chosen = '', placeholder = false } = {}) {
-  return {
+  const shell = {
+    control: null,
     querySelector(selector) {
       if (/single-value|multi-value__label/.test(selector)) return chosen ? { textContent: chosen } : null;
       if (/placeholder/.test(selector)) return placeholder ? {} : null;
       return null;
+    },
+    querySelectorAll(selector) {
+      if (/single-value|multi-value__label/.test(selector)) {
+        return chosen ? [{ textContent: chosen, closest: () => shell }] : [];
+      }
+      if (/placeholder/.test(selector)) return placeholder ? [{ closest: () => shell }] : [];
+      if (/role="combobox"|aria-haspopup/.test(selector)) {
+        return shell.control?.getAttribute('role') === 'combobox' ? [shell.control] : [];
+      }
+      if (/input:not\(\[type="hidden"\]\)|textarea|select/.test(selector)) {
+        return shell.control ? [shell.control] : [];
+      }
+      return [];
     }
   };
+  return shell;
 }
 
 // One form control. 'shell' is the select shell this control is INSIDE, which is the distinction
 // R-103 turns on: a control that merely sits near an answered select is not inside it.
 function control({ tag = 'INPUT', type = 'text', value = '', role = null, checked = null, files = null, name = null, shell = null, block = null } = {}) {
-  return {
+  const element = {
     tagName: tag, type, value, checked, files, name,
     getAttribute: (attribute) => (attribute === 'role' ? role : null),
     closest(selector) {
       if (!shell) return null;
       if (/select__container|select-shell/.test(selector)) return shell;
-      if (/select__control/.test(selector)) return { parentElement: shell };
+      if (/select__control/.test(selector)) return shell;
       return null;
     },
     parentElement: block || { querySelector: () => null, querySelectorAll: () => [] },
     querySelector: () => null,
     querySelectorAll: () => []
   };
+  if (shell) shell.control = element;
+  return element;
 }
 
 // A block that is itself flagged required: Greenhouse marks its uploader with a

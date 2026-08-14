@@ -969,14 +969,27 @@ const { chromium } = require('playwright');
     // nothing is answered; 'unknown' means this is not a widget whose answered state can be read, and
     // no conclusion may be drawn from it either way.
     const readChoiceState = async (container) => await container.evaluate((element) => {
-      const widget = element.closest('[class*="select__container"], [class*="select-shell"]')
-        || (element.closest('[class*="select__control"]') || {}).parentElement
+      const widget = element.closest('[class*="select__control"]')
+        || element.closest('[class*="select__container"], [class*="select-shell"]')
         || element;
       // The chosen value is rendered as its own node, and reading it beats reading the widget:
       // the widget's textContent also carries the question label, and a label is quite capable of
       // containing the answer word ("...currently enrolled in a degree program?" contains "no").
-      const chosen = widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]');
-      if (chosen) return { kind: 'chosen', value: chosen.textContent || '' };
+      const chosenNodes = [...(widget.querySelectorAll?.(
+        '[class*="select__single-value"], [class*="select__multi-value__label"]'
+      ) || [])];
+      const chosen = chosenNodes[0] || widget.querySelector(
+        '[class*="select__single-value"], [class*="select__multi-value__label"]'
+      );
+      if (chosen) return {
+        kind: 'chosen',
+        value: chosen.textContent || '',
+        values: (chosenNodes.length > 0 ? chosenNodes : [chosen]).map((node) => node.textContent || ''),
+        semanticValues: (chosenNodes.length > 0 ? chosenNodes : [chosen]).map((node) => (
+          node.getAttribute?.('aria-label') || node.getAttribute?.('data-value')
+            || node.getAttribute?.('title') || node.textContent || ''
+        ))
+      };
       // Still showing "Select...", so nothing was chosen. Saying so rather than falling through to
       // textContent stops the label from being mistaken for an answer.
       if (widget.querySelector('[class*="select__placeholder"]')) return { kind: 'empty', value: '' };
@@ -1423,9 +1436,14 @@ const { chromium } = require('playwright');
      * matter of time. verifyChoiceInContainer stays a pure reading of the control, which is what
      * lets it be unit-tested against a container that is nothing but a state. */
     const choiceLanded = async (container, expected) => {
-      if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
-        await unmarkChoice(container);
-        return true;
+      // React-controlled choices can publish their selected value on a later render. Give that
+      // exact value a bounded window before withdrawing anything the option click may have set.
+      for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
+        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
+          await unmarkChoice(container);
+          return true;
+        }
+        if (elapsed < 500) await page.waitForTimeout(50).catch(() => undefined);
       }
       await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer);
       return false;
@@ -2941,15 +2959,76 @@ const { chromium } = require('playwright');
       // The value a React Select renders, scoped to that select's OWN shell rather than to the block
       // around it, which is the whole of the fix. Returns null when the element is not a choice
       // control at all, so the caller can fall through rather than treat "not a select" as "empty".
+      const CHOICE_CONTROL = '[class*="select__control"]';
+      const CHOICE_OPENER = '[role="combobox"], [aria-haspopup="listbox"]';
+      const reactChoiceBinding = (element) => {
+        if (!element?.closest) return null;
+        const outerShell = element.closest(CHOICE_SHELL);
+        if (!outerShell) return null;
+        const boundaryOf = (candidate) => candidate?.closest?.(CHOICE_CONTROL)
+          || candidate?.closest?.(CHOICE_SHELL)
+          || null;
+        const hiddenBacking = String(element.tagName || '').toUpperCase() === 'INPUT'
+          && String(element.type || '').toLowerCase() === 'hidden';
+        if (!hiddenBacking) {
+          // A class such as "select-shell-grid" can be a layout wrapper. Prefer the nearest
+          // select__control when it owns exactly one opener, so a separate input in that grid cannot
+          // either borrow this answer or make the answered choice look empty.
+          const scope = element.closest(CHOICE_CONTROL) || outerShell;
+          const answerControls = [...new Set(scope.querySelectorAll(
+            'input:not([type="hidden"]), textarea, select, ' + CHOICE_OPENER
+          ))].filter((candidate) => boundaryOf(candidate) === scope);
+          const openers = [...new Set(scope.querySelectorAll(CHOICE_OPENER))]
+            .filter((candidate) => boundaryOf(candidate) === scope);
+          if (answerControls.length !== 1 || openers.length !== 1
+            || answerControls[0] !== openers[0] || element !== openers[0]) return null;
+          return { shell: outerShell, scope, opener: openers[0] };
+        }
+        const requiredBackings = [...outerShell.querySelectorAll(
+          'input[type="hidden"][required], input[type="hidden"][aria-required="true"]'
+        )].filter((candidate) => candidate.closest(CHOICE_SHELL) === outerShell);
+        if (requiredBackings.length !== 1 || requiredBackings[0] !== element) return null;
+        const openers = [...new Set(outerShell.querySelectorAll(CHOICE_OPENER))]
+          .filter((candidate) => candidate.closest(CHOICE_SHELL) === outerShell);
+        if (openers.length !== 1) return null;
+        const opener = openers[0];
+        const owner = opener.closest(CHOICE_CONTROL) || opener;
+        const sameControl = owner !== opener && element.closest(CHOICE_CONTROL) === owner;
+        const adjacentBacking = element.parentElement === outerShell
+          && (element.previousElementSibling === owner || element.nextElementSibling === owner);
+        return sameControl || adjacentBacking
+          ? { shell: outerShell, scope: owner === opener ? outerShell : owner, opener }
+          : null;
+      };
       const chosenValueOf = (element) => {
-        const shell = element.closest(CHOICE_SHELL)
-          || (element.closest('[class*="select__control"]') || {}).parentElement;
-        if (!shell) return null;
-        if (shell.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
+        const binding = reactChoiceBinding(element);
+        if (!binding) return null;
+        const selected = [...binding.scope.querySelectorAll(
+          '[class*="select__single-value"], [class*="select__multi-value__label"]'
+        )].some((candidate) => (
+          candidate.closest(CHOICE_CONTROL) || candidate.closest(CHOICE_SHELL)
+        ) === binding.scope);
+        if (selected) return true;
         // Still showing "Select...", so nothing was chosen. Returning false rather than falling
         // through stops the question label from being mistaken for an answer.
-        if (shell.querySelector('[class*="select__placeholder"]')) return false;
+        const placeholder = [...binding.scope.querySelectorAll('[class*="select__placeholder"]')]
+          .some((candidate) => (
+            candidate.closest(CHOICE_CONTROL) || candidate.closest(CHOICE_SHELL)
+          ) === binding.scope);
+        if (placeholder) return false;
         return null;
+      };
+      const select2SourceAnswered = (element) => {
+        const sourceTag = String(element?.tagName || '').toUpperCase();
+        const sourceType = String(element?.type || '').toLowerCase();
+        if (!(sourceTag === 'SELECT' || (sourceTag === 'INPUT' && sourceType === 'hidden'))
+          || !element.classList?.contains('select2-offscreen')
+          || !element.id) return null;
+        const shell = element.previousElementSibling;
+        if (!shell?.matches('.select2-container') || shell.id !== 's2id_' + element.id) return null;
+        if (widgetOf(element) !== widgetOf(shell)) return null;
+        if (shell.querySelectorAll(':scope > .select2-choice').length !== 1) return null;
+        return Boolean(clean(element.value));
       };
       // Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it with a
       // filename chip, so "no input[type=file] with files" is true of a block already given a file.
@@ -2998,14 +3077,14 @@ const { chromium } = require('playwright');
       };
       const hasAnswer = (element) => {
         if (!element) return false;
+        const select2Answer = select2SourceAnswered(element);
+        if (select2Answer !== null) return select2Answer;
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)) {
           // A combobox input holds the SEARCH text, which react-select clears on selection. Its
           // emptiness says nothing about whether an option was chosen, so read what the select
           // renders instead - but only for THIS select.
-          if (element.getAttribute('role') === 'combobox' || element.closest('[class*="select__control"]')) {
-            const chosen = chosenValueOf(element);
-            if (chosen !== null) return chosen;
-          }
+          const chosen = chosenValueOf(element);
+          if (chosen !== null) return chosen;
           if (element.type === 'hidden') return false;
           if (element.type === 'file') return uploadHasFile(element.parentElement);
           if (element.type === 'checkbox' || element.type === 'radio') {
@@ -3737,6 +3816,50 @@ const { chromium } = require('playwright');
             || (own && own.textContent)
           ).slice(0, 120);
         };
+        const CHOICE_SHELL = '[class*="select__container"], [class*="select-shell"]';
+        const CHOICE_CONTROL = '[class*="select__control"]';
+        const CHOICE_OPENER = '[role="combobox"], [aria-haspopup="listbox"]';
+        const reactChoiceBinding = (element) => {
+          if (!element?.closest) return null;
+          const outerShell = element.closest(CHOICE_SHELL);
+          if (!outerShell) return null;
+          const boundaryOf = (candidate) => candidate?.closest?.(CHOICE_CONTROL)
+            || candidate?.closest?.(CHOICE_SHELL)
+            || null;
+          const hiddenBacking = String(element.tagName || '').toUpperCase() === 'INPUT'
+            && String(element.type || '').toLowerCase() === 'hidden';
+          if (!hiddenBacking) {
+            const scope = element.closest(CHOICE_CONTROL) || outerShell;
+            const answerControls = [...new Set(scope.querySelectorAll(
+              'input:not([type="hidden"]), textarea, select, ' + CHOICE_OPENER
+            ))].filter((candidate) => boundaryOf(candidate) === scope);
+            const openers = [...new Set(scope.querySelectorAll(CHOICE_OPENER))]
+              .filter((candidate) => boundaryOf(candidate) === scope && isVisible(candidate));
+            if (answerControls.length !== 1 || openers.length !== 1
+              || answerControls[0] !== openers[0] || element !== openers[0]) return null;
+            return { shell: outerShell, scope, opener: openers[0] };
+          }
+          const requiredBackings = [...outerShell.querySelectorAll(
+            'input[type="hidden"][required], input[type="hidden"][aria-required="true"]'
+          )].filter((candidate) => candidate.closest(CHOICE_SHELL) === outerShell);
+          if (requiredBackings.length !== 1 || requiredBackings[0] !== element) return null;
+          const openers = [...new Set(outerShell.querySelectorAll(CHOICE_OPENER))]
+            .filter((candidate) => candidate.closest(CHOICE_SHELL) === outerShell && isVisible(candidate));
+          if (openers.length !== 1) return null;
+          const opener = openers[0];
+          const owner = opener.closest(CHOICE_CONTROL) || opener;
+          const sameControl = owner !== opener && element.closest(CHOICE_CONTROL) === owner;
+          const adjacentBacking = element.parentElement === outerShell
+            && (element.previousElementSibling === owner || element.nextElementSibling === owner);
+          return sameControl || adjacentBacking
+            ? { shell: outerShell, scope: owner === opener ? outerShell : owner, opener }
+            : null;
+        };
+        const reactChoiceAnswered = (binding) => [...binding.scope.querySelectorAll(
+          '[class*="select__single-value"], [class*="select__multi-value__label"]'
+        )].some((candidate) => (
+          candidate.closest(CHOICE_CONTROL) || candidate.closest(CHOICE_SHELL)
+        ) === binding.scope);
         const chosenValue = (element, widget) => {
           if (element instanceof HTMLInputElement && (element.type === 'radio' || element.type === 'checkbox')) {
             if (element.checked) return true;
@@ -3749,16 +3872,19 @@ const { chromium } = require('playwright');
           if (element instanceof HTMLSelectElement) return Boolean(clean(element.value));
           if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
             if (element instanceof HTMLInputElement && element.type === 'file') return Boolean(element.files && element.files.length > 0);
-            const shell = element.closest('[class*="select__container"], [class*="select-shell"]');
-            if (shell && shell.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
+            const binding = reactChoiceBinding(element);
+            if (binding && reactChoiceAnswered(binding)) return true;
             return Boolean(clean(element.value));
           }
           const uploadedFile = element.querySelector && element.querySelector('input[type="file"]');
           if (uploadedFile && uploadedFile.files && uploadedFile.files.length > 0) return true;
           if (element.querySelector && element.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+          for (const choice of element.querySelectorAll?.(CHOICE_OPENER) || []) {
+            const binding = reactChoiceBinding(choice);
+            if (binding && reactChoiceAnswered(binding)) return true;
+          }
           return Boolean(widget.querySelector(
             'input:checked, [aria-checked="true"], [aria-selected="true"], [aria-pressed="true"],'
-            + ' [class*="select__single-value"], [class*="select__multi-value__label"],'
             + ' button[class*="_active_"], button[class*="_selected_"], button[class*="_checked_"]'
           ));
         };
@@ -3767,20 +3893,72 @@ const { chromium } = require('playwright');
           const text = clean(node.textContent);
           return text.length <= 160 && /\bis required\b|\brequires an answer\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i.test(text);
         });
-        const affected = (element, widget) => {
+        const hasValidationIssue = (element) => {
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
-          return nativeMissing || element.getAttribute?.('aria-invalid') === 'true' || errorText(widget);
+          return nativeMissing || element.getAttribute?.('aria-invalid') === 'true';
         };
-        const controls = new Set(root.querySelectorAll(
+        const select2Binding = (control) => {
+          if (!control) return null;
+          let source = null;
+          let shell = null;
+          const isSource = (element) => Boolean(
+            (element instanceof HTMLSelectElement
+              || (element instanceof HTMLInputElement && element.type === 'hidden'))
+            && element.classList.contains('select2-offscreen')
+            && element.id
+          );
+          if (isSource(control)) {
+            source = control;
+            shell = document.getElementById('s2id_' + source.id);
+          } else {
+            shell = control.closest?.('.select2-container[id^="s2id_"]') || null;
+            const sourceId = shell?.id.slice('s2id_'.length) || '';
+            source = sourceId ? document.getElementById(sourceId) : null;
+          }
+          if (!isSource(source)
+            || !shell?.matches('.select2-container')
+            || shell.id !== 's2id_' + source.id
+            || source.previousElementSibling !== shell
+            || widgetOf(source) !== widgetOf(shell)
+            || !root.contains(source)
+            || !root.contains(shell)) return null;
+          const targets = [...shell.querySelectorAll(
+            ':scope > .select2-choice'
+          )].filter((candidate) => isVisible(candidate));
+          if (targets.length !== 1) return null;
+          return { source, shell, opener: targets[0] };
+        };
+        const controls = new Map();
+        const canonicalControl = (control) => {
+          if (!control) return null;
+          const select2 = select2Binding(control);
+          if (select2) return select2.source;
+          const reactChoice = reactChoiceBinding(control);
+          if (reactChoice) return reactChoice.opener;
+          return control;
+        };
+        const addControl = (control) => {
+          const canonical = canonicalControl(control);
+          if (!canonical || !root.contains(canonical)) return;
+          const validationSources = controls.get(canonical) || new Set([canonical]);
+          validationSources.add(control);
+          const select2 = select2Binding(control);
+          if (select2) {
+            validationSources.add(select2.source);
+            validationSources.add(select2.opener);
+          }
+          controls.set(canonical, validationSources);
+        };
+        for (const control of root.querySelectorAll(
           'input[required], textarea[required], select[required], [aria-required="true"]'
-        ));
+        )) addControl(control);
         for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
           const control = (named && document.getElementById(named))
             || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')
             || block;
-          if (control && root.contains(control)) controls.add(control);
+          addControl(control);
         }
         const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
         const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
@@ -3792,12 +3970,19 @@ const { chromium } = require('playwright');
           const control = (named && document.getElementById(named))
             || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')
             || block;
-          if (control && root.contains(control)) controls.add(control);
+          addControl(control);
+        }
+        for (const stale of root.querySelectorAll(
+          '[data-litos-required-confirm], [data-litos-required-confirm-source], [data-litos-select2-confirm]'
+        )) {
+          stale.removeAttribute('data-litos-required-confirm');
+          stale.removeAttribute('data-litos-required-confirm-source');
+          stale.removeAttribute('data-litos-select2-confirm');
         }
         const out = [];
         let index = 0;
         const seenGroups = new Set();
-        for (const element of controls) {
+        for (const [element, validationSources] of controls) {
           const widget = widgetOf(element);
           if (!isVisible(widget)) continue;
           const groupName = element instanceof HTMLInputElement && /radio|checkbox/.test(element.type) && element.name
@@ -3808,8 +3993,15 @@ const { chromium } = require('playwright');
           index += 1;
           const marker = 'litos-required-confirm-' + index;
           element.setAttribute('data-litos-required-confirm', marker);
+          for (const source of validationSources) {
+            source.setAttribute('data-litos-required-confirm-source', marker);
+          }
           const rawType = element instanceof HTMLInputElement ? (element.type || 'text').toLowerCase() : '';
-          const type = element.getAttribute?.('role') === 'combobox'
+          const select2 = select2Binding(element);
+          if (select2) select2.opener.setAttribute('data-litos-select2-confirm', marker);
+          const type = select2?.source === element
+            ? 'select2'
+            : element.getAttribute?.('role') === 'combobox'
             ? 'combobox'
             : element instanceof HTMLSelectElement
             ? 'select'
@@ -3857,8 +4049,9 @@ const { chromium } = require('playwright');
             selector: durableSelector,
             label: labelOf(element, widget) || null,
             fieldType: type === 'combobox' ? 'react-select' : type,
-            answered: chosenValue(element, widget),
-            affected: affected(element, widget)
+            answered: chosenValue(element, widget)
+              || [...validationSources].some((source) => chosenValue(source, widget)),
+            affected: [...validationSources].some(hasValidationIssue) || errorText(widget)
           });
         }
         return out;
@@ -3873,6 +4066,296 @@ const { chromium } = require('playwright');
       const attempts = [];
       const unresolved = [];
       let retries = 0;
+      let reactConfirmationMarker = 0;
+      const replayExactSelect2Selection = async (target, marker) => {
+        const opener = scope.locator(
+          '[data-litos-select2-confirm="' + String(marker).replace(/["\\]/g, '\\$&') + '"]'
+        );
+        if (await opener.count() !== 1 || !await opener.first().isVisible().catch(() => false)) {
+          return false;
+        }
+        const before = await target.evaluate((source, expectedMarker) => {
+          const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+          const isSource = source instanceof HTMLSelectElement
+            || (source instanceof HTMLInputElement && source.type === 'hidden');
+          if (!isSource || !source.id || !source.classList.contains('select2-offscreen')) return null;
+          const shell = source.previousElementSibling;
+          if (!shell?.matches('.select2-container') || shell.id !== 's2id_' + source.id) return null;
+          const openers = [...shell.querySelectorAll(':scope > .select2-choice')].filter((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            const style = getComputedStyle(candidate);
+            return (rect.width > 0 || rect.height > 0)
+              && style.display !== 'none'
+              && style.visibility !== 'hidden';
+          });
+          if (openers.length !== 1
+            || openers[0].getAttribute('data-litos-select2-confirm') !== expectedMarker) return null;
+          const displays = [...shell.querySelectorAll(':scope > .select2-choice .select2-chosen')];
+          if (displays.length !== 1) return null;
+          const display = cleanText(displays[0].textContent);
+          const sourceValue = cleanText(source.value);
+          if (!display || !sourceValue) return null;
+          // Select2 v3 renders its popup outside the field. Start only from a closed target with no
+          // active global popup, otherwise the one #select2-drop on the page may belong to another
+          // question and an exact-text row can still change that question instead of this one.
+          if (shell.classList.contains('select2-dropdown-open')
+            || document.querySelectorAll('#select2-drop.select2-drop-active').length !== 0) return null;
+          const jquery = window.jQuery;
+          if (typeof jquery !== 'function') return null;
+          const instance = jquery(source).data?.('select2');
+          if (!instance || instance.container?.[0] !== shell || typeof instance.id !== 'function') return null;
+          if (source instanceof HTMLSelectElement) {
+            const selected = [...source.options].filter((option) => option.selected);
+            const semanticMatches = [...source.options].filter(
+              (option) => cleanText(option.label || option.textContent) === display
+            );
+            if (selected.length !== 1 || semanticMatches.length !== 1
+              || selected[0] !== semanticMatches[0]
+              || cleanText(selected[0].value) !== sourceValue) return null;
+          }
+          return {
+            sourceId: source.id,
+            sourceKind: source instanceof HTMLSelectElement ? 'select' : 'hidden',
+            sourceValue,
+            semantic: display
+          };
+        }, marker).catch(() => null);
+        if (!before) return false;
+
+        const opened = await opener.first().click({ timeout: 2000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!opened) return false;
+        const close = async () => {
+          await opener.first().press('Escape').catch(() => undefined);
+          await opener.first().evaluate((element) => element.blur()).catch(() => undefined);
+        };
+        const dropdown = page.locator('#select2-drop.select2-drop-active:visible');
+        if (await dropdown.count() !== 1) {
+          await close();
+          return false;
+        }
+        const exactRows = dropdown.getByRole('option', { name: before.semantic, exact: true });
+        if (await exactRows.count() !== 1 || !await exactRows.first().isVisible().catch(() => false)) {
+          await close();
+          return false;
+        }
+        const rowMatchesSource = await exactRows.first().evaluate((row, proof) => {
+          const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+          const source = document.getElementById(proof.sourceId);
+          const shell = source?.previousElementSibling;
+          const dropdown = row.closest('#select2-drop.select2-drop-active');
+          if (!source || !shell?.matches('.select2-container')
+            || shell.id !== 's2id_' + proof.sourceId
+            || !shell.classList.contains('select2-dropdown-open')
+            || !dropdown
+            || document.querySelectorAll('#select2-drop.select2-drop-active').length !== 1) return false;
+          const jquery = window.jQuery;
+          if (typeof jquery !== 'function') return false;
+          const wrapped = jquery(source);
+          const instance = wrapped.data?.('select2');
+          const result = row.closest('.select2-result');
+          const data = result && jquery(result).data?.('select2-data');
+          if (!instance || instance.container?.[0] !== shell
+            || instance.dropdown?.[0] !== dropdown
+            || (instance.results?.[0] && !instance.results[0].contains(row))
+            || typeof instance.id !== 'function' || data == null) return false;
+          return cleanText(row.textContent) === proof.semantic
+            && cleanText(instance.id(data)) === proof.sourceValue;
+        }, before).catch(() => false);
+        if (!rowMatchesSource) {
+          await close();
+          return false;
+        }
+        const safeOptionActivation = await exactRows.first().evaluate((row) => {
+          const activations = [
+            row.closest('button, input'),
+            ...row.querySelectorAll('button, input')
+          ].filter(Boolean);
+          return activations.every((activation) => {
+            if (!activation.form) return true;
+            if (activation instanceof HTMLButtonElement) return activation.type !== 'submit';
+            if (activation instanceof HTMLInputElement) return !/^(?:submit|image)$/i.test(activation.type);
+            return true;
+          });
+        }).catch(() => false);
+        if (!safeOptionActivation) {
+          await close();
+          return false;
+        }
+        const selected = await exactRows.first().click({ timeout: 2000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!selected) {
+          await close();
+          return false;
+        }
+        const recommitted = await target.evaluate((source, proof) => {
+          const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+          const shell = source.previousElementSibling;
+          const displayNode = shell?.querySelector(':scope > .select2-choice .select2-chosen');
+          const stateMatches = () => {
+            if (!shell?.matches('.select2-container') || shell.id !== 's2id_' + proof.sourceId
+              || cleanText(source.value) !== proof.sourceValue
+              || cleanText(displayNode?.textContent) !== proof.semantic) return false;
+            if (!(source instanceof HTMLSelectElement)) return true;
+            const selectedOptions = [...source.options].filter((option) => option.selected);
+            return selectedOptions.length === 1
+              && cleanText(selectedOptions[0].value) === proof.sourceValue
+              && cleanText(selectedOptions[0].label || selectedOptions[0].textContent) === proof.semantic;
+          };
+          if (!stateMatches()) return false;
+          let usedSelect2Api = false;
+          const jquery = window.jQuery;
+          if (typeof jquery === 'function') {
+            const wrapped = jquery(source);
+            const instance = wrapped.data?.('select2');
+            if (instance?.container?.[0] === shell && typeof wrapped.select2 === 'function') {
+              try {
+                wrapped.select2('val', proof.sourceValue, true);
+                usedSelect2Api = true;
+              } catch {}
+            }
+          }
+          if (!usedSelect2Api) {
+            source.dispatchEvent(new Event('input', { bubbles: true }));
+            source.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          source.blur();
+          return stateMatches();
+        }, before).catch(() => false);
+        await close();
+        if (!recommitted) return false;
+        await page.waitForTimeout(100).catch(() => undefined);
+        return target.evaluate((source, proof) => {
+          const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+          const shell = source.previousElementSibling;
+          const display = shell?.querySelector(':scope > .select2-choice .select2-chosen');
+          if (!shell?.matches('.select2-container') || shell.id !== 's2id_' + proof.sourceId
+            || cleanText(source.value) !== proof.sourceValue
+            || cleanText(display?.textContent) !== proof.semantic) return false;
+          if (!(source instanceof HTMLSelectElement)) return true;
+          const selected = [...source.options].filter((option) => option.selected);
+          return selected.length === 1
+            && cleanText(selected[0].value) === proof.sourceValue
+            && cleanText(selected[0].label || selected[0].textContent) === proof.semantic;
+        }, before).catch(() => false);
+      };
+      // A required React Select can still carry an invalid marker after its answer is visible. The
+      // visual node is not necessarily the semantic option, though: country controls commonly show
+      // "+971" after choosing "United Arab Emirates +971". Replaying that abbreviation searches
+      // for a different answer and, on a multi-select, replaying the first chip toggles it off.
+      //
+      // The control's currently-open listbox is the only safe place to recover the original semantic
+      // answer. It must name the popup itself, exactly one option must declare itself selected, and
+      // that option's text must resolve through Playwright's exact accessible-name query exactly once.
+      // Anything else is left invalid for the final readiness check to block. In particular, two
+      // selected rows means multi-select, where confirmation remains click/Escape/blur only and never
+      // clicks an already-selected row.
+      const replayExactReactSelection = async (target) => {
+        const before = await readChoiceState(target);
+        if (before.kind !== 'chosen') return { answerPreserved: false };
+        // choiceLanded may have to withdraw a failed recommit. Bind that rollback to this control's
+        // current answer, never to the last unrelated choice filled earlier in the action list.
+        lastChoiceArrival = before;
+        const beforeValues = (Array.isArray(before.values) ? before.values : [before.value])
+          .map((value) => clean(value));
+        const opened = await target.click({ timeout: 2000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!opened) return { answerPreserved: false, arrival: before };
+        const menuId = await target.evaluate((element) => (
+          element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || ''
+        )).catch(() => '');
+        const menu = menuId
+          ? page.locator('[id="' + String(menuId).trim().split(/\s+/)[0].replace(/["\\\\]/g, '\\\\$&') + '"]')
+          : null;
+        if (!menu || await menu.count() !== 1) return { answerPreserved: false, arrival: before };
+        const selectedRows = menu.getByRole('option', { selected: true });
+        const selectedCount = await selectedRows.count();
+        const multiValue = await menu.getAttribute('aria-multiselectable').catch(() => null) === 'true';
+        if (multiValue) {
+          // Clicking any selected row in a multi-select removes that value. Opening, closing and
+          // blurring is enough to replay the field lifecycle, but only if every displayed chip and
+          // every selected menu row survived the open unchanged.
+          const afterOpen = await readChoiceState(target);
+          const afterValues = (Array.isArray(afterOpen.values) ? afterOpen.values : [afterOpen.value])
+            .map((value) => clean(value));
+          const unchanged = afterOpen.kind === 'chosen'
+            && selectedCount === beforeValues.length
+            && afterValues.length === beforeValues.length
+            && afterValues.every((value, index) => value === beforeValues[index]);
+          return { answerPreserved: unchanged, multiValue: true, arrival: before };
+        }
+        if (selectedCount !== 1) return { answerPreserved: false, arrival: before };
+        // The rendered value can be an abbreviation such as "+971". The unique selected menu row is
+        // the semantic answer, so read it from that row instead of trusting display-only attributes.
+        const semanticAnswer = clean(await selectedRows.first().evaluate((element) => (
+          element.getAttribute('aria-label') || element.textContent || ''
+        )).catch(() => ''));
+        if (!semanticAnswer) return { answerPreserved: false, arrival: before };
+        const semanticHints = (Array.isArray(before.semanticValues)
+          ? before.semanticValues : beforeValues
+        ).map((value) => clean(value));
+        const authoritativeHints = semanticHints.filter(
+          (value, index) => value && value.toLowerCase() !== clean(beforeValues[index]).toLowerCase()
+        );
+        const semanticLower = semanticAnswer.toLowerCase();
+        const matchesArrival = authoritativeHints.length > 0
+          ? authoritativeHints.some((value) => value.toLowerCase() === semanticLower)
+          : beforeValues.some((value) => {
+              const display = clean(value).toLowerCase();
+              if (semanticLower === display) return true;
+              return display.length >= 2
+                && !/\p{L}/u.test(display)
+                && display.includes('+')
+                && semanticLower.includes(display);
+            });
+        if (!matchesArrival) return { answerPreserved: false, arrival: before };
+        const exactRows = menu.getByRole('option', { name: semanticAnswer, exact: true });
+        if (await exactRows.count() !== 1 || !await exactRows.first().isVisible().catch(() => false)) {
+          return { answerPreserved: false, arrival: before };
+        }
+        const marker = 'litos-react-confirm-' + (++reactConfirmationMarker);
+        await selectedRows.first().evaluate((element, value) => {
+          element.setAttribute('data-litos-react-confirm-selected', value);
+        }, marker).catch(() => undefined);
+        const selectedExactRow = await exactRows.first().getAttribute(
+          'data-litos-react-confirm-selected'
+        ).catch(() => null) === marker;
+        await selectedRows.first().evaluate((element) => {
+          element.removeAttribute('data-litos-react-confirm-selected');
+        }).catch(() => undefined);
+        if (!selectedExactRow) return { answerPreserved: false, arrival: before };
+        const submitCapable = await exactRows.first().evaluate((element) => {
+          const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+          return Boolean(element.closest(selector) || element.querySelector(selector));
+        }).catch(() => true);
+        if (submitCapable) return { answerPreserved: false, arrival: before };
+        lastClickedOptionText = semanticAnswer;
+        lastClickedOptionAnswer = semanticAnswer;
+        const clicked = await exactRows.first().click({ timeout: 2000 })
+          .then(() => true)
+          .catch(() => false);
+        return { answerPreserved: clicked, semanticAnswer, arrival: before };
+      };
+      const waitForReactArrival = async (target, arrival, semanticAnswer) => {
+        const arrivalValues = (Array.isArray(arrival?.values) ? arrival.values : [arrival?.value])
+          .map((value) => clean(value));
+        for (let elapsed = 0; elapsed <= 3000; elapsed += 50) {
+          const current = await readChoiceState(target);
+          const currentValues = (Array.isArray(current.values) ? current.values : [current.value])
+            .map((value) => clean(value));
+          const sameDisplay = current.kind === 'chosen'
+            && currentValues.length === arrivalValues.length
+            && currentValues.every((value, index) => value === arrivalValues[index]);
+          if (sameDisplay || (semanticAnswer && await verifyChoiceInContainer(
+            target, semanticAnswer, semanticAnswer, semanticAnswer
+          ))) return true;
+          if (elapsed < 3000) await page.waitForTimeout(50).catch(() => undefined);
+        }
+        return false;
+      };
       for (const candidate of candidates) {
         const runtimeSelector = '[data-litos-required-confirm="' + candidate.marker + '"]';
         const target = page.locator(runtimeSelector).first();
@@ -3908,8 +4391,34 @@ const { chromium } = require('playwright');
               (label || selected)?.click();
               selected?.blur();
             }).catch(() => undefined);
+          } else if (fieldType === 'select2') {
+            answerPreserved = await replayExactSelect2Selection(target, candidate.marker);
           } else if (fieldType === 'react-select') {
-            await target.click({ timeout: 2000 }).catch(() => undefined);
+            const ownedControl = target.locator(
+              'xpath=ancestor-or-self::*[contains(@class,"select__control")][1]'
+            );
+            const outerShell = target.locator(
+              'xpath=ancestor-or-self::*[contains(@class,"select__container")'
+              + ' or contains(@class,"select-shell")][1]'
+            );
+            const choiceScope = (await ownedControl.count()) === 1 ? ownedControl : outerShell;
+            if ((await choiceScope.count()) === 1) {
+              const replayed = await replayExactReactSelection(target);
+              answerPreserved = replayed.answerPreserved;
+              if (answerPreserved && !replayed.multiValue) {
+                answerPreserved = await choiceLanded(choiceScope, replayed.semanticAnswer).catch(() => false);
+                if (!answerPreserved) {
+                  await waitForReactArrival(
+                    target, replayed.arrival, replayed.semanticAnswer
+                  ).catch(() => false);
+                }
+              }
+            } else {
+              // Other unreadable comboboxes keep the existing confirmation behavior. Their exact
+              // choice was established by the fill path, so do not force them through React Select's
+              // value reader and turn a correct answer into a hard block.
+              await target.click({ timeout: 2000 }).catch(() => undefined);
+            }
             await target.press('Escape').catch(() => undefined);
             await target.evaluate((element) => element.blur()).catch(() => undefined);
           } else if (fieldType === 'custom') {
@@ -3951,13 +4460,16 @@ const { chromium } = require('playwright');
             }).catch(() => undefined);
           }
           await page.waitForTimeout(150).catch(() => undefined);
-          const stillAffected = !answerPreserved || await target.evaluate((element) => {
+          const stillAffected = !answerPreserved || await scope.evaluate((root, marker) => {
             const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
             const visible = (node) => {
               const rect = node.getBoundingClientRect();
               const style = getComputedStyle(node);
               return (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
             };
+            const targetSelector = '[data-litos-required-confirm="' + CSS.escape(marker) + '"]';
+            const element = root.matches?.(targetSelector) ? root : root.querySelector(targetSelector);
+            if (!element) return true;
             const widget = element.closest(
               '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
               + ' [data-field-path], [class*="_fieldEntry_"]'
@@ -3967,8 +4479,19 @@ const { chromium } = require('playwright');
               const text = clean(node.textContent);
               return text.length <= 160 && /\bis required\b|\brequires an answer\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i.test(text);
             });
-            return Boolean((element.validity && element.validity.valueMissing) || element.getAttribute('aria-invalid') === 'true' || hasError);
-          }).catch(() => true);
+            const sourceSelector = '[data-litos-required-confirm-source="'
+              + CSS.escape(marker) + '"]';
+            const markedSources = [
+              ...(root.matches?.(sourceSelector) ? [root] : []),
+              ...root.querySelectorAll(sourceSelector)
+            ];
+            const validationSources = markedSources.length > 0 ? markedSources : [element];
+            const invalid = validationSources.some((control) => Boolean(
+              (control.validity && control.validity.valueMissing)
+              || control.getAttribute?.('aria-invalid') === 'true'
+            ));
+            return invalid || hasError;
+          }, candidate.marker).catch(() => true);
           if (!stillAffected) { outcome = 'confirmed'; break; }
           if (attemptNumber + 1 < maxAttempts) retries = 1;
         }
