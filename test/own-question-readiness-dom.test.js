@@ -366,6 +366,13 @@ test('zero or multiple marked descendants retain the first-control fail-closed f
   }
 });
 
+test('a starred wrapping label cannot borrow an unrelated required field from its parent form', async () => {
+  const readiness = await readinessOf(`
+    <label>* Marker only<input value=""></label>
+    <input required value="filled">`);
+  assert.deepEqual(readiness.blocking, ['"* Marker only" is required and is still empty']);
+});
+
 test('unique option names still form one Workable checkbox question', async () => {
   const empty = await readinessOf(`
     <span id="experience_label">* Which development experience applies?</span>
