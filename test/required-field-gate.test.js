@@ -303,7 +303,7 @@ test('an Ashby yes/no is read from its pills, because its checkbox cannot tell N
   assert.match(gate, /_active_\|_selected_\|_checked_/);
   // Consulted for a checkbox or radio BEFORE the peer-group walk, which reads the same unchecked
   // inputs and would answer "empty" for every Ashby yes/no on the form.
-  const pill = gate.indexOf('const pill = chosenPillOf(widgetOf(element))');
+  const pill = gate.indexOf('const pill = chosenAshbyYesNoOf(element)');
   const peers = gate.indexOf('One answered radio answers its whole group');
   assert.ok(pill >= 0 && peers > pill, 'the pill state must be read before the radio-group walk');
   // And the block that owns an Ashby question has to be reachable at all, or its <label> is never
