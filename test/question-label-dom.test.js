@@ -91,6 +91,22 @@ const leverDropdown = (uuid, field, prompt) => `
     </div></div>
   </div></li>`;
 
+/* A radio GROUP, which is the shape the recovery has never handled. Read live off Belvedere
+ * Trading's Lever posting 2026-08-17: the question sits in the card heading and each option carries
+ * its own <label>, so the input's nearest label is "High School Diploma" - an OPTION, not a
+ * question. Every option in the group shares one name attribute. */
+const leverRadioGroup = (uuid, field, prompt, options) => `
+  <li class="application-question custom-question"><div>
+    <div class="application-label full-width">
+      <div class="text">${prompt}<span class="required">&#10007;</span></div>
+    </div>
+    <div class="application-field full-width required-field"><ul>
+      ${options.map((option) => `
+        <li><label><input type="radio" name="cards[${uuid}][${field}]" value="${option}" required />
+          <span>${option}</span></label></li>`).join('')}
+    </ul></div>
+  </div></li>`;
+
 const leverTextarea = (uuid, field, prompt) => `
   <li class="application-question custom-question"><div>
     <div class="application-label full-width textarea">
@@ -167,6 +183,57 @@ test('a Lever custom question is named by its card heading, not by its name attr
  * properties cannot be told apart by this assertion alone; textContent is kept because it is what
  * the backend's identical walk and the submit-readiness gate both read, and the three must not
  * disagree about what an employer's question says. */
+/* THE RADIO GROUP DEFECT, PINNED ON THE MARKUP THAT CAUSES IT.
+ *
+ * CHARACTERISATION, NOT AN ENDORSEMENT. This asserts what the shipped reader does TODAY so the
+ * defect is reproducible in this repo instead of only in production. It is expected to be inverted
+ * by whoever fixes it.
+ *
+ * Measured on the owner's account 2026-08-16/17: Belvedere Trading and Palantir, two unrelated Lever
+ * tenants, both come back with required fields called "High School Diploma", "Yes", "Other",
+ * "December 2026/January 2027" and "I Understand". Every one of those is the FIRST OPTION of a
+ * question. No stored answer can ever reach a control named after one of its own options, which is
+ * why no Lever application has ever completed - the CAPTCHA flags on those packets are separately
+ * disproved as stale.
+ *
+ * TWO THINGS STOP THE EXISTING RECOVERY, and a fix needs both:
+ *
+ *   1. The handle-only fall-through is gated on `!written`, and a radio's own <label> is real human
+ *      text ("High School Diploma"), so `written` is non-empty and the branch never runs. An
+ *      option's label is not the control's question.
+ *   2. Even reached, the card would be refused as ambiguous: the two-control bound counts each
+ *      radio separately, so a four-option group looks like four controls. Every option in a group
+ *      shares one name attribute, so they can be collapsed to one - but that has to be done
+ *      deliberately, because the bound is what stops "High School Name & Graduation Year" being
+ *      borrowed by both of its controls.
+ *
+ * DO NOT fix this by adding .application-label to the generic walk. The runner already records that
+ * it was measured and rejected: it recovers four more fields and also resolves "High School Name*"
+ * to "University of Southern California, Viterbi School of Engineering". This file's whole
+ * asymmetry is that a wrong question is worse than a missing one. */
+test('a Lever radio group is named by its own first option, which is the defect', async () => {
+  const labels = await labelsFor(
+    leverCard('What degree are you currently pursuing?',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000001', 'field0', 'What degree are you currently pursuing?',
+        ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD'])),
+    'input[type="radio"]',
+  );
+  assert.equal(labels.length, 4);
+  /* Each option answers with ITS OWN TEXT, concatenated with the shared name handle - the `own`
+   * string is [labelText, aria-label, placeholder, name, id] joined, and for a radio the labelText
+   * is the option. So the stored question for the first option starts with "high school diploma". */
+  assert.match(labels[0], /^high school diploma\b/, labels[0]);
+  assert.match(labels[3], /^masters\/phd\b/, labels[3]);
+  // Every option in the group shares one name, which is what makes collapsing them to one control
+  // possible - and is also why a selector-keyed diff over them reports false positives.
+  for (const label of labels) assert.match(label, /cards\[9f2b1c7a-0000-4000-8000-000000000001\]\[field0\]/);
+  // And not one of them carries the question a resolver would need in order to answer it.
+  for (const label of labels) {
+    assert.doesNotMatch(label, /degree are you currently pursuing/,
+      'when this starts failing, the recovery has been fixed and the assertions above invert');
+  }
+});
+
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {
   const [label] = await labelsFor(
     leverCard('Year of Graduation', leverDropdown('026d7ce7-7ca4-44ed-9db6-1c7857707f0e', 'field0', 'Intended graduation year')),
