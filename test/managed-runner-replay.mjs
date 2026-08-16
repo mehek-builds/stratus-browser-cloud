@@ -361,10 +361,19 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     var countNode = document.getElementById('delayed-receipt-submit-count');
     var count = Number(countNode.textContent.split(':')[1] || '0') + 1;
     countNode.textContent = 'submission-count:' + count;
+    /* PAST THE PHASE-ZERO WINDOW, WHICHEVER WINDOW THAT IS.
+     *
+     * 3600ms was chosen to sit just past a 3s bounded wait. When that wait became 12s this fixture
+     * silently stopped testing what it is named for: phase zero read the receipt directly, returned
+     * 'confirmed', and the delayed-receipt continuation path below - the one that proves the page was
+     * retained and finalSubmitPressed survived without a second click - was never exercised.
+     *
+     * 13.6s keeps it a DELAYED receipt: past the 12s wait, and 1.4s inside the 15s one-shot
+     * continuation that phase zero then offers, so phase one still has room to observe it. */
     setTimeout(function () {
       document.getElementById('delayed-receipt-form').remove();
       document.getElementById('delayed-receipt-result').innerHTML = '<div class="ashby-application-form-success-container"><div role="status" aria-live="polite">Success. Thank you for submitting your application to kos.ai.</div></div>';
-    }, 3600);
+    }, 13600);
   });
   document.getElementById('apply').addEventListener('click', function () {
     setTimeout(function () {
@@ -1393,7 +1402,9 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
     assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
   };
-  await waitForFile(result0);
+  // Longer than the phase-zero settle window itself: phase zero deliberately spends that window
+  // watching the page before it writes result0, so the file cannot appear sooner than the window.
+  await waitForFile(result0, 25_000);
   const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
   assert.equal(first.submitOutcome.pressed, true);
   assert.equal(first.submitOutcome.state, 'unknown');
@@ -1404,7 +1415,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'receipt observation must use its own short lifetime, got ' + remainingMs + 'ms');
   await new Promise((resolve) => setTimeout(resolve, 1000));
   fs.writeFileSync(continuationInput, JSON.stringify({ actions: [], screenshot: false, fullPage: false }));
-  await waitForFile(result1);
+  await waitForFile(result1, 25_000);
   const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
   assert.equal(second.submitOutcome.pressed, true, 'empty phase one retains the phase-zero click fact');
   assert.equal(second.submitOutcome.state, 'confirmed');
