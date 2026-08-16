@@ -2695,12 +2695,43 @@ const { chromium } = require('playwright');
      * settling, and a wait that returned the moment it saw one would return before the page had
      * changed at all. Everywhere else a challenge appearing is a real terminal state. */
     const waitForPostSubmitApplicationState = async ({ securityCodeSettles = true } = {}) => {
-      const greenhouseHost = /^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/i.test(await page.evaluate(() => location.hostname).catch(() => ''));
-      // Greenhouse can paint its exact code control after the ordinary receipt-settle window. Hold
-      // phase zero a little longer only on that measured ATS so the original challenge capability
-      // survives. A later empty receipt observation has already consumed its one token and cannot
-      // safely answer a newly rendered code wall without another application submit.
-      const deadline = Date.now() + (securityCodeSettles && greenhouseHost ? 8_000 : 3_000);
+      /* EVERY ATS GETS THE WINDOW THAT WAS ONLY EVER MEASURED ON ONE OF THEM.
+       *
+       * 3 seconds was the budget for every board except Greenhouse, and it is not enough time for a
+       * single-page application to post a resume upload and re-render a success panel. Measured on
+       * the owner's account 2026-08-16: the ONLY family that ever produced a readable receipt is
+       * Greenhouse, the one family holding the longer window. Skydio and kos.ai on Ashby and Pony.ai
+       * on Workable each pressed Send and each came back no_confirmation_state; Pony.ai did it
+       * twice, on two separate runs, from a form Litos had filled completely. Scale AI on Greenhouse,
+       * run minutes later through the same code, confirmed from the page on the first attempt.
+       *
+       * WHAT AN EXPIRED WINDOW COSTS, which is why the trade is not close. The application may well
+       * be at the employer, but Litos cannot say so, so it parks at unverified: the applicant is sent
+       * to go and look, the duplicate guard then blocks every future application to that posting, and
+       * the only way out is her answering a question she often cannot answer either, because a board
+       * that has taken an application does not show it back to her.
+       *
+       * WHAT A LONGER WINDOW COSTS: nothing on a page that decides, because the loop returns on the
+       * first confirmed, rejected or code-control read. It is paid only on a page that stays
+       * genuinely ambiguous, and there it is browser time against an application the applicant would
+       * otherwise have to chase by hand.
+       *
+       * 12s rather than a bigger number because the run budget is 90s (MANAGED_RUN_TIMEOUT_MS) and a
+       * submit happens at the end of a run that has already filled the form. Greenhouse has been
+       * spending 8s of that budget in production without trouble, so 12s is 4s past a figure already
+       * known to fit, not a guess at the ceiling. The exact settle time for Ashby and Workable has
+       * NOT been measured - there is no way to measure it without submitting to a real employer - so
+       * this raises a floor that was demonstrably too low rather than claiming to have found the
+       * right one. If an Ashby receipt still fails to land, this constant is the first thing to
+       * revisit, and it should be raised with the run budget rather than inside it.
+       *
+       * The host check that used to select between 8s and 3s is gone rather than left as a ternary
+       * with two equal arms. Greenhouse's own reason for a longer window - it can paint its exact
+       * code control after the ordinary receipt-settle window - is satisfied by a uniform figure
+       * that is longer than the 8s it had, and the branch was the only reader of the hostname.
+       */
+      const POST_SUBMIT_SETTLE_MS = 12_000;
+      const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
         const outcome = await readSubmitOutcome();
