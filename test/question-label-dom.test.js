@@ -207,10 +207,30 @@ test('a Lever custom question is named by its card heading, not by its name attr
  *      deliberately, because the bound is what stops "High School Name & Graduation Year" being
  *      borrowed by both of its controls.
  *
+ * THE MECHANISM, traced 2026-08-17. questionLabel ALREADY has a radio/checkbox branch written for
+ * exactly this - "a radio or checkbox is labelled with its OPTION and the applicant is answering the
+ * QUESTION above it". It calls blockOf(el) to find the owning block, then looks inside it for a
+ * label that is not an option's.
+ *
+ * blockOf matches: fieldset, [role=group], [role=radiogroup], [data-field-path], [class*=_fieldEntry_],
+ * [class*=select__container], .field, .field-wrapper.
+ *
+ * Lever's container is div.application-field, and **`.field` does not match `application-field`** -
+ * a CSS class selector matches whole tokens. So blockOf finds nothing, falls back to
+ * el.parentElement, and on Lever that IS the option's own <label>. The branch then searches inside
+ * that label for a non-option label, finds none, and yields nothing. The existing fix is right and
+ * simply never reaches this markup.
+ *
+ * A second obstacle sits behind it: Lever puts its question in div.application-label > div.text,
+ * which is not a <label> or <legend> element, so even with the right block the branch's
+ * querySelectorAll('label, legend') would still come back empty.
+ *
  * DO NOT fix this by adding .application-label to the generic walk. The runner already records that
  * it was measured and rejected: it recovers four more fields and also resolves "High School Name*"
- * to "University of Southern California, Viterbi School of Engineering". This file's whole
- * asymmetry is that a wrong question is worse than a missing one. */
+ * to "University of Southern California, Viterbi School of Engineering". Note that the radio branch
+ * is a NARROWER place than that generic walk - its owner is one application-question, not a card -
+ * so the rejection does not automatically apply there, but it has to be re-measured rather than
+ * assumed. This file's whole asymmetry is that a wrong question is worse than a missing one. */
 test('a Lever radio group is named by its own first option, which is the defect', async () => {
   const labels = await labelsFor(
     leverCard('What degree are you currently pursuing?',
