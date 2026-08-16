@@ -185,9 +185,8 @@ test('a Lever custom question is named by its card heading, not by its name attr
  * disagree about what an employer's question says. */
 /* THE RADIO GROUP DEFECT, PINNED ON THE MARKUP THAT CAUSES IT.
  *
- * CHARACTERISATION, NOT AN ENDORSEMENT. This asserts what the shipped reader does TODAY so the
- * defect is reproducible in this repo instead of only in production. It is expected to be inverted
- * by whoever fixes it.
+ * FIXED 2026-08-17. This began as a characterisation test asserting the defect; the assertions
+ * below are its inversion, which is how the fix was verified.
  *
  * Measured on the owner's account 2026-08-16/17: Belvedere Trading and Palantir, two unrelated Lever
  * tenants, both come back with required fields called "High School Diploma", "Yes", "Other",
@@ -231,7 +230,7 @@ test('a Lever custom question is named by its card heading, not by its name attr
  * is a NARROWER place than that generic walk - its owner is one application-question, not a card -
  * so the rejection does not automatically apply there, but it has to be re-measured rather than
  * assumed. This file's whole asymmetry is that a wrong question is worse than a missing one. */
-test('a Lever radio group is named by its own first option, which is the defect', async () => {
+test('a Lever radio group is named by its question, not by its own first option', async () => {
   const labels = await labelsFor(
     leverCard('What degree are you currently pursuing?',
       leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000001', 'field0', 'What degree are you currently pursuing?',
@@ -239,19 +238,15 @@ test('a Lever radio group is named by its own first option, which is the defect'
     'input[type="radio"]',
   );
   assert.equal(labels.length, 4);
-  /* Each option answers with ITS OWN TEXT, concatenated with the shared name handle - the `own`
-   * string is [labelText, aria-label, placeholder, name, id] joined, and for a radio the labelText
-   * is the option. So the stored question for the first option starts with "high school diploma". */
-  assert.match(labels[0], /^high school diploma\b/, labels[0]);
-  assert.match(labels[3], /^masters\/phd\b/, labels[3]);
-  // Every option in the group shares one name, which is what makes collapsing them to one control
-  // possible - and is also why a selector-keyed diff over them reports false positives.
-  for (const label of labels) assert.match(label, /cards\[9f2b1c7a-0000-4000-8000-000000000001\]\[field0\]/);
-  // And not one of them carries the question a resolver would need in order to answer it.
+  // Every option in the group now answers with the QUESTION, which is what a resolver needs.
   for (const label of labels) {
-    assert.doesNotMatch(label, /degree are you currently pursuing/,
-      'when this starts failing, the recovery has been fixed and the assertions above invert');
+    assert.match(label, /what degree are you currently pursuing/, label);
   }
+  // And never with its own option text, which is what it used to return.
+  assert.doesNotMatch(labels[0], /high school diploma/, labels[0]);
+  assert.doesNotMatch(labels[3], /masters\/phd/, labels[3]);
+  // Nor with the shared name handle, which downstream drops as handle-only.
+  for (const label of labels) assert.doesNotMatch(label, /cards\[/, label);
 });
 
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {

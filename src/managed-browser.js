@@ -4990,7 +4990,12 @@ const { chromium } = require('playwright');
               // the input, or by naming a choice input in its "for". What is left is the block's own
               // heading. Without this test the search finds a SIBLING option's label and calls the
               // question "Female" - a group of options is full of labels that are not the question.
-              const ownerLabel = owner && [...owner.querySelectorAll('label, legend')].find((candidate) => {
+              /* .application-label is included ONLY here, inside the choice branch, and that
+               * narrowness is the point. The runner records that adding it to the GENERIC walk was
+               * measured and rejected because it resolved "High School Name*" to her university.
+               * This branch's owner is one application-question, holding one question and its own
+               * options, so that ambiguity cannot arise here. */
+              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label')].find((candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
@@ -5069,9 +5074,19 @@ const { chromium } = require('playwright');
           // two Ashby entries are what make a pill group resolve to its question rather than to the
           // row of buttons.
           function blockOf(el) {
+            /* li.application-question is Lever's, and it is here because .field does NOT match
+             * application-field - a class selector matches whole tokens. Without it blockOf found
+             * nothing on Lever, fell back to el.parentElement, and on a radio that IS the option's
+             * own label element, so the choice branch searched inside one option and yielded nothing.
+             * Measured on Belvedere Trading and Palantir 2026-08-17: every Lever packet came back
+             * with required fields named "High School Diploma", "Yes", "Other" - each the first
+             * OPTION of a question. One application-question holds one question and its own options,
+             * so this is narrower than the card and cannot reintroduce the two-control ambiguity the
+             * card bound exists to refuse. */
             return el.closest(
               'fieldset, [role="group"], [role="radiogroup"], [data-field-path],'
-              + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper'
+              + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper,'
+              + ' li.application-question'
             ) || el.parentElement || el;
           }
           function choiceQuestionKey(el, block) {
