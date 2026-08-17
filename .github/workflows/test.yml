@@ -18,7 +18,12 @@ jobs:
   verify:
     name: npm run verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30, not 20. The post-submit settle window went from 3s to 30s, and every replay case that ends
+    # on a genuinely ambiguous submit now spends that window before giving up - which is the whole
+    # point of the change, because employers do not reliably email a confirmation and the page is the
+    # only witness. The suite therefore waits longer by design. Measured: the combined run hit 20m15s
+    # and was cancelled with no assertion failure.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
