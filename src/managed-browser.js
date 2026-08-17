@@ -5541,7 +5541,35 @@ const { chromium } = require('playwright');
         // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
         // phone against the international form would report a correct fill as a failed one.
         if (action.label && await verifyFilled(target, fillValue || '')) filledFields.push(action.label);
-        else if (action.label) skipped.push(action.label + ': value did not persist after fill');
+        /* WHAT WAS WRITTEN AND WHAT THE FIELD HOLDS, because the bare sentence cannot be acted on.
+         *
+         * "value did not persist after fill" says a write was lost and nothing else, and on
+         * 2026-08-18 that one line was the last blocker on six of this user's Greenhouse packets -
+         * DV Trading, Five Rings, Akuna, Tower Research, Jump Trading and IMC - all naming the same
+         * control, "phone", and none of them saying why.
+         *
+         * Two plausible causes were then ruled out by hand against the live DV Trading form, which
+         * is the work this line exists to make unnecessary. Its #phone is intl-tel-input
+         * (iti__tel-input inside iti--allow-dropdown), and it ACCEPTS the international form:
+         * "+971500000000" reads back "+971 50 000 0000". So the value is not rejected, and the
+         * reformatting cannot break verifyFilled either, because normalized() keeps only [a-z0-9]
+         * and both sides reduce to the same digits. Something in the live sequence loses it instead,
+         * and neither the value nor the check can say which.
+         *
+         * Both sides truncated, and only ever on the failure path: this is the applicant's own data
+         * going back to the applicant's own dashboard, and a run that SUCCEEDS still records nothing
+         * but the label. */
+        else if (action.label) {
+          const held = await target.evaluate((element) => (
+            'value' in element ? String(element.value || '') : (element.textContent || '')
+          )).catch(() => '');
+          const wrote = String(fillValue || '');
+          // Concatenation, not a template literal: this source is itself carried inside one, so a
+          // backtick or a dollar-brace here terminates the runner rather than formatting a string.
+          skipped.push(action.label
+            + ': value did not persist after fill'
+            + ' (wrote "' + wrote.slice(0, 40) + '", field holds "' + held.slice(0, 40) + '")');
+        }
         // Last, and only after the value is committed and verified: a date field commits its value
         // and leaves its calendar standing over the next question.
         await dismissOverlayAfterFill(target, action.label);
