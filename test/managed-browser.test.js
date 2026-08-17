@@ -427,8 +427,8 @@ test('an option is only ever clicked inside an option list, never loose in the p
   // And the correctly scoped attempt gets a bounded wait, because it used to be made as an instant
   // count() 150ms after the click - before the menu rendered - which is what made the page-wide
   // sweep reachable in the first place. Measured: menus arrived 555-563ms after the control was hit.
-  assert.match(SANDBOX_RUNNER, /const waitForMenu = async \(timeout\) =>/);
-  assert.match(SANDBOX_RUNNER, /await waitForMenu\(1200\)/);
+  assert.match(SANDBOX_RUNNER, /const waitForMenu = async \(control, timeout\) =>/);
+  assert.match(SANDBOX_RUNNER, /await waitForMenu\(control, 1200\)/);
 });
 
 test('a choice control that already holds an answer is never emptied to look for a better one', () => {

@@ -1787,16 +1787,55 @@ const { chromium } = require('playwright');
       const OPTION_NODES = '[role="option"], [class*="select__option"], [role="listbox"] li,'
         + ' [role="listbox"] [class*="option"], .select2-result, .select2-results li, [class*="select2-result"]';
       const optionsRoot = () => (scopedMenu ?? page).locator(OPTION_NODES);
+      /* WHERE THE MENU ACTUALLY RENDERED, because a recognised shell is not proof it renders there.
+       *
+       * R-076, measured on the live DV Trading Greenhouse board (job-boards.greenhouse.io, the
+       * Remix React UI, 2026-08-18): the graduation-range React Select carries a
+       * "select-shell remix-css-...-container" ancestor, so scopedMenu is set, and it PORTALS its
+       * menu to <body> in a .select__menu-portal node. Every query in this function was bounded to
+       * the shell, which never holds a row, so the runner opened the control, typed the correct
+       * reviewed answer into the search box, found nothing it was allowed to click, pressed Escape,
+       * and the widget dropped the uncommitted text on blur. The control ended empty and the report
+       * said the value did not persist. The comment that used to stand on menuRoot below called this
+       * case known and unchanged; this flag is what changes it.
+       *
+       * True exactly when the shell holds no option nodes while the menu the OPENED control names
+       * through aria-controls holds some. That menu is the author's own statement of which popup
+       * belongs to this combobox (see readDeclaredMenu above), so scoping to it is not a widening:
+       * it is the same one-question boundary the shell was standing in for, found where the widget
+       * actually put it. Another question's rows are exactly as unreachable as before, and every
+       * ambiguity guard still applies on the new root.
+       */
+      let menuIsPortalled = false;
+      const readMenuPortal = async () => {
+        menuIsPortalled = Boolean(scopedMenu && declaredMenu)
+          && (await scopedMenu.locator(OPTION_NODES).count()) === 0
+          && (await declaredMenu.locator(OPTION_NODES).count()) > 0;
+      };
       // Bounded, and only spent where it can buy something. With a recognisable widget the wait is
       // for THAT widget's own menu and ends the moment it renders. With no recognisable widget there
       // is nothing specific to wait for, so this keeps the old flat pause rather than charging every
       // control on the form the full timeout for a menu that was never coming.
-      const waitForMenu = async (timeout) => {
+      //
+      // Polled over BOTH places the widget's menu can be, re-reading the declared menu each pass
+      // because aria-controls is only required to exist while the popup is visible: a shell whose
+      // widget portals its menu never renders a row inside itself, and waiting on the shell alone
+      // charged the portalling control the full timeout for a menu that was already open on the
+      // page. See menuIsPortalled above for the measured case.
+      const waitForMenu = async (control, timeout) => {
         if (!scopedMenu) {
           await page.waitForTimeout(150).catch(() => undefined);
           return;
         }
-        await optionsRoot().first().waitFor({ state: 'visible', timeout }).catch(() => undefined);
+        const deadline = Date.now() + timeout;
+        for (;;) {
+          if (await optionsRoot().first().isVisible().catch(() => false)) return;
+          await readDeclaredMenu(control);
+          if (declaredMenu
+            && await declaredMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+          if (Date.now() >= deadline) return;
+          await page.waitForTimeout(50).catch(() => undefined);
+        }
       };
       /* THE NAME OF AN OPTION IS COMPUTED BY PLAYWRIGHT, NEVER BY THIS FILE.
        *
@@ -1850,12 +1889,14 @@ const { chromium } = require('playwright');
        * loses the wider arm and is handed back. Q1's rows are no longer reachable from Q2 by any
        * query, which is the property that was missing.
        *
-       * KNOWN AND UNCHANGED: a React Select that portals its menu has a '.select__container'
-       * ancestor, so scopedMenu is set and wins here, and scopedMenu does not contain the portalled
-       * menu. That control was handed back before this change and still is. It is not made worse by
-       * the line below and is not fixed by it either.
+       * A React Select that portals its menu has a shell ancestor, so scopedMenu is set, and the
+       * shell does not contain the portalled menu. That control used to be handed back from here,
+       * which on the live Greenhouse Remix boards is R-076: the shell wins, holds no rows, and the
+       * correct answer sits unclicked in the open portal. menuIsPortalled (above) detects exactly
+       * that shape after the control is opened, and hands BOTH roots the menu the control itself
+       * declared, which is the same author-stated one-question boundary this comment defends.
        */
-      const menuRoot = () => scopedMenu ?? declaredMenu;
+      const menuRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? declaredMenu);
       /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
        *
        * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
@@ -1883,7 +1924,7 @@ const { chromium } = require('playwright');
        * safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls that
        * work today; the scoping is what makes the refusal rare and the answer right.
        */
-      const widenRoot = () => scopedMenu ?? container;
+      const widenRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? container);
       /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
        *
        * The ambiguity guards below refuse a tier that offers two, so counting NODES rather than rows
@@ -2137,6 +2178,11 @@ const { chromium } = require('playwright');
           // showing the pre-filter list, so waiting for "a visible option" would return instantly and
           // match against rows the search is about to replace.
           await page.waitForTimeout(1200).catch(() => undefined);
+          // Typing is what makes some widgets render a menu at all, so where that menu landed is
+          // re-read after the settle: a server-searched React Select that portals shows its first
+          // rows only now, and the portal verdict taken before typing would still say false.
+          await readDeclaredMenu(control);
+          await readMenuPortal();
           const refusalsBefore = choiceRefusals;
           if (await clickMatchingOption(target)) return true;
           // And a refusal ends the search too, rather than being narrowed away by the next query.
@@ -2164,10 +2210,11 @@ const { chromium } = require('playwright');
         // Sized on measurement, not a guess: on a live Greenhouse education form the asynchronously
         // loaded School and Discipline menus arrived 563ms and 555ms after the control was touched.
         // The old flat 150ms expired before either, which is how the page-wide sweep was reached.
-        await waitForMenu(1200);
+        await waitForMenu(control, 1200);
         // Read AFTER the wait, because aria-controls is only required to be there while the popup is
         // visible and react-select adds it from the same state that renders the menu.
         await readDeclaredMenu(control);
+        await readMenuPortal();
         const refusalsBefore = choiceRefusals;
         if (await clickMatchingOption(wanted)) return true;
         /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
