@@ -18,15 +18,24 @@ jobs:
   verify:
     name: npm run verify
     runs-on: ubuntu-latest
-    # 30, and the reason is the suite's own size rather than any one change in it. Measured on
-    # 2026-08-17: the full verify takes about 25 minutes - a unit suite of 257 plus five replay
-    # harnesses that each drive a real browser against a fixture server, plus an e2e pass. Runs were
-    # cancelled at 20m07s, 20m15s and 30m15s on three separate heads.
+    # 35, and the reason is the suite's own size rather than any one change in it: a unit suite of
+    # 257 plus five replay harnesses that each drive a real browser against a fixture server, plus
+    # an e2e pass.
     #
-    # Two earlier raises blamed the post-submit settle window and that was wrong: with the window
-    # short in tests (LITOS_POST_SUBMIT_SETTLE_MS in the replay scripts) the suite still needs more
-    # than 20 minutes, so the budget was simply too small for what verify does.
-    timeout-minutes: 30
+    # The chronology matters, because one of the cancellations below is at 30 minutes and would
+    # otherwise read as evidence that 35 is also too small:
+    #
+    #   1. cancelled at 30m15s, WITH the cap already at 30 and BEFORE any reduction.
+    #   2. the replay scripts then got LITOS_POST_SUBMIT_SETTLE_MS, which took the managed-runner
+    #      replay from about 9 minutes to 1m53s.
+    #   3. the cap was reverted to 20 on the theory that the reduction had paid for it. It had not:
+    #      runs were then cancelled at 20m07s and 20m15s on two separate heads.
+    #
+    # So the post-reduction suite measures about 25 minutes, which is more than 20 and less than the
+    # 30 that failed pre-reduction. 35 is that 25 plus enough headroom that a slow runner does not
+    # cancel a passing run, and still short enough to catch a genuine hang. A cap is a ceiling, not
+    # a reservation: raising it costs nothing on a run that passes.
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
