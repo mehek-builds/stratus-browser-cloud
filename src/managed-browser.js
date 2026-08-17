@@ -2948,8 +2948,30 @@ const { chromium } = require('playwright');
         const byFor = element && element.id && root.querySelector('label[for="' + CSS.escape(element.id) + '"]');
         const legend = widget && widget.querySelector('legend');
         const own = widget && widget.querySelector('label, .label, .upload-label, legend');
+        /* A GROUPED CHOICE IS LABELLED WITH ITS OPTION, and wrappingLabelTextOf below returns it.
+         *
+         * questionLabel was taught this and the required-field scan was not, so after the Lever
+         * label fix shipped the two disagreed about the same control: choice resolution correctly
+         * said "what degree are you currently pursuing" while this scan still reported the blocker
+         * as "High School Diploma". Measured on a fresh Belvedere packet, 2026-08-17.
+         *
+         * Narrow on purpose. It requires ALL of: a radio or checkbox, more than one input sharing
+         * its name (so a lone "I agree" checkbox, whose own label IS its question, is untouched),
+         * and a question container that publishes its own text. Anything else falls through to the
+         * candidate order below exactly as before. */
+        const groupedChoiceQuestion = (() => {
+          if (!element || (element.type !== 'radio' && element.type !== 'checkbox')) return '';
+          const name = element.getAttribute('name');
+          if (!name) return '';
+          if (root.querySelectorAll('input[name="' + CSS.escape(name) + '"]').length < 2) return '';
+          const container = element.closest('li.application-question, fieldset, [role="radiogroup"], [role="group"]');
+          const heading = container && container.querySelector('.application-label, legend');
+          if (!heading || heading.querySelector('input, textarea, select')) return '';
+          return renderedText(heading);
+        })();
         for (const candidate of [
           renderedText(referenced),
+          groupedChoiceQuestion,
           renderedText(byFor),
           wrappingLabelTextOf(element),
           renderedText(proxyReferenced),
@@ -3901,8 +3923,32 @@ const { chromium } = require('playwright');
           const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
           const wrapping = element.closest && element.closest('label');
           const own = widget.querySelector && widget.querySelector('legend, label, .question, h3, h4');
+          /* A GROUPED CHOICE IS LABELLED WITH ITS OPTION, and the wrapping label below returns it.
+           *
+           * THIS IS THE SECOND labelOf. The runner declares one at readSubmitReadiness and this one
+           * in the atomic required-field scan, with the arguments in the opposite order, and THIS is
+           * the one whose text becomes the blocker the applicant reads. Teaching only the other one
+           * left the two disagreeing about the same control: choice resolution correctly said "what
+           * degree are you currently pursuing" while the blocker still read "High School Diploma".
+           * Measured on a fresh Belvedere packet 2026-08-17, after the questionLabel fix shipped.
+           *
+           * Narrow on purpose, and identical to the rule in the other copy: a radio or checkbox, more
+           * than one input sharing its name so a lone "I agree" keeps its own label, and a question
+           * container that publishes its own text. Everything else falls through unchanged. */
+          const groupedChoiceQuestion = (() => {
+            if (element.type !== 'radio' && element.type !== 'checkbox') return '';
+            const name = element.getAttribute && element.getAttribute('name');
+            if (!name) return '';
+            if (document.querySelectorAll('input[name="' + CSS.escape(name) + '"]').length < 2) return '';
+            const container = element.closest
+              && element.closest('li.application-question, fieldset, [role="radiogroup"], [role="group"]');
+            const heading = container && container.querySelector('.application-label, legend');
+            if (!heading || heading.querySelector('input, textarea, select')) return '';
+            return renderedText(heading);
+          })();
           return clean(
             renderedText(referenced)
+            || groupedChoiceQuestion
             || renderedText(byFor)
             || renderedText(wrapping)
             || renderedText(proxyReferenced)
