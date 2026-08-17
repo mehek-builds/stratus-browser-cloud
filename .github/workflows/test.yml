@@ -18,7 +18,15 @@ jobs:
   verify:
     name: npm run verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30, and the reason is the suite's own size rather than any one change in it. Measured on
+    # 2026-08-17: the full verify takes about 25 minutes - a unit suite of 257 plus five replay
+    # harnesses that each drive a real browser against a fixture server, plus an e2e pass. Runs were
+    # cancelled at 20m07s, 20m15s and 30m15s on three separate heads.
+    #
+    # Two earlier raises blamed the post-submit settle window and that was wrong: with the window
+    # short in tests (LITOS_POST_SUBMIT_SETTLE_MS in the replay scripts) the suite still needs more
+    # than 20 minutes, so the budget was simply too small for what verify does.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
