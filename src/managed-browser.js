@@ -2747,9 +2747,23 @@ const { chromium } = require('playwright');
        * between a fixture timeout, this deadline and the 15s receipt-observation TTL. Clamped to 30s,
        * because this decides how long a run holds a browser open. */
       const POST_SUBMIT_SETTLE_MS = (() => {
+        const clamp = (value) => Math.min(value, 30_000);
+        // Per-run first: the delayed-receipt replay needs its own exact window and must outrank the
+        // suite-wide default below.
         const requested = Number(input && input.postSubmitSettleMs);
-        if (!Number.isFinite(requested) || requested <= 0) return 30_000;
-        return Math.min(requested, 30_000);
+        if (Number.isFinite(requested) && requested > 0) return clamp(requested);
+        /* THEN THE SUITE-WIDE DEFAULT, and this exists for a measured reason.
+         *
+         * At 30s the verify suite exceeded a 20 MINUTE ci budget, then exceeded 30 minutes after the
+         * budget was raised - 30m15s, cancelled, no assertion failure. Every replay case that ends on
+         * a genuinely ambiguous submit spends the whole window before giving up, and there are many.
+         * Raising the budget again just moves the wall.
+         *
+         * So the suite sets this and production does not. A sandbox run has no such variable and gets
+         * the full 30s, which is the whole point of the change. */
+        const fromEnv = Number(typeof process !== 'undefined' && process.env && process.env.LITOS_POST_SUBMIT_SETTLE_MS);
+        if (Number.isFinite(fromEnv) && fromEnv > 0) return clamp(fromEnv);
+        return 30_000;
       })();
       const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
       while (Date.now() < deadline) {
