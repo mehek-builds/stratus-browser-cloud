@@ -91,6 +91,22 @@ const leverDropdown = (uuid, field, prompt) => `
     </div></div>
   </div></li>`;
 
+/* A radio GROUP, which is the shape the recovery has never handled. Read live off Belvedere
+ * Trading's Lever posting 2026-08-17: the question sits in the card heading and each option carries
+ * its own <label>, so the input's nearest label is "High School Diploma" - an OPTION, not a
+ * question. Every option in the group shares one name attribute. */
+const leverRadioGroup = (uuid, field, prompt, options) => `
+  <li class="application-question custom-question"><div>
+    <div class="application-label full-width">
+      <div class="text">${prompt}<span class="required">&#10007;</span></div>
+    </div>
+    <div class="application-field full-width required-field"><ul>
+      ${options.map((option) => `
+        <li><label><input type="radio" name="cards[${uuid}][${field}]" value="${option}" required />
+          <span>${option}</span></label></li>`).join('')}
+    </ul></div>
+  </div></li>`;
+
 const leverTextarea = (uuid, field, prompt) => `
   <li class="application-question custom-question"><div>
     <div class="application-label full-width textarea">
@@ -167,6 +183,72 @@ test('a Lever custom question is named by its card heading, not by its name attr
  * properties cannot be told apart by this assertion alone; textContent is kept because it is what
  * the backend's identical walk and the submit-readiness gate both read, and the three must not
  * disagree about what an employer's question says. */
+/* THE RADIO GROUP DEFECT, PINNED ON THE MARKUP THAT CAUSES IT.
+ *
+ * FIXED 2026-08-17. This began as a characterisation test asserting the defect; the assertions
+ * below are its inversion, which is how the fix was verified.
+ *
+ * Measured on the owner's account 2026-08-16/17: Belvedere Trading and Palantir, two unrelated Lever
+ * tenants, both come back with required fields called "High School Diploma", "Yes", "Other",
+ * "December 2026/January 2027" and "I Understand". Every one of those is the FIRST OPTION of a
+ * question. No stored answer can ever reach a control named after one of its own options, which is
+ * why no Lever application has ever completed - the CAPTCHA flags on those packets are separately
+ * disproved as stale.
+ *
+ * TWO THINGS STOP THE EXISTING RECOVERY, and a fix needs both:
+ *
+ *   1. The handle-only fall-through is gated on `!written`, and a radio's own <label> is real human
+ *      text ("High School Diploma"), so `written` is non-empty and the branch never runs. An
+ *      option's label is not the control's question.
+ *   2. Even reached, the card would be refused as ambiguous: the two-control bound counts each
+ *      radio separately, so a four-option group looks like four controls. Every option in a group
+ *      shares one name attribute, so they can be collapsed to one - but that has to be done
+ *      deliberately, because the bound is what stops "High School Name & Graduation Year" being
+ *      borrowed by both of its controls.
+ *
+ * THE MECHANISM, traced 2026-08-17. questionLabel ALREADY has a radio/checkbox branch written for
+ * exactly this - "a radio or checkbox is labelled with its OPTION and the applicant is answering the
+ * QUESTION above it". It calls blockOf(el) to find the owning block, then looks inside it for a
+ * label that is not an option's.
+ *
+ * blockOf matches: fieldset, [role=group], [role=radiogroup], [data-field-path], [class*=_fieldEntry_],
+ * [class*=select__container], .field, .field-wrapper.
+ *
+ * Lever's container is div.application-field, and **`.field` does not match `application-field`** -
+ * a CSS class selector matches whole tokens. So blockOf finds nothing, falls back to
+ * el.parentElement, and on Lever that IS the option's own <label>. The branch then searches inside
+ * that label for a non-option label, finds none, and yields nothing. The existing fix is right and
+ * simply never reaches this markup.
+ *
+ * A second obstacle sits behind it: Lever puts its question in div.application-label > div.text,
+ * which is not a <label> or <legend> element, so even with the right block the branch's
+ * querySelectorAll('label, legend') would still come back empty.
+ *
+ * DO NOT fix this by adding .application-label to the generic walk. The runner already records that
+ * it was measured and rejected: it recovers four more fields and also resolves "High School Name*"
+ * to "University of Southern California, Viterbi School of Engineering". Note that the radio branch
+ * is a NARROWER place than that generic walk - its owner is one application-question, not a card -
+ * so the rejection does not automatically apply there, but it has to be re-measured rather than
+ * assumed. This file's whole asymmetry is that a wrong question is worse than a missing one. */
+test('a Lever radio group is named by its question, not by its own first option', async () => {
+  const labels = await labelsFor(
+    leverCard('What degree are you currently pursuing?',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000001', 'field0', 'What degree are you currently pursuing?',
+        ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD'])),
+    'input[type="radio"]',
+  );
+  assert.equal(labels.length, 4);
+  // Every option in the group now answers with the QUESTION, which is what a resolver needs.
+  for (const label of labels) {
+    assert.match(label, /what degree are you currently pursuing/, label);
+  }
+  // And never with its own option text, which is what it used to return.
+  assert.doesNotMatch(labels[0], /high school diploma/, labels[0]);
+  assert.doesNotMatch(labels[3], /masters\/phd/, labels[3]);
+  // Nor with the shared name handle, which downstream drops as handle-only.
+  for (const label of labels) assert.doesNotMatch(label, /cards\[/, label);
+});
+
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {
   const [label] = await labelsFor(
     leverCard('Year of Graduation', leverDropdown('026d7ce7-7ca4-44ed-9db6-1c7857707f0e', 'field0', 'Intended graduation year')),
