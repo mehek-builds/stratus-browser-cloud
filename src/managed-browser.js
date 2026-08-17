@@ -2730,7 +2730,27 @@ const { chromium } = require('playwright');
        * code control after the ordinary receipt-settle window - is satisfied by a uniform figure
        * that is longer than the 8s it had, and the branch was the only reader of the hostname.
        */
-      const POST_SUBMIT_SETTLE_MS = 12_000;
+      /* 30 SECONDS, AND INJECTABLE.
+       *
+       * Mehek's call, and the reasoning is hers: employers do not reliably email a confirmation, so
+       * the page after Submit is the only witness, and three seconds is nowhere near enough for a
+       * single-page application to post a resume upload and re-render a success panel.
+       *
+       * Costs nothing on a page that decides - the loop returns on the first confirmed, rejected or
+       * code-control read - so this is only ever spent where the page stays genuinely ambiguous, and
+       * there it buys a receipt instead of an unverified packet the applicant has to chase.
+       *
+       * It fits the 90s run budget (MANAGED_RUN_TIMEOUT_MS) with room: the submit is the last thing a
+       * run does, and Greenhouse has been spending 8s of that budget in production without trouble.
+       *
+       * Injectable so a test can choose its own window instead of depending on wall-clock coincidence
+       * between a fixture timeout, this deadline and the 15s receipt-observation TTL. Clamped to 30s,
+       * because this decides how long a run holds a browser open. */
+      const POST_SUBMIT_SETTLE_MS = (() => {
+        const requested = Number(input && input.postSubmitSettleMs);
+        if (!Number.isFinite(requested) || requested <= 0) return 30_000;
+        return Math.min(requested, 30_000);
+      })();
       const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
