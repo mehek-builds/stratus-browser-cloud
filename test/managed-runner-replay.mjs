@@ -361,10 +361,19 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     var countNode = document.getElementById('delayed-receipt-submit-count');
     var count = Number(countNode.textContent.split(':')[1] || '0') + 1;
     countNode.textContent = 'submission-count:' + count;
+    /* PAST PHASE ZERO'S WINDOW, AND BEFORE THE CONTINUATION STARTS.
+     *
+     * 3600ms originally sat just past a hardcoded 3s wait, so this case broke the moment the wait
+     * changed. The window is injectable now and this run asks for 2s, which makes the case exact
+     * arithmetic instead of coincidence: the receipt lands at 2.6s, after phase zero has given up at
+     * 2s, and BEFORE the continuation begins at roughly 3s.
+     *
+     * That ordering is deliberate. The success container is persistent once rendered, so phase one
+     * sees it on its FIRST read and the assertion does not depend on how phase one polls. */
     setTimeout(function () {
       document.getElementById('delayed-receipt-form').remove();
       document.getElementById('delayed-receipt-result').innerHTML = '<div class="ashby-application-form-success-container"><div role="status" aria-live="polite">Success. Thank you for submitting your application to kos.ai.</div></div>';
-    }, 3600);
+    }, 2600);
   });
   document.getElementById('apply').addEventListener('click', function () {
     setTimeout(function () {
@@ -1379,6 +1388,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     requestContinuation: true,
     continuationTtlSeconds: 120,
     continuationExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+    // See the fixture comment above: 2s puts the 2.6s receipt past phase zero and before phase one.
+    postSubmitSettleMs: 2000,
     allowedHost: new URL(base).hostname
   }));
   const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
@@ -1393,6 +1404,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
     assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
   };
+  // Longer than the phase-zero settle window itself: phase zero deliberately spends that window
+  // watching the page before it writes result0, so the file cannot appear sooner than the window.
   await waitForFile(result0);
   const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
   assert.equal(first.submitOutcome.pressed, true);
