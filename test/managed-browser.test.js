@@ -1677,3 +1677,23 @@ test('the runner reads the submit outcome off the page and reports it', () => {
   // Body text alone cannot confirm anything while the form is still sitting there filled.
   assert.match(SANDBOX_RUNNER, /if \(!formStillPresent && CONFIRMED_TEXT\.test\(body\)\)/);
 });
+
+test('a tel field verifies on digits, so its own formatting is not a lost answer', () => {
+  /* normalized() replaces each non-alphanumeric RUN with a SPACE rather than with nothing, so a
+   * reformatted number never equalled the number written:
+   *
+   *   wrote  "2135746270"      -> normalized "2135746270"
+   *   holds  "(213) 574-6270"  -> normalized "213 574 6270"
+   *
+   * Measured 2026-08-18 from the read-back this runner records on a lost fill. Five Rings, Akuna,
+   * Tower Research, Jump Trading and IMC every one reported phone as lost with those two exact
+   * strings, on forms where the value had landed and a person would see it on the page. */
+  assert.match(SANDBOX_RUNNER, /state\.type === 'tel'/);
+  assert.match(SANDBOX_RUNNER, /candidateDigits === expectedDigits/);
+  // The control's own type has to travel with the reading for that arm to be reachable at all.
+  assert.match(SANDBOX_RUNNER, /type: element instanceof HTMLInputElement \? String\(element\.type \|\| ''\) : ''/);
+  // Fails closed outside that class: a letter on either side, or an empty side, judges as before.
+  assert.match(SANDBOX_RUNNER, /const noLetters = \(value\) => !\/\[a-z\]\/i\.test/);
+  // And the read-back that made the diagnosis possible stays.
+  assert.match(SANDBOX_RUNNER, /field holds "/);
+});
