@@ -497,7 +497,13 @@ const { chromium } = require('playwright');
           // chooser read is the same defect class as one that reads a different element.
           return { kind: 'select', actual: selected ? [selected.textContent || '', selected.value || '', selected.label || ''] : [element.value || ''] };
         }
-        return { kind: 'other', actual: ['value' in element ? String(element.value || '') : (element.textContent || '')] };
+        return {
+          kind: 'other',
+          // The control's own type travels with the reading, because a tel field's formatting is
+          // not a difference of answer. See the digitsOnly arm in sameAnswer.
+          type: element instanceof HTMLInputElement ? String(element.type || '') : '',
+          actual: ['value' in element ? String(element.value || '') : (element.textContent || '')],
+        };
       }).catch(() => ({ kind: 'other', actual: [] }));
       const actual = state.actual || [];
       if (!clean(expected)) return actual.some((candidate) => Boolean(clean(candidate)));
@@ -528,6 +534,31 @@ const { chromium } = require('playwright');
        * non-Latin answer that is genuinely correct still matches itself.
        */
       const sameAnswer = (candidate) => {
+        /* A PHONE FIELD'S OWN FORMATTING IS NOT A DIFFERENT ANSWER.
+         *
+         * normalized() replaces each non-alphanumeric RUN with a SPACE rather than with nothing, so
+         * a number the control reformatted never equals the number that was written:
+         *
+         *   wrote  "2135746270"      -> normalized "2135746270"
+         *   holds  "(213) 574-6270"  -> normalized "213 574 6270"
+         *
+         * Measured 2026-08-18 on this user's Greenhouse packets, from the read-back this repo
+         * started recording one commit ago. Every one of Five Rings, Akuna, Tower Research, Jump
+         * Trading and IMC reported phone as lost with those exact two strings, on forms where the
+         * value had in fact landed correctly and a person looking at the page would see it.
+         *
+         * Restricted to type="tel" and to a pair that is digits-only on both sides once separators
+         * go. That is the whole class where punctuation carries no meaning: a text answer, a select
+         * option and anything containing a letter are all judged exactly as before. */
+        const digitsOnly = (value) => String(value == null ? '' : value).replace(/\D+/g, '');
+        if (state.type === 'tel') {
+          const candidateDigits = digitsOnly(candidate);
+          const expectedDigits = digitsOnly(expected);
+          const noLetters = (value) => !/[a-z]/i.test(String(value == null ? '' : value));
+          if (candidateDigits && expectedDigits && noLetters(candidate) && noLetters(expected)) {
+            return candidateDigits === expectedDigits;
+          }
+        }
         const a = normalized(candidate);
         const b = normalized(expected);
         if (a && b) return a === b;
