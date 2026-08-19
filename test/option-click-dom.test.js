@@ -109,6 +109,11 @@ async function choose(rows, target, extra = '') {
        portal arm is never the one under test, and declaring the flag keeps a runner that reads it
        executable while pinning that a shell-rendered menu does not depend on it. */
     let menuIsPortalled = false;
+    /* And whether the menu rendered beside its shell (the Select2 v3 shape). False here for the
+       same reason as the portal flag: the rows are inside the injected scopedMenu, so the
+       beside-shell arm is never the one under test, and declaring it keeps a runner that reads it
+       executable while pinning that a shell-rendered menu does not depend on it. */
+    let menuIsBesideShell = false;
     ${BASE}
     ${INNER}
     return async (target) => ({
