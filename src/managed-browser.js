@@ -353,6 +353,98 @@ const { chromium } = require('playwright');
       }
       return [...new Set(options.filter(Boolean))];
     };
+    /* A GRADED VALUE AGAINST A LIST OF BANDS IS NOT A NEAR MISS, and it is the only widening this
+     * chooser carries. "3.89" against a list offering "3.50 - 4.00" is not a guess between two
+     * plausible rows: exactly one band CONTAINS the number and the rest cannot. Measured on this
+     * account 2026-08-19: "no option matched 3.89, left for you to choose" was the stored blocker
+     * on Akuna and one other packet, with the answer sitting in the profile the whole time.
+     *
+     * THE SCALE IS WHAT MAKES IT SAFE, AND WITHOUT IT THIS TIER MUST NOT FIRE. A bare 3.89 against
+     * a percentage list (0-25 / 26-50 / 51-75 / 76-100) falls inside "0-25", so a matcher that only
+     * checked containment would state a first-quartile GPA to an employer, under her name, and
+     * verifyFilled would agree with it because the row really was selected. Containment alone is
+     * therefore NOT a sufficient condition and never becomes one.
+     *
+     * So the answer has to carry its own denominator - "3.89/4.0" - and the list's own maximum has
+     * to equal it. A percentage list tops out at 100, 100 !== 4, and the tier declines before it
+     * looks at a single row. That is a property of the two numbers rather than a guess about what
+     * the question meant, which is what this file requires of a widening.
+     *
+     * Bounded further, on purpose:
+     *   - the value must land in EXACTLY ONE band, so overlapping or repeated bands refuse;
+     *   - every row that looks like a band must parse, so a list mixing bands with prose ("3.5-4.0",
+     *     "Not applicable") is left alone rather than half-read;
+     *   - it runs AFTER both exact tiers, so a list that literally offers "3.89" is still answered
+     *     by the answer, not by a band that happens to contain it.
+     */
+    const gradedValueWithScale = (wanted) => {
+      const match = /^\s*(\d+(?:\.\d+)?)\s*(?:\/|\s+out\s+of\s+)\s*(\d+(?:\.\d+)?)\s*$/i.exec(String(wanted || ''));
+      if (!match) return null;
+      const value = Number(match[1]);
+      const scale = Number(match[2]);
+      if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0 || value < 0) return null;
+      if (value > scale) return null;
+      return { value, scale };
+    };
+    const parseBand = (text) => {
+      const source = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!source) return null;
+      const num = '(\\d+(?:\\.\\d+)?)';
+      const span = new RegExp('^' + num + '\\s*(?:-|\u2013|\u2014|to)\\s*' + num + '$', 'i').exec(source);
+      if (span) {
+        const lo = Number(span[1]);
+        const hi = Number(span[2]);
+        return Number.isFinite(lo) && Number.isFinite(hi) && lo <= hi ? { lo, hi } : null;
+      }
+      const atLeast = new RegExp('^(?:above|over|at least)\\s*' + num + '$|^' + num + '\\s*(?:\\+|and above|or above|and higher|or higher|and over|or more)$', 'i').exec(source);
+      if (atLeast) {
+        const lo = Number(atLeast[1] ?? atLeast[2]);
+        return Number.isFinite(lo) ? { lo, hi: Infinity } : null;
+      }
+      const atMost = new RegExp('^(?:below|under|less than)\\s*' + num + '$', 'i').exec(source);
+      if (atMost) {
+        const hi = Number(atMost[1]);
+        return Number.isFinite(hi) ? { lo: -Infinity, hi, exclusiveHi: true } : null;
+      }
+      return null;
+    };
+    const gradedBandIndex = (texts, wanted) => {
+      const graded = gradedValueWithScale(wanted);
+      if (!graded) return -1;
+      /* A ROW THAT IS THE VALUE BEATS A ROW THAT CONTAINS IT, and this guard is the only thing that
+       * enforces it here. The exact tiers above never see the bare number: they are handed
+       * "3.89/4.0" and answerOptions does not strip the denominator, so a list offering BOTH "3.89"
+       * and "3.50 - 4.00" reaches this function with the literal row unmatched. Without this, the
+       * band would answer a list that was offering the value itself. */
+      const bare = String(graded.value);
+      const trimmedBare = String(graded.value.toFixed(2));
+      for (const text of texts) {
+        const literal = clean(text).toLowerCase();
+        if (literal === bare || literal === trimmedBare) return -1;
+      }
+      const bands = texts.map((text) => parseBand(text));
+      const present = bands.filter(Boolean);
+      // Two bands at minimum, or "a list of bands" is not what this is looking at.
+      if (present.length < 2) return -1;
+      /* THE LIST'S OWN CEILING HAS TO BE THE ANSWER'S DENOMINATOR. An open-topped band ("3.5+") is
+       * read as reaching the scale, because that is what it means on a graded list; anything above
+       * the scale means this list is not measuring what the answer measured. */
+      let ceiling = 0;
+      for (const band of present) {
+        if (!Number.isFinite(band.hi)) { ceiling = Math.max(ceiling, graded.scale); continue; }
+        ceiling = Math.max(ceiling, band.hi);
+      }
+      if (Math.abs(ceiling - graded.scale) > 0.011) return -1;
+      const hits = [];
+      for (let index = 0; index < bands.length; index += 1) {
+        const band = bands[index];
+        if (!band) continue;
+        const withinLow = graded.value >= band.lo;
+        const withinHigh = band.exclusiveHi ? graded.value < band.hi : graded.value <= band.hi;
+        if (withinLow && withinHigh) hits.push(index);
+      }
+      return hits.length === 1 ? hits[0] : -1;
+    };
     const optionMatches = (candidate, wanted) => {
       const a = normalized(candidate);
       if (!a) return false;
@@ -477,6 +569,11 @@ const { chromium } = require('playwright');
          * has always deduped and refused; this tier did not. */
         if (exact.length > 1) return -1;
       }
+      /* AFTER BOTH EXACT TIERS, NEVER BEFORE THEM. A list that literally offers the answer is
+       * answered by the answer; only a list that offers bands instead of values reaches here. See
+       * gradedBandIndex for why the answer's own denominator is what bounds this. */
+      const band = gradedBandIndex(texts, wanted);
+      if (band !== -1) return band;
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
         if (declineMatches(texts[index], wanted)) refusals.push(index);
