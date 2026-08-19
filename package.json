@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "NODE_ENV=test node --test --test-concurrency=1 test/*.test.js",
+    "test": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node --test --test-concurrency=1 test/*.test.js",
     "test:runner": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/managed-runner-replay.mjs",
     "test:choice-parity": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/choice-parity-replay.mjs",
     "test:security-code": "LITOS_POST_SUBMIT_SETTLE_MS=9000 NODE_ENV=test node test/security-code-replay.mjs",
