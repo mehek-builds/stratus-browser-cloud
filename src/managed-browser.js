@@ -5409,13 +5409,23 @@ const { chromium } = require('playwright');
             /* NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a machine handle
              * this runner can name, so removing them all leaves no word a person wrote.
              *
-             * The list and the order are the backend's PROVIDER_HANDLE_STRIPPERS, verbatim
+             * The first six are the backend's PROVIDER_HANDLE_STRIPPERS, verbatim and in its order
              * (src/lib/questionDiscovery.ts). They have to agree, because the whole safety argument
              * for the fall-through below is that a string this calls handle-only is a string
              * normalizeDiscoveredLabel already reduces to '' and drops - so recovering it can only
              * add a question, never rename one. Order is load-bearing: the uuid strip is what turns
              * the middle bracket of cards[<uuid>][field0] into a bare "[ ]" for the next one to
              * clear.
+             *
+             * THE BREEZY STRIPPER AT THE END IS A DELIBERATE RUNNER-SIDE ADDITION, and the safety
+             * argument shifts one notch rather than breaking: a Breezy questionnaire control
+             * carries name="section_<epoch>_question_<n>" and nothing else a person wrote, so
+             * without this line the stored label IS that handle - measured live on the
+             * transparent-hiring.breezy.hr form 2026-08-19, every paragraph, date and later-section
+             * question was stored under it and never reached the Apply screen. With it, the
+             * fall-through recovers the <h3> heading the applicant actually reads. So this line
+             * turns a garbage label into the employer's words, never renames one that already read
+             * correctly, and the backend list should gain the same shape when it is next touched.
              *
              * \p{L} and not [a-z]: a Japanese or Arabic label is a label. */
             function isProviderHandleOnly(value) {
@@ -5425,7 +5435,8 @@ const { chromium } = require('playwright');
                 /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/gi,
                 /\[\s*\]/g,
                 /\bcards\s*\[\s*field\d+\s*\]/gi,
-                /\s*\*?\s+\d{2,5}\s*$/u
+                /\s*\*?\s+\d{2,5}\s*$/u,
+                /\bsection_\d+_question_\d+\b/gi
               ];
               let rest = value == null ? '' : String(value);
               for (const stripper of strippers) rest = rest.replace(stripper, ' ');
@@ -5475,7 +5486,14 @@ const { chromium } = require('playwright');
                * measured and rejected because it resolved "High School Name*" to her university.
                * This branch's owner is one application-question, holding one question and its own
                * options, so that ambiguity cannot arise here. */
-              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label')].find((candidate) => {
+              /* h3 is here for Breezy, and only inside this choice branch, the same way
+               * .application-label is only here for Lever. Breezy's questionnaire writes the
+               * question in an <h3> inside the same li.question that holds the options - measured
+               * live 2026-08-19, the first option of "English level" is "B1 (Intermediate) or
+               * below", which the tenant auto-disqualifies, so a group labeled by its first option
+               * asks the applicant to disqualify herself. An h3 inside ONE question's own block is
+               * that question's heading; the generic walk already trusts h3 for the same reason. */
+              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label, h3')].find((candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
@@ -5499,13 +5517,73 @@ const { chromium } = require('playwright');
              * Applied ONLY when the control has neither a <label for> nor an aria-label, so no form
              * that labels its inputs properly can be relabelled by this.
              */
+            /* A COMBOBOX THAT SAYS ONLY WHAT IT IS, NEVER WHAT IT ASKS. Measured on the live
+             * Rippling apply form (ats.rippling.com, Easy Dynamics, 2026-08-19): the widget's own
+             * input carries aria-label "Search", placeholder "Search", a name randomized on every
+             * render ("vh-v1lveguk" one run, "QBIQlS1zQx" the next) and an id like "field-34", and
+             * the visible question - "Phone number", "Are you currently authorized to work in the
+             * U.S.?" - sits in a plain div or span BESIDE the widget, never in a <label> element.
+             * So the parts join below stored "search search vh-v1lveguk field-34" as the question,
+             * which no saved answer can ever anchor to, and which is a NEW question on every
+             * render because the name half rotates.
+             *
+             * The arm is double-gated so it cannot rename a labelled control: the element must be a
+             * combobox opener with NO label text of its own, and everything it does say (aria-label,
+             * placeholder) must be widget furniture - "search", "select", "select..." - words that
+             * describe the control and not the question. Then the visible label is the text of the
+             * nearest preceding sibling on the way up that holds no controls of its own; a sibling
+             * holding controls is the PREVIOUS question and ends the walk, which is what keeps this
+             * from borrowing a neighbour's heading. */
+            const choiceOpenerHere = el.getAttribute('role') === 'combobox'
+              || el.getAttribute('aria-haspopup') === 'listbox';
+            const WIDGET_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+            if (choiceOpenerHere && !clean(labelText)
+              && WIDGET_FURNITURE.test(clean(ariaLabel))
+              && WIDGET_FURNITURE.test(clean(el.getAttribute('placeholder') || ''))) {
+              // Twelve, not the walk's usual six: measured on the live form, the "Phone number"
+              // label div is ten parents above the widget's input. What bounds the walk is not the
+              // depth but the two stop rules below - a sibling holding controls is the previous
+              // QUESTION and ends it.
+              let above = el;
+              for (let depth = 0; above && depth < 12; depth += 1, above = above.parentElement) {
+                const beside = above.previousElementSibling;
+                if (!beside) continue;
+                if (beside.querySelector && beside.querySelector('input, textarea, select, [role="combobox"], button')) break;
+                const besideText = clean(renderedText(beside));
+                if (besideText && besideText.length <= 200 && !genericControlText(besideText)) {
+                  return besideText.toLowerCase();
+                }
+                if (besideText) break;
+              }
+            }
             if (!clean(labelText) && !clean(ariaLabel)) {
               const owner = blockOf(el);
               const ownerLabel = owner && owner.querySelector('label, legend');
               const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
             }
-            const parts = [labelText || '', ariaLabel, el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
+            /* A PLACEHOLDER IS NOT PART OF A QUESTION'S NAME, unless it is all the control has.
+             *
+             * Measured on live Teamtailor forms (fully.teamtailor.com and moburst.teamtailor.com,
+             * 2026-08-19/20): the phone question was stored as "phone phone number with country
+             * code +1 201-555-0123 candidate[phone] candidate_phone" - visible label plus
+             * PLACEHOLDER plus name plus id. The placeholder half is volatile between renders, so
+             * consecutive discoveries mint the "same" question under two different labels;
+             * downstream that flaps packet identity and every send attempt refuses with
+             * packet_stale, forever. So a control that carries any written label (label text or
+             * aria-label) is named WITHOUT its placeholder. A control whose only human text IS the
+             * placeholder keeps it, because dropping it there would reduce the label to a bare
+             * handle and lose the question (the Ashby "start typing..." shape the owner-walk above
+             * already handles when it can).
+             *
+             * The name and id stay in the join, deliberately: the backend reads control handles
+             * OUT of the stored label (LABEL_SECTION_HANDLE_RE and friends recover "school--0" and
+             * the Greenhouse demographic ids from it), so dropping them here would orphan the
+             * education option probes. Unlike a placeholder they are stable within one board's
+             * render... where they are not (Rippling), the combobox arm above names the control
+             * before this join runs. */
+            const placeholderText = clean(labelText) || clean(ariaLabel) ? '' : (el.getAttribute('placeholder') || '');
+            const parts = [labelText || '', ariaLabel, placeholderText, el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
             /* THE HANDLE THAT IS NOT A LABEL.
              *
@@ -5563,10 +5641,18 @@ const { chromium } = require('playwright');
              * OPTION of a question. One application-question holds one question and its own options,
              * so this is narrower than the card and cannot reintroduce the two-control ambiguity the
              * card bound exists to refuse. */
+            /* li.question is Breezy's, for the same reason li.application-question is Lever's.
+             * Measured on the live transparent-hiring.breezy.hr HR Assistant Intern form
+             * (2026-08-19): each questionnaire question is one <li class="question"> holding an
+             * <h3> heading and a <ul class="options"> of <label><input type="radio">…</label>
+             * rows. Without it blockOf fell back to el.parentElement, which on a Breezy radio IS
+             * the option's own <label>, so the question was named after its first option and the
+             * option list held one row. One li.question holds one question and its own options,
+             * so this is as narrow as the Lever entry above it. */
             return el.closest(
               'fieldset, [role="group"], [role="radiogroup"], [data-field-path],'
               + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper,'
-              + ' li.application-question'
+              + ' li.application-question, li.question'
             ) || el.parentElement || el;
           }
           function choiceQuestionKey(el, block) {
