@@ -108,17 +108,18 @@ const SELF_ID_CLAIMS = [
   { id: 'sid-prefer', row: 'I prefer not to identify with any of the above' },
   { id: 'sid-trans', row: 'I do not identify as transgender' }
 ];
-/* 'searched' is whether the React rendering reaches this row too, and it is a property of the ROW
-   rather than of the predicate. The radio and pill paths are handed the whole list and rank it, so
-   chooseOptionIndex's intent tier reaches any refusal however worded. A React Select menu is
-   searched instead, by typing each restatement answerOptions knows, so it reaches a row it can
-   already NAME. "I don´t wish to answer" is one of those, differing from a known restatement only
-   by the character used for the apostrophe, which the punctuation-tolerant name tier forgives. The
-   other two are worded outside that list entirely. */
+/* Every row here is reached on all three renderings now, by two different mechanisms worth keeping
+   in writing. The radio and pill paths are handed the whole list and rank it, so
+   chooseOptionIndex's intent tier reaches any refusal however worded. A React Select menu used to
+   be reachable only by SEARCH - typing each restatement answerOptions knows - so it reached
+   "I don´t wish to answer", one apostrophe character away from a known restatement, and not the
+   other two. Since the offered-rows tiers, the unfiltered menu's own rows run through the same
+   chooseOptionIndex the lists do, so a refusal worded outside the restatement list is reached by
+   intent there as well. */
 const SELF_ID_REFUSALS = [
-  { id: 'sid-would-like', row: 'I would not like to disclose this', searched: false },
-  { id: 'sid-wish-not', row: 'I wish not to answer', searched: false },
-  { id: 'sid-acute', row: 'I don´t wish to answer', searched: true }
+  { id: 'sid-would-like', row: 'I would not like to disclose this' },
+  { id: 'sid-wish-not', row: 'I wish not to answer' },
+  { id: 'sid-acute', row: 'I don´t wish to answer' }
 ];
 const SELF_ID_ROWS = [...SELF_ID_CLAIMS, ...SELF_ID_REFUSALS];
 const SELF_ID_STORED = 'Decline to self-identify';
@@ -1450,28 +1451,26 @@ for (const entry of SELF_ID_CLAIMS) {
  * these costs her a blank and a line to read rather than a false answer, which is the only reason
  * they are minor.
  *
- * TWO RENDERINGS OF THREE, AND THE THIRD IS NOT A DEFECT IN THIS CHANGE. The radio and pill paths
+ * THREE RENDERINGS OF THREE, AND THE THIRD USED TO BE PINNED AT TWO. The radio and pill paths
  * are handed the whole list and rank it with chooseOptionIndex, whose last tier matches a refusal
- * to a refusal by intent, so a wording nobody enumerated is still reached. A React Select menu is
- * not a list this file may read: it is SEARCHED, by typing each restatement answerOptions knows
- * into the box, so it can only reach a refusal it can already name. That asymmetry predates this
- * change, is documented at chooseOptionIndex, and fails closed: the control is left blank and she
- * is told, rather than answered wrongly. Pinned here rather than left implicit, so that closing it
- * is a deliberate act and not a surprise. */
+ * to a refusal by intent, so a wording nobody enumerated is still reached. A React Select menu
+ * used to be reachable only by SEARCH - typing each restatement answerOptions knows into the box -
+ * so it could only reach a refusal it could already name, and the earlier version of this pin held
+ * that asymmetry visible so that closing it would be a deliberate act and not a surprise. The
+ * offered-rows tiers closed it deliberately: the UNFILTERED menu's own rows now run through the
+ * same chooseOptionIndex the lists do, the decline tier matches a refusal to a refusal by intent
+ * there too, and the commit carries tier provenance so verification accepts the whole clicked row.
+ * So a stored refusal now reaches the employer's own refusal wording on every rendering, instead
+ * of costing her a blank and a line to read on the one rendering that could not name it. */
 for (const entry of SELF_ID_REFUSALS) {
   const result = await replay([
     ...ask(entry.id, `Veteran status, ${entry.id}`, SELF_ID_STORED),
     ...readBack(entry.id)
   ]);
-  const [radio, pill, react] = answers(result, entry.id);
-  assert.deepEqual([radio, pill], [entry.row, entry.row],
-    `"${entry.row}" is a refusal and a list-reading rendering must reach it`);
-  assert.equal(react, entry.searched ? entry.row : '',
-    'the searched rendering reaches a refusal it can name and says so rather than guessing');
-  assert.deepEqual(result.filledFields,
-    entry.searched ? labels(entry.id) : labels(entry.id).slice(0, 2));
-  assert.deepEqual(result.skipped,
-    entry.searched ? [] : [`question:${entry.id}:react: ${unmatchedReason(SELF_ID_STORED)}`]);
+  assert.deepEqual(answers(result, entry.id), [entry.row, entry.row, entry.row],
+    `"${entry.row}" is a refusal and every rendering must reach it`);
+  assert.deepEqual(result.filledFields, labels(entry.id));
+  assert.deepEqual(result.skipped, []);
 }
 
 /* ---------------------------------------------------------------------------------------------
