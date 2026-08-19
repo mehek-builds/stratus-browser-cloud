@@ -398,7 +398,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
-  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -490,7 +490,7 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer\)\)/);
   assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
   assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 2,

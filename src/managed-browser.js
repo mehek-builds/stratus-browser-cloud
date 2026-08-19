@@ -1254,6 +1254,15 @@ const { chromium } = require('playwright');
      */
     let lastClickedOptionText = '';
     let lastClickedOptionAnswer = '';
+    /* AND WHETHER THE CLICK WAS MADE BY THE LIST-SHAPED TIERS, carrying the answer it was made
+     * for. chooseFromOfferedRows (inside fillCustomChoice) commits a row the answer does not
+     * name - the sole statement of a one-option consent, the band that contains a graded value,
+     * the year of a month-and-year answer - so the clicked-row rule in verifyChoiceInContainer,
+     * which demands the row CONTAIN the answer, would withdraw exactly the rows those tiers are
+     * for. This is the provenance that lets the verifier ask the right question instead: is the
+     * control holding the WHOLE row that tier clicked, for the answer this action is filling.
+     * Empty for every click the name tiers make, so nothing about their verification changes. */
+    let lastChooserTierAnswer = '';
     /* THE STATE THE CONTROL WAS IN WHEN THIS RUN REACHED IT, written by fillCustomChoice and read by
      * the withdrawal below. A refused click has to be put back, and "back" is this. */
     let lastChoiceArrival = { kind: 'empty', value: '' };
@@ -1339,7 +1348,7 @@ const { chromium } = require('playwright');
      * 'unknown' either way, and drawing a positive one out of a blob was the part that was wrong.
      */
     let lastChoiceUnreadable = false;
-    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer) => {
+    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer) => {
       lastChoiceUnreadable = false;
       /* AND A JAPANESE ANSWER IS NOT A BLANK. normalized() keeps only [a-z0-9], so it erases a
        * Japanese, Arabic, Cyrillic, Greek or Chinese string entirely, and optionMatchesExactly
@@ -1469,6 +1478,25 @@ const { chromium } = require('playwright');
        */
       const row = clean(clickedOptionText || '').toLowerCase();
       const shown = clean(text).toLowerCase();
+      /* A ROW THE LIST-SHAPED TIERS CHOSE DOES NOT CONTAIN THE ANSWER, BY CONSTRUCTION, and the
+       * clicked-row rule below would therefore withdraw every one of their correct commits: a
+       * one-option consent's "I consent to the above." does not contain "Yes", "3.50 - 4.00" does
+       * not contain "3.89/4.0", and "2028" does not contain "May 2028". For those clicks the
+       * honest question is not "does the row carry the answer" - the tier's own suite pins that
+       * the tier may say it does - but "did the row the tier clicked PERSIST as the control's
+       * value". So this accepts exactly that, and nothing looser:
+       *   - the click was made by chooseFromOfferedRows FOR the answer this action is verifying
+       *     (the provenance travels in chooserTierAnswer and is '' for every name-tier click, so
+       *     their verification is unchanged);
+       *   - the control publishes a chosen value (an 'unknown' widget keeps the unreadable
+       *     treatment it has);
+       *   - and that value is the WHOLE clicked row, not a fragment of it. The near-miss refusal
+       *     above still runs first and still cannot be reached past. */
+      if (clean(chooserTierAnswer || '') && holdsAnswer(chooserTierAnswer, expected)
+        && state.kind === 'chosen' && row && shown && row === shown) {
+        lastChoiceUnreadable = false;
+        return true;
+      }
       if (!row || shown.length < 2 || !row.includes(shown)) return false;
       // Script-aware for the same reason the first rule is: comparing the clicked answer against the
       // expected one through normalized() alone reads two non-Latin strings as one blank, and this
@@ -1678,7 +1706,7 @@ const { chromium } = require('playwright');
       // React-controlled choices can publish their selected value on a later render. Give that
       // exact value a bounded window before withdrawing anything the option click may have set.
       for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
-        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
+        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer)) {
           await unmarkChoice(container);
           return true;
         }
@@ -1952,6 +1980,7 @@ const { chromium } = require('playwright');
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
       lastClickedOptionText = '';
       lastClickedOptionAnswer = '';
+      lastChooserTierAnswer = '';
       // Whether this call ever got as far as OPENING something. It separates "this block holds no
       // control I can drive" from "I drove the control and its list does not carry her answer",
       // which are the same 'false' to the caller and are opposite sentences to the applicant.
@@ -1981,10 +2010,23 @@ const { chromium } = require('playwright');
       // the click, before the menu had rendered, so the page-wide sweep was reached every time. The
       // menu now gets the same bounded grace the optional pre-check already gives asynchronous
       // controls, and there is no page-wide sweep left to fall through to.
-      const menuScope = container.locator(
-        'xpath=ancestor-or-self::*[contains(@class,"select__container") or contains(@class,"select-shell") or contains(@class,"select2-container")][1]'
-      );
-      const scopedMenu = (await menuScope.count()) > 0 ? menuScope : undefined;
+      /* BOTH DIRECTIONS, for the same measured reason clearChoiceControl reads both. The fill
+       * branch hands in '.select__input-container', so the shell is an ANCESTOR of the container;
+       * fillByLabelText hands in the question's BLOCK, so the shell is a DESCENDANT, and the
+       * ancestor-only read left scopedMenu unset on every combobox that arrived by label. That
+       * unset scope is not a smaller version of the same behaviour, it is three behaviours gone at
+       * once: waitForMenu degrades to a flat 150ms pause that the measured Greenhouse menus
+       * (555-563ms) always lose, menuIsPortalled can never become true so the R-076 portalled
+       * menus are unreachable, and widenRoot falls back to a container that holds no rows. On a
+       * form where the backend's trimmer leaves each question ONE fillByLabelText, that one action
+       * is the label path, so the highest-volume rendering lost all three exactly where no retry
+       * exists. Downwards first, per the ordering note on clearChoiceControl: only a container
+       * with nothing shell-shaped under it is itself part of one. */
+      const shellDown = container.locator('xpath=(descendant::*[' + CHOICE_SHELL_CLASSES + '])[1]');
+      const shellUp = container.locator('xpath=ancestor-or-self::*[' + CHOICE_SHELL_CLASSES + '][1]');
+      const scopedMenu = (await shellDown.count()) > 0
+        ? shellDown
+        : ((await shellUp.count()) > 0 ? shellUp : undefined);
       /* THE MENU THE OPENED CONTROL SAYS IS ITS OWN, read off the control after it is opened and
        * never guessed. See menuRoot below for what it replaces and why.
        *
@@ -2416,6 +2458,56 @@ const { chromium } = require('playwright');
         }
         return false;
       };
+      /* THE TIERS THAT JUDGE THE LIST, NOT THE ROW, run over the control's own menu.
+       *
+       * clickMatchingOption asks Playwright's role engine about one row at a time, and that is the
+       * right instrument for every tier that matches the answer against a row's NAME. It cannot ask
+       * the questions chooseOptionIndex's widened tiers ask, because those are properties of the
+       * WHOLE list: soleOptionIndex is a length check, gradedBandIndex needs every band and the
+       * list's own ceiling, dateComponentIndex needs to know its hit is unique. So the same chooser
+       * the native select, radio and pill renderings already share runs here over the menu's
+       * offered rows, which closes the one rendering it never reached. Measured live on the
+       * Optiver Greenhouse form 2026-08-19: "I consent to the above." is a react-select whose
+       * single statement row a stored "Yes" can never name-match, so the one protected
+       * fillByLabelText the backend's trimmer leaves each question on a 14-question form opened
+       * the control, matched nothing, and committed nothing, while the answer sat in the packet.
+       *
+       * THE ROWS ARE READ AS RENDERED TEXT, and that is a deliberate, bounded exception to the
+       * rule on clickIfPresent. The name-shaped defects that rule lists cannot reprice these
+       * tiers: chooseOptionIndex refuses every ambiguity it can see (two rows normalising to the
+       * answer, two candidate bands, two date parts, two differently-worded refusals, and ANY list
+       * of two under soleOptionIndex), offeredRows has already dropped hidden and aria-hidden
+       * nodes, and choiceLanded still reads the committed value back afterwards. A row whose text
+       * misleads is therefore refused or withdrawn, never resolved by position.
+       *
+       * AND ONLY EVER OVER menuRoot() - the control's own shell, or the menu the opened control
+       * declared through aria-controls - never the container and never the page. An unscoped
+       * [role="option"] on the live Optiver form returns 244 nodes, because Greenhouse renders the
+       * phone-country picker's full country list permanently; a chooser handed that list would be
+       * choosing among countries.
+       *
+       * ONLY EVER ON THE UNFILTERED MENU. searchFor types into the widget, and a filtered list can
+       * offer one row where the full list offered two: under soleOptionIndex that is not a
+       * narrowed ambiguity, it is a fabricated one-option control, and an affirmative answer would
+       * then commit whichever statement happened to survive the filter. So the control loop runs
+       * this once, after the name tiers and before any typing, and searchFor never re-enters it. */
+      const chooseFromOfferedRows = async (wanted) => {
+        const root = menuRoot();
+        if (!root) return false;
+        const rows = root.locator(OPTION_NODES);
+        const offers = await offeredRows(rows);
+        if (offers.length === 0) return false;
+        const texts = [];
+        for (const index of offers) {
+          texts.push(clean(await rows.nth(index).textContent().catch(() => '')));
+        }
+        const chosen = chooseOptionIndex(texts, wanted);
+        if (chosen === -1) return false;
+        if (!await clickIfPresent(rows.nth(offers[chosen]))) return false;
+        lastClickedOptionAnswer = clean(wanted);
+        lastChooserTierAnswer = clean(wanted);
+        return true;
+      };
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
@@ -2453,6 +2545,9 @@ const { chromium } = require('playwright');
           await page.keyboard.press('Escape').catch(() => undefined);
           return false;
         }
+        // The list-shaped tiers, on the menu the click just opened and before any typing filters
+        // it. See chooseFromOfferedRows for why this must not run again after searchFor types.
+        if (await chooseFromOfferedRows(wanted)) return true;
         if (await searchFor(control, wanted)) return true;
         if (choiceRefusals !== refusalsBefore) {
           await page.keyboard.press('Escape').catch(() => undefined);
@@ -4858,6 +4953,8 @@ const { chromium } = require('playwright');
         if (submitCapable) return { answerPreserved: false, arrival: before };
         lastClickedOptionText = semanticAnswer;
         lastClickedOptionAnswer = semanticAnswer;
+        // Re-aimed by hand here, so the tier provenance from any earlier fill must not ride along.
+        lastChooserTierAnswer = '';
         const clicked = await exactRows.first().click({ timeout: 2000 })
           .then(() => true)
           .catch(() => false);
@@ -5961,6 +6058,24 @@ const { chromium } = require('playwright');
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         }));
+        /* A SEARCH BOX IS NOT THE CONTROL, however it is dressed. The field locator above resolves
+         * the FIRST typeable input in the block, and on a react-select that is the widget's own
+         * search input. Typing into it filters a menu and commits nothing, the typed text survives
+         * long enough for verifyFilled to read it straight back out of the same box, and the
+         * widget then drops it on blur - so the one protected attempt the backend's trimmer leaves
+         * each question reported a fill the form never kept. Measured live on the Optiver
+         * Greenhouse form 2026-08-19 the input announced itself (role=combobox), which the arm
+         * below already dispatches on; older react-select renderings announce nothing on the input
+         * at all (see the shape-read note above verifyFilled's rescue chain below), and for those
+         * the widget's own class shell around the input is the durable signal. WIDGET-INTERNAL
+         * classes only, on purpose: the shell names themselves ('select-shell', 'select__container')
+         * also appear in LAYOUT wrappers - the measured 'select-shell-grid' of 19c - and a plain
+         * text input under such a wrapper must keep its plain fill rather than be handed to a
+         * chooser that has nothing to open. Detection only: everything this routes INTO is the
+         * same verified choice arm the ARIA shapes take. */
+        const fieldInChoiceShell = shape.tag === 'input' && await field.evaluate((element) => Boolean(
+          element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
+        )).catch(() => false);
         // Read off the control, ahead of every other arm. A date picker is not a select, not a
         // combobox and not free text, and the old test for one - an answer already shaped
         // YYYY-MM-DD next to a placeholder mentioning a date - could only ever fire on a run that
@@ -5984,7 +6099,7 @@ const { chromium } = require('playwright');
             if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
-        } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
+        } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list' || fieldInChoiceShell) {
           if (await fillCustomChoice(container, action.value || '')) {
             const landed = await choiceLanded(container, action.value || '');
             if (action.label && landed) filledFields.push(action.label);
