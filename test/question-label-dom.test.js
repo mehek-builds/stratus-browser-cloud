@@ -249,6 +249,49 @@ test('a Lever radio group is named by its question, not by its own first option'
   for (const label of labels) assert.doesNotMatch(label, /cards\[/, label);
 });
 
+/* AND IT REPORTS THE OPTIONS, which is the half nothing asserted and which cost a whole cycle.
+ *
+ * `has_field_options: false` on every Lever packet was diagnosed as "Stratus discovery reports no
+ * option lists at all" and the remaining work was booked against this file. It was already working.
+ * The lists were being discarded one repo downstream, by an inventory-key pattern that accepted a
+ * bare name with at most a trailing `[]` and so could not express Lever's `cards[<uuid>][field0]`
+ * (backend lib/portalSubmission.ts, controlNameOptionKeyFromDiscoveredSelector, and
+ * lib/leverOptionInventory.test.ts pins it there).
+ *
+ * The label test above passes on markup whose options are never read, because it only ever looked at
+ * labels. So this asserts the other half against the same fixture: what an employer offers, in the
+ * employer's own words and order, which is what a resolver snaps a stored answer onto. Without it the
+ * next person reading a packet with no options has no way to tell which side dropped them. */
+test('a Lever radio group also reports the four options the employer offers', async () => {
+  const details = await choiceDetailsFor(
+    leverCard('What degree are you currently pursuing?',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000001', 'field0', 'What degree are you currently pursuing?',
+        ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD'])),
+  );
+
+  // One entry for the group, not one per option: choiceQuestionKey collapses them by shared name.
+  assert.equal(details.length, 1);
+  assert.match(details[0].label, /what degree are you currently pursuing/);
+  // Exact texts and exact order. "Bachelor Degree" is the singular form the employer wrote, and it is
+  // what the resolver's degree ladder has to find; a normalised or reordered list would not match it.
+  assert.deepEqual(details[0].options, [
+    'High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD',
+  ]);
+});
+
+/* THE YES/NO GROUP FROM THE SAME FORM. Two options, and the question is the card's, so a list of
+ * ["Yes", "No"] is the only thing that lets a stored yes/no reach an employer's own radio. */
+test('a Lever yes/no group reports both options', async () => {
+  const details = await choiceDetailsFor(
+    leverCard('Work authorisation',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000002', 'field0',
+        'Are you lawfully authorized to work in the United States?', ['Yes', 'No'])),
+  );
+
+  assert.equal(details.length, 1);
+  assert.deepEqual(details[0].options, ['Yes', 'No']);
+});
+
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {
   const [label] = await labelsFor(
     leverCard('Year of Graduation', leverDropdown('026d7ce7-7ca4-44ed-9db6-1c7857707f0e', 'field0', 'Intended graduation year')),
