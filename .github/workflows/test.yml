@@ -55,7 +55,21 @@ jobs:
       # matched build. playwright-core ships the browser downloader but not the browser, hence this
       # step. test/e2e.mjs is the other case: it launches with config.chromePath, which is what the
       # Resolve Chrome step below supplies.
+      # CACHED, BECAUSE A HANGING DOWNLOAD COSTS THE WHOLE JOB. Twice on 2026-08-19 this step hung
+      # and the job was cancelled at the 35-minute cap with the failure attributed here, which reads
+      # as a test failure and is not one: the same suite had passed in 21m38s hours earlier. The
+      # cache key is the lockfile, so a playwright-core bump re-downloads and nothing else does.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # A STEP CAP AS WELL AS THE CACHE. The cache stops the usual case; this stops a cold miss on a
+      # bad CDN day from eating the job budget and reporting a hang as a red suite. Six minutes is
+      # well past the ~90 seconds a real download takes, and far short of the 35 the job has.
       - name: Install Playwright Chromium
+        timeout-minutes: 6
         run: node node_modules/playwright-core/cli.js install --with-deps chromium
 
       # The GitHub Ubuntu image already carries Google Chrome, so resolve it rather than downloading
