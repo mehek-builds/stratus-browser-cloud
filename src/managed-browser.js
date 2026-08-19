@@ -5870,6 +5870,27 @@ const { chromium } = require('playwright');
         // would lose it in exactly the case that matters.
         if (isFinalSubmitAction(action)) finalSubmitPressed = true;
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+        /* THE PAGE AFTER SEND IS THE ONLY PROOF, SO THE RUN HAS TO STAY AND WATCH IT.
+         *
+         * The confirmAndSubmit path has waited out the post-submit window since it existed; the
+         * plain final-submit click never did. It waited for networkidle and moved on, and the
+         * run's final text and screenshot are taken AFTER the action loop - so on a board that
+         * confirms with a client-side transition after the submit XHR, the snapshot fires in the
+         * gap between the network going quiet and the thank-you rendering. Measured live on the
+         * Max Borges Workable form (2026-08-19): Send was pressed, the application was really
+         * sent, and the backend's receipt reader reported the run "never showed a confirmation it
+         * could read" because the snapshot predates the confirmation. Employers do not reliably
+         * email a confirmation, so that snapshot is the applicant's only receipt.
+         *
+         * waitForPostSubmitApplicationState is the same bounded watch the atomic path uses: up to
+         * 30 seconds on the SAME page, returning on the first read that is a confirmation, a
+         * rejection, or a standing security-code challenge - so the snapshot taken after the loop
+         * is from the first state worth reporting, and only a page that stays ambiguous for the
+         * whole window is reported unconfirmed. The securityCode click keeps its own sequence
+         * below, where the same watch already runs after the code is resubmitted. */
+        if (isFinalSubmitAction(action) && !action.securityCode) {
+          await waitForPostSubmitApplicationState();
+        }
         /* THE SECOND HALF OF A GREENHOUSE SUBMIT, and the reason it is HERE rather than in its own
          * action.
          *
