@@ -408,6 +408,62 @@ const { chromium } = require('playwright');
       }
       return null;
     };
+    /* A DATE ANSWER AGAINST A LIST THAT ASKS FOR ONE OF ITS PARTS.
+     *
+     * "May 2028" is the single most common unmatched answer on this account: seven stored blockers
+     * reading "no option matched May 2028, left for you to choose", against Graduation Year lists
+     * offering 2026 / 2027 / 2028 and Graduation Month lists offering January..December. The answer
+     * holds both parts and the control wants one of them, so exact matching correctly fails and the
+     * applicant is handed a field whose answer she already gave.
+     *
+     * WHAT IS AND IS NOT A PART. A year row that IS the answer's year, or a month row that IS the
+     * answer's month, is that answer restated - not a near miss and not an inference. A SEASON is a
+     * different thing and is refused: mapping May onto "Spring 2028" is a claim about the employer's
+     * calendar, and Northern and Southern hemisphere terms disagree about it. Same for quarters.
+     *
+     * The uniqueness requirement is what keeps a partial read honest. A list offering both "2028"
+     * and "May 2028" is answered by the fuller row through the exact tiers above, and if it somehow
+     * reaches here with two rows matching, it refuses rather than picking.
+     */
+    const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june',
+      'july', 'august', 'september', 'october', 'november', 'december'];
+    const monthIndexOf = (token) => {
+      const word = String(token || '').trim().toLowerCase().replace(/\.$/, '');
+      if (!word) return -1;
+      return MONTH_NAMES.findIndex((name) => name === word || (word.length >= 3 && name.startsWith(word)));
+    };
+    const datePartsOf = (text) => {
+      const source = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!source) return null;
+      const year = /\b(19|20)\d{2}\b/.exec(source);
+      const words = source.split(/[^A-Za-z]+/).filter(Boolean);
+      let month = -1;
+      for (const word of words) {
+        const found = monthIndexOf(word);
+        if (found !== -1) { month = found; break; }
+      }
+      if (!year && month === -1) return null;
+      /* A SEASON OR QUARTER IN THE TEXT MAKES IT NOT A PLAIN DATE, and this is checked on both
+       * sides. On the ANSWER it means the stored value already speaks the employer's vocabulary and
+       * the exact tiers own it; on an OPTION it means the row is a term, not a month. */
+      const seasonal = /\b(spring|summer|autumn|fall|winter|q[1-4]|quarter|semester|term|trimester)\b/i.test(source);
+      return { year: year ? Number(year[0]) : null, month, seasonal, hasBoth: Boolean(year) && month !== -1 };
+    };
+    const dateComponentIndex = (texts, wanted) => {
+      const answer = datePartsOf(wanted);
+      // Only an answer carrying BOTH parts can be split; a bare "2028" is already exact-matchable.
+      if (!answer || !answer.hasBoth || answer.seasonal) return -1;
+      const hits = [];
+      for (let index = 0; index < texts.length; index += 1) {
+        const row = datePartsOf(texts[index]);
+        if (!row || row.seasonal) continue;
+        const yearOnly = row.year !== null && row.month === -1 && row.year === answer.year;
+        const monthOnly = row.year === null && row.month !== -1 && row.month === answer.month;
+        const bothMatch = row.hasBoth && row.year === answer.year && row.month === answer.month;
+        if (yearOnly || monthOnly || bothMatch) hits.push(index);
+      }
+      return hits.length === 1 ? hits[0] : -1;
+    };
     const gradedBandIndex = (texts, wanted) => {
       const graded = gradedValueWithScale(wanted);
       if (!graded) return -1;
@@ -574,6 +630,10 @@ const { chromium } = require('playwright');
        * gradedBandIndex for why the answer's own denominator is what bounds this. */
       const band = gradedBandIndex(texts, wanted);
       if (band !== -1) return band;
+      /* Also after both exact tiers, for the same reason: a list that offers the whole date is
+       * answered by the whole date, and only a list asking for one part reaches here. */
+      const datePart = dateComponentIndex(texts, wanted);
+      if (datePart !== -1) return datePart;
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
         if (declineMatches(texts[index], wanted)) refusals.push(index);
