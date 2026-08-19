@@ -26,8 +26,12 @@ function constSource(name, indent, required = true) {
   return rest.slice(0, next === -1 ? rest.length : next);
 }
 
+/* chooseOptionIndex reaches for every tier it has, so this list must carry them all: extracting a
+   subset makes the chooser throw ReferenceError and the suite fails for a reason that has nothing
+   to do with what it is testing. */
 const SRC = ['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'declineMatches',
-  'gradedValueWithScale', 'parseBand', 'gradedBandIndex', 'chooseOptionIndex']
+  'gradedValueWithScale', 'parseBand', 'gradedBandIndex',
+  'MONTH_NAMES', 'monthIndexOf', 'datePartsOf', 'dateComponentIndex', 'chooseOptionIndex']
   .map((name) => constSource(name, 4))
   .join('\n');
 const { chooseOptionIndex, gradedBandIndex, parseBand, gradedValueWithScale } =
