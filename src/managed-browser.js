@@ -353,6 +353,39 @@ const { chromium } = require('playwright');
       }
       return [...new Set(options.filter(Boolean))];
     };
+    /* A LIST OF ONE HAS NOTHING TO CHOOSE BETWEEN, and that is the whole of this tier.
+     *
+     * Employers write acknowledgement rows as STATEMENTS, not as yes/no. Read off a live Optiver
+     * Greenhouse form 2026-08-19, the three acknowledgement controls offered, in full:
+     *
+     *     "I consent to the above."
+     *     "Yes, I have read and agree to Optiver's privacy policies, notices and disclaimers."
+     *     "I am NOT currently in process for another Optiver role" / "I am currently in process..."
+     *
+     * A stored "Yes" matches none of them, so every one was refused and reported back as "required
+     * and is still empty" while the applicant's answer sat in the packet. Nothing was broken; the
+     * answer was simply not on the menu.
+     *
+     * WHY ONE OPTION IS THE SAFE CASE AND TWO IS NOT. With a single row the control offers no
+     * alternative: the only outcomes are "select it" or "leave the required field blank", so an
+     * affirmative answer can only mean the former and there is no second reading to guess between.
+     * The moment a list offers two - the first-preference control above - choosing becomes a claim
+     * about which statement is true of her, and that is hers. This tier therefore refuses at two,
+     * and the refusal is a length check rather than a judgement about wording.
+     *
+     * WHAT BOUNDS IT UPSTREAM, and it is what makes an affirmative safe to act on at all: the
+     * held-declaration veto in isConsentAcknowledgementQuestion runs long before here, so a truth
+     * attestation, a background or reference authorisation, criminal history, health, work
+     * authorisation, age, degree, veteran and EEO questions never carry a replayed answer into this
+     * file. What reaches a single-option control with an affirmative stored against it has already
+     * been classified as the routine consent class. */
+    const AFFIRMATIVE_ANSWER = /^(?:yes|y|agree[d]?|i agree|i consent|consent|accept(?:ed)?|i accept|acknowledge[d]?|i acknowledge|confirm(?:ed)?|i confirm|true)\b/i;
+    const soleOptionIndex = (texts, wanted) => {
+      if (texts.length !== 1) return -1;
+      if (!AFFIRMATIVE_ANSWER.test(clean(wanted))) return -1;
+      // An empty row is not an option, it is a placeholder.
+      return clean(texts[0]) ? 0 : -1;
+    };
     /* A GRADED VALUE AGAINST A LIST OF BANDS IS NOT A NEAR MISS, and it is the only widening this
      * chooser carries. "3.89" against a list offering "3.50 - 4.00" is not a guess between two
      * plausible rows: exactly one band CONTAINS the number and the rest cannot. Measured on this
@@ -628,6 +661,10 @@ const { chromium } = require('playwright');
       /* AFTER BOTH EXACT TIERS, NEVER BEFORE THEM. A list that literally offers the answer is
        * answered by the answer; only a list that offers bands instead of values reaches here. See
        * gradedBandIndex for why the answer's own denominator is what bounds this. */
+      /* After both exact tiers, like every widening here: a one-row list that literally offers the
+       * stored answer is already handled above, and only a statement-worded row reaches this. */
+      const sole = soleOptionIndex(texts, wanted);
+      if (sole !== -1) return sole;
       const band = gradedBandIndex(texts, wanted);
       if (band !== -1) return band;
       /* Also after both exact tiers, for the same reason: a list that offers the whole date is
