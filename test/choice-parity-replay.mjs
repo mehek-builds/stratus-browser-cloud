@@ -1039,6 +1039,136 @@ const workableCheckboxFixture = `<!doctype html><meta charset="utf-8"><title>Wor
   }());
 </script>`;
 
+/* R-076: THE GREENHOUSE REMIX BOARD'S REACT SELECT, WHOSE SHELL IS RECOGNISED AND WHOSE MENU IS NOT
+ * IN IT.
+ *
+ * Measured on the live DV Trading form (job-boards.greenhouse.io, the Remix React UI, 2026-08-18).
+ * The ancestor chain above the combobox input is copied from that page: select__input,
+ * select__input-container, select__value-container, select__control, a classless div,
+ * "select-shell remix-css-...-container", select__container, select. The shell matches the
+ * runner's scopedMenu xpath, and the widget PORTALS its menu to <body> in a .select__menu-portal
+ * node, naming it through aria-controls="react-select-...-listbox" exactly while it is open.
+ *
+ * A read-only probe against the live page proved the raw sequence works: click opens, typing
+ * filters, clicking the option commits a .select__single-value. The shipped runner still lost it,
+ * because every option query was bounded to the shell, which never holds a row. It opened the
+ * control, typed the correct reviewed answer into the search box, clicked nothing, and the widget
+ * dropped the uncommitted text on blur: "January 2028 - July 2028" was typed and the control ended
+ * empty, reported as the value not persisting. The '-typed' witness below records that the search
+ * box really did receive text on the unfixed path, so this fixture demonstrably reproduces the
+ * live defect rather than a lookalike; blur clears the input the way react-select does, which is
+ * the "drop".
+ *
+ * On its own page for the same reason portalFixture is: the portal lands on <body>, and a portal
+ * sharing a page with other cases' menus would let a page-scoped defect pass by accident. */
+const remixPortalFixture = `<!doctype html><meta charset="utf-8"><title>Remix Portal Fixture</title>
+<div class="select">
+  <div class="select__container">
+    <label for="react-select-grad-input">When will you graduate from your degree program?</label>
+    <div class="select-shell remix-css-b62m3t-container">
+      <div>
+        <div class="select__control">
+          <div class="select__value-container">
+            <div class="select__placeholder" id="grad-placeholder">Select...</div>
+            <div class="select__input-container">
+              <input id="react-select-grad-input" class="select__input" type="text" role="combobox"
+                     aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" autocomplete="off">
+            </div>
+          </div>
+          <div class="select__indicators">
+            <div class="select__indicator select__dropdown-indicator" aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="grad-answer"></div><div id="grad-shown"></div>
+<div id="grad-menu-parent"></div><div id="grad-typed"></div>
+<script>
+  (function () {
+    var input = document.getElementById('react-select-grad-input');
+    var control = document.querySelector('.select__control');
+    var values = document.querySelector('.select__value-container');
+    var placeholder = document.getElementById('grad-placeholder');
+    var answer = document.getElementById('grad-answer');
+    var ROWS = ['January 2028 - July 2028', 'August 2028 - December 2028', 'January 2029 - July 2029'];
+    var chosen = '';
+    function renderChosen() {
+      var existing = values.querySelector('.select__single-value');
+      if (existing) existing.remove();
+      if (!chosen) { placeholder.style.display = ''; answer.textContent = ''; return; }
+      placeholder.style.display = 'none';
+      var node = document.createElement('div');
+      node.className = 'select__single-value';
+      node.textContent = chosen;
+      values.prepend(node);
+      answer.textContent = chosen;
+      // Never cleared: what this control was ever made to hold, so an empty control can be told
+      // apart from a click that never happened. Same witness as the React blocks above.
+      document.getElementById('grad-shown').textContent = chosen;
+    }
+    function close() {
+      var portal = document.getElementById('grad-portal');
+      if (portal) portal.remove();
+      input.removeAttribute('aria-controls');
+      input.setAttribute('aria-expanded', 'false');
+    }
+    function renderMenu() {
+      var portal = document.getElementById('grad-portal');
+      if (portal) portal.remove();
+      portal = document.createElement('div');
+      portal.id = 'grad-portal';
+      portal.className = 'select__menu-portal';
+      var menu = document.createElement('div');
+      menu.className = 'select__menu';
+      var list = document.createElement('div');
+      list.className = 'select__menu-list';
+      list.setAttribute('role', 'listbox');
+      list.id = 'react-select-3-listbox';
+      var query = input.value.trim().toLowerCase();
+      ROWS.filter(function (row) {
+        return !query || row.toLowerCase().indexOf(query) >= 0;
+      }).forEach(function (row, index) {
+        var option = document.createElement('div');
+        option.className = 'select__option';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', row === chosen ? 'true' : 'false');
+        option.id = 'react-select-3-option-' + index;
+        option.textContent = row;
+        function take(event) {
+          if (event) event.preventDefault();
+          chosen = row;
+          input.value = '';
+          renderChosen();
+          close();
+        }
+        option.addEventListener('mousedown', take);
+        option.addEventListener('click', take);
+        list.appendChild(option);
+      });
+      menu.appendChild(list);
+      portal.appendChild(menu);
+      document.body.appendChild(portal);
+      input.setAttribute('aria-controls', 'react-select-3-listbox');
+      input.setAttribute('aria-expanded', 'true');
+      // A witness that the menu really left the shell, or this case proves nothing.
+      document.getElementById('grad-menu-parent').textContent = portal.parentElement.tagName;
+    }
+    control.addEventListener('mousedown', function () {
+      if (input.getAttribute('aria-expanded') === 'true') close(); else renderMenu();
+    });
+    input.addEventListener('input', function () {
+      // Never cleared: proof the runner typed into the search box, which is what the live report
+      // meant by the value being typed and then dropped.
+      if (input.value) document.getElementById('grad-typed').textContent = input.value;
+      renderMenu();
+    });
+    input.addEventListener('blur', function () { input.value = ''; close(); });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') close(); });
+  }());
+</script>`;
+
 const server = http.createServer((request, response) => {
   // 'close' matters: a keep-alive socket stops Chromium ever reporting networkidle.
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
@@ -1047,6 +1177,7 @@ const server = http.createServer((request, response) => {
     '/gate': gateFixture,
     '/gate-select2': select2GateFixture,
     '/portal': portalFixture,
+    '/remix-portal': remixPortalFixture,
     '/workable-checkbox': workableCheckboxFixture
   };
   response.end(pages[route] || fixture);
@@ -1837,6 +1968,46 @@ for (const entry of NEGATED) {
     filled: [],
     skipped: [`question:portal-sponsor: ${unmatchedReason('No')}`]
   });
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 19a. R-076: A RECOGNISED SHELL WHOSE MENU IS PORTALLED MUST STILL COMMIT THE ANSWER.
+ *
+ * The complement of case 19, and the case the menuRoot comment used to call known and unchanged.
+ * There the control had NO recognisable shell, so the declared menu was the only root and it was
+ * consulted. Here the control has the Greenhouse Remix board's "select-shell remix-css-..."
+ * ancestor, so scopedMenu is set - and the menu is not in it, because the widget portals it to
+ * <body> while naming it through aria-controls. On the shipped runner every option query stayed
+ * bounded to the shell: the run opened the control, typed the correct reviewed answer into the
+ * search box, clicked nothing, and the widget dropped the uncommitted text on blur. Live on the
+ * DV Trading form (2026-08-18) that was "January 2028 - July 2028" typed and the control still
+ * empty, reported as the value not persisting.
+ *
+ * The action is a plain 'fill' aimed at the combobox input, which is the shape the live packet
+ * sends. What the case pins: the menu really rendered on <body>, the exact stored answer ends up
+ * held by the control, and the run reports the field filled with nothing skipped.
+ * ------------------------------------------------------------------------------------------- */
+{
+  const GRAD_RANGE = 'January 2028 - July 2028';
+  const result = await replay([
+    { type: 'fill', selector: '#react-select-grad-input', value: GRAD_RANGE, label: 'question:grad-range' },
+    { type: 'extract', selector: '#grad-answer' },
+    { type: 'extract', selector: '#grad-shown' },
+    { type: 'extract', selector: '#grad-menu-parent' }
+  ], { url: `${base}remix-portal` });
+  assert.equal(valueOf(result, '#grad-menu-parent'), 'BODY',
+    'the fixture must really portal its menu out of the recognised shell, or this case proves nothing');
+  assert.deepEqual({
+    page: valueOf(result, '#grad-answer'),
+    everHeld: valueOf(result, '#grad-shown'),
+    filled: result.filledFields,
+    skipped: result.skipped
+  }, {
+    page: GRAD_RANGE,
+    everHeld: GRAD_RANGE,
+    filled: ['question:grad-range'],
+    skipped: []
+  }, 'a portalled menu the control itself names is this control\'s own menu, and the answer on it must be committed');
 }
 
 /* ---------------------------------------------------------------------------------------------

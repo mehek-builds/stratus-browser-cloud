@@ -104,6 +104,11 @@ async function choose(rows, target, extra = '') {
        menu is never consulted. Declaring it keeps a runner that reads it executable, and pins that
        a scoped widget does not depend on it. */
     let declaredMenu = null;
+    /* Whether the widget portalled its menu out of its own shell. False here on purpose, matching
+       declaredMenu above: this harness renders its rows inside the injected scopedMenu, so the
+       portal arm is never the one under test, and declaring the flag keeps a runner that reads it
+       executable while pinning that a shell-rendered menu does not depend on it. */
+    let menuIsPortalled = false;
     ${BASE}
     ${INNER}
     return async (target) => ({
