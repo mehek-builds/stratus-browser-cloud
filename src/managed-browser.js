@@ -2074,10 +2074,30 @@ const { chromium } = require('playwright');
        * ambiguity guard still applies on the new root.
        */
       let menuIsPortalled = false;
+      /* AND THE MENU THAT RENDERED BESIDE ITS SHELL, which is the same lesson one door over. A
+       * recognised shell is not proof the menu renders inside it (that is menuIsPortalled, above),
+       * and it is not proof the widget declares its menu either: Select2 v3 does neither. Its
+       * .select2-container holds the chosen value and the search box, its results list renders
+       * OUTSIDE it, and it says no aria-controls at all. Measured on the choice-parity Select2
+       * fixture after the both-directions shell read landed: the label path now finds the shell
+       * DOWN from the question block, every tier searches that shell, the shell never holds a row,
+       * and "Computer Science" sits unclicked in the open list one sibling away. Before that
+       * change the label path had no scopedMenu and the widened tier searched the question BLOCK,
+       * which is what found the row for as long as it did.
+       *
+       * So a shell that holds no rows and declares no menu is no better informed than a bare
+       * control, and it degrades to exactly the bare control's boundary: this question's own
+       * container. That is not a widening. The container is the block the whole file already
+       * treats as one question, every ambiguity guard runs unchanged on it, and another question's
+       * rows remain exactly as unreachable as before. */
+      let menuIsBesideShell = false;
       const readMenuPortal = async () => {
         menuIsPortalled = Boolean(scopedMenu && declaredMenu)
           && (await scopedMenu.locator(OPTION_NODES).count()) === 0
           && (await declaredMenu.locator(OPTION_NODES).count()) > 0;
+        menuIsBesideShell = Boolean(scopedMenu) && !menuIsPortalled
+          && (await scopedMenu.locator(OPTION_NODES).count()) === 0
+          && (await container.locator(OPTION_NODES).count()) > 0;
       };
       // Bounded, and only spent where it can buy something. With a recognisable widget the wait is
       // for THAT widget's own menu and ends the moment it renders. With no recognisable widget there
@@ -2100,6 +2120,10 @@ const { chromium } = require('playwright');
           await readDeclaredMenu(control);
           if (declaredMenu
             && await declaredMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+          // The third place the widget's menu can be: beside its shell, inside the question's own
+          // block. Select2 v3 renders there and declares nothing, so without this check that shape
+          // paid the full timeout for a menu that was already open. See menuIsBesideShell.
+          if (await container.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
           if (Date.now() >= deadline) return;
           await page.waitForTimeout(50).catch(() => undefined);
         }
@@ -2163,7 +2187,9 @@ const { chromium } = require('playwright');
        * that shape after the control is opened, and hands BOTH roots the menu the control itself
        * declared, which is the same author-stated one-question boundary this comment defends.
        */
-      const menuRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? declaredMenu);
+      const menuRoot = () => (menuIsPortalled
+        ? declaredMenu
+        : (menuIsBesideShell ? container : scopedMenu ?? declaredMenu));
       /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
        *
        * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
@@ -2191,7 +2217,9 @@ const { chromium } = require('playwright');
        * safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls that
        * work today; the scoping is what makes the refusal rare and the answer right.
        */
-      const widenRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? container);
+      const widenRoot = () => (menuIsPortalled
+        ? declaredMenu
+        : (menuIsBesideShell ? container : scopedMenu ?? container));
       /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
        *
        * The ambiguity guards below refuse a tier that offers two, so counting NODES rather than rows
