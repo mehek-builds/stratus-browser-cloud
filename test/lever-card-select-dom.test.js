@@ -218,3 +218,18 @@ test('a bare opener never borrows a visible select, and never one of two', async
   `);
   assert.deepEqual(results, [null, null]);
 });
+
+test('the borrow requires the opener to live inside the select’s own widget', async () => {
+  const selector = await evaluateWith(mytosCard(`
+    <li class="application-question"><div>
+      <div class="application-field">
+        <select name="cards[d][backing]" aria-hidden="true"><option>1</option></select>
+        <div class="unrelated"></div>
+        <span role="combobox" class="stray"></span>
+      </div>
+    </div></li>`), `
+    const el = document.querySelector('span.stray');
+    return helpers.durableSelectorOf(el, helpers.blockOf(el));
+  `);
+  assert.equal(selector, null);
+});

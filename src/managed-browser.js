@@ -6281,9 +6281,16 @@ const { chromium } = require('playwright');
               const backing = selects.length === 1 ? selects[0] : null;
               const backingHidden = backing && (backing.getAttribute('aria-hidden') === 'true'
                 || /(?:^|\s)(?:select2-hidden-accessible|chosen-select)(?:\s|$)/.test(backing.className || ''));
-              const backingName = backingHidden && backing.getAttribute('name');
+              /* AND THE WIDGET THE OPENER LIVES IN MUST BE THE SELECT'S OWN. Select2 and Chosen
+               * both render their widget as the select's immediate next sibling, so an opener
+               * inside that sibling is this select's rendering and an opener anywhere else in the
+               * block is some other question's. Without this, an unnamed input-backed combobox
+               * sharing a broad block with one widgetized select could borrow a foreign name. */
+              const widget = backingHidden && backing.nextElementSibling;
+              const openerIsItsWidget = Boolean(widget && (widget === el || widget.contains(el)));
+              const backingName = openerIsItsWidget && backing.getAttribute('name');
               if (backingName) return '[name="' + backingName.replace(/["\\]/g, '\\$&') + '"]';
-              if (backingHidden && backing.id && !/^[0-9]/.test(backing.id)) return '#' + CSS.escape(backing.id);
+              if (openerIsItsWidget && backing.id && !/^[0-9]/.test(backing.id)) return '#' + CSS.escape(backing.id);
             }
             return null;
           }
