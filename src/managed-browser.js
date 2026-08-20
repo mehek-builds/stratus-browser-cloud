@@ -2686,6 +2686,99 @@ const { chromium } = require('playwright');
          */
         return false;
       };
+      /* REAL ROWS, NOT THE WIDGET TELLING HER THERE ARE NONE.
+       *
+       * OPTION_NODES' loose class match ('[class*="option"]') is right for every existing caller,
+       * which only ever runs it against a menu that already has at least one real row to find. It
+       * is wrong for a caller whose whole question is "are there zero": react-select's own empty
+       * state renders as '<div class="select__menu-notice select__menu-notice--no-options">No
+       * options</div>', and "no-options" contains the substring "option". Measured directly against
+       * this exact fixture shape: unfiltered, OPTION_NODES counted that notice as one offered row,
+       * so a query that returned genuinely nothing read back as "found one option" and the narrowed
+       * retry below never ran at all. This drops any offered row whose own class name contains
+       * "notice" without narrowing OPTION_NODES itself, which every other tier in this file still
+       * depends on staying exactly as loose as it is. Indices are returned, not a count, for the
+       * same reason offeredRows returns them: the caller that wants the ONE surviving row still
+       * needs to say which one. */
+      const realOfferedRows = async (root) => {
+        const rows = root.locator(OPTION_NODES);
+        const shown = await offeredRows(rows);
+        if (shown.length === 0) return { rows, indices: shown };
+        const isNotice = await rows.evaluateAll(
+          (nodes, indices) => indices.map((index) => /\bnotice\b/i.test(nodes[index].className || '')),
+          shown,
+        ).catch(() => shown.map(() => false));
+        return { rows, indices: shown.filter((_, position) => !isNotice[position]) };
+      };
+      /* HOW MANY ROWS THE MENU IS OFFERING RIGHT NOW, unfiltered by name - the same primitive
+       * chooseFromOfferedRows uses, reused here for a narrower question: not "which row matches",
+       * only "did the search return anything at all". Scoped to menuRoot() for the reason menuRoot
+       * exists: an unscoped query on the live Optiver form returns the phone-country picker's 244
+       * permanently-rendered rows, which is not "the search returned results". */
+      const renderedRowCount = async () => {
+        const root = menuRoot();
+        if (!root) return 0;
+        return (await realOfferedRows(root)).indices.length;
+      };
+      /* A REMOTE-SEARCHED FIELD'S ZERO IS A DIFFERENT FACT FROM A CLOSED LIST'S ZERO.
+       *
+       * Every other tier in this file treats "the menu offers nothing named this" as the question
+       * having no such option, correctly, because a closed list (a country dropdown, a Yes/No pair,
+       * a school picker) is exhaustive: what it does not offer does not exist on the form. A
+       * server-searched location field is not exhaustive - it is a live geocoder answering ONE
+       * query string - so a stored answer written for a different kind of field can be a real place
+       * and still return nothing, because the QUERY was never one the geocoder resolves.
+       *
+       * Measured live on IMC Trading's Greenhouse form, 2026-08-20: her stored city answer is
+       * "Dubai, U.A.E." - correct and required verbatim on every plain free-text city field - and a
+       * real Google-Places-backed combobox returns ZERO results for that exact string. The same
+       * field returns "Dubai, United Arab Emirates" as its first and only result for "Dubai" alone.
+       * The country abbreviation is not a spelling difference the matching tiers below can forgive;
+       * it is a query the geocoder never runs.
+       *
+       * SCOPED AS NARROWLY AS THE EVIDENCE ALLOWS. This fires only when the untouched typed value
+       * produced a menu with LITERALLY NOTHING in it - never when rows exist but none match, which
+       * is clickMatchingOption's job and must not be pre-empted by a query rewrite. It only tries
+       * the text before the first comma, once, and only when a comma is present: "Yes, I agree" and
+       * a stored discipline with a comma in it never reach this branch, because a real consent or
+       * taxonomy list is closed and a genuine zero there means what it always meant. And it takes
+       * the result ONLY if narrowing produces EXACTLY ONE row, whose own text confirms it opens with
+       * the city she actually typed - the geocoder's own single answer to the only query that could
+       * ever have worked, not a guess among several candidates. */
+      const takeNarrowedGeocodeMatch = async (control, option) => {
+        if (!option.includes(',')) return false;
+        if ((await renderedRowCount()) !== 0) return false;
+        const city = option.slice(0, option.indexOf(',')).trim();
+        if (!city) return false;
+        await control.fill(city).catch(async () => {
+          await page.keyboard.press('Control+A').catch(() => undefined);
+          await page.keyboard.press('Backspace').catch(() => undefined);
+          await page.keyboard.type(city, { delay: 5 }).catch(() => undefined);
+        });
+        await page.waitForTimeout(1200).catch(() => undefined);
+        await readDeclaredMenu(control);
+        await readMenuPortal();
+        const root = menuRoot();
+        if (!root) return false;
+        const { rows, indices: offers } = await realOfferedRows(root);
+        if (offers.length !== 1) return false;
+        const rowText = clean(await rows.nth(offers[0]).textContent().catch(() => ''));
+        if (!rowText || !rowText.toLowerCase().startsWith(city.toLowerCase())) return false;
+        if (!await clickIfPresent(rows.nth(offers[0]))) return false;
+        /* BOTH PROVENANCE VARIABLES, never just one - the same pair chooseFromOfferedRows sets for
+         * its own list-shaped tiers (a band, a sole consent row, a date component), because this is
+         * that same shape: the clicked row's text ("Dubai, United Arab Emirates") does not, and
+         * structurally cannot, contain the stored answer's text ("Dubai, U.A.E.") the way an
+         * ordinary name-tier click's row does. verifyChoiceInContainer's chosen-path acceptance for
+         * that shape is gated on chooserTierAnswer specifically (see its own comment: "the
+         * provenance travels in chooserTierAnswer and is '' for every name-tier click") - setting
+         * only lastClickedOptionAnswer, as an ordinary name-tier commit does, would leave this
+         * click correctly made and then WITHDRAWN by the verifier for not containing text it was
+         * never going to contain. */
+        lastClickedOptionAnswer = clean(option);
+        lastChooserTierAnswer = clean(option);
+        return true;
+      };
       const searchFor = async (control, target) => {
         for (const option of answerOptions(target)) {
           // Only blank the search box when the widget is holding nothing. See (1) above.
@@ -2706,6 +2799,7 @@ const { chromium } = require('playwright');
           // rows only now, and the portal verdict taken before typing would still say false.
           await readDeclaredMenu(control);
           await readMenuPortal();
+          if (await takeNarrowedGeocodeMatch(control, option)) return true;
           const refusalsBefore = choiceRefusals;
           if (await clickMatchingOption(target)) return true;
           // And a refusal ends the search too, rather than being narrowed away by the next query.
