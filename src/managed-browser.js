@@ -851,6 +851,39 @@ const { chromium } = require('playwright');
       };
       return actual.some((candidate) => optionMatches(candidate, expected) || sameAnswer(candidate));
     };
+    /* THE SAME BOUNDED WINDOW choiceLanded GIVES A REACT SELECT'S REPAINT, OFFERED TO EVERY OTHER
+     * VERIFICATION IN THIS FILE THAT USED TO READ A CONTROL BACK EXACTLY ONCE.
+     *
+     * PR #54/#77 closed this race for one control shape: a react-select whose chosen-value node can
+     * commit on a later render than the one its click dispatched into, so a single read taken right
+     * after the click can catch the control between empty and holding the right answer. choiceLanded
+     * answered that with a bounded retry - up to 500ms across eleven reads of the exact same
+     * predicate a bare read would have used once - and withdrawRefusedChoice took one more such read
+     * before it would clear anything.
+     *
+     * Every OTHER control-verification in this file never got that treatment, because the race is a
+     * property of a controlled component's render lagging its own click, not of react-select
+     * specifically, and nothing here restricts a controlled radio, checkbox or native select from the
+     * same lag. Traced 2026-08-20 against a fresh run on the real account minutes after PR #77 went
+     * live: Mytos, Optiver and DGA all reported "did not persist" / "did not stay selected" on
+     * fields whose stored answers were correct and unchanged on retry - pronouns, a terms-and-
+     * conditions checkbox, a yes/no relocation and work-authorization toggle, and discipline/location
+     * selects among them - the same product-facing symptom as the react-select race, on control
+     * shapes pickRadioOption, the lone-checkbox arm and selectNativeOption's callers had only ever
+     * read once.
+     *
+     * This is deliberately NOT a looser check. It runs the exact same predicate the caller already
+     * had - isChecked, verifyFilled - and asks it again on the same schedule, so a genuinely wrong or
+     * different value that fails on read one still fails on read eleven; nothing here is cleared, so
+     * there is no analogue of withdrawRefusedChoice's confirm-before-clear gate to add - only more
+     * chances for a correct answer that has not painted yet to be recognised as correct. */
+    const settleVerified = async (check) => {
+      for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
+        if (await check()) return true;
+        if (elapsed < 500) await page.waitForTimeout(50).catch(() => undefined);
+      }
+      return false;
+    };
     /* A NATIVE SELECT IS A CHOICE CONTROL EVEN WHEN THE CALLER SAYS FILL.
      *
      * Discovery gives the caller a durable selector and the control type, but a later action still
@@ -2072,9 +2105,15 @@ const { chromium } = require('playwright');
           const byFor = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
           (byFor || element.closest('label') || element).click();
         }).catch(() => undefined);
-        await page.waitForTimeout(150).catch(() => undefined);
       }
-      return await isChecked() ? 'checked' : 'not-checked';
+      // See settleVerified's own comment: a controlled radio or checkbox can commit its checked
+      // state on a render after the one the check()/label-click above dispatched into, and a single
+      // read straight afterward can catch it between the two. Measured 2026-08-20 on Optiver's
+      // pronoun and terms-and-conditions controls and DGA's relocation and work-authorization
+      // radios: the click landed, and the one fixed-wait read this used to make (150ms, once) still
+      // caught several of them mid-repaint and reported "the option was clicked and did not stay
+      // selected" for an option that, a moment later, had.
+      return await settleVerified(isChecked) ? 'checked' : 'not-checked';
     };
     /* THE BLOCK THAT OWNS ONE QUESTION'S OPTIONS.
      *
@@ -6641,7 +6680,10 @@ const { chromium } = require('playwright');
             if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
-          if (action.label && await verifyFilled(target, action.value || '')) filledFields.push(action.label);
+          // See settleVerified: a native select's own DOM value is set synchronously by the click,
+          // but a board that mirrors it into a controlled React value prop can still repaint the
+          // rendered selectedIndex on a later tick, and this used to read verifyFilled exactly once.
+          if (action.label && await settleVerified(() => verifyFilled(target, action.value || ''))) filledFields.push(action.label);
           else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
           continue;
         }
@@ -6975,7 +7017,10 @@ const { chromium } = require('playwright');
           const total = await lone.count();
           if (total === 1 && /^yes$/i.test(wanted)) {
             await lone.first().check().catch(() => undefined);
-            if (await lone.first().evaluate((element) => element.checked === true).catch(() => false)) {
+            // A single "I agree" checkbox - a terms-and-conditions acknowledgement is the measured
+            // case - is exactly the shape pickRadioOption's own settleVerified call now covers, and
+            // this arm had none of it: one check() and one immediate read, no retry at all.
+            if (await settleVerified(() => lone.first().evaluate((element) => element.checked === true).catch(() => false))) {
               if (action.label) filledFields.push(action.label);
               continue;
             }
@@ -7010,7 +7055,11 @@ const { chromium } = require('playwright');
          * button inside THIS question's container, fillCustomChoice is the react-select path that
          * the same defect class was already fixed in. Nothing here runs on a fill that worked.
          */
-        let persisted = await verifyFilled(field, action.value || '');
+        // See settleVerified: this is also where the shape.tag === 'select' branch above lands once
+        // selectNativeOption has clicked an option, so a controlled select whose rendered value
+        // repaints a tick after its DOM value commits gets the same bounded re-read a react-select
+        // does, rather than the one immediate check this used to make.
+        let persisted = await settleVerified(() => verifyFilled(field, action.value || ''));
         if (!persisted) {
           if (await pickOptionPill(container, action.value || '')) persisted = true;
           else if (await fillCustomChoice(container, action.value || '')) {
