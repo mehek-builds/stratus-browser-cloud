@@ -353,6 +353,39 @@ const { chromium } = require('playwright');
       }
       return [...new Set(options.filter(Boolean))];
     };
+    /* A LIST OF ONE HAS NOTHING TO CHOOSE BETWEEN, and that is the whole of this tier.
+     *
+     * Employers write acknowledgement rows as STATEMENTS, not as yes/no. Read off a live Optiver
+     * Greenhouse form 2026-08-19, the three acknowledgement controls offered, in full:
+     *
+     *     "I consent to the above."
+     *     "Yes, I have read and agree to Optiver's privacy policies, notices and disclaimers."
+     *     "I am NOT currently in process for another Optiver role" / "I am currently in process..."
+     *
+     * A stored "Yes" matches none of them, so every one was refused and reported back as "required
+     * and is still empty" while the applicant's answer sat in the packet. Nothing was broken; the
+     * answer was simply not on the menu.
+     *
+     * WHY ONE OPTION IS THE SAFE CASE AND TWO IS NOT. With a single row the control offers no
+     * alternative: the only outcomes are "select it" or "leave the required field blank", so an
+     * affirmative answer can only mean the former and there is no second reading to guess between.
+     * The moment a list offers two - the first-preference control above - choosing becomes a claim
+     * about which statement is true of her, and that is hers. This tier therefore refuses at two,
+     * and the refusal is a length check rather than a judgement about wording.
+     *
+     * WHAT BOUNDS IT UPSTREAM, and it is what makes an affirmative safe to act on at all: the
+     * held-declaration veto in isConsentAcknowledgementQuestion runs long before here, so a truth
+     * attestation, a background or reference authorisation, criminal history, health, work
+     * authorisation, age, degree, veteran and EEO questions never carry a replayed answer into this
+     * file. What reaches a single-option control with an affirmative stored against it has already
+     * been classified as the routine consent class. */
+    const AFFIRMATIVE_ANSWER = /^(?:yes|y|agree[d]?|i agree|i consent|consent|accept(?:ed)?|i accept|acknowledge[d]?|i acknowledge|confirm(?:ed)?|i confirm|true)\b/i;
+    const soleOptionIndex = (texts, wanted) => {
+      if (texts.length !== 1) return -1;
+      if (!AFFIRMATIVE_ANSWER.test(clean(wanted))) return -1;
+      // An empty row is not an option, it is a placeholder.
+      return clean(texts[0]) ? 0 : -1;
+    };
     /* A GRADED VALUE AGAINST A LIST OF BANDS IS NOT A NEAR MISS, and it is the only widening this
      * chooser carries. "3.89" against a list offering "3.50 - 4.00" is not a guess between two
      * plausible rows: exactly one band CONTAINS the number and the rest cannot. Measured on this
@@ -628,6 +661,10 @@ const { chromium } = require('playwright');
       /* AFTER BOTH EXACT TIERS, NEVER BEFORE THEM. A list that literally offers the answer is
        * answered by the answer; only a list that offers bands instead of values reaches here. See
        * gradedBandIndex for why the answer's own denominator is what bounds this. */
+      /* After both exact tiers, like every widening here: a one-row list that literally offers the
+       * stored answer is already handled above, and only a statement-worded row reaches this. */
+      const sole = soleOptionIndex(texts, wanted);
+      if (sole !== -1) return sole;
       const band = gradedBandIndex(texts, wanted);
       if (band !== -1) return band;
       /* Also after both exact tiers, for the same reason: a list that offers the whole date is
@@ -1217,6 +1254,15 @@ const { chromium } = require('playwright');
      */
     let lastClickedOptionText = '';
     let lastClickedOptionAnswer = '';
+    /* AND WHETHER THE CLICK WAS MADE BY THE LIST-SHAPED TIERS, carrying the answer it was made
+     * for. chooseFromOfferedRows (inside fillCustomChoice) commits a row the answer does not
+     * name - the sole statement of a one-option consent, the band that contains a graded value,
+     * the year of a month-and-year answer - so the clicked-row rule in verifyChoiceInContainer,
+     * which demands the row CONTAIN the answer, would withdraw exactly the rows those tiers are
+     * for. This is the provenance that lets the verifier ask the right question instead: is the
+     * control holding the WHOLE row that tier clicked, for the answer this action is filling.
+     * Empty for every click the name tiers make, so nothing about their verification changes. */
+    let lastChooserTierAnswer = '';
     /* THE STATE THE CONTROL WAS IN WHEN THIS RUN REACHED IT, written by fillCustomChoice and read by
      * the withdrawal below. A refused click has to be put back, and "back" is this. */
     let lastChoiceArrival = { kind: 'empty', value: '' };
@@ -1302,7 +1348,7 @@ const { chromium } = require('playwright');
      * 'unknown' either way, and drawing a positive one out of a blob was the part that was wrong.
      */
     let lastChoiceUnreadable = false;
-    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer) => {
+    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer) => {
       lastChoiceUnreadable = false;
       /* AND A JAPANESE ANSWER IS NOT A BLANK. normalized() keeps only [a-z0-9], so it erases a
        * Japanese, Arabic, Cyrillic, Greek or Chinese string entirely, and optionMatchesExactly
@@ -1432,6 +1478,25 @@ const { chromium } = require('playwright');
        */
       const row = clean(clickedOptionText || '').toLowerCase();
       const shown = clean(text).toLowerCase();
+      /* A ROW THE LIST-SHAPED TIERS CHOSE DOES NOT CONTAIN THE ANSWER, BY CONSTRUCTION, and the
+       * clicked-row rule below would therefore withdraw every one of their correct commits: a
+       * one-option consent's "I consent to the above." does not contain "Yes", "3.50 - 4.00" does
+       * not contain "3.89/4.0", and "2028" does not contain "May 2028". For those clicks the
+       * honest question is not "does the row carry the answer" - the tier's own suite pins that
+       * the tier may say it does - but "did the row the tier clicked PERSIST as the control's
+       * value". So this accepts exactly that, and nothing looser:
+       *   - the click was made by chooseFromOfferedRows FOR the answer this action is verifying
+       *     (the provenance travels in chooserTierAnswer and is '' for every name-tier click, so
+       *     their verification is unchanged);
+       *   - the control publishes a chosen value (an 'unknown' widget keeps the unreadable
+       *     treatment it has);
+       *   - and that value is the WHOLE clicked row, not a fragment of it. The near-miss refusal
+       *     above still runs first and still cannot be reached past. */
+      if (clean(chooserTierAnswer || '') && holdsAnswer(chooserTierAnswer, expected)
+        && state.kind === 'chosen' && row && shown && row === shown) {
+        lastChoiceUnreadable = false;
+        return true;
+      }
       if (!row || shown.length < 2 || !row.includes(shown)) return false;
       // Script-aware for the same reason the first rule is: comparing the clicked answer against the
       // expected one through normalized() alone reads two non-Latin strings as one blank, and this
@@ -1641,7 +1706,7 @@ const { chromium } = require('playwright');
       // React-controlled choices can publish their selected value on a later render. Give that
       // exact value a bounded window before withdrawing anything the option click may have set.
       for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
-        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer)) {
+        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer)) {
           await unmarkChoice(container);
           return true;
         }
@@ -1915,6 +1980,7 @@ const { chromium } = require('playwright');
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
       lastClickedOptionText = '';
       lastClickedOptionAnswer = '';
+      lastChooserTierAnswer = '';
       // Whether this call ever got as far as OPENING something. It separates "this block holds no
       // control I can drive" from "I drove the control and its list does not carry her answer",
       // which are the same 'false' to the caller and are opposite sentences to the applicant.
@@ -1944,10 +2010,23 @@ const { chromium } = require('playwright');
       // the click, before the menu had rendered, so the page-wide sweep was reached every time. The
       // menu now gets the same bounded grace the optional pre-check already gives asynchronous
       // controls, and there is no page-wide sweep left to fall through to.
-      const menuScope = container.locator(
-        'xpath=ancestor-or-self::*[contains(@class,"select__container") or contains(@class,"select-shell") or contains(@class,"select2-container")][1]'
-      );
-      const scopedMenu = (await menuScope.count()) > 0 ? menuScope : undefined;
+      /* BOTH DIRECTIONS, for the same measured reason clearChoiceControl reads both. The fill
+       * branch hands in '.select__input-container', so the shell is an ANCESTOR of the container;
+       * fillByLabelText hands in the question's BLOCK, so the shell is a DESCENDANT, and the
+       * ancestor-only read left scopedMenu unset on every combobox that arrived by label. That
+       * unset scope is not a smaller version of the same behaviour, it is three behaviours gone at
+       * once: waitForMenu degrades to a flat 150ms pause that the measured Greenhouse menus
+       * (555-563ms) always lose, menuIsPortalled can never become true so the R-076 portalled
+       * menus are unreachable, and widenRoot falls back to a container that holds no rows. On a
+       * form where the backend's trimmer leaves each question ONE fillByLabelText, that one action
+       * is the label path, so the highest-volume rendering lost all three exactly where no retry
+       * exists. Downwards first, per the ordering note on clearChoiceControl: only a container
+       * with nothing shell-shaped under it is itself part of one. */
+      const shellDown = container.locator('xpath=(descendant::*[' + CHOICE_SHELL_CLASSES + '])[1]');
+      const shellUp = container.locator('xpath=ancestor-or-self::*[' + CHOICE_SHELL_CLASSES + '][1]');
+      const scopedMenu = (await shellDown.count()) > 0
+        ? shellDown
+        : ((await shellUp.count()) > 0 ? shellUp : undefined);
       /* THE MENU THE OPENED CONTROL SAYS IS ITS OWN, read off the control after it is opened and
        * never guessed. See menuRoot below for what it replaces and why.
        *
@@ -1995,10 +2074,30 @@ const { chromium } = require('playwright');
        * ambiguity guard still applies on the new root.
        */
       let menuIsPortalled = false;
+      /* AND THE MENU THAT RENDERED BESIDE ITS SHELL, which is the same lesson one door over. A
+       * recognised shell is not proof the menu renders inside it (that is menuIsPortalled, above),
+       * and it is not proof the widget declares its menu either: Select2 v3 does neither. Its
+       * .select2-container holds the chosen value and the search box, its results list renders
+       * OUTSIDE it, and it says no aria-controls at all. Measured on the choice-parity Select2
+       * fixture after the both-directions shell read landed: the label path now finds the shell
+       * DOWN from the question block, every tier searches that shell, the shell never holds a row,
+       * and "Computer Science" sits unclicked in the open list one sibling away. Before that
+       * change the label path had no scopedMenu and the widened tier searched the question BLOCK,
+       * which is what found the row for as long as it did.
+       *
+       * So a shell that holds no rows and declares no menu is no better informed than a bare
+       * control, and it degrades to exactly the bare control's boundary: this question's own
+       * container. That is not a widening. The container is the block the whole file already
+       * treats as one question, every ambiguity guard runs unchanged on it, and another question's
+       * rows remain exactly as unreachable as before. */
+      let menuIsBesideShell = false;
       const readMenuPortal = async () => {
         menuIsPortalled = Boolean(scopedMenu && declaredMenu)
           && (await scopedMenu.locator(OPTION_NODES).count()) === 0
           && (await declaredMenu.locator(OPTION_NODES).count()) > 0;
+        menuIsBesideShell = Boolean(scopedMenu) && !menuIsPortalled
+          && (await scopedMenu.locator(OPTION_NODES).count()) === 0
+          && (await container.locator(OPTION_NODES).count()) > 0;
       };
       // Bounded, and only spent where it can buy something. With a recognisable widget the wait is
       // for THAT widget's own menu and ends the moment it renders. With no recognisable widget there
@@ -2021,6 +2120,10 @@ const { chromium } = require('playwright');
           await readDeclaredMenu(control);
           if (declaredMenu
             && await declaredMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+          // The third place the widget's menu can be: beside its shell, inside the question's own
+          // block. Select2 v3 renders there and declares nothing, so without this check that shape
+          // paid the full timeout for a menu that was already open. See menuIsBesideShell.
+          if (await container.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
           if (Date.now() >= deadline) return;
           await page.waitForTimeout(50).catch(() => undefined);
         }
@@ -2084,7 +2187,9 @@ const { chromium } = require('playwright');
        * that shape after the control is opened, and hands BOTH roots the menu the control itself
        * declared, which is the same author-stated one-question boundary this comment defends.
        */
-      const menuRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? declaredMenu);
+      const menuRoot = () => (menuIsPortalled
+        ? declaredMenu
+        : (menuIsBesideShell ? container : scopedMenu ?? declaredMenu));
       /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
        *
        * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
@@ -2112,7 +2217,9 @@ const { chromium } = require('playwright');
        * safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls that
        * work today; the scoping is what makes the refusal rare and the answer right.
        */
-      const widenRoot = () => (menuIsPortalled ? declaredMenu : scopedMenu ?? container);
+      const widenRoot = () => (menuIsPortalled
+        ? declaredMenu
+        : (menuIsBesideShell ? container : scopedMenu ?? container));
       /* WHICH OF THE MATCHED NODES ARE ROWS THE MENU IS OFFERING, and it is not all of them.
        *
        * The ambiguity guards below refuse a tier that offers two, so counting NODES rather than rows
@@ -2379,6 +2486,56 @@ const { chromium } = require('playwright');
         }
         return false;
       };
+      /* THE TIERS THAT JUDGE THE LIST, NOT THE ROW, run over the control's own menu.
+       *
+       * clickMatchingOption asks Playwright's role engine about one row at a time, and that is the
+       * right instrument for every tier that matches the answer against a row's NAME. It cannot ask
+       * the questions chooseOptionIndex's widened tiers ask, because those are properties of the
+       * WHOLE list: soleOptionIndex is a length check, gradedBandIndex needs every band and the
+       * list's own ceiling, dateComponentIndex needs to know its hit is unique. So the same chooser
+       * the native select, radio and pill renderings already share runs here over the menu's
+       * offered rows, which closes the one rendering it never reached. Measured live on the
+       * Optiver Greenhouse form 2026-08-19: "I consent to the above." is a react-select whose
+       * single statement row a stored "Yes" can never name-match, so the one protected
+       * fillByLabelText the backend's trimmer leaves each question on a 14-question form opened
+       * the control, matched nothing, and committed nothing, while the answer sat in the packet.
+       *
+       * THE ROWS ARE READ AS RENDERED TEXT, and that is a deliberate, bounded exception to the
+       * rule on clickIfPresent. The name-shaped defects that rule lists cannot reprice these
+       * tiers: chooseOptionIndex refuses every ambiguity it can see (two rows normalising to the
+       * answer, two candidate bands, two date parts, two differently-worded refusals, and ANY list
+       * of two under soleOptionIndex), offeredRows has already dropped hidden and aria-hidden
+       * nodes, and choiceLanded still reads the committed value back afterwards. A row whose text
+       * misleads is therefore refused or withdrawn, never resolved by position.
+       *
+       * AND ONLY EVER OVER menuRoot() - the control's own shell, or the menu the opened control
+       * declared through aria-controls - never the container and never the page. An unscoped
+       * [role="option"] on the live Optiver form returns 244 nodes, because Greenhouse renders the
+       * phone-country picker's full country list permanently; a chooser handed that list would be
+       * choosing among countries.
+       *
+       * ONLY EVER ON THE UNFILTERED MENU. searchFor types into the widget, and a filtered list can
+       * offer one row where the full list offered two: under soleOptionIndex that is not a
+       * narrowed ambiguity, it is a fabricated one-option control, and an affirmative answer would
+       * then commit whichever statement happened to survive the filter. So the control loop runs
+       * this once, after the name tiers and before any typing, and searchFor never re-enters it. */
+      const chooseFromOfferedRows = async (wanted) => {
+        const root = menuRoot();
+        if (!root) return false;
+        const rows = root.locator(OPTION_NODES);
+        const offers = await offeredRows(rows);
+        if (offers.length === 0) return false;
+        const texts = [];
+        for (const index of offers) {
+          texts.push(clean(await rows.nth(index).textContent().catch(() => '')));
+        }
+        const chosen = chooseOptionIndex(texts, wanted);
+        if (chosen === -1) return false;
+        if (!await clickIfPresent(rows.nth(offers[chosen]))) return false;
+        lastClickedOptionAnswer = clean(wanted);
+        lastChooserTierAnswer = clean(wanted);
+        return true;
+      };
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
@@ -2416,6 +2573,9 @@ const { chromium } = require('playwright');
           await page.keyboard.press('Escape').catch(() => undefined);
           return false;
         }
+        // The list-shaped tiers, on the menu the click just opened and before any typing filters
+        // it. See chooseFromOfferedRows for why this must not run again after searchFor types.
+        if (await chooseFromOfferedRows(wanted)) return true;
         if (await searchFor(control, wanted)) return true;
         if (choiceRefusals !== refusalsBefore) {
           await page.keyboard.press('Escape').catch(() => undefined);
@@ -4821,6 +4981,8 @@ const { chromium } = require('playwright');
         if (submitCapable) return { answerPreserved: false, arrival: before };
         lastClickedOptionText = semanticAnswer;
         lastClickedOptionAnswer = semanticAnswer;
+        // Re-aimed by hand here, so the tier provenance from any earlier fill must not ride along.
+        lastChooserTierAnswer = '';
         const clicked = await exactRows.first().click({ timeout: 2000 })
           .then(() => true)
           .catch(() => false);
@@ -5275,13 +5437,23 @@ const { chromium } = require('playwright');
             /* NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a machine handle
              * this runner can name, so removing them all leaves no word a person wrote.
              *
-             * The list and the order are the backend's PROVIDER_HANDLE_STRIPPERS, verbatim
+             * The first six are the backend's PROVIDER_HANDLE_STRIPPERS, verbatim and in its order
              * (src/lib/questionDiscovery.ts). They have to agree, because the whole safety argument
              * for the fall-through below is that a string this calls handle-only is a string
              * normalizeDiscoveredLabel already reduces to '' and drops - so recovering it can only
              * add a question, never rename one. Order is load-bearing: the uuid strip is what turns
              * the middle bracket of cards[<uuid>][field0] into a bare "[ ]" for the next one to
              * clear.
+             *
+             * THE BREEZY STRIPPER AT THE END IS A DELIBERATE RUNNER-SIDE ADDITION, and the safety
+             * argument shifts one notch rather than breaking: a Breezy questionnaire control
+             * carries name="section_<epoch>_question_<n>" and nothing else a person wrote, so
+             * without this line the stored label IS that handle - measured live on the
+             * transparent-hiring.breezy.hr form 2026-08-19, every paragraph, date and later-section
+             * question was stored under it and never reached the Apply screen. With it, the
+             * fall-through recovers the <h3> heading the applicant actually reads. So this line
+             * turns a garbage label into the employer's words, never renames one that already read
+             * correctly, and the backend list should gain the same shape when it is next touched.
              *
              * \p{L} and not [a-z]: a Japanese or Arabic label is a label. */
             function isProviderHandleOnly(value) {
@@ -5291,7 +5463,8 @@ const { chromium } = require('playwright');
                 /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/gi,
                 /\[\s*\]/g,
                 /\bcards\s*\[\s*field\d+\s*\]/gi,
-                /\s*\*?\s+\d{2,5}\s*$/u
+                /\s*\*?\s+\d{2,5}\s*$/u,
+                /\bsection_\d+_question_\d+\b/gi
               ];
               let rest = value == null ? '' : String(value);
               for (const stripper of strippers) rest = rest.replace(stripper, ' ');
@@ -5341,7 +5514,14 @@ const { chromium } = require('playwright');
                * measured and rejected because it resolved "High School Name*" to her university.
                * This branch's owner is one application-question, holding one question and its own
                * options, so that ambiguity cannot arise here. */
-              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label')].find((candidate) => {
+              /* h3 is here for Breezy, and only inside this choice branch, the same way
+               * .application-label is only here for Lever. Breezy's questionnaire writes the
+               * question in an <h3> inside the same li.question that holds the options - measured
+               * live 2026-08-19, the first option of "English level" is "B1 (Intermediate) or
+               * below", which the tenant auto-disqualifies, so a group labeled by its first option
+               * asks the applicant to disqualify herself. An h3 inside ONE question's own block is
+               * that question's heading; the generic walk already trusts h3 for the same reason. */
+              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label, h3')].find((candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
@@ -5365,13 +5545,73 @@ const { chromium } = require('playwright');
              * Applied ONLY when the control has neither a <label for> nor an aria-label, so no form
              * that labels its inputs properly can be relabelled by this.
              */
+            /* A COMBOBOX THAT SAYS ONLY WHAT IT IS, NEVER WHAT IT ASKS. Measured on the live
+             * Rippling apply form (ats.rippling.com, Easy Dynamics, 2026-08-19): the widget's own
+             * input carries aria-label "Search", placeholder "Search", a name randomized on every
+             * render ("vh-v1lveguk" one run, "QBIQlS1zQx" the next) and an id like "field-34", and
+             * the visible question - "Phone number", "Are you currently authorized to work in the
+             * U.S.?" - sits in a plain div or span BESIDE the widget, never in a <label> element.
+             * So the parts join below stored "search search vh-v1lveguk field-34" as the question,
+             * which no saved answer can ever anchor to, and which is a NEW question on every
+             * render because the name half rotates.
+             *
+             * The arm is double-gated so it cannot rename a labelled control: the element must be a
+             * combobox opener with NO label text of its own, and everything it does say (aria-label,
+             * placeholder) must be widget furniture - "search", "select", "select..." - words that
+             * describe the control and not the question. Then the visible label is the text of the
+             * nearest preceding sibling on the way up that holds no controls of its own; a sibling
+             * holding controls is the PREVIOUS question and ends the walk, which is what keeps this
+             * from borrowing a neighbour's heading. */
+            const choiceOpenerHere = el.getAttribute('role') === 'combobox'
+              || el.getAttribute('aria-haspopup') === 'listbox';
+            const WIDGET_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+            if (choiceOpenerHere && !clean(labelText)
+              && WIDGET_FURNITURE.test(clean(ariaLabel))
+              && WIDGET_FURNITURE.test(clean(el.getAttribute('placeholder') || ''))) {
+              // Twelve, not the walk's usual six: measured on the live form, the "Phone number"
+              // label div is ten parents above the widget's input. What bounds the walk is not the
+              // depth but the two stop rules below - a sibling holding controls is the previous
+              // QUESTION and ends it.
+              let above = el;
+              for (let depth = 0; above && depth < 12; depth += 1, above = above.parentElement) {
+                const beside = above.previousElementSibling;
+                if (!beside) continue;
+                if (beside.querySelector && beside.querySelector('input, textarea, select, [role="combobox"], button')) break;
+                const besideText = clean(renderedText(beside));
+                if (besideText && besideText.length <= 200 && !genericControlText(besideText)) {
+                  return besideText.toLowerCase();
+                }
+                if (besideText) break;
+              }
+            }
             if (!clean(labelText) && !clean(ariaLabel)) {
               const owner = blockOf(el);
               const ownerLabel = owner && owner.querySelector('label, legend');
               const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
             }
-            const parts = [labelText || '', ariaLabel, el.getAttribute('placeholder') || '', el.getAttribute('name') || '', el.id || ''];
+            /* A PLACEHOLDER IS NOT PART OF A QUESTION'S NAME, unless it is all the control has.
+             *
+             * Measured on live Teamtailor forms (fully.teamtailor.com and moburst.teamtailor.com,
+             * 2026-08-19/20): the phone question was stored as "phone phone number with country
+             * code +1 201-555-0123 candidate[phone] candidate_phone" - visible label plus
+             * PLACEHOLDER plus name plus id. The placeholder half is volatile between renders, so
+             * consecutive discoveries mint the "same" question under two different labels;
+             * downstream that flaps packet identity and every send attempt refuses with
+             * packet_stale, forever. So a control that carries any written label (label text or
+             * aria-label) is named WITHOUT its placeholder. A control whose only human text IS the
+             * placeholder keeps it, because dropping it there would reduce the label to a bare
+             * handle and lose the question (the Ashby "start typing..." shape the owner-walk above
+             * already handles when it can).
+             *
+             * The name and id stay in the join, deliberately: the backend reads control handles
+             * OUT of the stored label (LABEL_SECTION_HANDLE_RE and friends recover "school--0" and
+             * the Greenhouse demographic ids from it), so dropping them here would orphan the
+             * education option probes. Unlike a placeholder they are stable within one board's
+             * render... where they are not (Rippling), the combobox arm above names the control
+             * before this join runs. */
+            const placeholderText = clean(labelText) || clean(ariaLabel) ? '' : (el.getAttribute('placeholder') || '');
+            const parts = [labelText || '', ariaLabel, placeholderText, el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
             /* THE HANDLE THAT IS NOT A LABEL.
              *
@@ -5429,10 +5669,18 @@ const { chromium } = require('playwright');
              * OPTION of a question. One application-question holds one question and its own options,
              * so this is narrower than the card and cannot reintroduce the two-control ambiguity the
              * card bound exists to refuse. */
+            /* li.question is Breezy's, for the same reason li.application-question is Lever's.
+             * Measured on the live transparent-hiring.breezy.hr HR Assistant Intern form
+             * (2026-08-19): each questionnaire question is one <li class="question"> holding an
+             * <h3> heading and a <ul class="options"> of <label><input type="radio">…</label>
+             * rows. Without it blockOf fell back to el.parentElement, which on a Breezy radio IS
+             * the option's own <label>, so the question was named after its first option and the
+             * option list held one row. One li.question holds one question and its own options,
+             * so this is as narrow as the Lever entry above it. */
             return el.closest(
               'fieldset, [role="group"], [role="radiogroup"], [data-field-path],'
               + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper,'
-              + ' li.application-question'
+              + ' li.application-question, li.question'
             ) || el.parentElement || el;
           }
           function choiceQuestionKey(el, block) {
@@ -5650,6 +5898,27 @@ const { chromium } = require('playwright');
         // would lose it in exactly the case that matters.
         if (isFinalSubmitAction(action)) finalSubmitPressed = true;
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+        /* THE PAGE AFTER SEND IS THE ONLY PROOF, SO THE RUN HAS TO STAY AND WATCH IT.
+         *
+         * The confirmAndSubmit path has waited out the post-submit window since it existed; the
+         * plain final-submit click never did. It waited for networkidle and moved on, and the
+         * run's final text and screenshot are taken AFTER the action loop - so on a board that
+         * confirms with a client-side transition after the submit XHR, the snapshot fires in the
+         * gap between the network going quiet and the thank-you rendering. Measured live on the
+         * Max Borges Workable form (2026-08-19): Send was pressed, the application was really
+         * sent, and the backend's receipt reader reported the run "never showed a confirmation it
+         * could read" because the snapshot predates the confirmation. Employers do not reliably
+         * email a confirmation, so that snapshot is the applicant's only receipt.
+         *
+         * waitForPostSubmitApplicationState is the same bounded watch the atomic path uses: up to
+         * 30 seconds on the SAME page, returning on the first read that is a confirmation, a
+         * rejection, or a standing security-code challenge - so the snapshot taken after the loop
+         * is from the first state worth reporting, and only a page that stays ambiguous for the
+         * whole window is reported unconfirmed. The securityCode click keeps its own sequence
+         * below, where the same watch already runs after the code is resubmitted. */
+        if (isFinalSubmitAction(action) && !action.securityCode) {
+          await waitForPostSubmitApplicationState();
+        }
         /* THE SECOND HALF OF A GREENHOUSE SUBMIT, and the reason it is HERE rather than in its own
          * action.
          *
@@ -5924,6 +6193,24 @@ const { chromium } = require('playwright');
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         }));
+        /* A SEARCH BOX IS NOT THE CONTROL, however it is dressed. The field locator above resolves
+         * the FIRST typeable input in the block, and on a react-select that is the widget's own
+         * search input. Typing into it filters a menu and commits nothing, the typed text survives
+         * long enough for verifyFilled to read it straight back out of the same box, and the
+         * widget then drops it on blur - so the one protected attempt the backend's trimmer leaves
+         * each question reported a fill the form never kept. Measured live on the Optiver
+         * Greenhouse form 2026-08-19 the input announced itself (role=combobox), which the arm
+         * below already dispatches on; older react-select renderings announce nothing on the input
+         * at all (see the shape-read note above verifyFilled's rescue chain below), and for those
+         * the widget's own class shell around the input is the durable signal. WIDGET-INTERNAL
+         * classes only, on purpose: the shell names themselves ('select-shell', 'select__container')
+         * also appear in LAYOUT wrappers - the measured 'select-shell-grid' of 19c - and a plain
+         * text input under such a wrapper must keep its plain fill rather than be handed to a
+         * chooser that has nothing to open. Detection only: everything this routes INTO is the
+         * same verified choice arm the ARIA shapes take. */
+        const fieldInChoiceShell = shape.tag === 'input' && await field.evaluate((element) => Boolean(
+          element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
+        )).catch(() => false);
         // Read off the control, ahead of every other arm. A date picker is not a select, not a
         // combobox and not free text, and the old test for one - an answer already shaped
         // YYYY-MM-DD next to a placeholder mentioning a date - could only ever fire on a run that
@@ -5947,7 +6234,7 @@ const { chromium } = require('playwright');
             if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
-        } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list') {
+        } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list' || fieldInChoiceShell) {
           if (await fillCustomChoice(container, action.value || '')) {
             const landed = await choiceLanded(container, action.value || '');
             if (action.label && landed) filledFields.push(action.label);

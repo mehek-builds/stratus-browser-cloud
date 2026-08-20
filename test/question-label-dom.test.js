@@ -249,6 +249,49 @@ test('a Lever radio group is named by its question, not by its own first option'
   for (const label of labels) assert.doesNotMatch(label, /cards\[/, label);
 });
 
+/* AND IT REPORTS THE OPTIONS, which is the half nothing asserted and which cost a whole cycle.
+ *
+ * `has_field_options: false` on every Lever packet was diagnosed as "Stratus discovery reports no
+ * option lists at all" and the remaining work was booked against this file. It was already working.
+ * The lists were being discarded one repo downstream, by an inventory-key pattern that accepted a
+ * bare name with at most a trailing `[]` and so could not express Lever's `cards[<uuid>][field0]`
+ * (backend lib/portalSubmission.ts, controlNameOptionKeyFromDiscoveredSelector, and
+ * lib/leverOptionInventory.test.ts pins it there).
+ *
+ * The label test above passes on markup whose options are never read, because it only ever looked at
+ * labels. So this asserts the other half against the same fixture: what an employer offers, in the
+ * employer's own words and order, which is what a resolver snaps a stored answer onto. Without it the
+ * next person reading a packet with no options has no way to tell which side dropped them. */
+test('a Lever radio group also reports the four options the employer offers', async () => {
+  const details = await choiceDetailsFor(
+    leverCard('What degree are you currently pursuing?',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000001', 'field0', 'What degree are you currently pursuing?',
+        ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD'])),
+  );
+
+  // One entry for the group, not one per option: choiceQuestionKey collapses them by shared name.
+  assert.equal(details.length, 1);
+  assert.match(details[0].label, /what degree are you currently pursuing/);
+  // Exact texts and exact order. "Bachelor Degree" is the singular form the employer wrote, and it is
+  // what the resolver's degree ladder has to find; a normalised or reordered list would not match it.
+  assert.deepEqual(details[0].options, [
+    'High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD',
+  ]);
+});
+
+/* THE YES/NO GROUP FROM THE SAME FORM. Two options, and the question is the card's, so a list of
+ * ["Yes", "No"] is the only thing that lets a stored yes/no reach an employer's own radio. */
+test('a Lever yes/no group reports both options', async () => {
+  const details = await choiceDetailsFor(
+    leverCard('Work authorisation',
+      leverRadioGroup('9f2b1c7a-0000-4000-8000-000000000002', 'field0',
+        'Are you lawfully authorized to work in the United States?', ['Yes', 'No'])),
+  );
+
+  assert.equal(details.length, 1);
+  assert.deepEqual(details[0].options, ['Yes', 'No']);
+});
+
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {
   const [label] = await labelsFor(
     leverCard('Year of Graduation', leverDropdown('026d7ce7-7ca4-44ed-9db6-1c7857707f0e', 'field0', 'Intended graduation year')),
@@ -423,4 +466,229 @@ test('hidden fallback and closed-menu copy never become an employer question', a
   assert.equal(address, '* address');
   assert.match(phone, /^\* phone\s*\+971/);
   assert.doesNotMatch(`${address} ${phone}`, /svg|united states|united kingdom|canada/i);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * BREEZY'S QUESTIONNAIRE, transcribed from the live transparent-hiring.breezy.hr HR Assistant
+ * Intern form on 2026-08-19, not sketched. The load-bearing details are all real:
+ *   - each question is one <li class="question"> holding an <h3> heading; the question text is
+ *     NEVER in a <label> element;
+ *   - each multiplechoice option is <li class="option"><label><input .../><span>text</span></label>,
+ *     so the input's nearest label IS its option;
+ *   - every control's name is "section_<epoch>_question_<n>", which no person wrote;
+ *   - paragraph and date questions hold a bare <textarea> / <input type="date"> with an empty
+ *     placeholder and no label at all.
+ *
+ * WHY THE FIRST-OPTION DEFECT CAN DISQUALIFY AN APPLICANT, which is what makes this group's
+ * labeling severity rather than cosmetics: the English question's first option is
+ * "B1 (Intermediate) or below", and the tenant auto-disqualifies that answer. Discovery used to
+ * store the group AS that option ("B1 (Intermediate) or below" was the question, and the option
+ * list held only itself), so a user answering the question as shown answers herself out of the
+ * role, and a saved answer can never anchor to the real rendered label.
+ * ------------------------------------------------------------------------------------------- */
+const breezySection = (questions) => `<form><ul class="questions">${questions.join('')}</ul></form>`;
+const breezyMultipleChoice = (name, heading, options, body = '') => `
+  <li ng-repeat="question in section.questions" class="question ng-scope">
+    <div class="multiplechoice ng-scope">
+      <h3><span class="ng-binding">${heading}</span><span title="Required" class="required">*</span></h3>
+      ${body ? `<div class="question-body ng-scope"><p><span>${body}</span></p></div>` : ''}
+      <ul class="options">
+        ${options.map((option) => `
+          <li ng-repeat="opt in question.options" class="option ng-scope"><label>
+            <input type="radio" ng-model="question.response" value="${option}" name="${name}" required="required" />
+            <span class="ng-binding">${option}</span></label></li>`).join('')}
+      </ul>
+      <div class="error-container ng-hide" style="display:none"><span class="error polygot">A response is required</span></div>
+    </div>
+  </li>`;
+const breezyParagraph = (name, heading) => `
+  <li ng-repeat="question in section.questions" class="question ng-scope">
+    <div class="ng-scope">
+      <h3><span class="ng-binding">${heading}</span><span title="Required" class="required">*</span></h3>
+      <textarea name="${name}" placeholder="" class="description full" required="required"></textarea>
+      <div class="error-container ng-hide" style="display:none"><span class="error polygot">A response is required</span></div>
+    </div>
+  </li>`;
+const breezyDate = (name, heading) => `
+  <li ng-repeat="question in section.questions" class="question ng-scope">
+    <div class="ng-scope">
+      <h3><span class="ng-binding">${heading}</span><span class="ng-hide required" style="display:none">*</span></h3>
+      <input name="${name}" type="date" />
+    </div>
+  </li>`;
+
+const BREEZY_ENGLISH = breezyMultipleChoice('section_1751373777767_question_0', 'English level', [
+  'B1 (Intermediate) or below', 'B2 (Upper-Intermediate)', 'C1 (Advanced)', 'C2 (Proficient/Bilingual/Native)',
+], 'Select your speaking level');
+
+test('a Breezy multiplechoice group is named by its question, not by its disqualifying first option', async () => {
+  const labels = await labelsFor(breezySection([BREEZY_ENGLISH]), 'input[type="radio"]');
+  assert.equal(labels.length, 4);
+  for (const label of labels) assert.match(label, /english level/, label);
+  // Never the first option, which is the answer the tenant auto-disqualifies.
+  for (const label of labels) assert.doesNotMatch(label, /b1 \(intermediate\)/, label);
+  // And never the machine handle nobody wrote.
+  for (const label of labels) assert.doesNotMatch(label, /section_\d+_question_\d+/, label);
+});
+
+test('a Breezy group reports every option, in the employer\'s own order', async () => {
+  const details = await choiceDetailsFor(breezySection([BREEZY_ENGLISH]));
+  assert.equal(details.length, 1, 'one entry for the group, not one per option');
+  assert.match(details[0].label, /english level/);
+  assert.deepEqual(details[0].options, [
+    'B1 (Intermediate) or below', 'B2 (Upper-Intermediate)', 'C1 (Advanced)', 'C2 (Proficient/Bilingual/Native)',
+  ]);
+});
+
+test('the whole Breezy questionnaire is walked: paragraph, date and later-section questions recover their headings', async () => {
+  const markup = breezySection([
+    BREEZY_ENGLISH,
+    breezyParagraph('section_1751373777767_question_1', 'Send us a link from your LinkedIn profile'),
+    breezyMultipleChoice('section_1751373777767_question_2', 'What is your time zone?', [
+      'CET or within +- 3 hours', 'More than 5h difference from CET (German) time',
+    ]),
+    breezyDate('section_1751373777767_question_4', 'Your earliest possible start date'),
+    breezyParagraph('section_1751373777767_question_5', 'Unpaid internship confirmation'),
+  ]);
+  const [linkedin, unpaid] = await labelsFor(markup, 'textarea');
+  // These were not captured at all: the control's only name is the section_ handle, which the
+  // handle-only fall-through now recognises as Breezy's and trades for the heading above it.
+  assert.match(linkedin, /send us a link from your linkedin profile/, linkedin);
+  assert.match(unpaid, /unpaid internship confirmation/, unpaid);
+  const [startDate] = await labelsFor(markup, 'input[type="date"]');
+  assert.match(startDate, /your earliest possible start date/, startDate);
+  const timezone = await choiceDetailsFor(markup);
+  assert.equal(timezone.length, 2, 'both choice groups discovered');
+  assert.match(timezone[1].label, /what is your time zone/);
+  assert.deepEqual(timezone[1].options, ['CET or within +- 3 hours', 'More than 5h difference from CET (German) time']);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * RIPPLING'S COMBOBOX, transcribed from the live ats.rippling.com Easy Dynamics apply form on
+ * 2026-08-19. The widget's own input says only what it is - aria-label "Search", placeholder
+ * "Search" - and carries a name randomized on every render plus an id like "field-34". The visible
+ * question sits in a plain div/span BESIDE the widget, several wrappers up, never in a <label>.
+ * Discovery stored "search search vh-v1lveguk field-34" as a question: unanchorable by any saved
+ * answer, and a NEW question on every render because the name half rotates.
+ * The nesting depth below mirrors the live tree (the label div is eleven parents above the input),
+ * so a walk that is too shallow fails here the way it failed live.
+ * ------------------------------------------------------------------------------------------- */
+const ripplingPhoneCode = (name) => `
+  <div data-testid="field">
+    <div><span id="field-31-label" class="css-1xdhyk6">Phone number</span></div>
+    <div>
+      <div data-testid="screen-reader-only" style="display:none"></div>
+      <div>
+        <div data-testid="field">
+          <div>
+            <div data-testid="phone_number-code">
+              <div>
+                <div data-testid="select-controller">
+                  <div>
+                    <div>
+                      <div data-testid="select-search-input">
+                        <input data-testid="input-select-search-input" id="field-34" name="${name}" type="text"
+                          role="combobox" aria-expanded="false" autocomplete="auto-complete-off"
+                          placeholder="Search" aria-label="Search" aria-required="true" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div data-testid="phone_number"><input id="field-35" type="tel" aria-labelledby="field-31-label" /></div>
+      </div>
+    </div>
+  </div>`;
+const ripplingCustomQuestion = (question, id) => `
+  <div>
+    <div>${question}</div>
+    <div data-testid="field">
+      <div data-testid="customQuestions.6a4e6720f5f7fe82342f4bbd.${id}">
+        <div>
+          <div data-testid="select-controller">
+            <div>
+              <div>
+                <div data-testid="select-search-input">
+                  <input data-testid="input-select-search-input" id="${id}" name="ZzRandom${id}" type="text"
+                    role="combobox" aria-expanded="false" placeholder="Search" aria-label="Search" aria-required="true" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+test('a Rippling combobox is named by the visible label beside it, never by its internal ids', async () => {
+  const [label] = await labelsFor(ripplingPhoneCode('vh-v1lveguk'), 'input[role="combobox"]');
+  assert.match(label, /phone number/, label);
+  assert.doesNotMatch(label, /field-34|vh-v1lveguk|search/, label);
+});
+
+test('a renamed Rippling widget input is still the same question on the next render', async () => {
+  // The name attribute rotates between renders. The stored label must not carry it, or every
+  // discovery mints a brand-new question and no saved answer ever lands.
+  const [first] = await labelsFor(ripplingPhoneCode('vh-v1lveguk'), 'input[role="combobox"]');
+  const [second] = await labelsFor(ripplingPhoneCode('QBIQlS1zQx'), 'input[role="combobox"]');
+  assert.equal(first, second);
+});
+
+test('a Rippling custom question is named by the sibling text above its widget', async () => {
+  const [label] = await labelsFor(
+    ripplingCustomQuestion('Are you currently authorized to work in the U.S.?', 'field-63x'),
+    'input[role="combobox"]',
+  );
+  assert.equal(label, 'are you currently authorized to work in the u.s.?');
+});
+
+test('a combobox with a real referenced label keeps it and never walks', async () => {
+  // The gate: the sideways walk only exists for a widget that says nothing but furniture. A
+  // labelled one (Rippling's own Pronouns control carries aria-labelledby) keeps its label.
+  const [label] = await labelsFor(`
+    <div data-testid="field">
+      <div><span id="field-20-label">Pronouns</span></div>
+      <div><input id="field-20" type="text" role="combobox" aria-labelledby="field-20-label"
+        placeholder="Search" aria-label="Search" /></div>
+    </div>`, 'input[role="combobox"]');
+  assert.equal(label, 'pronouns');
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * TEAMTAILOR'S PLACEHOLDER, measured on fully.teamtailor.com and moburst.teamtailor.com
+ * (2026-08-19/20): the phone question was stored as the concatenation "phone phone number with
+ * country code +1 201-555-0123 candidate[phone] candidate_phone" - visible label plus PLACEHOLDER
+ * plus name plus id. The placeholder half is volatile between renders, so consecutive discoveries
+ * mint the "same" question under two different labels; downstream that flaps packet identity and
+ * every send attempt refuses with packet_stale, forever. A labelled control is therefore named
+ * WITHOUT its placeholder. The name and id are deliberately still in the join - the backend reads
+ * control handles out of the stored label (school--0, the Greenhouse demographic ids) - and they
+ * are stable between renders, so they cannot flap identity the way the placeholder measured.
+ * ------------------------------------------------------------------------------------------- */
+const teamtailorPhone = (placeholder) => `
+  <div class="form-group">
+    <label for="candidate_phone">Phone</label>
+    <input id="candidate_phone" name="candidate[phone]" type="tel"${placeholder ? ` placeholder="${placeholder}"` : ''} />
+  </div>`;
+
+test('the same Teamtailor control discovers under ONE label with and without its placeholder', async () => {
+  const [withPlaceholder] = await labelsFor(teamtailorPhone('Phone number with country code +1 201-555-0123'), 'input');
+  const [withoutPlaceholder] = await labelsFor(teamtailorPhone(''), 'input');
+  assert.equal(withPlaceholder, withoutPlaceholder,
+    'a volatile placeholder must not mint a second identity for the same question');
+  assert.doesNotMatch(withPlaceholder, /201-555|country code/, withPlaceholder);
+  assert.match(withPlaceholder, /^phone\b/);
+});
+
+test('a placeholder still names a control that has nothing else written on it', async () => {
+  // The Ashby shape: no label, no aria-label, and the placeholder is the only human text. Dropping
+  // it here would reduce the label to a bare handle and lose the question entirely.
+  const [label] = await labelsFor(
+    '<div><div><input type="text" name="xyzzy123" placeholder="Your GitHub profile" /></div></div>',
+    'input',
+  );
+  assert.match(label, /your github profile/, label);
 });

@@ -66,11 +66,25 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       # A STEP CAP AS WELL AS THE CACHE. The cache stops the usual case; this stops a cold miss on a
-      # bad CDN day from eating the job budget and reporting a hang as a red suite. Six minutes is
-      # well past the ~90 seconds a real download takes, and far short of the 35 the job has.
+      # bad CDN day from eating the job budget and reporting a hang as a red suite.
+      #
+      # NO --with-deps, AND THAT IS THE THIRD TIME THIS STEP'S BUDGET WAS MEASURED WRONG. Six
+      # minutes fired on a healthy cold install because apt ran past it; twelve then fired too
+      # (2026-08-19, 18:46 UTC run): the mirror served fonts-ipafont-gothic, 3.5 MB, in five
+      # minutes and the cap expired before the browser download even started. That run's own apt
+      # log is also the proof the apt half is not needed here: every shared library --with-deps
+      # asked for was "already the newest version" on the runner image, because the image ships
+      # Chrome and Chromium with their libraries, and the only NEW packages were nine font packs
+      # for scripts no suite renders or asserts on. So the step now downloads only the browser,
+      # which is the one thing the image genuinely lacks and the one thing the cache covers. If
+      # the image ever drops a library, this does not fail silently: chromium.launch() in the very
+      # first DOM suite refuses with Playwright's missing-dependency message naming this step.
+      #
+      # Six minutes is four times the measured ~90 second download, and a cache hit spends
+      # seconds. The apt lottery is out of the number now, so the number can be honest again.
       - name: Install Playwright Chromium
         timeout-minutes: 6
-        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+        run: node node_modules/playwright-core/cli.js install chromium
 
       # The GitHub Ubuntu image already carries Google Chrome, so resolve it rather than downloading
       # a third copy. Fail loudly if it is ever absent: a silently skipped browser suite is how an

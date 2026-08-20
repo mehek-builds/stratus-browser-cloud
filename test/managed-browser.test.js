@@ -398,7 +398,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
-  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -490,7 +490,7 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer\)\)/);
   assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
   assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 2,
@@ -1696,4 +1696,31 @@ test('a tel field verifies on digits, so its own formatting is not a lost answer
   assert.match(SANDBOX_RUNNER, /const noLetters = \(value\) => !\/\[a-z\]\/i\.test/);
   // And the read-back that made the diagnosis possible stays.
   assert.match(SANDBOX_RUNNER, /field holds "/);
+});
+
+/* THE PAGE AFTER SEND IS THE ONLY PROOF, AND THE PLAIN SUBMIT CLICK NOW STAYS TO READ IT.
+ *
+ * Measured live on the Max Borges Workable form (2026-08-19): Send was pressed, the application
+ * was really sent, and the confirmation renders as a client-side transition AFTER the submit XHR -
+ * so networkidle resolved, the action loop ended, and the run's final text and screenshot were
+ * taken in the gap before the thank-you rendered. The backend's receipt reader then reported the
+ * run "never showed a confirmation it could read" for an application that was at the employer.
+ * The atomic confirmAndSubmit path has waited out this window since it existed
+ * (waitForPostSubmitApplicationState: up to 30s on the same page, returning on the first
+ * confirmed, rejected or code-challenge read); the plain final-submit click is the path Workable
+ * runs take, and it was the one that never waited. The replay suites prove the watch's behaviour
+ * in a real browser; this pins that the plain click path actually enters it. */
+test('a plain final submit stays and watches the page the way the atomic path does', () => {
+  assert.match(
+    SANDBOX_RUNNER,
+    /if \(isFinalSubmitAction\(action\) && !action\.securityCode\) \{\n\s+await waitForPostSubmitApplicationState\(\);\n\s+\}/,
+    'the final click must wait for the first readable post-submit state before the snapshot is taken'
+  );
+  // And the snapshot the caller stores is taken after the action loop, which is what makes the
+  // watch above sufficient: the first readable state is what the text and screenshot capture.
+  assert.ok(
+    SANDBOX_RUNNER.indexOf('await waitForPostSubmitApplicationState();') <
+    SANDBOX_RUNNER.indexOf("const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000))"),
+    'the post-submit watch runs before the final page-text snapshot'
+  );
 });

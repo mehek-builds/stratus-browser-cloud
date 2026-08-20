@@ -10,27 +10,9 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { loadChooser } from './chooser-source.mjs';
 
-function constSource(name, indent, required = true) {
-  const pad = ' '.repeat(indent);
-  const start = SANDBOX_RUNNER.indexOf(`\n${pad}const ${name} = `);
-  if (start === -1) {
-    if (required) assert.fail(`${name} must exist in the sandbox runner`);
-    return '';
-  }
-  const rest = SANDBOX_RUNNER.slice(start + 1);
-  const next = rest.search(new RegExp(`\\n${pad}(?:const|let|var|for|if|return|await|fs\\.)`));
-  return rest.slice(0, next === -1 ? rest.length : next);
-}
-
-const SRC = ['clean', 'normalized', 'DECLINE_TO_STATE', 'answerOptions', 'declineMatches',
-  'gradedValueWithScale', 'parseBand', 'gradedBandIndex',
-  'MONTH_NAMES', 'monthIndexOf', 'datePartsOf', 'dateComponentIndex', 'chooseOptionIndex']
-  .map((name) => constSource(name, 4))
-  .join('\n');
-const { chooseOptionIndex, dateComponentIndex, datePartsOf } =
-  Function(`${SRC}\nreturn { chooseOptionIndex, dateComponentIndex, datePartsOf };`)();
+const { chooseOptionIndex, dateComponentIndex, datePartsOf } = loadChooser();
 
 const YEARS = ['2026', '2027', '2028', '2029'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
