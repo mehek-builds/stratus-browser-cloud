@@ -6196,8 +6196,15 @@ const { chromium } = require('playwright');
                * (own label holds no control, one visible control per question) recovers them.
                * A FALLBACK, deliberately behind the heading walk: a one-question card keeps the
                * heading it has always been named by, so no stored Lever question changes its
-               * words and no saved answer is orphaned by a rename. */
-              if (el.tagName === 'SELECT') {
+               * words and no saved answer is orphaned by a rename.
+               *
+               * TEXTAREA for the same measured reason, same form, same day: the required
+               * "What have you built..." card question is a textarea whose placeholder is EMPTY,
+               * so the placeholder-gated arm cannot reach it either, and the run reported it as
+               * "a required field has no label Litos can read". A text INPUT is deliberately
+               * not included until a form shows the need: inputs routinely carry placeholders,
+               * and the placeholder arm already recovers them. */
+              if (el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
                 const siblingLabel = boundedSiblingCardLabel();
                 if (siblingLabel) return siblingLabel;
               }
