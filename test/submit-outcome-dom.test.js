@@ -185,3 +185,38 @@ test('the captured evidence never promotes an unrecognised page to confirmed', a
   assert.equal(outcome.state, 'unknown');
   assert.equal(outcome.source, 'unmatched_page_text');
 });
+
+/* A FORM THAT SAYS ITS ERRORS OUT LOUD HAS REFUSED THE PRESS. Transcribed from the live
+ * transparent-hiring.breezy.hr receipt (run 549604ee, 2026-08-20): "A response is required"
+ * beside a required video recorder and "Your application contains errors" under the pressed
+ * button, with the whole form still standing - and the old reading reported it unverified. */
+test('a client-validation sentence over a live form is a proven rejection', async () => {
+  const outcome = await read(`
+    <form>
+      <input type="email" value="a@b.c" />
+      <div class="recorder"><button type="button">Record Video</button></div>
+      <span style="color:red">A response is required</span>
+      <button type="submit">Submit Application</button>
+      <div style="color:red">Your application contains errors</div>
+    </form>`);
+  assert.equal(outcome.state, 'rejected');
+  assert.equal(outcome.source, 'client_validation');
+  assert.equal(outcome.formStillPresent, true);
+  assert.match(outcome.message, /Your application contains errors/);
+  assert.match(outcome.message, /1 required response still missing/);
+});
+
+test('the word required decorating a label never reads as a refusal', async () => {
+  const outcome = await read(`
+    <form>
+      <label>Email (required)</label><input type="email" />
+      <span>This field is required</span>
+      <button type="submit">Submit Application</button>
+    </form>`);
+  assert.equal(outcome.state, 'unknown');
+});
+
+test('the validation sentence with the form gone falls through to the ordinary arms', async () => {
+  const outcome = await read('<p>Your application contains errors</p>');
+  assert.notEqual(outcome.source, 'client_validation');
+});

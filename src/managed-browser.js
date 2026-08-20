@@ -3147,6 +3147,40 @@ const { chromium } = require('playwright');
         const node = visibleOne(selector);
         if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
       }
+      /* A FORM THAT SAYS ITS ERRORS OUT LOUD HAS REFUSED THE PRESS, and the form still standing is
+       * the PROOF, not the doubt. Measured on the live transparent-hiring.breezy.hr form
+       * (run 549604ee, 2026-08-20): Send was pressed, the network witness recorded not one request
+       * to any breezy host, and the receipt shows the reason on screen twice - "A response is
+       * required" beside a required Ziggeo video recorder, and "Your application contains errors"
+       * directly under the pressed button. Every arm below is gated on the form being GONE, so
+       * this exact page - the clearest not-sent a page can say - was reported as "never showed a
+       * confirmation it could read" and the applicant was sent to look for an application that
+       * provably never left the browser.
+       *
+       * Client validation is the ONE rejection the live form corroborates rather than
+       * contradicts: an ATS failure panel over a live form is ambiguous (the Ashby arm above
+       * rightly falls to unverified there), but a validation sentence EXISTS only while the form
+       * does. So this arm requires the form to still be present, requires the sentence to sit in
+       * a leaf node (a page-sized container matching by concatenation is not the message), and
+       * matches only wording that names the application's own errors - never a bare "required",
+       * which decorates half the labels on every form. */
+      const VALIDATION_REFUSAL_RE = /your application (?:contains|has) errors|please (?:fix|correct) the errors? (?:above|below|highlighted)/i;
+      if (formStillPresent) {
+        const leaves = [...document.querySelectorAll('div, p, span, label, small')]
+          .filter((node) => node.children.length === 0 && isVisible(node));
+        const refusal = leaves.find((node) => VALIDATION_REFUSAL_RE.test(node.textContent || ''));
+        if (refusal) {
+          const missing = leaves.filter((node) => /^\s*a response is required\.?\s*$/i.test(node.textContent || '')).length;
+          return {
+            state: 'rejected',
+            source: 'client_validation',
+            evidence: 'validation_message',
+            message: (clean(refusal.textContent).slice(0, 300)
+              + (missing > 0 ? ' (' + missing + ' required response' + (missing === 1 ? '' : 's') + ' still missing on the form)' : '')),
+            formStillPresent
+          };
+        }
+      }
       /* GREENHOUSE CONFIRMS BY ROUTING, NOT BY RENDERING A PANEL.
        *
        * Read on 2026-08-10 out of the bundle the Cresta board serves live: on an ok response the
