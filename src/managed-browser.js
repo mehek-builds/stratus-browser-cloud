@@ -1291,6 +1291,31 @@ const { chromium } = require('playwright');
       if (widget.querySelector('[class*="select__placeholder"]')) return { kind: 'empty', value: '' };
       return { kind: 'unknown', value: element.textContent || '' };
     }).catch(() => ({ kind: 'unknown', value: '' }));
+    /* A COMBOBOX THAT IS AN <input> PUBLISHES ITS CHOICE IN ITS OWN VALUE, and textContent can
+     * never see it. Measured on the live Easy Dynamics Rippling form (2026-08-20, field-77
+     * "Please identify your race"): clicking the "Asian" row leaves the search input holding
+     * value="Asian" with the menu closed, no chosen-value node and no select__* class anywhere -
+     * so readChoiceState calls it 'unknown', the verifier refused a correct fill as unreadable,
+     * and every run parked over an answer that was plainly on the form.
+     *
+     * DELIBERATELY NOT AN ARM OF readChoiceState. The same input is where a search query is
+     * typed, and a query is not a choice: promoting any closed-menu input value to 'chosen'
+     * leaks into every reader of that state - the arrival read, the clear check, the
+     * left-on-the-form skip - and lets a fill that merely TYPED the answer verify itself
+     * against its own keystrokes, the exact read-your-own-search-box tautology the fill
+     * branch's bare-opener refusal exists to avoid. That was tried and reviewed out. What this
+     * returns is only EVIDENCE; the one caller weighs it against the row that was clicked, and
+     * a value that is not byte-for-byte that whole row proves nothing and changes nothing.
+     *
+     * Null while the menu is open, because an open menu means the input is mid-conversation
+     * and its value is whatever was last typed into it. */
+    const readCommittedSearchInputValue = async (container) => await container.evaluate((element) => {
+      const input = (element.matches && element.matches('input[role="combobox"]'))
+        ? element : element.querySelector?.('input[role="combobox"]');
+      if (!input) return null;
+      if (input.getAttribute('aria-expanded') === 'true') return null;
+      return String(input.value || '');
+    }).catch(() => null);
     // READS THE ANSWER THE EMPLOYER WOULD SEE, not the container the fill happened to be scoped to.
     // The container handed in by the 'fill' branch is resolved as the nearest ancestor holding a
     // combobox, and on a React Select that is '.select__input-container' - a div whose only child is
@@ -1486,6 +1511,34 @@ const { chromium } = require('playwright');
       lastChoiceUnreadable = state.kind === 'unknown';
       const text = state.value;
       if (holdsAnswer(text, expected) || declineMatches(text, expected)) { lastChoiceUnreadable = false; return true; }
+      /* THE ROW THAT WAS CLICKED IS SITTING IN THE WIDGET'S OWN INPUT, on a control readChoiceState
+       * cannot read. Measured on the live Easy Dynamics Rippling form: the race question is an
+       * '<input role="combobox">' whose committed choice lands in input.value with the menu closed,
+       * so state.kind is 'unknown' here, the block-text near-miss below fires (the block's text
+       * contains the answer beside its label), and a correct fill was refused as unreadable on
+       * every run - the same three attentions re-minted forever.
+       *
+       * WHAT MAKES THIS A READ AND NOT THE TAUTOLOGY: the value must be byte-for-byte the WHOLE
+       * row this call clicked. A residual search query can only equal the whole clicked row when
+       * the query WAS that entire row name, and a menu offering a row named exactly what was typed
+       * is the exact tier's own match; a wrong row reached by a widened query never equals the
+       * query that found it ("Computer Science" is not "Computer Science and Engineering"). The
+       * AND THE HELD ROW STILL HAS TO BE THE ANSWER, under the same reading a readable widget
+       * gets. A widened click of "South Asian" for the answer "Asian" persists as a value that
+       * equals its row, but on a React Select that exact commit is refused by the near-miss rule
+       * and withdrawn; accepting it here because the widget is harder to read would make
+       * unreadability a privilege. So the held row must satisfy holdsAnswer itself, or be a
+       * list-shaped tier's recorded commit - a band or sole-consent row does not contain its
+       * answer by construction, and its provenance already travels in chooserTierAnswer. */
+      if (state.kind === 'unknown' && clean(clickedOptionText || '')) {
+        const committed = await readCommittedSearchInputValue(container);
+        const heldRow = clean(committed || '').toLowerCase();
+        if (heldRow && heldRow === clean(clickedOptionText).toLowerCase()) {
+          const rowIsTheAnswer = holdsAnswer(committed, expected) || declineMatches(committed, expected);
+          const listTier = Boolean(clean(chooserTierAnswer || '')) && holdsAnswer(chooserTierAnswer, expected);
+          if (rowIsTheAnswer || listTier) { lastChoiceUnreadable = false; return true; }
+        }
+      }
       /* A near miss is a refusal, and it only counts as a READ the runner managed when the widget
        * published its chosen value. On an 'unknown' container what came back is the whole block's
        * text, which routinely contains the answer somewhere, so treating that as a near miss would
