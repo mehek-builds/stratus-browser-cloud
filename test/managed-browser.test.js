@@ -587,7 +587,11 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   // resolved from the stored profile, both fell through to the plain text branch because the shape
   // read gave no role and no aria-haspopup to dispatch on, and both reported "value did not persist
   // after fillByLabelText". A real text input keeps what you type; one that does not is a widget.
-  assert.match(SANDBOX_RUNNER, /let persisted = await verifyFilled\(field, action\.value \|\| ''\);/);
+  // settleVerified wraps this read now (see settle-window-covers-radio-select-checkbox.test.js): a
+  // controlled widget reached down this path can commit its value on a later render than the one
+  // the fill dispatched into, the same race choiceLanded already gives a react-select up to 500ms
+  // to settle. The predicate verifyFilled runs is unchanged; only the number of times it is asked.
+  assert.match(SANDBOX_RUNNER, /let persisted = await settleVerified\(\(\) => verifyFilled\(field, action\.value \|\| ''\)\);/);
   assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
   // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
   // exactly as readily as one reached through the two branches above.
@@ -621,7 +625,10 @@ test('a radio is reported from the radio that was clicked, not from the first on
    * The option now reports on itself and the arm ends there. Nothing about a choice reaches the
    * text verification at the bottom of fillByLabelText. */
   assert.match(SANDBOX_RUNNER, /const isChecked = async \(\) => await match\.evaluate\(\(element\) => element\.checked === true\)/);
-  assert.match(SANDBOX_RUNNER, /return await isChecked\(\) \? 'checked' : 'not-checked';/);
+  // settleVerified now stands between the click and this verdict, for the same reason as the text-
+  // fill path above: a controlled radio's checked state can commit on a render after the click, and
+  // this used to read isChecked() back exactly once. See settle-window-covers-radio-select-checkbox.test.js.
+  assert.match(SANDBOX_RUNNER, /return await settleVerified\(isChecked\) \? 'checked' : 'not-checked';/);
   assert.match(SANDBOX_RUNNER, /if \(outcome === 'checked'\) \{\n\s+if \(action\.label\) filledFields\.push\(action\.label\);\n\s+continue;/);
   // A click that did not take is the applicant's to finish, and is named as such.
   assert.match(SANDBOX_RUNNER, /the option was clicked and did not stay selected/);
