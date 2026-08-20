@@ -4,11 +4,15 @@
  * '<input role="combobox" data-input="select-search-input" id="field-77">', and clicking the
  * "Asian" row of its portalled '#field-77-list' leaves the input holding value="Asian" with the
  * menu closed. There is no select__single-value node and no select__* class anywhere, and
- * textContent never carries an input's value, so readChoiceState called a correct fill 'unknown',
- * the verifier marked it unreadable, and the run was parked over an answer that was on the form.
+ * textContent never carries an input's value, so readChoiceState calls it 'unknown', the verifier
+ * marked a correct fill unreadable, and the run was parked over an answer that was on the form.
  *
- * These cases run the REAL readChoiceState (extracted from the shipped runner, never copied)
- * against that measured shape and against the shapes that must keep their existing verdicts.
+ * The repair is deliberately NOT an arm of readChoiceState - promoting any closed-menu input
+ * value to 'chosen' would leak into the arrival read, the clear check and the left-on-the-form
+ * skip, and would let a fill verify its own keystrokes. It is a separate evidence read,
+ * readCommittedSearchInputValue, weighed by verifyChoiceInContainer against the row that was
+ * clicked. These cases run the REAL helper (extracted from the shipped runner, never copied)
+ * against the measured shape, and pin the verifier's weighing in source.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -24,6 +28,7 @@ function constSource(name, indent) {
   return rest.slice(0, next === -1 ? rest.length : next);
 }
 
+const READ_COMMITTED = constSource('readCommittedSearchInputValue', 4);
 const READ_CHOICE_STATE = constSource('readChoiceState', 4);
 
 let browser;
@@ -34,13 +39,13 @@ test.before(async () => {
 });
 test.after(async () => { if (browser) await browser.close(); });
 
-async function choiceStateFor(markup, containerSelector) {
+async function runExtracted(source, name, markup, containerSelector) {
   await page.setContent(`<!doctype html><html><body>${markup}</body></html>`);
   const container = page.locator(containerSelector);
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
   const run = new AsyncFunction('container', `
-    ${READ_CHOICE_STATE}
-    return readChoiceState(container);
+    ${source}
+    return ${name}(container);
   `);
   return run(container);
 }
@@ -57,70 +62,65 @@ const rippling = (inputAttributes) => (
   + '</div></div>'
 );
 
-test('a committed value in a closed search-input combobox reads back as chosen', async () => {
-  const state = await choiceStateFor(
+test('a committed value behind a closed menu is read off the input', async () => {
+  const held = await runExtracted(
+    READ_COMMITTED, 'readCommittedSearchInputValue',
     rippling('aria-expanded="false" placeholder="Select..." value="Asian"'),
     '.etc2niq2',
   );
-  assert.equal(state.kind, 'chosen');
-  assert.equal(state.value, 'Asian');
-  assert.deepEqual(state.values, ['Asian']);
+  assert.equal(held, 'Asian');
 });
 
-test('the same value behind an OPEN menu is a search query, not a choice', async () => {
-  const state = await choiceStateFor(
+test('the same value behind an OPEN menu is a search query and reads null', async () => {
+  const held = await runExtracted(
+    READ_COMMITTED, 'readCommittedSearchInputValue',
     rippling('aria-expanded="true" placeholder="Select..." value="Asian"'),
+    '.etc2niq2',
+  );
+  assert.equal(held, null);
+});
+
+test('the combobox handed in directly, not via a wrapper, reads its own value', async () => {
+  const held = await runExtracted(
+    READ_COMMITTED, 'readCommittedSearchInputValue',
+    rippling('aria-expanded="false" placeholder="Search" value="+1 US"'),
+    '#field-77',
+  );
+  assert.equal(held, '+1 US');
+});
+
+test('a container with no input-shaped combobox has no evidence to offer', async () => {
+  const held = await runExtracted(
+    READ_COMMITTED, 'readCommittedSearchInputValue',
+    '<div class="block"><div id="field-90" role="combobox" aria-expanded="false">'
+    + '<p>Select...</p></div></div>',
+    '.block',
+  );
+  assert.equal(held, null);
+});
+
+test('readChoiceState itself still calls the measured Rippling shape unknown', async () => {
+  const state = await runExtracted(
+    READ_CHOICE_STATE, 'readChoiceState',
+    rippling('aria-expanded="false" placeholder="Select..." value="Asian"'),
     '.etc2niq2',
   );
   assert.equal(state.kind, 'unknown');
 });
 
-test('an empty search input is not promoted to chosen', async () => {
-  const state = await choiceStateFor(
-    rippling('aria-expanded="false" placeholder="Select..." value=""'),
-    '.etc2niq2',
-  );
-  assert.notEqual(state.kind, 'chosen');
-});
-
-test('a value that is exactly the resting placeholder is what nothing looks like', async () => {
-  const state = await choiceStateFor(
-    rippling('aria-expanded="false" placeholder="Select..." value="Select..."'),
-    '.etc2niq2',
-  );
-  assert.notEqual(state.kind, 'chosen');
-});
-
-test('the combobox handed in directly, not via a wrapper, reads its own value', async () => {
-  const state = await choiceStateFor(
-    rippling('aria-expanded="false" placeholder="Search" value="+1 US"'),
-    '#field-77',
-  );
-  assert.equal(state.kind, 'chosen');
-  assert.equal(state.value, '+1 US');
-});
-
-test('a React Select chosen-value node still wins over the input read', async () => {
-  const state = await choiceStateFor(
-    '<div class="select__container"><div class="select__control">'
-    + '<div class="select__single-value">United Arab Emirates</div>'
-    + '<div class="select__input-container">'
-    + '<input role="combobox" aria-expanded="false" value="typed query">'
-    + '</div></div></div>',
-    '.select__container',
-  );
-  assert.equal(state.kind, 'chosen');
-  assert.equal(state.value, 'United Arab Emirates');
-});
-
-test('a React Select placeholder still reads empty, whatever its input holds', async () => {
-  const state = await choiceStateFor(
-    '<div class="select__container"><div class="select__control">'
-    + '<div class="select__placeholder">Select...</div>'
-    + '<div class="select__input-container">'
-    + '<input role="combobox" aria-expanded="false" value="abandoned text">'
-    + '</div></div></div>',
-    '.select__container',
-  );
-  assert.equal(state.kind, 'empty');
+/* THE WEIGHING LIVES IN verifyChoiceInContainer AND ONLY THERE. Source pins, in the style of the
+ * budget and furniture pins: the acceptance must stay gated on the unknown state, on a click this
+ * call actually made, on byte-for-byte equality with that whole clicked row, and on the held row
+ * itself being the answer (or a list-shaped tier's recorded commit). Loosening any one of these
+ * re-opens either the read-your-own-keystrokes tautology or the near-miss privilege. */
+test('the verifier weighs the committed value against the clicked row, gated exactly', () => {
+  const start = SANDBOX_RUNNER.indexOf('const verifyChoiceInContainer');
+  const end = SANDBOX_RUNNER.indexOf('const markChoice');
+  assert.ok(start !== -1 && end > start, 'verifyChoiceInContainer must precede markChoice');
+  const verifier = SANDBOX_RUNNER.slice(start, end);
+  assert.match(verifier, /state\.kind === 'unknown' && clean\(clickedOptionText \|\| ''\)/);
+  assert.match(verifier, /readCommittedSearchInputValue\(container\)/);
+  assert.match(verifier, /heldRow === clean\(clickedOptionText\)\.toLowerCase\(\)/);
+  assert.match(verifier, /holdsAnswer\(committed, expected\) \|\| declineMatches\(committed, expected\)/);
+  assert.match(verifier, /clean\(chooserTierAnswer \|\| ''\)\) && holdsAnswer\(chooserTierAnswer, expected\)/);
 });

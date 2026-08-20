@@ -325,8 +325,17 @@ test('a tier commit verifies as the whole clicked row, and only with tier proven
   const body = SANDBOX_RUNNER.slice(start, end);
   assert.match(body, /clean\(chooserTierAnswer \|\| ''\) && holdsAnswer\(chooserTierAnswer, expected\)/);
   assert.match(body, /state\.kind === 'chosen' && row && shown && row === shown/,
-    'the WHOLE row, published as the chosen value; fragments and unreadable widgets keep their treatment');
-  // And the near-miss refusal still runs first: the tier rule sits after it in source.
-  assert.ok(body.indexOf('if (nearMiss(text, expected))') < body.indexOf('chooserTierAnswer, expected'),
-    'a near miss still refuses before any provenance rule may accept');
+    'the WHOLE row, published as the chosen value; fragments keep their treatment');
+  /* And the near-miss refusal still runs before the CHOSEN-path tier rule. The unknown-state arm
+   * above it cannot sit behind nearMiss - on an unknown widget `text` is the block's own text,
+   * which contains the answer beside its label, so nearMiss fires on every correct fill - and it
+   * embeds the same refusal instead: the held row must BE the answer under holdsAnswer, so a
+   * near-missing commit ("South Asian" for "Asian") fails the gate a chosen widget fails. */
+  assert.ok(body.indexOf('if (nearMiss(text, expected))')
+    < body.indexOf("state.kind === 'chosen' && row && shown"),
+    'a near miss still refuses before the chosen-path tier rule may accept');
+  assert.match(body, /holdsAnswer\(committed, expected\) \|\| declineMatches\(committed, expected\)/,
+    'the unknown-state arm accepts only a held row that is itself the answer');
+  assert.match(body, /heldRow === clean\(clickedOptionText\)\.toLowerCase\(\)/,
+    'and only when it is byte-for-byte the whole row this call clicked');
 });
