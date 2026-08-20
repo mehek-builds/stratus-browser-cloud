@@ -3041,7 +3041,14 @@ const { chromium } = require('playwright');
         const sentence = (body.match(CONFIRMED_TEXT) || [''])[0];
         return { state: 'confirmed', source: 'page_text', evidence: 'body', message: clean(body.slice(Math.max(0, body.indexOf(sentence)), body.indexOf(sentence) + 400)), formStillPresent };
       }
-      return { state: 'unknown', source: null, evidence: null, message: null, formStillPresent };
+      /* NO ARM RECOGNISED THIS PAGE, and the old shape threw that fact away: message/evidence went
+       * back null, so a genuinely new ATS shape (no live confirmation evidence exists for breezy.hr
+       * or workable.com anywhere in this codebase or the vault, measured 2026-08-20) left no residue
+       * to build a real arm from. It costs nothing to keep what the page actually said - state stays
+       * 'unknown' and no verdict anywhere reads this arm's message for the unknown state, so nothing
+       * downstream can mistake it for a confirmation. It is the ONLY way the next real Workable or
+       * breezy send produces ground truth instead of another silent unverified dead end. */
+      return { state: 'unknown', source: 'unmatched_page_text', evidence: location.href, message: body.slice(0, 600) || null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
     /* IS A HUMAN ACTUALLY BEING ASKED FOR ANYTHING, read off the widget rather than off a class name.
