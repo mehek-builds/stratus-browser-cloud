@@ -131,6 +131,15 @@ const FULL_CARD = mytosCard(
   + cardSelect('field3', 'What level of formal educational qualification do you hold?', ['Bachelors', 'Masters'])
   + cardText('field4', 'What was your numeric percentage average?')
   + cardSelect('field5', 'What was your degree classification?', ['First', '2:1'])
+  + `
+  <li class="application-question custom-question"><div>
+    <div class="application-label full-width">
+      <div class="text">What have you built that was challenging, you had ownership of and are proud of?<span class="required">&#10047;</span></div>
+    </div>
+    <div class="application-field full-width required-field">
+      <textarea class="card-field-input" name="cards[62541ff1-0b7c-4f5b-a51d-a217d565776e][field6]" required></textarea>
+    </div>
+  </div></li>`
   + cardSelect('field7', 'Do you require a visa to work in the UK?', ['Yes', 'No']),
 );
 
@@ -232,4 +241,14 @@ test('the borrow requires the opener to live inside the select’s own widget', 
     return helpers.durableSelectorOf(el, helpers.blockOf(el));
   `);
   assert.equal(selector, null);
+});
+
+/* Same form, same day: the required "What have you built..." question is a TEXTAREA whose
+ * placeholder is EMPTY, so the placeholder-gated arm cannot reach it and the run reported it as
+ * "a required field has no label Litos can read". */
+test('a card textarea with no text of its own is named by its sibling application-label', async () => {
+  const [label] = await evaluateWith(FULL_CARD, `
+    return [...document.querySelectorAll('textarea')].map((el) => helpers.questionLabel(el));
+  `);
+  assert.equal(label, 'what have you built that was challenging, you had ownership of and are proud of?\u273f');
 });

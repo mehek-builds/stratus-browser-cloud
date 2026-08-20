@@ -318,7 +318,7 @@ test('a card holding two controls refuses its heading and keeps the handle', asy
     'textarea, select',
   );
   assert.equal(labels.length, 2);
-  assert.match(labels[0], /^cards\[d54adf7b-3148-4095-93bb-72bef32a61f8\]\[field0\]$/);
+  assert.equal(labels[0], 'high school name\u2717');
   assert.equal(labels[1], 'year of high school graduation\u2717');
   for (const label of labels) {
     assert.doesNotMatch(label, /name & graduation/, 'the shared card heading must never be borrowed');
