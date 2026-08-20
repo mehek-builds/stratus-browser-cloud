@@ -2115,7 +2115,13 @@ const { chromium } = require('playwright');
            * never widen to an arbitrary element. */
           if (element.id) {
             const conventional = document.getElementById(element.id + '-list');
-            if (conventional && conventional.getAttribute('role') === 'listbox') return element.id + '-list';
+            /* Visible rows required, not just the role: a page could carry another question's
+             * permanently rendered listbox under a colliding name, and a closed or empty node
+             * proves nothing about THIS control. A menu that has not rendered yet simply fails
+             * this read and is picked up by the next poll of waitForMenu below. */
+            if (conventional && conventional.getAttribute('role') === 'listbox'
+              && [...conventional.querySelectorAll('[role="option"]')]
+                .some((row) => row.getClientRects().length > 0)) return element.id + '-list';
           }
           return '';
         }).catch(() => '');
@@ -2184,8 +2190,21 @@ const { chromium } = require('playwright');
       // page. See menuIsPortalled above for the measured case.
       const waitForMenu = async (control, timeout) => {
         if (!scopedMenu) {
-          await page.waitForTimeout(150).catch(() => undefined);
-          return;
+          /* A bare control has no shell to watch, but it can still NAME its menu - by reference,
+           * or by the {id}-list convention that only reads true once the popup has visible rows.
+           * The flat 150ms pause was measured too short for exactly the widgets this matters on
+           * (this file's own Greenhouse async menus arrive at 555-563ms), and the choosers below
+           * never re-read, so a menu that rendered at 500ms was simply lost. Poll the declared
+           * read on the same cadence as the shelled branch, bounded by the same deadline. */
+          const bareDeadline = Date.now() + timeout;
+          for (;;) {
+            await readDeclaredMenu(control);
+            if (declaredMenu
+              && await declaredMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+            if (await container.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+            if (Date.now() >= bareDeadline) return;
+            await page.waitForTimeout(50).catch(() => undefined);
+          }
         }
         const deadline = Date.now() + timeout;
         for (;;) {

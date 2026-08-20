@@ -66,6 +66,18 @@ test('the {id}-list convention names the menu when nothing is referenced', async
   assert.equal(declared, '[id="field-90-list"]');
 });
 
+test('a conventional listbox with no visible rows declares nothing', async () => {
+  /* Another question's collapsed or permanently rendered-but-hidden list under a colliding name
+   * must not become this control's menu; and a menu that has not rendered yet simply fails this
+   * read and is retried by waitForMenu's poll. */
+  const declared = await declaredMenuFor(
+    '<div role="combobox" id="field-90">Select</div>'
+    + '<div role="listbox" id="field-90-list" style="display:none"><div role="option">Yes</div></div>',
+    '#field-90',
+  );
+  assert.equal(declared, null);
+});
+
 test('a conventional id that is not a listbox declares nothing', async () => {
   const declared = await declaredMenuFor(
     '<div role="combobox" id="field-90">Select</div>'
