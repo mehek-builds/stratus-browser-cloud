@@ -160,3 +160,28 @@ test('an ordinary unsubmitted application page is unknown, not confirmed', async
     <p>Thanks for your interest in Deepgram. We review every application.</p>${FORM}`);
   assert.equal(outcome.state, 'unknown');
 });
+
+// No captured evidence exists anywhere for what a real breezy.hr or workable.com post-submit page
+// looks like (measured 2026-08-20 - see the comment beside this arm in managed-browser.js). Until
+// a dedicated arm exists for either, an unrecognised page must still hand back what it actually saw
+// rather than nulling it out, so the NEXT real submission to either produces the ground truth a
+// real arm can be built from, instead of another silent no_confirmation_state with nothing to learn.
+test('a page no arm recognises still reports what it actually said, tagged distinctly', async () => {
+  // Deliberately outside CONFIRMED_TEXT and REJECTED_TEXT: this is what a real breezy.hr or
+  // workable.com post-submit page might say, and until either is measured this must NOT be able to
+  // resolve as 'confirmed' - it must fall through and still be legible.
+  const outcome = await read('<h1>You are all set</h1><p>Our recruiting team will follow up soon.</p>');
+  assert.equal(outcome.state, 'unknown');
+  assert.equal(outcome.source, 'unmatched_page_text');
+  assert.match(outcome.message, /You are all set/);
+  assert.match(outcome.message, /Our recruiting team will follow up soon/);
+});
+
+// A false 'confirmed' tells Mehek an application was filed that no employer received, so capturing
+// this evidence must never be able to promote itself into one - only 'page_text' (the CONFIRMED_TEXT
+// arm, gated on the form being gone) may return state: 'confirmed'.
+test('the captured evidence never promotes an unrecognised page to confirmed', async () => {
+  const outcome = await read('<h1>You are all set</h1><p>Our recruiting team will follow up soon.</p>' + FORM);
+  assert.equal(outcome.state, 'unknown');
+  assert.equal(outcome.source, 'unmatched_page_text');
+});
