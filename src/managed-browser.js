@@ -3847,6 +3847,21 @@ const { chromium } = require('playwright');
         if (chosen !== null) return chosen;
         const pill = chosenPillOf(element);
         if (pill !== null) return pill;
+        /* A BARE COMBOBOX HOLDS ITS ANSWER AS ITS RENDERED TEXT, and this gate could not read it.
+         * Measured live on ats.rippling.com (Easy Dynamics, 2026-08-20): the fill landed "Yes" on
+         * the work-authorization div - the run's own preview screenshot shows it - and this gate
+         * still reported '"Are you currently authorized to work in the U.S.?" is required and is
+         * still empty', because a div is none of the tag arms above and holds no child control for
+         * the loop below. The rendered text IS the value for this shape; furniture words are what
+         * the widget says when it holds nothing, judged by the same vocabulary the label demotion
+         * uses (BARE_OPENER_FURNITURE below, pinned equal to its two siblings by the drift test). */
+        if (element.getAttribute
+          && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
+          && !element.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select')) {
+          const BARE_OPENER_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+          const rendered = clean(renderedText(element));
+          return Boolean(rendered) && !BARE_OPENER_FURNITURE.test(rendered);
+        }
         for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
           if (hasAnswer(control)) return true;
         }
