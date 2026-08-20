@@ -306,10 +306,12 @@ test('a heading painted uppercase is stored as the words the employer wrote', as
  * heading. Borrowing that heading names both of them "high school name & graduation year", and the
  * resolver answers "High School Name" out of the education profile - which would type her
  * UNIVERSITY into an employer's high-school field. So the SHARED heading may never be borrowed by
- * either control. The textarea stays handle-only, which downstream drops into an honest blocker.
- * The select is different since the sibling-label fallback shipped: its own li carries its own
- * .application-label, "Year of High School Graduation", and that is not a guess - it is the one
- * label that disambiguates the card - so it is kept, while the shared heading still never is. */
+ * either control. Since the sibling-label fallback shipped for selects and textareas, each control
+ * is named by ITS OWN li's .application-label - "High School Name", "Year of High School
+ * Graduation" - which is not a guess: it is the one label that disambiguates the card. The
+ * backend's school resolution explicitly excludes high-school-worded questions
+ * (submissionRunner.ts), so a truly named high-school field cannot be answered with her
+ * university. The shared card heading still may never be borrowed by either control. */
 test('a card holding two controls refuses its heading and keeps the handle', async () => {
   const labels = await labelsFor(
     leverCard('High School Name & Graduation Year',
