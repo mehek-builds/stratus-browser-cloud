@@ -305,8 +305,11 @@ test('a heading painted uppercase is stored as the words the employer wrote', as
  * The live "High School Name & Graduation Year" card holds a textarea and a select under ONE
  * heading. Borrowing that heading names both of them "high school name & graduation year", and the
  * resolver answers "High School Name" out of the education profile - which would type her
- * UNIVERSITY into an employer's high-school field. Both stay handle-only, which downstream drops
- * into an honest blocker. */
+ * UNIVERSITY into an employer's high-school field. So the SHARED heading may never be borrowed by
+ * either control. The textarea stays handle-only, which downstream drops into an honest blocker.
+ * The select is different since the sibling-label fallback shipped: its own li carries its own
+ * .application-label, "Year of High School Graduation", and that is not a guess - it is the one
+ * label that disambiguates the card - so it is kept, while the shared heading still never is. */
 test('a card holding two controls refuses its heading and keeps the handle', async () => {
   const labels = await labelsFor(
     leverCard('High School Name & Graduation Year',
@@ -315,9 +318,10 @@ test('a card holding two controls refuses its heading and keeps the handle', asy
     'textarea, select',
   );
   assert.equal(labels.length, 2);
+  assert.match(labels[0], /^cards\[d54adf7b-3148-4095-93bb-72bef32a61f8\]\[field0\]$/);
+  assert.equal(labels[1], 'year of high school graduation\u2717');
   for (const label of labels) {
-    assert.match(label, /^cards\[d54adf7b-3148-4095-93bb-72bef32a61f8\]\[field\d\]$/);
-    assert.doesNotMatch(label, /high school/, 'an ambiguous heading must never be borrowed');
+    assert.doesNotMatch(label, /name & graduation/, 'the shared card heading must never be borrowed');
   }
 });
 

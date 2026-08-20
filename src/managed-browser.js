@@ -6123,8 +6123,7 @@ const { chromium } = require('playwright');
              * the Palantir refuseAmbiguousBlock bound already trust. A control with NO placeholder
              * is untouched: the handle-only fall-through below keeps its existing, measured
              * behavior, including refusing the two-control Palantir card. */
-            const leverCardHeading = (() => {
-              if (!placeholderText) return '';
+            const boundedSiblingCardLabel = () => {
               const fieldBlock = el.closest && el.closest('.application-field');
               const cardLabel = fieldBlock && fieldBlock.previousElementSibling;
               if (!cardLabel || !cardLabel.matches || !cardLabel.matches('.application-label')) return '';
@@ -6135,7 +6134,8 @@ const { chromium } = require('playwright');
               ).length > 1) return '';
               const text = clean(renderedText(cardLabel));
               return text && text.length <= 200 && !genericControlText(text) ? text.toLowerCase() : '';
-            })();
+            };
+            const leverCardHeading = placeholderText ? boundedSiblingCardLabel() : '';
             const parts = [labelText || '', ariaLabel, leverCardHeading || placeholderText, el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
             /* THE HANDLE THAT IS NOT A LABEL.
@@ -6176,6 +6176,24 @@ const { chromium } = require('playwright');
             if (own && !written && isProviderHandleOnly(own)) {
               const underHeading = nearestQuestionText(el, true);
               if (underHeading) return underHeading;
+              /* A SELECT WITH NO HUMAN TEXT OF ITS OWN, in a card the heading walk refused. The
+               * walk above rejects any level holding more than one control, and that is exactly
+               * the shape of Lever's multi-question education card. Measured on the live
+               * jobs.lever.co Mytos form, 2026-08-20 (packet 16f1c744): one card renders nine
+               * questions - four of them required NATIVE selects (discipline, qualification
+               * level, degree classification, UK visa) carrying nothing but
+               * name="cards[<uuid>][fieldN]" - so all four were named by their handles, dropped
+               * downstream as handle-only, and the run said a required field "has no label Litos
+               * can read" about labels that were on the screen. Their questions sit in the
+               * sibling .application-label, and the same bounded read the placeholder arm uses
+               * (own label holds no control, one visible control per question) recovers them.
+               * A FALLBACK, deliberately behind the heading walk: a one-question card keeps the
+               * heading it has always been named by, so no stored Lever question changes its
+               * words and no saved answer is orphaned by a rename. */
+              if (el.tagName === 'SELECT') {
+                const siblingLabel = boundedSiblingCardLabel();
+                if (siblingLabel) return siblingLabel;
+              }
             }
             const fallbackText = nearestQuestionText(el);
             if (own && !genericControlText(own)) return own;
@@ -6245,6 +6263,35 @@ const { chromium } = require('playwright');
             if (name) return '[name="' + name.replace(/["\\]/g, '\\$&') + '"]';
             const path = block && block.getAttribute && block.getAttribute('data-field-path');
             if (path) return '[data-field-path="' + path.replace(/["\\]/g, '\\$&') + '"]';
+            /* A RENDERED WIDGET'S DURABLE NAME IS ITS BACKING SELECT'S. Measured on the live
+             * jobs.lever.co Mytos university picker, 2026-08-20: the control discovery emits is
+             * Select2's '<span role="combobox">', which carries no id, no name and no field path,
+             * so the question shipped with no durable selector, the backend could not build a
+             * fill action for it, and a required field whose answer sat resolved in the packet
+             * ("University of Southern California", present verbatim among the select's 2,965
+             * options) was reported "required and is still empty" on every run. The hidden
+             * '<select class="select2-hidden-accessible" name="cards[<uuid>][field0]">' one node
+             * over IS this question's control: filling it natively is what Select2 itself does on
+             * a commit, and the fill branch already handles a select. Named only when the block
+             * holds exactly ONE select and that select is widget-backing (aria-hidden or hidden
+             * by the widget's own class), so a foreign control can never lend its name. */
+            if (el.getAttribute && (el.getAttribute('role') === 'combobox'
+              || el.getAttribute('aria-haspopup') === 'listbox') && block && block.querySelectorAll) {
+              const selects = block.querySelectorAll('select');
+              const backing = selects.length === 1 ? selects[0] : null;
+              const backingHidden = backing && (backing.getAttribute('aria-hidden') === 'true'
+                || /(?:^|\s)(?:select2-hidden-accessible|chosen-select)(?:\s|$)/.test(backing.className || ''));
+              /* AND THE WIDGET THE OPENER LIVES IN MUST BE THE SELECT'S OWN. Select2 and Chosen
+               * both render their widget as the select's immediate next sibling, so an opener
+               * inside that sibling is this select's rendering and an opener anywhere else in the
+               * block is some other question's. Without this, an unnamed input-backed combobox
+               * sharing a broad block with one widgetized select could borrow a foreign name. */
+              const widget = backingHidden && backing.nextElementSibling;
+              const openerIsItsWidget = Boolean(widget && (widget === el || widget.contains(el)));
+              const backingName = openerIsItsWidget && backing.getAttribute('name');
+              if (backingName) return '[name="' + backingName.replace(/["\\]/g, '\\$&') + '"]';
+              if (openerIsItsWidget && backing.id && !/^[0-9]/.test(backing.id)) return '#' + CSS.escape(backing.id);
+            }
             return null;
           }
           // The choices a closed list actually offers, so the resolver can snap a stored answer onto
