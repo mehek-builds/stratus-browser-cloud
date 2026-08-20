@@ -1289,6 +1289,34 @@ const { chromium } = require('playwright');
       // Still showing "Select...", so nothing was chosen. Saying so rather than falling through to
       // textContent stops the label from being mistaken for an answer.
       if (widget.querySelector('[class*="select__placeholder"]')) return { kind: 'empty', value: '' };
+      /* A COMBOBOX THAT IS AN <input> PUBLISHES ITS CHOICE IN ITS OWN VALUE, and textContent can
+       * never see it. Measured on the live Easy Dynamics Rippling form (2026-08-20, field-77
+       * "Please identify your race"): clicking the "Asian" row leaves the search input holding
+       * value="Asian" with the menu closed and aria-expanded="false", no chosen-value node and no
+       * select__* class anywhere - so the read above fell through to 'unknown', the verifier
+       * refused a correct fill as unreadable, and the run was parked over an answer that was
+       * plainly on the form.
+       *
+       * ONLY WHILE THE MENU IS CLOSED. The same input is where a search query is typed, and a
+       * query is not a choice: reading value while aria-expanded="true" is how a fill that merely
+       * TYPED the answer would verify itself against its own keystrokes - the exact
+       * read-your-own-search-box tautology the bare-opener refusal below this file exists to
+       * avoid. A committed Rippling choice closes its menu in the same act, so the closed-menu
+       * value is the widget's, not this run's.
+       *
+       * The resting placeholder ("Select...", "Search") is excluded by comparison with the
+       * attribute itself rather than a word list, because the attribute is the one honest
+       * statement of what this control shows when it holds nothing. */
+      const searchInput = (element.matches?.('input[role="combobox"]') ? element : null)
+        || widget.querySelector?.('input[role="combobox"]')
+        || element.querySelector?.('input[role="combobox"]');
+      if (searchInput && searchInput.getAttribute('aria-expanded') !== 'true') {
+        const held = String(searchInput.value || '').trim();
+        const resting = String(searchInput.getAttribute('placeholder') || '').trim();
+        if (held && held !== resting) {
+          return { kind: 'chosen', value: held, values: [held], semanticValues: [held] };
+        }
+      }
       return { kind: 'unknown', value: element.textContent || '' };
     }).catch(() => ({ kind: 'unknown', value: '' }));
     // READS THE ANSWER THE EMPLOYER WOULD SEE, not the container the fill happened to be scoped to.
