@@ -2100,10 +2100,26 @@ const { chromium } = require('playwright');
        */
       let declaredMenu = null;
       const readDeclaredMenu = async (control) => {
-        const owns = await control.evaluate((element) => (
-          element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || ''
-        )).catch(() => '');
-        const id = String(owns).trim().split(/\s+/)[0] || '';
+        const owns = await control.evaluate((element) => {
+          const referenced = element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || '';
+          const id = String(referenced).trim().split(/\s+/)[0] || '';
+          if (id) return id;
+          /* THE MENU NAMED BY CONVENTION INSTEAD OF BY REFERENCE. Rippling's bare div combobox
+           * ('<div role="combobox" id="field-90">', measured live on ats.rippling.com, Easy
+           * Dynamics, 2026-08-20) portals its popup to '<div role="listbox" id="field-90-list">'
+           * and sets NO aria-controls or aria-owns anywhere, so the declared-menu read came back
+           * empty, menuRoot had nowhere it was allowed to look, and the correct answer sat
+           * unclicked in the open portal - R-076's exact shape, one attribute short. The {id}-list
+           * suffix is the same author statement one convention over, and it is accepted only when
+           * the node exists RIGHT NOW and carries role="listbox", so it can only ever name a menu,
+           * never widen to an arbitrary element. */
+          if (element.id) {
+            const conventional = document.getElementById(element.id + '-list');
+            if (conventional && conventional.getAttribute('role') === 'listbox') return element.id + '-list';
+          }
+          return '';
+        }).catch(() => '');
+        const id = String(owns).trim();
         declaredMenu = id ? page.locator('[id="' + id.replace(/["\\]/g, '\\$&') + '"]') : null;
       };
       // Anything that is genuinely part of an option list. A bare 'li' still qualifies, but only
