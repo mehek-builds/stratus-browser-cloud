@@ -474,6 +474,21 @@ test('an ANSWERED bare div combobox is not a blocker: its rendered text is its v
   assert.equal(readiness.blocking.length, 0, JSON.stringify(readiness.blocking));
 });
 
+test('a custom empty-state placeholder is not an answer', async () => {
+  /* A tenant-configured placeholder is outside the shared furniture vocabulary, and reading it as
+   * an answer silently skips a required field. Placeholder-shaped grammar and aria-label
+   * restatement both read as empty. */
+  for (const empty of ['Please select an answer', 'Select a country', '-- Select --', 'Pick one', 'None selected']) {
+    const readiness = await readinessOf(`
+      <div><div>
+        <div class="q">Are you currently authorized to work in the U.S.?</div>
+        <div id="field-63" role="combobox" aria-haspopup="listbox"
+          aria-required="true" tabindex="0"><p>${empty}</p></div>
+      </div></div>`);
+    assert.equal(readiness.blocking.length, 1, empty + ': ' + JSON.stringify(readiness.blocking));
+  }
+});
+
 test('the furniture aria-label is a last resort, not a casualty', async () => {
   // The same widget with NOTHING beside it to walk to: "Select" is still one notch better than an
   // unnamed required field, so demoting it must not have dropped it.

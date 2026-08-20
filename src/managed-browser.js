@@ -3859,8 +3859,20 @@ const { chromium } = require('playwright');
           && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
           && !element.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select')) {
           const BARE_OPENER_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+          /* Three empty-state readings, because a tenant can configure its own placeholder and a
+           * placeholder read as an answer is a silent skip of a required field - the one direction
+           * this file forbids. (1) the shared furniture vocabulary; (2) text that merely restates
+           * the widget's own aria-label ("Select" / "Select", the measured Rippling empty state);
+           * (3) placeholder-shaped grammar - an imperative select/choose/pick opening or a bare
+           * "none selected". A real ANSWER that happens to open with those words ("Choose not to
+           * disclose") reads as empty and keeps its blocker, which fails toward a person looking
+           * at an answered control - the direction this gate is allowed to be wrong in. */
+          const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$/i;
           const rendered = clean(renderedText(element));
-          return Boolean(rendered) && !BARE_OPENER_FURNITURE.test(rendered);
+          if (!rendered) return false;
+          const openerAriaLabel = clean(element.getAttribute('aria-label') || '');
+          if (openerAriaLabel && rendered.toLowerCase() === openerAriaLabel.toLowerCase()) return false;
+          return !BARE_OPENER_FURNITURE.test(rendered) && !PLACEHOLDER_SHAPED.test(rendered);
         }
         for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
           if (hasAnswer(control)) return true;
