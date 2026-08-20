@@ -1754,10 +1754,10 @@ const { chromium } = require('playwright');
       }
       return false;
     };
-    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer) => {
+    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer, expected) => {
       // Nothing was clicked during this call, so this call has nothing on the form to take back. The
       // provenance rule the clicked-row tier already relies on, asked for the opposite purpose.
-      if (!clean(clickedOptionText || '')) return;
+      if (!clean(clickedOptionText || '')) return false;
       const arrival = lastChoiceArrival;
       const now = await readChoiceState(container);
       /* THE ROW THAT WAS CLICKED WAS THE ANSWER, ON A CONTROL THAT CANNOT SAY SO.
@@ -1784,16 +1784,44 @@ const { chromium } = require('playwright');
           === clean(clickedForAnswer || '').toLowerCase();
         if (clickedTheAnswer) await unmarkChoice(container);
         else await markChoice(container, 'unreadable');
-        return;
+        return false;
       }
       // Positively empty. Either the click never took or something already undid it, and either way
       // there is no false answer sitting on the form.
-      if (now.kind === 'empty') { await unmarkChoice(container); return; }
+      if (now.kind === 'empty') { await unmarkChoice(container); return false; }
       /* Re-entering fillCustomChoice to put an earlier answer back would overwrite the two sentences
        * the caller is about to read, so they are held across the withdrawal. The verdict is already
        * made; what happens here can only change the FORM, never the report. */
       const heldRefusal = lastChoiceRefusal;
       const heldUnreadable = lastChoiceUnreadable;
+      /* ONE MORE READ, AGAINST THE STATE THIS FUNCTION IS ABOUT TO ACT ON, BEFORE ANYTHING IS PRESSED.
+       *
+       * choiceLanded's settle loop above already gives a React Select up to 500ms across ten reads to
+       * publish the value it was just clicked to hold, and on every control measured so far that is
+       * enough. It is a bound, not a guarantee: the loop's LAST read and this function's FIRST read
+       * are still two separate reads of a live page, or the control was clicked but its render is
+       * gated behind something other than the plain repaint the loop is timed for. Either way, 'now'
+       * two lines up already told us the control is holding SOMETHING ('chosen', not 'empty' and not
+       * 'unknown') - what had not been asked, until now, is whether that something is the answer.
+       *
+       * So it is asked, once, with the exact same verifier and the exact same provenance the settle
+       * loop just ran out of retries on. A confirmed match here is not a coincidence the caller gets
+       * to be suspicious of: verifyChoiceInContainer is the one function in this file allowed to
+       * disagree with the chooser, and if it now agrees, the control is holding the answer by the
+       * same rule choiceLanded's own successful path accepts. Clearing it anyway - which is every
+       * line below this block - would take a correctly answered field and report it as one this run
+       * lost, on a control this run itself just emptied.
+       *
+       * 'expected' is optional and the old behaviour stands when it is not supplied: there is then
+       * nothing to confirm the control wrong against, and guessing would be worse than the unreadable
+       * treatment above already gives it. */
+      if (expected !== undefined
+        && await verifyChoiceInContainer(container, expected, clickedOptionText, clickedForAnswer, lastChooserTierAnswer)) {
+        await unmarkChoice(container);
+        lastChoiceRefusal = heldRefusal;
+        lastChoiceUnreadable = false;
+        return true;
+      }
       let restored = await clearChoiceControl(container);
       if (arrival.kind === 'chosen') {
         await fillCustomChoice(container, arrival.value).catch(() => undefined);
@@ -1805,6 +1833,7 @@ const { chromium } = require('playwright');
       lastChoiceUnreadable = heldUnreadable;
       if (restored) await unmarkChoice(container);
       else await markChoice(container, 'different');
+      return false;
     };
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
@@ -1822,8 +1851,10 @@ const { chromium } = require('playwright');
         }
         if (elapsed < 500) await page.waitForTimeout(50).catch(() => undefined);
       }
-      await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer);
-      return false;
+      // withdrawRefusedChoice now gets one more look at 'expected' before it presses anything, and a
+      // confirmed match there is exactly as landed as one the loop above caught. See its own comment
+      // for why clearing on that path would be destroying a correct answer to report a false loss.
+      return await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer, expected);
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
