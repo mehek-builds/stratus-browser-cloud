@@ -339,3 +339,58 @@ test('a tier commit verifies as the whole clicked row, and only with tier proven
   assert.match(body, /heldRow === clean\(clickedOptionText\)\.toLowerCase\(\)/,
     'and only when it is byte-for-byte the whole row this call clicked');
 });
+
+/* A REMOTE-SEARCHED LOCATION FIELD, whose "no rows" is a live geocoder answering the wrong query -
+ * not a closed list saying the option does not exist. Measured live on IMC Trading's Greenhouse
+ * form, 2026-08-20: her stored city answer "Dubai, U.A.E." (correct and required verbatim on every
+ * plain free-text city field) returns zero results from the real widget; "Dubai" alone returns
+ * "Dubai, United Arab Emirates" as its one and only result. fixture()'s substring filter reproduces
+ * that shape exactly: the full comma string matches nothing, the text before the comma does. */
+test('a remote-searched combobox retries with the city alone when the full stored value renders nothing', async () => {
+  const result = await protectedAttempt(
+    fixture({ options: ['Dubai, United Arab Emirates'] }),
+    'Dubai, U.A.E.'
+  );
+  assert.equal(result.filled, true, 'the narrowed query is the only one the live geocoder ever answers');
+  assert.equal(result.landed, true, 'the clicked row does not contain the stored text and needs chooserTierAnswer provenance to verify, exactly like a band or a sole-consent row');
+  assert.deepEqual(result.clicked, ['Dubai, United Arab Emirates']);
+  assert.equal(result.shown, 'Dubai, United Arab Emirates');
+});
+
+test('a comma-bearing value that the full query already answers is never narrowed', async () => {
+  // Ordinary exact-match consent and taxonomy rows carry commas too ("Yes, I agree"). Narrowing
+  // must be gated on the untouched query returning NOTHING, never merely on a comma being present.
+  const result = await protectedAttempt(
+    fixture({ options: ['Assessment, Test'] }),
+    'Assessment, Test'
+  );
+  assert.equal(result.filled, true);
+  assert.deepEqual(result.clicked, ['Assessment, Test'], 'the exact tier took it; the narrowed retry was never reached');
+});
+
+test('an ambiguous narrowed query refuses rather than guessing among several rows', async () => {
+  const result = await protectedAttempt(
+    fixture({ options: ['Dubai Marina, UAE', 'Dubai, UAE Downtown'] }),
+    'Dubai, U.A.E.'
+  );
+  assert.equal(result.filled, false, 'two rows both start with the narrowed city; picking either would be a guess');
+  assert.deepEqual(result.clicked, [], 'nothing was clicked, not even transiently');
+});
+
+test('a narrowed match that does not start with the searched city is refused, not merely contains it', async () => {
+  const result = await protectedAttempt(
+    fixture({ options: ['Old Dubai District'] }),
+    'Dubai, U.A.E.'
+  );
+  assert.equal(result.filled, false, '"Old Dubai District" contains "Dubai" but is not a match for it');
+  assert.deepEqual(result.clicked, []);
+});
+
+test('a comma value with no answer under either query is left alone', async () => {
+  const result = await protectedAttempt(
+    fixture({ options: ['Somewhere Else'] }),
+    'Nowhere, Real'
+  );
+  assert.equal(result.filled, false);
+  assert.deepEqual(result.clicked, []);
+});
