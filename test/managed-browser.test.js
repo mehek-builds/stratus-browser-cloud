@@ -705,7 +705,10 @@ test('a fill selector that names a question fills the one control inside it', ()
   // locator.fill() threw against it. Exactly one candidate, or none: a wrapper holding two controls
   // speaks for two questions.
   assert.match(SANDBOX_RUNNER, /const fillTargetWithin = async \(locator\)/);
-  assert.match(SANDBOX_RUNNER, /\(await inside\.count\(\)\.catch\(\(\) => 0\)\) === 1 \? inside\.first\(\) : null/);
+  assert.match(SANDBOX_RUNNER, /if \(\(await inside\.count\(\)\.catch\(\(\) => 0\)\) === 1\) return inside\.first\(\);/);
+  // A combobox that is not an input is still THE control: a bare opener (itself, or the one
+  // opener inside the named block) is a valid fill target and routes to the combobox dispatch.
+  assert.match(SANDBOX_RUNNER, /const bareItself = await locator\.evaluate\(isBareOpener\)/);
   assert.doesNotMatch(SANDBOX_RUNNER, /await locator\.fill\(fillValue/);
 });
 
@@ -1733,12 +1736,13 @@ test('a phone field that does not say type="tel" still verifies on digits', () =
    * run reported 'value did not persist after fill (wrote "2135746270", field holds
    * "213-574-6270")' over ten identical digits. The employer's own per-control markup now travels
    * with the reading; tel-persistence-dom.test.js runs the arm against that exact element. */
-  assert.match(SANDBOX_RUNNER, /state\.type === 'tel' \|\| state\.telShaped/);
+  assert.match(SANDBOX_RUNNER, /if \(state\.telShaped\) \{/);
   assert.match(SANDBOX_RUNNER, /telShaped: element instanceof HTMLInputElement && \(/);
   // Each signal is the employer's own markup naming this one control a phone field.
   assert.match(SANDBOX_RUNNER, /getAttribute\('inputmode'\) \|\| ''\)\.toLowerCase\(\) === 'tel'/);
   assert.match(SANDBOX_RUNNER, /getAttribute\('autocomplete'\)/);
-  assert.match(SANDBOX_RUNNER, /\(\?:\\b\|_\)\(\?:phone\|mobile\|tel\)\(\?:\\b\|_\)/);
+  // "telephone" spelt out is the most common long form; \btel\b alone cannot match it.
+  assert.match(SANDBOX_RUNNER, /\(\?:\\b\|_\)\(\?:phone\|mobile\|telephone\|tel\)\(\?:\\b\|_\)/);
   // The inferred arm carries the bound the declared one does not: seven digits on both sides.
   assert.match(SANDBOX_RUNNER, /candidateDigits\.length >= 7 && expectedDigits\.length >= 7/);
 });
@@ -1753,7 +1757,24 @@ test('discovery scans combobox openers that are not form tags', () => {
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\]:not\(input\):not\(select\):not\(textarea\),/);
   assert.match(SANDBOX_RUNNER, /\[aria-haspopup="listbox"\]:not\(input\):not\(select\):not\(textarea\)/);
   // A non-form-tag opener that holds a real control inside it is a wrapper, and the inner control
-  // is already the candidate; scanning both would mint two questions for one control.
+  // is already the candidate; scanning both would mint two questions for one control. Hidden and
+  // aria-hidden backing controls do not count as real (Chosen nests its 1x1 select INSIDE the
+  // shell), page chrome is out (a header language switcher is a listbox opener too), and of
+  // nested openers only the innermost is scanned.
   assert.match(SANDBOX_RUNNER, /const bareOpener = choiceOpener && !\/\^\(\?:INPUT\|SELECT\|TEXTAREA\)\$\/\.test\(el\.tagName\);/);
-  assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.querySelector\('input:not\(\[type="hidden"\]\), textarea, select'\)\) return false;/);
+  assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.closest\('header, footer, nav, \[role="navigation"\], \[role="banner"\], \[role="contentinfo"\]'\)\) return false;/);
+  assert.match(SANDBOX_RUNNER, /'input:not\(\[type="hidden"\]\):not\(\[aria-hidden="true"\]\), textarea, select:not\(\[aria-hidden="true"\]\)'/);
+  assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.querySelector\('\[role="combobox"\], \[aria-haspopup="listbox"\]'\)\) return false;/);
+});
+
+test('the furniture-label vocabulary is one vocabulary in both passes', () => {
+  /* FURNITURE_LABEL (readiness gate) and WIDGET_FURNITURE (discovery) are the same judgement
+   * made in two evaluated sandboxes that cannot share a binding. A word added to one and not
+   * the other makes the blocker and the stored question disagree about the same control, the
+   * exact defect class this file has already measured in production. This pin turns that
+   * silent drift into a red test. */
+  const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
+  const literals = [...source.matchAll(/(?:FURNITURE_LABEL|WIDGET_FURNITURE) = (\/[^\n]+\/i);/g)].map((m) => m[1]);
+  assert.equal(literals.length, 2, 'both furniture vocabularies must exist');
+  assert.equal(literals[0], literals[1], 'the two furniture vocabularies drifted apart');
 });
