@@ -408,7 +408,7 @@ test('fillByLabelText can use scoped custom listbox controls', () => {
   assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) =>/);
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
   assert.match(SANDBOX_RUNNER, /getByRole\('option', \{ name: option, exact: false \}\)/);
-  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(questionBlock, action\.value \|\| ''\)/);
 });
 
 test('an option is only ever clicked inside an option list, never loose in the page', () => {
@@ -491,7 +491,9 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
   assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer\)\)/);
-  assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
+  const landedReadbacks = (SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length
+    + (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length;
+  assert.equal(landedReadbacks, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
   assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,
     'fill call sites cannot skip withdrawal; the second read waits for a delayed rollback to settle;'
@@ -506,7 +508,7 @@ test('a choice option that is not on the list names the answer that went looking
   // unchanged; the bare "choice option not found" simply never told the applicant what to fix.
   // The emission, not the words: the sentence survives in the comment that explains why it went.
   assert.doesNotMatch(SANDBOX_RUNNER, /': choice option not found'/);
-  assert.match(SANDBOX_RUNNER, /const unmatched = await readChoiceState\(container\);/);
+  assert.match(SANDBOX_RUNNER, /const unmatched = await readChoiceState\(questionBlock\);/);
   // The sentence now lives in one helper, so a chooser that DECLINED an ambiguous list can replace
   // it with what actually happened rather than claiming her answer was absent.
   assert.match(SANDBOX_RUNNER, /const unmatchedReason = \(value\) => lastChoiceRefusal/);
@@ -516,7 +518,7 @@ test('a choice option that is not on the list names the answer that went looking
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
   assert.match(SANDBOX_RUNNER, /\.select2-choice, \.select2-container/);
   assert.match(SANDBOX_RUNNER, /\.select2-result, \.select2-results li/);
-  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(container, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(questionBlock, action\.value \|\| ''\)/);
   assert.match(SANDBOX_RUNNER, /const selectNativeOption = async \(field, wanted\) =>/);
   assert.match(SANDBOX_RUNNER, /const selected = customSelected \|\| await selectNativeOption\(field, action\.value \|\| ''\)/);
 });
@@ -592,10 +594,10 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   // the fill dispatched into, the same race choiceLanded already gives a react-select up to 500ms
   // to settle. The predicate verifyFilled runs is unchanged; only the number of times it is asked.
   assert.match(SANDBOX_RUNNER, /let persisted = await settleVerified\(\(\) => verifyFilled\(field, action\.value \|\| ''\)\);/);
-  assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(container, action\.value \|\| ''\)\) persisted = true;/);
+  assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(questionBlock, action\.value \|\| ''\)\) persisted = true;/);
   // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
   // exactly as readily as one reached through the two branches above.
-  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(container, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(container, action\.value \|\| ''\);/);
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(questionBlock, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(questionBlock, action\.value \|\| ''\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.
   assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);
@@ -606,7 +608,8 @@ test('choice matching is scoped to the question container, never the page', () =
   // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
   // on the form, which the applicant cannot undo. The scope is now the question's OWN option block
   // rather than whatever container the anchor happened to land in; see D-02 and the test below.
-  assert.match(SANDBOX_RUNNER, /const scope = await questionOptionBlock\(label, container\);/);
+  assert.match(SANDBOX_RUNNER, /const questionBlock = await questionOptionBlock\(label, container\);/);
+  assert.match(SANDBOX_RUNNER, /const scope = questionBlock;/);
   assert.match(SANDBOX_RUNNER, /const choices = scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing - and says
   // so, which it used to do silently.
@@ -686,6 +689,11 @@ test('fillByLabelText climbs to a container that actually owns controls', () => 
   assert.match(
     SANDBOX_RUNNER,
     /ancestor::\*\[\(self::div or self::fieldset\) and \(\.\/\/textarea or \.\/\/input\[not\(@type="file"\) and not\(@type="hidden"\)\] or \.\/\/select or \.\/\/\*\[@role="combobox"\] or \.\/\/\*\[@aria-haspopup="listbox"\]\)\]\[1\]/,
+  );
+  assert.match(
+    SANDBOX_RUNNER,
+    /const questionBlock = await questionOptionBlock\(label, container\);\n\s+const field = questionBlock\.locator\('textarea, input:not\(\[type=file\]\):not\(\[type=hidden\]\), select'\)\.first\(\);/,
+    'the field dispatch must use the question-scoped block, not the first control in a shared parent',
   );
 });
 

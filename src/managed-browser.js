@@ -6956,7 +6956,8 @@ const { chromium } = require('playwright');
         const container = label.locator(
           'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select or .//*[@role="combobox"] or .//*[@aria-haspopup="listbox"])][1]'
         );
-        const field = container.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
+        const questionBlock = await questionOptionBlock(label, container);
+        const field = questionBlock.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
           /* THE FOURTH CALL SITE, AND IT WAS THE ONE WITHOUT A VERIFIER.
            *
@@ -6977,8 +6978,8 @@ const { chromium } = require('playwright');
            * clicked and was then refused by its verifier, and this branch clicked the same row and
            * reported the field filled.
            */
-          if (await fillCustomChoice(container, action.value || '')) {
-            const landed = await choiceLanded(container, action.value || '');
+          if (await fillCustomChoice(questionBlock, action.value || '')) {
+            const landed = await choiceLanded(questionBlock, action.value || '');
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -6989,7 +6990,7 @@ const { chromium } = require('playwright');
           // A question whose only controls are option buttons has no field to find, by construction.
           // Asked here as well as in the checkbox arm below because a board that omits the mirror
           // input entirely never reaches that arm.
-          if (await pickOptionPill(container, action.value || '')) {
+          if (await pickOptionPill(questionBlock, action.value || '')) {
             if (action.label) filledFields.push(action.label);
             continue;
           }
@@ -7010,7 +7011,7 @@ const { chromium } = require('playwright');
            * portalling control that does not offer her answer used to click somebody else's row and
            * is now correctly handed back, so this is the sentence that reports it. */
           if (lastChoiceControlOpened && action.label) {
-            const unmatched = await readChoiceState(container);
+            const unmatched = await readChoiceState(questionBlock);
             skipped.push(unmatched.kind === 'chosen'
               ? action.label + ': left the answer already on the form, "' + clean(unmatched.value) + '"'
               : action.label + ': ' + unmatchedReason(action.value || ''));
@@ -7066,7 +7067,7 @@ const { chromium } = require('playwright');
           continue;
         }
         if (shape.tag === 'select') {
-          const customSelected = await fillCustomChoice(container, action.value || '');
+          const customSelected = await fillCustomChoice(questionBlock, action.value || '');
           const selected = customSelected || await selectNativeOption(field, action.value || '');
           // SAID OUT LOUD, because a silent 'continue' is a dropped answer. This branch left an
           // unmatched select with nothing in filledFields and nothing in skipped, so the run
@@ -7078,8 +7079,8 @@ const { chromium } = require('playwright');
             continue;
           }
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list' || fieldInChoiceShell) {
-          if (await fillCustomChoice(container, action.value || '')) {
-            const landed = await choiceLanded(container, action.value || '');
+          if (await fillCustomChoice(questionBlock, action.value || '')) {
+            const landed = await choiceLanded(questionBlock, action.value || '');
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -7098,7 +7099,7 @@ const { chromium } = require('playwright');
            * report she could have cleared in one click read as a fault in Litos.
            */
           if (action.label) {
-            const unmatched = await readChoiceState(container);
+            const unmatched = await readChoiceState(questionBlock);
             skipped.push(unmatched.kind === 'chosen'
               ? action.label + ': left the answer already on the form, "' + clean(unmatched.value) + '"'
               : action.label + ': ' + unmatchedReason(action.value || ''));
@@ -7117,7 +7118,7 @@ const { chromium } = require('playwright');
            * reads the first input in the block and not the option that was clicked.
            */
           const wanted = String(action.value || '').trim();
-          const scope = await questionOptionBlock(label, container);
+          const scope = questionBlock;
           const groups = await radioGroupNames(scope);
           if (groups.length > 1) {
             // Refused rather than guessed. Two groups means two questions, and the only thing worse
@@ -7202,12 +7203,12 @@ const { chromium } = require('playwright');
         // does, rather than the one immediate check this used to make.
         let persisted = await settleVerified(() => verifyFilled(field, action.value || ''));
         if (!persisted) {
-          if (await pickOptionPill(container, action.value || '')) persisted = true;
-          else if (await fillCustomChoice(container, action.value || '')) {
+          if (await pickOptionPill(questionBlock, action.value || '')) persisted = true;
+          else if (await fillCustomChoice(questionBlock, action.value || '')) {
             // Same row hint as the two branches above, for the same reason: the fill that just
             // succeeded is the one whose row this is, and a widget on this path abbreviates its
             // chosen value exactly as readily as one on the others.
-            persisted = await choiceLanded(container, action.value || '');
+            persisted = await choiceLanded(questionBlock, action.value || '');
             if (!persisted && lastChoiceUnreadable) lastChoiceRefusal = unreadableChoiceReason;
           }
         }
