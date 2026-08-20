@@ -87,6 +87,46 @@ test('a group with no identifiable decline member is left alone', async () => {
   assert.deepEqual(declined, []);
 });
 
+
+test('stock TCPA copy on the ACCEPT label can never take the decline click', async () => {
+  const declined = await runDecline(
+    '<label><input type="radio" name="sms_opt_in" value="agree">Yes, text me. Reply STOP to opt out anytime.</label>'
+    + '<label><input type="radio" name="sms_opt_in" value="nah">I do not consent to receiving text messages</label>',
+  );
+  assert.deepEqual(declined, ['sms_opt_in']);
+  const chosen = await page.evaluate(() => document.querySelector('input[value="nah"]').checked);
+  assert.equal(chosen, true);
+  const accept = await page.evaluate(() => document.querySelector('input[value="agree"]').checked);
+  assert.equal(accept, false);
+});
+
+test('two members sharing one wrapping container are left alone', async () => {
+  const declined = await runDecline(
+    '<label>Check Yes or No to indicate your agreement to receive text message updates.'
+    + '<input type="radio" name="sms_opt_in" value="a">'
+    + '<input type="radio" name="sms_opt_in" value="b"></label>',
+  );
+  assert.deepEqual(declined, []);
+});
+
+test('an incidental mid-sentence no on the accept label does not read as a decline', async () => {
+  const declined = await runDecline(
+    '<label><input type="radio" name="email_opt_in" value="a">Yes, email me updates, no spam ever</label>'
+    + '<label><input type="radio" name="email_opt_in" value="b">Please decline all emails</label>',
+  );
+  assert.deepEqual(declined, ['email_opt_in']);
+  const chosen = await page.evaluate(() => document.querySelector('input[value="b"]').checked);
+  assert.equal(chosen, true);
+});
+
+test('the name gate is anchored: a foreign name containing an opt-in substring stays foreign', async () => {
+  const declined = await runDecline(
+    '<input type="radio" name="context_opt_in_scope" value="true">'
+    + '<input type="radio" name="context_opt_in_scope" value="false">',
+  );
+  assert.deepEqual(declined, []);
+});
+
 /* The gate around the pass, pinned in source: it runs only when NO candidate is viable and some
  * final-intent control is sitting there DISABLED, it declines (never accepts), and it re-reads
  * the candidates exactly once. */

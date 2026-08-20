@@ -4619,9 +4619,20 @@ const { chromium } = require('playwright');
       if (viable.length === 0 && Array.isArray(choices)
         && choices.some((choice) => choice.visible && choice.finalIntent && choice.disabled)) {
         const declined = await page.evaluate(() => {
-          const OPTIN_NAME = /(?:sms|text|email|marketing|news(?:letter)?|updates?)[_-]?opt[_-]?in/i;
+          const OPTIN_NAME = /(?:^|[_-])(?:sms|text|email|marketing|news(?:letter)?|updates?)[_-]?opt[_-]?in/i;
           const DECLINE_VALUE = /^(?:false|no|0|decline[d]?)$/i;
-          const DECLINE_WORDING = /\bno\b[^a-z]|\bno\s*$|\bdo\s*(?:not|n[’']t)\s+consent\b|\bdecline\b|\bopt\s*out\b/i;
+          /* ANCHORED AND ONE-SIDED, and the review that tightened this is worth keeping in mind.
+           * The first cut accepted 'opt out' and a bare mid-sentence 'no' anywhere in the label,
+           * and fell back to parentElement when a radio had no label of its own. Measured in
+           * Chromium: stock TCPA copy on the ACCEPT option ('Yes, text me. Reply STOP to opt out
+           * anytime.') matched, a shared parent handed both members the same paragraph so the
+           * first (accept) radio matched, and 'no spam ever' on an accept label matched. All
+           * three clicked the opt-IN and recorded a decline that never happened. So: the label is
+           * the radio's OWN <label> or nothing, every member must have a distinct one, exactly
+           * one member may read as a decline, and a label that also reads as an acceptance is
+           * disqualified from being that member. */
+          const DECLINE_WORDING = /^\s*no\b|\bdo\s*(?:not|n[’']t)\s+consent\b|\bdecline\b/i;
+          const ACCEPT_WORDING = /\byes\b|\bagree\b|\bsign\s+me\s+up\b|\b(?:text|email|send)\s+me\b|\bopt\s*in\b/i;
           const groups = new Map();
           for (const radio of document.querySelectorAll('input[type="radio"][name]')) {
             const name = radio.getAttribute('name') || '';
@@ -4632,10 +4643,19 @@ const { chromium } = require('playwright');
           const declinedNames = [];
           for (const [name, members] of groups) {
             if (members.some((radio) => radio.checked)) continue;
-            const decline = members.find((radio) => DECLINE_VALUE.test(String(radio.value || '')))
-              || members.find((radio) => DECLINE_WORDING.test(
-                String((radio.closest('label') || radio.parentElement || radio).textContent || '')
-              ));
+            let decline = members.find((radio) => DECLINE_VALUE.test(String(radio.value || '')));
+            if (!decline) {
+              const labelled = members.map((radio) => ({ radio, node: radio.closest('label') }));
+              const nodes = labelled.map((entry) => entry.node);
+              const distinct = nodes.every(Boolean) && new Set(nodes).size === members.length;
+              if (distinct) {
+                const declineReads = labelled.filter(({ node }) => {
+                  const text = String(node.textContent || '');
+                  return DECLINE_WORDING.test(text) && !ACCEPT_WORDING.test(text);
+                });
+                if (declineReads.length === 1) decline = declineReads[0].radio;
+              }
+            }
             if (!decline) continue;
             decline.click();
             decline.dispatchEvent(new Event('input', { bubbles: true }));
