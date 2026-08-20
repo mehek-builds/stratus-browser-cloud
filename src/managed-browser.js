@@ -4876,6 +4876,29 @@ const { chromium } = require('playwright');
             const binding = reactChoiceBinding(choice);
             if (binding && reactChoiceAnswered(binding)) return true;
           }
+          /* A BARE OPENER PUBLISHES ITS COMMITTED CHOICE AS ITS OWN RENDERED TEXT, and nothing
+           * above can see it: no inner input to hold a value, no react-select nodes, no
+           * aria-selected child. Measured on the live Easy Dynamics Rippling form (2026-08-20):
+           * the two required '<div role="combobox" aria-label="Select">' work-authorization
+           * selects were filled with their resolved answers, readSubmitReadiness's own bare-opener
+           * arm read them as answered, and THIS scan still called them "required field is empty" -
+           * so the run found the send button, held the press, and reported a confirmation failure
+           * over two committed answers. The reading below is the same three-empty-state gate that
+           * arm uses, byte for byte where it counts: furniture, the aria-label restatement, and
+           * placeholder-shaped grammar all read as EMPTY, which fails toward a person looking at
+           * an answered control - the one direction this scan is allowed to be wrong in. */
+          if (element.getAttribute
+            && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
+            && !element.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select')) {
+            const BARE_OPENER_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+            const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$/i;
+            const rendered = clean(typeof element.innerText === 'string' ? element.innerText : (element.textContent || ''));
+            if (rendered) {
+              const openerAriaLabel = clean(element.getAttribute('aria-label') || '');
+              const restated = openerAriaLabel && rendered.toLowerCase() === openerAriaLabel.toLowerCase();
+              if (!restated && !BARE_OPENER_FURNITURE.test(rendered) && !PLACEHOLDER_SHAPED.test(rendered)) return true;
+            }
+          }
           return Boolean(widget.querySelector(
             'input:checked, [aria-checked="true"], [aria-selected="true"], [aria-pressed="true"],'
             + ' button[class*="_active_"], button[class*="_selected_"], button[class*="_checked_"]'
