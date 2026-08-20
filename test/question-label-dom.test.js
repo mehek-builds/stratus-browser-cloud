@@ -692,3 +692,148 @@ test('a placeholder still names a control that has nothing else written on it', 
   );
   assert.match(label, /your github profile/, label);
 });
+
+/* THE COMBOBOX THAT IS NOT A FORM TAG, ON THE MARKUP THE EMPLOYER SERVES.
+ *
+ * Transcribed read-only from the live ats.rippling.com Easy Dynamics Software Engineer apply form
+ * on 2026-08-20, not sketched. The load-bearing details are all real:
+ *   - the control is a <div role="combobox" aria-haspopup="listbox">, so a scan over form TAGS
+ *     never saw it, while the readiness gate - which scans [role="combobox"] - did, which is how a
+ *     live run reported '1 required field has no question you can answer in Litos: "Select"' over
+ *     a control discovery had never emitted;
+ *   - everything the control says about itself is furniture: aria-label "Select", a <p>Select</p>
+ *     child, no name, no label element anywhere on the form;
+ *   - the employer's question sits in a plain div BESIDE the widget's wrapper, reachable only by
+ *     the same preceding-sibling walk the input-backed Rippling comboboxes already use. */
+const ripplingDivCombobox = `
+  <div class="css-page">
+    <div class="css-question">
+      <div class="css-label"><p>Are you currently authorized to work in the U.S.?</p></div>
+      <div class="css-widget">
+        <div id="field-63" role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
+          aria-expanded="false" aria-label="Select" aria-required="true" aria-invalid="false"
+          aria-disabled="false" tabindex="0" class="css-hyyaj0"><p class="css-1lilszh">Select</p></div>
+      </div>
+    </div>
+  </div>`;
+
+test('a Rippling div combobox is named by the visible label beside it, not by "Select"', async () => {
+  const [label] = await labelsFor(ripplingDivCombobox, '[role="combobox"]');
+  assert.equal(label, 'are you currently authorized to work in the u.s.?');
+});
+
+/* And its aria-labelledby cousin keeps its real reference: Rippling's demographic comboboxes
+ * (#field-75 on the same live form) point aria-labelledby at an EXTERNAL label element, and the
+ * self-label guard below must never touch a reference that points outside the control. */
+test('a div combobox whose aria-labelledby points outside itself keeps that label', async () => {
+  const [label] = await labelsFor(`
+    <div>
+      <span id="field-75-label">Gender</span>
+      <div id="field-75" role="combobox" aria-haspopup="listbox" aria-labelledby="field-75-label"
+        aria-label="Select..."></div>
+    </div>`, '[role="combobox"]');
+  assert.equal(label, 'gender');
+});
+
+/* THE SELECT2 SELF-LABEL, ON LEVER'S OWN UNIVERSITY PICKER.
+ *
+ * Transcribed read-only from the live jobs.lever.co Mytos Junior/Mid Software Engineer apply form
+ * on 2026-08-20. Three details are load-bearing and all three are real:
+ *   - the original <select> stays in the DOM as select2-hidden-accessible: 1x1, tabindex="-1",
+ *     aria-hidden="true", the immediate PREVIOUS SIBLING of the span Select2 renders - so the
+ *     honeypot filter rightly drops it and the sibling walk must step past it rather than treat it
+ *     as the previous question;
+ *   - the visible control is '<span role="combobox">' whose aria-labelledby points at its OWN
+ *     child, the selection span currently rendering the placeholder "Select a university or
+ *     college" - a label that would change the moment an option lands;
+ *   - the employer's words, "Which was the most recent university you attended?", sit in the
+ *     question's own div.application-label, one sibling above the control's application-field. */
+const leverSelect2University = `
+  <li class="application-question custom-question"><div>
+    <div class="application-label full-width university">
+      <div class="text">Which was the most recent university you attended?<span class="required">&#10033;</span></div>
+    </div>
+    <div class="application-field full-width required-field"><div class="application-university">
+      <select data-qa="university-dropdown" name="cards[62541ff1-0b7c-4f5b-a51d-a217d565776e][field0]"
+        id="university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0" data-placeholder="Select a university or college"
+        required tabindex="-1" class="select2-hidden-accessible" aria-hidden="true"
+        style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden">
+        <option value="">Select a university or college</option>
+        <option value="University of Southern California">University of Southern California</option>
+      </select>
+      <span class="select2 select2-container select2-container--default"><span class="selection">
+        <span class="select2-selection select2-selection--single" role="combobox" aria-autocomplete="list"
+          aria-haspopup="true" aria-expanded="false" tabindex="0"
+          aria-labelledby="select2-university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0-container">
+          <span class="select2-selection__rendered"
+            id="select2-university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0-container">Select a university or college</span>
+        </span>
+      </span></span>
+    </div></div>
+  </div></li>`;
+
+test('a Select2 university picker is named by its card heading, not by its own rendered placeholder', async () => {
+  const [label] = await labelsFor(leverSelect2University, 'span[role="combobox"]');
+  assert.match(label, /which was the most recent university you attended/);
+  assert.doesNotMatch(label, /select a university or college/,
+    'the widget’s rendered value must never be stored as the question');
+});
+
+/* THE PLACEHOLDER THAT IS NOT THE QUESTION, ON LEVER'S OWN EDUCATION CARD.
+ *
+ * Transcribed read-only from the same live Mytos form, 2026-08-20. Every text answer in the
+ * education card is '<input class="card-field-input" placeholder="Type your response">' under its
+ * own single-control div.application-label / div.application-field pair, all inside ONE card - so
+ * the bounded heading walk refuses at the card level (many controls) and discovery stored the
+ * question as "Type your response", one identical string for three different questions. No saved
+ * answer can tell them apart, which is the Teamtailor packet-identity defect wearing Lever markup. */
+const leverEducationCard = `
+  <div class="section page-centered application-form" data-qa="additional-cards"><ul>
+    <li class="application-question custom-question"><div>
+      <div class="application-label full-width text">
+        <div class="text">What degree did you complete at the above university?<span class="required">&#10033;</span></div>
+      </div>
+      <div class="application-field full-width required-field">
+        <input required class="card-field-input" type="text" placeholder="Type your response"
+          name="cards[62541ff1-0b7c-4f5b-a51d-a217d565776e][field2]" />
+      </div>
+    </div></li>
+    <li class="application-question custom-question"><div>
+      <div class="application-label full-width text">
+        <div class="text">What was your numeric percentage average?<span class="required">&#10033;</span></div>
+      </div>
+      <div class="application-field full-width required-field">
+        <input required class="card-field-input" type="text" placeholder="Type your response"
+          name="cards[62541ff1-0b7c-4f5b-a51d-a217d565776e][field4]" />
+      </div>
+    </div></li>
+  </ul></div>`;
+
+test('a Lever card control whose only human text is its placeholder is named by its own heading', async () => {
+  const [degree, average] = await labelsFor(leverEducationCard, 'input');
+  assert.match(degree, /what degree did you complete at the above university/);
+  assert.match(average, /what was your numeric percentage average/);
+  // Two different questions must never share one label, or packet identity flaps forever.
+  assert.notEqual(degree, average);
+  for (const label of [degree, average]) {
+    assert.doesNotMatch(label, /type your response/, 'the placeholder describes the control, not the question');
+  }
+});
+
+/* ADVERSARIAL: the heading swap stays inside one question's own block. A label block speaking for
+ * two controls speaks for neither - the same Palantir bound the fall-through already keeps - so a
+ * placeholder input sharing its li keeps the placeholder, exactly as before. */
+test('a placeholder control sharing its question block with another control keeps the placeholder', async () => {
+  const [label] = await labelsFor(`
+    <li class="application-question custom-question"><div>
+      <div class="application-label full-width">
+        <div class="text">High School Name &amp; Graduation Year</div>
+      </div>
+      <div class="application-field full-width">
+        <input type="text" placeholder="Type your response" name="cards[d54adf7b-3148-4095-93bb-72bef32a61f8][field0]" />
+        <select name="cards[d54adf7b-3148-4095-93bb-72bef32a61f8][field1]"><option value="">Select...</option></select>
+      </div>
+    </div></li>`, 'input');
+  assert.match(label, /^type your response cards\[/);
+  assert.doesNotMatch(label, /high school/, 'an ambiguous heading must never be borrowed');
+});

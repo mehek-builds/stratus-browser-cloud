@@ -1724,3 +1724,36 @@ test('a plain final submit stays and watches the page the way the atomic path do
     'the post-submit watch runs before the final page-text snapshot'
   );
 });
+
+test('a phone field that does not say type="tel" still verifies on digits', () => {
+  /* PR #65 keyed the digit comparison on the control's declared type, and two days later the same
+   * defect reopened one board over: the live Rippling apply form (ats.rippling.com, Easy Dynamics,
+   * 2026-08-20) renders its phone control as type="text" with inputmode="tel",
+   * data-input="phone_number" and placeholder "Phone number", so the arm was unreachable and the
+   * run reported 'value did not persist after fill (wrote "2135746270", field holds
+   * "213-574-6270")' over ten identical digits. The employer's own per-control markup now travels
+   * with the reading; tel-persistence-dom.test.js runs the arm against that exact element. */
+  assert.match(SANDBOX_RUNNER, /state\.type === 'tel' \|\| state\.telShaped/);
+  assert.match(SANDBOX_RUNNER, /telShaped: element instanceof HTMLInputElement && \(/);
+  // Each signal is the employer's own markup naming this one control a phone field.
+  assert.match(SANDBOX_RUNNER, /getAttribute\('inputmode'\) \|\| ''\)\.toLowerCase\(\) === 'tel'/);
+  assert.match(SANDBOX_RUNNER, /getAttribute\('autocomplete'\)/);
+  assert.match(SANDBOX_RUNNER, /\(\?:\\b\|_\)\(\?:phone\|mobile\|tel\)\(\?:\\b\|_\)/);
+  // The inferred arm carries the bound the declared one does not: seven digits on both sides.
+  assert.match(SANDBOX_RUNNER, /candidateDigits\.length >= 7 && expectedDigits\.length >= 7/);
+});
+
+test('discovery scans combobox openers that are not form tags', () => {
+  /* Measured live on ats.rippling.com (Easy Dynamics, 2026-08-20): the required
+   * work-authorization control is '<div id="field-63" role="combobox" aria-haspopup="listbox"
+   * aria-label="Select" aria-required="true">' with no input anywhere inside it. The readiness
+   * gate has always scanned [role="combobox"], so it reported a required control named "Select"
+   * while discovery - which scanned form TAGS only - emitted nothing for it: no question record,
+   * nothing the applicant could ever answer in Litos. */
+  assert.match(SANDBOX_RUNNER, /\[role="combobox"\]:not\(input\):not\(select\):not\(textarea\),/);
+  assert.match(SANDBOX_RUNNER, /\[aria-haspopup="listbox"\]:not\(input\):not\(select\):not\(textarea\)/);
+  // A non-form-tag opener that holds a real control inside it is a wrapper, and the inner control
+  // is already the candidate; scanning both would mint two questions for one control.
+  assert.match(SANDBOX_RUNNER, /const bareOpener = choiceOpener && !\/\^\(\?:INPUT\|SELECT\|TEXTAREA\)\$\/\.test\(el\.tagName\);/);
+  assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.querySelector\('input:not\(\[type="hidden"\]\), textarea, select'\)\) return false;/);
+});

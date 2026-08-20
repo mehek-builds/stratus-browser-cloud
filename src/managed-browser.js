@@ -696,6 +696,34 @@ const { chromium } = require('playwright');
           // The control's own type travels with the reading, because a tel field's formatting is
           // not a difference of answer. See the digitsOnly arm in sameAnswer.
           type: element instanceof HTMLInputElement ? String(element.type || '') : '',
+          /* A PHONE FIELD THAT DOES NOT SAY type="tel" IS STILL A PHONE FIELD.
+           *
+           * Measured on the live Rippling apply form (ats.rippling.com, Easy Dynamics, 2026-08-20):
+           * its phone control #field-31 is type="text", and the tel arm below was therefore
+           * unreachable, so the same defect PR #65 closed for Greenhouse reopened one board over -
+           * the field auto-formats with dashes and the run reported
+           * 'value did not persist after fill (wrote "2135746270", field holds "213-574-6270")'
+           * with both sides holding the same ten digits.
+           *
+           * What the control DOES say, read off that live element: inputmode="tel",
+           * data-input="phone_number", placeholder "Phone number". Each of those is the employer's
+           * own markup naming this one control a phone field, the same per-control machine signal
+           * class as type="tel" itself. The word test also reads name and id, because a board that
+           * writes name="phone" is making the same statement; Rippling's randomized name
+           * ("lzIjPmFwR5E") simply never matches anything. */
+          telShaped: element instanceof HTMLInputElement && (
+            element.type === 'tel'
+            || (element.getAttribute('inputmode') || '').toLowerCase() === 'tel'
+            || /(?:^|\s|:)tel(?:$|\s|-)/.test((element.getAttribute('autocomplete') || '').toLowerCase())
+            || /(?:\b|_)(?:phone|mobile|tel)(?:\b|_)/i.test([
+              element.getAttribute('placeholder') || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('name') || '',
+              element.id || '',
+              element.getAttribute('data-input') || '',
+              element.getAttribute('data-testid') || ''
+            ].join(' '))
+          ),
           actual: ['value' in element ? String(element.value || '') : (element.textContent || '')],
         };
       }).catch(() => ({ kind: 'other', actual: [] }));
@@ -745,11 +773,19 @@ const { chromium } = require('playwright');
          * go. That is the whole class where punctuation carries no meaning: a text answer, a select
          * option and anything containing a letter are all judged exactly as before. */
         const digitsOnly = (value) => String(value == null ? '' : value).replace(/\D+/g, '');
-        if (state.type === 'tel') {
+        if (state.type === 'tel' || state.telShaped) {
           const candidateDigits = digitsOnly(candidate);
           const expectedDigits = digitsOnly(expected);
           const noLetters = (value) => !/[a-z]/i.test(String(value == null ? '' : value));
-          if (candidateDigits && expectedDigits && noLetters(candidate) && noLetters(expected)) {
+          /* On a declared type="tel" the digit compare stands exactly as PR #65 shipped it. On a
+           * field that is only INFERRED to be a phone (telShaped above: inputmode, autocomplete,
+           * or a phone word in its own attributes), both sides must also carry at least seven
+           * digits - the shortest thing that is a phone number anywhere - so a short numeric
+           * answer that happens to sit near the word "phone" ("10" against "10+", an extension
+           * box) is still judged by the strict comparison below and never by digits alone. */
+          const phoneLength = state.type === 'tel'
+            || (candidateDigits.length >= 7 && expectedDigits.length >= 7);
+          if (candidateDigits && expectedDigits && phoneLength && noLetters(candidate) && noLetters(expected)) {
             return candidateDigits === expectedDigits;
           }
         }
@@ -3397,14 +3433,32 @@ const { chromium } = require('playwright');
         return '';
       };
       const labelOf = (widget, element) => {
+        /* A LABEL THAT LIVES INSIDE THE CONTROL IT NAMES IS THE CONTROL'S RENDERED VALUE, and a
+         * blocker named by it tells the applicant what the widget currently shows, not what the
+         * employer asks. Measured on the live jobs.lever.co Mytos university picker, 2026-08-20:
+         * Select2's '<span role="combobox">' points aria-labelledby at its OWN selection span, so
+         * this gate named the required university field "Select a university or college" - the
+         * placeholder - while the employer's words, "Which was the most recent university you
+         * attended?", sat one sibling over in div.application-label. Worse, that "label" changes
+         * the moment an option lands, so the same field is called two different things across one
+         * run. A reference is a label only when it points OUTSIDE the control that carries it;
+         * a self-contained one is dropped here so the later candidates can find the real heading.
+         * References carried by the WIDGET (the question block) are untouched: a block whose
+         * label lives inside the block is the normal case, not self-labelling. */
         const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
           || (element && element.getAttribute('aria-labelledby'));
-        const proxyLabelledBy = widget
-          && widget.querySelector('[role="combobox"][aria-labelledby], [aria-haspopup="listbox"][aria-labelledby]')
-            ?.getAttribute('aria-labelledby');
-        const referenced = labelledBy && root.querySelector('#' + CSS.escape(labelledBy.split(/\s+/)[0]));
-        const proxyReferenced = proxyLabelledBy
+        const proxyCombobox = widget
+          ? widget.querySelector('[role="combobox"][aria-labelledby], [aria-haspopup="listbox"][aria-labelledby]')
+          : null;
+        const proxyLabelledBy = proxyCombobox && proxyCombobox.getAttribute('aria-labelledby');
+        const referencedRaw = labelledBy && root.querySelector('#' + CSS.escape(labelledBy.split(/\s+/)[0]));
+        const elementOwnsReference = !(widget && widget.getAttribute('aria-labelledby'));
+        const referenced = referencedRaw && elementOwnsReference
+          && element && element.contains && element.contains(referencedRaw) ? null : referencedRaw;
+        const proxyReferencedRaw = proxyLabelledBy
           && root.querySelector('#' + CSS.escape(proxyLabelledBy.split(/\s+/)[0]));
+        const proxyReferenced = proxyReferencedRaw && proxyCombobox.contains
+          && proxyCombobox.contains(proxyReferencedRaw) ? null : proxyReferencedRaw;
         const byFor = element && element.id && root.querySelector('label[for="' + CSS.escape(element.id) + '"]');
         const legend = widget && widget.querySelector('legend');
         const own = widget && widget.querySelector('label, .label, .upload-label, legend');
@@ -3429,6 +3483,45 @@ const { chromium } = require('playwright');
           if (!heading || heading.querySelector('input, textarea, select')) return '';
           return renderedText(heading);
         })();
+        /* A COMBOBOX THAT SAYS ONLY WHAT IT IS, NEVER WHAT IT ASKS - the gate's copy of the rule
+         * discovery already applies, so the blocker line and the question say the same words.
+         * Measured on the live ats.rippling.com Easy Dynamics form, 2026-08-20: the required
+         * work-authorization control is '<div id="field-63" role="combobox" aria-label="Select"
+         * aria-required="true">' and this gate reported it as "Select" - widget furniture - while
+         * the employer's question, "Are you currently authorized to work in the U.S.?", sits in a
+         * plain div beside the widget, in no label element any candidate above can reach. The
+         * furniture aria-label is demoted, not dropped: it comes back as the last resort below,
+         * because "Select" is still one notch better than an unnamed required field when the
+         * sibling walk finds nothing either. */
+        const FURNITURE_LABEL = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+        const ownAriaLabel = (element && element.getAttribute && element.getAttribute('aria-label')) || '';
+        const furnitureAriaLabel = Boolean(element && element.getAttribute
+          && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
+          && clean(ownAriaLabel) && FURNITURE_LABEL.test(clean(ownAriaLabel)));
+        /* The nearest preceding sibling on the way up that holds no controls of its own - the same
+         * walk, with the same two stop rules, that discovery's combobox arm uses to recover these
+         * labels, kept in step by hand like everything else the two passes share. Twelve, not six:
+         * on the live Rippling form the question div sits ten parents above the widget. A sibling
+         * that IS or HOLDS a control is the previous question and ends the walk; the one exception
+         * is a widget's own hidden backing control (Select2 leaves its 1x1 aria-hidden <select>
+         * as the immediate previous sibling of the span it renders), which belongs to THIS
+         * question and is stepped past. Placed after every label-shaped candidate, so it can only
+         * ever name a control that would otherwise be unnamed or furniture-named. */
+        const besideQuestionText = (() => {
+          let above = element;
+          for (let depth = 0; above && depth < 12; depth += 1, above = above.parentElement) {
+            const beside = above.previousElementSibling;
+            if (!beside) continue;
+            if (beside.matches && beside.matches('input, textarea, select')
+              && beside.getAttribute('aria-hidden') === 'true') continue;
+            if (beside.querySelector && beside.querySelector('input, textarea, select, [role="combobox"], button')) break;
+            if (beside.matches && beside.matches('input, textarea, select, [role="combobox"], button')) break;
+            const besideText = clean(renderedText(beside));
+            if (besideText && besideText.length <= 200 && !genericControlText(besideText)) return besideText;
+            if (besideText) break;
+          }
+          return '';
+        })();
         for (const candidate of [
           renderedText(referenced),
           groupedChoiceQuestion,
@@ -3437,9 +3530,11 @@ const { chromium } = require('playwright');
           renderedText(proxyReferenced),
           renderedText(legend),
           renderedText(own),
-          element && element.getAttribute('aria-label'),
+          furnitureAriaLabel ? '' : ownAriaLabel,
           widget && widget.getAttribute('aria-label'),
-          nearestQuestionText(element)
+          nearestQuestionText(element),
+          besideQuestionText,
+          furnitureAriaLabel ? ownAriaLabel : ''
         ]) {
           const text = clean(candidate);
           if (!text) continue;
@@ -5481,7 +5576,24 @@ const { chromium } = require('playwright');
             const fieldsetChoices = fieldset && choice
               ? [...fieldset.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
               : [];
-            const referencedLabel = labelledByText(el);
+            /* A LABEL THAT LIVES INSIDE THE CONTROL IT NAMES IS THE CONTROL'S RENDERED VALUE.
+             *
+             * Select2 points aria-labelledby at its own selection span: measured on the live
+             * jobs.lever.co Mytos university picker, 2026-08-20, '<span role="combobox"
+             * aria-labelledby="select2-university-picker-...-container">' where that container is
+             * the span's own child rendering whatever is currently chosen - which on an untouched
+             * form is the placeholder, "Select a university or college". Reading it as the
+             * question stores placeholder text where the employer's heading belongs (the same
+             * defect class as the Teamtailor placeholder join), and worse, the "label" CHANGES the
+             * moment an option is picked. A reference is only a label when it points OUTSIDE the
+             * control; a self-contained one is ignored so the walks below can find the heading the
+             * applicant actually reads. */
+            const referenceTargets = clean(el.getAttribute('aria-labelledby')).split(/\s+/)
+              .filter(Boolean)
+              .map((id) => document.getElementById(id));
+            const selfLabelled = referenceTargets.length > 0
+              && referenceTargets.every((target) => target && el.contains(target));
+            const referencedLabel = selfLabelled ? '' : labelledByText(el);
             const referenceIds = clean(el.getAttribute('aria-labelledby'));
             const sameNamePeers = choice && el.name
               ? (fieldsetChoices.length > 0 ? fieldsetChoices : [...(el.form || document).querySelectorAll(
@@ -5576,7 +5688,16 @@ const { chromium } = require('playwright');
               for (let depth = 0; above && depth < 12; depth += 1, above = above.parentElement) {
                 const beside = above.previousElementSibling;
                 if (!beside) continue;
+                /* THE WIDGET'S OWN HIDDEN BACKING CONTROL IS NOT THE PREVIOUS QUESTION. Select2
+                 * leaves the original <select> standing as the immediate previous sibling of the
+                 * span it renders, 1x1, tabindex="-1" and aria-hidden="true" (measured on the live
+                 * jobs.lever.co Mytos university picker, 2026-08-20). It belongs to THIS question,
+                 * so the walk steps past it; a VISIBLE control sibling still ends the walk below,
+                 * because that one really is the previous question's. */
+                if (beside.matches && beside.matches('input, textarea, select')
+                  && beside.getAttribute('aria-hidden') === 'true') continue;
                 if (beside.querySelector && beside.querySelector('input, textarea, select, [role="combobox"], button')) break;
+                if (beside.matches && beside.matches('input, textarea, select, [role="combobox"], button')) break;
                 const besideText = clean(renderedText(beside));
                 if (besideText && besideText.length <= 200 && !genericControlText(besideText)) {
                   return besideText.toLowerCase();
@@ -5611,7 +5732,42 @@ const { chromium } = require('playwright');
              * render... where they are not (Rippling), the combobox arm above names the control
              * before this join runs. */
             const placeholderText = clean(labelText) || clean(ariaLabel) ? '' : (el.getAttribute('placeholder') || '');
-            const parts = [labelText || '', ariaLabel, placeholderText, el.getAttribute('name') || '', el.id || ''];
+            /* A LEVER CARD CONTROL WHOSE ONLY HUMAN TEXT IS ITS PLACEHOLDER is named by the
+             * heading the applicant reads, not by the words inside the empty box.
+             *
+             * Measured on the live jobs.lever.co Mytos form, 2026-08-20: every text answer in the
+             * education card is '<input class="card-field-input" placeholder="Type your response"
+             * name="cards[<uuid>][fieldN]">' sitting under its own
+             * '<div class="application-label"><div class="text">What degree did you complete at
+             * the above university?...' - so the stored question was "Type your response", one
+             * identical string for three different questions, and no saved answer can tell them
+             * apart. Same class as the Teamtailor placeholder-volatility fix: the placeholder
+             * describes the CONTROL, the .application-label states the QUESTION.
+             *
+             * NARROWER THAN THE WALK THE RUNNER ALREADY REJECTED, and the bound is kept. Adding
+             * .application-label to the generic walk was measured and rejected because an
+             * UNBOUNDED walk borrows a neighbouring card's heading. This arm never walks: it reads
+             * the ONE .application-label that Lever renders as the immediate previous sibling of
+             * the control's own .application-field, refuses it when that label block holds any
+             * control, and refuses it when the surrounding li.application-question holds more than
+             * one visible control - the same one-question-one-control shape the choice branch and
+             * the Palantir refuseAmbiguousBlock bound already trust. A control with NO placeholder
+             * is untouched: the handle-only fall-through below keeps its existing, measured
+             * behavior, including refusing the two-control Palantir card. */
+            const leverCardHeading = (() => {
+              if (!placeholderText) return '';
+              const fieldBlock = el.closest && el.closest('.application-field');
+              const cardLabel = fieldBlock && fieldBlock.previousElementSibling;
+              if (!cardLabel || !cardLabel.matches || !cardLabel.matches('.application-label')) return '';
+              if (cardLabel.querySelector('input, textarea, select, [role="combobox"], button')) return '';
+              const owner = el.closest('li.application-question') || fieldBlock.parentElement;
+              if (!owner || owner.querySelectorAll(
+                'input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select, [role="combobox"]'
+              ).length > 1) return '';
+              const text = clean(renderedText(cardLabel));
+              return text && text.length <= 200 && !genericControlText(text) ? text.toLowerCase() : '';
+            })();
+            const parts = [labelText || '', ariaLabel, leverCardHeading || placeholderText, el.getAttribute('name') || '', el.id || ''];
             const own = clean(parts.join(' ')).toLowerCase();
             /* THE HANDLE THAT IS NOT A LABEL.
              *
@@ -5745,6 +5901,11 @@ const { chromium } = require('playwright');
               if (text && text.length <= 80 && text.toLowerCase() !== question.toLowerCase()) texts.push(text);
             }
             for (const button of block.querySelectorAll('button')) {
+              // The control under discovery can itself be a button-shaped or div-shaped combobox
+              // opener now that non-form tags are scanned; its own furniture text ("Select") is
+              // what it looks like closed, not one of the choices it offers.
+              if (button === el || button.getAttribute('role') === 'combobox'
+                || button.getAttribute('aria-haspopup') === 'listbox') continue;
               const text = clean(renderedText(button));
               if (!text || text.length > 40) continue;
               if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) continue;
@@ -5752,10 +5913,31 @@ const { chromium } = require('playwright');
             }
             return [...new Set(texts)];
           }
+          /* D-01 AGAIN, ONE TAG FAMILY OVER: A COMBOBOX THAT IS NOT AN INPUT WAS NEVER SCANNED.
+           *
+           * The list below named form TAGS, so a choice control built out of a div or span was
+           * invisible to discovery while remaining perfectly visible to the readiness gate, whose
+           * control scans have always included [role="combobox"]. Measured live on
+           * ats.rippling.com (Easy Dynamics, 2026-08-20): the two required work-authorization
+           * questions are '<div id="field-63" role="combobox" aria-haspopup="listbox"
+           * aria-label="Select" aria-required="true">' and its sponsorship twin #field-69 - no
+           * input anywhere inside them - so the run's readiness gate reported a required control
+           * named only "Select" while discovery had emitted nothing for it: no question record,
+           * no resolver attempt, nothing the applicant could answer in Litos. The same run
+           * discovered every INPUT-backed Rippling combobox (#field-20, #field-34, #field-42)
+           * because those carry the role on the input itself. Lever's Select2 university picker
+           * is the same shape one board over: the visible control is a <span role="combobox">
+           * and the <select> behind it is a 1x1 aria-hidden honeypot-shaped element this scan
+           * rightly drops.
+           *
+           * :not(input):not(select):not(textarea) keeps every existing candidate exactly as it
+           * was: a combobox that IS a form control still enters through its own tag selector. */
           const els = Array.prototype.slice
             .call(document.querySelectorAll(
               'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"],'
-              + ' input[type="date"], input[type="radio"], input[type="checkbox"], input:not([type]), textarea, select'
+              + ' input[type="date"], input[type="radio"], input[type="checkbox"], input:not([type]), textarea, select,'
+              + ' [role="combobox"]:not(input):not(select):not(textarea),'
+              + ' [aria-haspopup="listbox"]:not(input):not(select):not(textarea)'
             ))
             // A choice input is exempt from the visibility test and from readOnly. Ashby's yes/no
             // mirror input is display:none by design and is the only DOM node that names the
@@ -5766,6 +5948,14 @@ const { chromium } = require('playwright');
               const choice = el.type === 'radio' || el.type === 'checkbox';
               const choiceOpener = el.getAttribute('role') === 'combobox'
                 || el.getAttribute('aria-haspopup') === 'listbox';
+              // A non-form-tag opener that holds a real form control inside it is a WRAPPER, and
+              // the control inside is the candidate this scan already judges on its own merits.
+              // Older React-Select bundles put role="combobox" on the shell around their search
+              // input; scanning both would mint two questions for one control. The Rippling
+              // work-authorization divs and Lever's Select2 span hold no such control (measured
+              // 2026-08-20: #field-63 has zero descendant inputs), so they stay.
+              const bareOpener = choiceOpener && !/^(?:INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+              if (bareOpener && el.querySelector('input:not([type="hidden"]), textarea, select')) return false;
               if (!choice && ((!choiceOpener && el.readOnly) || !isVisible(el))) return false;
               if (choice && !isVisible(blockOf(el))) return false;
               return !isHoneypot(el) || choice;
