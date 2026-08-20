@@ -7269,7 +7269,15 @@ function continuationEligible(result, checkpoint) {
  * at 12:25:49.894. 67.4 seconds end to end, of which one 60-second wait, on a form with no
  * challenge and nothing to continue.
  */
-const MANAGED_RUN_TIMEOUT_MS = 90_000;
+/* 150 seconds, raised from 90 on a measurement: the live Mercari workable run (Class of 2028,
+ * 2026-08-20) died three times with 'Sandbox stream was closed and is not accepting commands' -
+ * the sandbox's own LIFETIME is set from this value, and a long form's fill + submit + the
+ * 30-second post-submit receipt watch overran 90s, so the box was evicted mid-run and the report
+ * said "temporary secure-browser error". Worse, a box evicted DURING the receipt watch is exactly
+ * a press with no confirmation read - the workable unverified-submission class. Not higher: the
+ * CALLER chains up to three runs (discovery, option probe, fill) inside its own 300-second
+ * function budget, so one run's ceiling has to leave room for the others. */
+const MANAGED_RUN_TIMEOUT_MS = 150_000;
 const CONTINUATION_TIMEOUT_MS = 60_000;
 
 /**
