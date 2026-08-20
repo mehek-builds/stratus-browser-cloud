@@ -254,6 +254,58 @@ const { chromium } = require('playwright');
      * 13bccb2d (Skydio, Ashby, 2026-08-09) is the case: the run was killed while this was the only
      * fact anybody needed, and it was not recorded anywhere. */
     let finalSubmitPressed = false;
+    /* WHAT THE SUBMIT REQUEST ITSELF CAME BACK WITH, because the page is allowed to say nothing.
+     *
+     * Measured on the live Easy Dynamics Rippling form, twice (2026-08-20, 15:15Z and 17:09Z):
+     * Send was pressed, the run stayed the full post-submit window, and the page never rendered a
+     * confirmation, a rejection, or anything else readSubmitOutcome knows how to read - the receipt
+     * screenshot shows the form still standing and the Apply button holding a spinner. Whether the
+     * employer received that application turns entirely on what the submit request returned, and
+     * nothing recorded it: the applicant was left with "Litos does not know", twice, on the same
+     * form, with no way for anyone to learn more from the next attempt than from the last.
+     *
+     * So the moment before a final-submit control is pressed, the run starts writing down every
+     * write-shaped request the page makes: method, origin plus path, and the status it came back
+     * with - or the failure text when it never came back, which is evidence of exactly the hang the
+     * spinner looks like. Origin plus path only, never the query string or body, because a submit
+     * URL can carry tokens and the record travels to the caller. Armed at the press and never
+     * disarmed, because everything after the press is the submission settling; bounded, because a
+     * page can chatter (analytics POSTs are write-shaped too) and twenty entries around the press
+     * is worth more than an unbounded log of everything after it.
+     *
+     * The listeners must never break the run: a witness that can throw during the one click that
+     * matters is worse than no witness, so every read is wrapped and a failure to record is
+     * silently a missing entry. */
+    let submitNetwork = null;
+    const armSubmitNetworkWatch = () => {
+      if (submitNetwork) return;
+      submitNetwork = [];
+      const record = (entry) => { if (submitNetwork.length < 20) submitNetwork.push(entry); };
+      const writeShaped = (request) => {
+        const method = request.method();
+        if (method !== 'POST' && method !== 'PUT' && method !== 'PATCH') return null;
+        const type = request.resourceType();
+        if (type !== 'xhr' && type !== 'fetch' && type !== 'document') return null;
+        return method;
+      };
+      page.on('response', (response) => {
+        try {
+          const method = writeShaped(response.request());
+          if (!method) return;
+          const parsed = new URL(response.url());
+          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: response.status() });
+        } catch (error) { /* a witness must never break the run */ }
+      });
+      page.on('requestfailed', (request) => {
+        try {
+          const method = writeShaped(request);
+          if (!method) return;
+          const parsed = new URL(request.url());
+          const failure = request.failure();
+          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: null, failure: String(failure && failure.errorText || 'failed').slice(0, 120) });
+        } catch (error) { /* a witness must never break the run */ }
+      });
+    };
     let requiredFieldConfirmation = null;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -5596,6 +5648,7 @@ const { chromium } = require('playwright');
       }
       const blocked = unresolved.length > 0;
       if (!blocked) {
+        armSubmitNetworkWatch();
         await submitHandle.click({ timeout: action.timeout || 10_000 });
         finalSubmitPressed = true;
       }
@@ -6417,6 +6470,10 @@ const { chromium } = require('playwright');
         continue;
       }
       if (action.type === 'click') {
+        // Armed BEFORE the click for the same reason finalSubmitPressed is set before the wait: the
+        // response worth recording is the one the click itself causes, and a watch attached after
+        // the click races the request it exists to see.
+        if (isFinalSubmitAction(action)) armSubmitNetworkWatch();
         await locator.click();
         // RECORDED BEFORE THE WAIT, not after. A submit click that lands and then navigates, times
         // out, or takes the sandbox down with it has still been pressed, and "was the button
@@ -7089,7 +7146,7 @@ const { chromium } = require('playwright');
      * a confirmation-shaped sentence already on an unsubmitted page (an employer's "Thank you for
      * your interest") must not be able to manufacture one. */
     const submitOutcome = finalSubmitPressed
-      ? { pressed: true, ...(await readSubmitOutcome()) }
+      ? { pressed: true, ...(await readSubmitOutcome()), ...(submitNetwork ? { network: submitNetwork } : {}) }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
     // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
     // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
