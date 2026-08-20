@@ -3847,6 +3847,33 @@ const { chromium } = require('playwright');
         if (chosen !== null) return chosen;
         const pill = chosenPillOf(element);
         if (pill !== null) return pill;
+        /* A BARE COMBOBOX HOLDS ITS ANSWER AS ITS RENDERED TEXT, and this gate could not read it.
+         * Measured live on ats.rippling.com (Easy Dynamics, 2026-08-20): the fill landed "Yes" on
+         * the work-authorization div - the run's own preview screenshot shows it - and this gate
+         * still reported '"Are you currently authorized to work in the U.S.?" is required and is
+         * still empty', because a div is none of the tag arms above and holds no child control for
+         * the loop below. The rendered text IS the value for this shape; furniture words are what
+         * the widget says when it holds nothing, judged by the same vocabulary the label demotion
+         * uses (BARE_OPENER_FURNITURE below, pinned equal to its two siblings by the drift test). */
+        if (element.getAttribute
+          && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
+          && !element.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select')) {
+          const BARE_OPENER_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
+          /* Three empty-state readings, because a tenant can configure its own placeholder and a
+           * placeholder read as an answer is a silent skip of a required field - the one direction
+           * this file forbids. (1) the shared furniture vocabulary; (2) text that merely restates
+           * the widget's own aria-label ("Select" / "Select", the measured Rippling empty state);
+           * (3) placeholder-shaped grammar - an imperative select/choose/pick opening or a bare
+           * "none selected". A real ANSWER that happens to open with those words ("Choose not to
+           * disclose") reads as empty and keeps its blocker, which fails toward a person looking
+           * at an answered control - the direction this gate is allowed to be wrong in. */
+          const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$/i;
+          const rendered = clean(renderedText(element));
+          if (!rendered) return false;
+          const openerAriaLabel = clean(element.getAttribute('aria-label') || '');
+          if (openerAriaLabel && rendered.toLowerCase() === openerAriaLabel.toLowerCase()) return false;
+          return !BARE_OPENER_FURNITURE.test(rendered) && !PLACEHOLDER_SHAPED.test(rendered);
+        }
         for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
           if (hasAnswer(control)) return true;
         }

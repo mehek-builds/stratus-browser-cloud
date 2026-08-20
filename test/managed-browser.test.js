@@ -1774,7 +1774,9 @@ test('the furniture-label vocabulary is one vocabulary in both passes', () => {
    * exact defect class this file has already measured in production. This pin turns that
    * silent drift into a red test. */
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
-  const literals = [...source.matchAll(/(?:FURNITURE_LABEL|WIDGET_FURNITURE) = (\/[^\n]+\/i);/g)].map((m) => m[1]);
-  assert.equal(literals.length, 2, 'both furniture vocabularies must exist');
-  assert.equal(literals[0], literals[1], 'the two furniture vocabularies drifted apart');
+  const literals = [...source.matchAll(/(?:FURNITURE_LABEL|WIDGET_FURNITURE|BARE_OPENER_FURNITURE) = (\/[^\n]+\/i);/g)].map((m) => m[1]);
+  assert.equal(literals.length, 3, 'all three furniture vocabularies must exist');
+  for (const literal of literals.slice(1)) {
+    assert.equal(literal, literals[0], 'a furniture vocabulary drifted apart');
+  }
 });
