@@ -1610,9 +1610,11 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
       return true;
     }
   );
-  // Requesting a continuation must not shorten the run. 90_000 is what a managed run gets when it
-  // does not request one; this used to be 60_000, and a 67-second Skydio submit died inside it.
-  assert.equal(fake.calls[0].timeoutMs, 90_000, 'phase 0 gets the full run budget: ' + JSON.stringify(fake.calls));
+  // Requesting a continuation must not shorten the run. 150_000 is what a managed run gets when
+  // it does not request one; this was 60_000 (a 67-second Skydio submit died inside it), then
+  // 90_000 (the Mercari workable fill + 30s receipt watch died inside THAT, three times, reported
+  // as a temporary secure-browser error).
+  assert.equal(fake.calls[0].timeoutMs, 150_000, 'phase 0 gets the full run budget: ' + JSON.stringify(fake.calls));
   assert.deepEqual(fake.calls[0].wanted, ['stratus-result-0.json', 'stratus-error.json']);
 });
 
