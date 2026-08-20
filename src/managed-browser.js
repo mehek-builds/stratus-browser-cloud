@@ -3139,10 +3139,23 @@ const { chromium } = require('playwright');
        * and textarea controls missed a form whose email field is type="text", which is common, and
        * that single miss let the weakest arm below confirm a submission with the Submit button still
        * on the page. A live submit control is the least ambiguous evidence that nothing was sent. */
+      /* A SUBMIT-SHAPED BUTTON IS THE FORM SAYING IT IS STILL HERE, whatever it is wrapped in.
+       * Measured on the live transparent-hiring.breezy.hr form (2026-08-20, runs 549604ee and
+       * b966c219): breezy renders its application in plain divs - no <form> element, the email
+       * field is type="text", and the file input hides behind an Upload Resume button - so every
+       * selector below missed and this read reported the fully rendered, fully submittable form
+       * as GONE. That miss disarmed the client-validation arm (gated on the form being present)
+       * and, worse, it is the gate every confirmation arm leans on: a body-text "thank you" on a
+       * breezy page would have confirmed an application over a live form. The button text is
+       * matched whole and closed (submit / apply / send application shapes), so a link that
+       * merely mentions applying cannot count; a confirmation page renders none of these. */
+      const SUBMIT_SHAPED_BUTTON = /^(?:submit(?:\s+(?:your\s+)?application)?|apply(?:\s+now)?|send(?:\s+(?:your\s+)?application)?)$/i;
+      const submitShapedButton = [...document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
+        .some((node) => isVisible(node) && SUBMIT_SHAPED_BUTTON.test(clean(node.innerText || node.value || '')));
       const formStillPresent = Boolean(visibleOne([
         'input[type=file]', 'input[type=email]', 'textarea',
         'form button[type=submit]', 'form input[type=submit]',
-      ].join(', ')));
+      ].join(', '))) || submitShapedButton;
       for (const selector of REJECTED_CONTAINERS) {
         const node = visibleOne(selector);
         if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };

@@ -220,3 +220,30 @@ test('the validation sentence with the form gone falls through to the ordinary a
   const outcome = await read('<p>Your application contains errors</p>');
   assert.notEqual(outcome.source, 'client_validation');
 });
+
+/* THE BREEZY FORM THE READER CALLED GONE. Measured live (transparent-hiring.breezy.hr, 2026-08-20):
+ * no <form> element, email typed as type="text", file input hidden behind an Upload Resume button -
+ * every old formStillPresent selector missed, which disarmed the client-validation arm and left the
+ * confirmation arms leaning on a gate that was open. */
+test('a submit-shaped button says the form is still here, whatever it is wrapped in', async () => {
+  const outcome = await read(`
+    <div class="application">
+      <input type="text" name="email" value="a@b.c" />
+      <button type="button">Upload Resume</button>
+      <span style="color:red">A response is required</span>
+      <button type="button">Submit Application</button>
+      <div style="color:red">Your application contains errors</div>
+    </div>
+    <p>Thank you for applying</p>`);
+  assert.equal(outcome.formStillPresent, true);
+  assert.equal(outcome.state, 'rejected');
+  assert.equal(outcome.source, 'client_validation');
+});
+
+test('a link that merely mentions applying does not resurrect a submitted form', async () => {
+  const outcome = await read(`
+    <p>Thank you for applying to our team. We have received your application.</p>
+    <a role="button" href="/jobs">See more roles and apply for another position</a>`);
+  assert.equal(outcome.formStillPresent, false);
+  assert.equal(outcome.state, 'confirmed');
+});
