@@ -493,8 +493,10 @@ test('a widget that renders its answer shorter than the row that set it is not a
   assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer\)\)/);
   assert.equal((SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
-  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 2,
-    'fill call sites cannot skip withdrawal; the second read only waits for a delayed rollback to settle');
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,
+    'fill call sites cannot skip withdrawal; the second read waits for a delayed rollback to settle;'
+    + ' the third is withdrawRefusedChoice\'s own confirm-before-clearing gate (see'
+    + ' choice-withdrawal-confirms-before-clearing.test.js)');
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
