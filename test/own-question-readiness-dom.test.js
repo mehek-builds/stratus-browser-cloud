@@ -429,3 +429,82 @@ test('an outer fieldset cannot let one named choice group answer another', async
     ],
   );
 });
+
+/* THE REQUIRED COMBOBOX THE GATE COULD ONLY CALL "Select".
+ *
+ * Transcribed read-only from the live ats.rippling.com Easy Dynamics apply form, 2026-08-20. The
+ * control is '<div role="combobox" aria-haspopup="listbox" aria-label="Select"
+ * aria-required="true">' - no input inside it, no label element anywhere, the employer's question
+ * in a plain div beside the widget's wrapper. The aria-required scan has always caught it; labelOf
+ * could reach nothing but the furniture aria-label, so the live packet read '1 required field has
+ * no question you can answer in Litos: "Select"'. The gate now walks to the same preceding-sibling
+ * label discovery uses, so the blocker line and the discovered question say the same words. */
+const ripplingRequiredDivCombobox = `
+  <div class="css-page">
+    <div class="css-question">
+      <div class="css-label"><p>Are you currently authorized to work in the U.S.?</p></div>
+      <div class="css-widget">
+        <div id="field-63" role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
+          aria-expanded="false" aria-label="Select" aria-required="true" aria-invalid="false"
+          aria-disabled="false" tabindex="0" class="css-hyyaj0"><p class="css-1lilszh">Select</p></div>
+      </div>
+    </div>
+  </div>`;
+
+test('a required Rippling div combobox blocks under the employer’s question, not under "Select"', async () => {
+  const readiness = await readinessOf(ripplingRequiredDivCombobox);
+  assert.equal(readiness.blocking.length, 1, JSON.stringify(readiness.blocking));
+  assert.match(readiness.blocking[0], /Are you currently authorized to work in the U\.S\.\?/);
+  assert.match(readiness.blocking[0], /is required and is still empty$/);
+  assert.doesNotMatch(readiness.blocking[0], /"Select"/,
+    'widget furniture must not be the name the applicant is handed');
+});
+
+test('the furniture aria-label is a last resort, not a casualty', async () => {
+  // The same widget with NOTHING beside it to walk to: "Select" is still one notch better than an
+  // unnamed required field, so demoting it must not have dropped it.
+  const readiness = await readinessOf(`
+    <div><div>
+      <div id="field-63" role="combobox" aria-haspopup="listbox" aria-label="Select"
+        aria-required="true" tabindex="0"><p>Select</p></div>
+    </div></div>`);
+  assert.equal(readiness.blocking.length, 1, JSON.stringify(readiness.blocking));
+  assert.match(readiness.blocking[0], /"Select" is required and is still empty/);
+});
+
+/* THE SELECT2 SELF-LABEL, IN THE GATE. Same live Mytos markup as question-label-dom.test.js: the
+ * span points aria-labelledby at its own rendered-value child, so the gate named the required
+ * university field by its placeholder, "Select a university or college" - words that change the
+ * moment an option lands. The blocker must carry the employer's heading instead, which is also
+ * what discovery now stores, so the two halves of one run call the control one thing. */
+const leverSelect2UniversityCard = `
+  <li class="application-question custom-question"><div>
+    <div class="application-label full-width university">
+      <div class="text">Which was the most recent university you attended?<span class="required">&#10033;</span></div>
+    </div>
+    <div class="application-field full-width required-field"><div class="application-university">
+      <select data-qa="university-dropdown" name="cards[62541ff1-0b7c-4f5b-a51d-a217d565776e][field0]"
+        id="university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0" data-placeholder="Select a university or college"
+        required tabindex="-1" class="select2-hidden-accessible" aria-hidden="true"
+        style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden">
+        <option value="">Select a university or college</option>
+        <option value="University of Southern California">University of Southern California</option>
+      </select>
+      <span class="select2 select2-container select2-container--default"><span class="selection">
+        <span class="select2-selection select2-selection--single" role="combobox" aria-autocomplete="list"
+          aria-haspopup="true" aria-expanded="false" tabindex="0"
+          aria-labelledby="select2-university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0-container">
+          <span class="select2-selection__rendered"
+            id="select2-university-picker-62541ff1-0b7c-4f5b-a51d-a217d565776e-0-container">Select a university or college</span>
+        </span>
+      </span></span>
+    </div></div>
+  </div></li>`;
+
+test('an empty required Select2 picker blocks under its heading, not under its rendered placeholder', async () => {
+  const readiness = await readinessOf(leverSelect2UniversityCard);
+  assert.equal(readiness.blocking.length, 1, JSON.stringify(readiness.blocking));
+  assert.match(readiness.blocking[0], /Which was the most recent university you attended/);
+  assert.doesNotMatch(readiness.blocking[0], /Select a university or college/,
+    'the widget’s rendered value is not the employer’s question');
+});
