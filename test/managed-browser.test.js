@@ -638,7 +638,7 @@ test('a question is anchored on the element that names it, not on prose that men
    * prose that merely contains it. Containment stays as the fallback. */
   assert.match(SANDBOX_RUNNER, /const wholeLabel = wantedLabel/);
   assert.match(SANDBOX_RUNNER, /const exactLabel = wholeLabel \? page\.getByText\(wholeLabel\)\.first\(\) : null;/);
-  assert.match(SANDBOX_RUNNER, /: page\.getByText\(action\.text, \{ exact: false \}\)\.first\(\);/);
+  assert.match(SANDBOX_RUNNER, /: page\.getByText\(wantedLabel \|\| action\.text, \{ exact: false \}\)\.first\(\);/);
   // And the option block is walked up from that anchor, through the four ways a board says "these
   // options belong together".
   assert.match(SANDBOX_RUNNER, /const questionOptionBlock = async \(anchor, fallback\) =>/);
@@ -1765,6 +1765,15 @@ test('discovery scans combobox openers that are not form tags', () => {
   assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.closest\('header, footer, nav, \[role="navigation"\], \[role="banner"\], \[role="contentinfo"\]'\)\) return false;/);
   assert.match(SANDBOX_RUNNER, /'input:not\(\[type="hidden"\]\):not\(\[aria-hidden="true"\]\), textarea, select:not\(\[aria-hidden="true"\]\)'/);
   assert.match(SANDBOX_RUNNER, /if \(bareOpener && el\.querySelector\('\[role="combobox"\], \[aria-haspopup="listbox"\]'\)\) return false;/);
+});
+
+test('the required marker is stripped from the wanted label before matching', () => {
+  /* Lever welds \u2733 to the heading with no space while the stored question carries it with
+   * one; the whole-string and containment matches both failed on that byte and every reviewed
+   * radio on the live DGA form was silently skipped (measured 2026-08-20, proven in a live
+   * Chromium check: 0 matches unstripped, 1 stripped). */
+  assert.match(SANDBOX_RUNNER, /const wantedLabel = clean\(action\.text\)\.replace\(\/\[\\s\\u2733\*\]\+\$\/, ''\);/);
+  assert.match(SANDBOX_RUNNER, /getByText\(wantedLabel \|\| action\.text, \{ exact: false \}\)/);
 });
 
 test('the furniture-label vocabulary is one vocabulary in both passes', () => {

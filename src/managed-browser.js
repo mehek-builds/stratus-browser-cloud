@@ -6436,14 +6436,21 @@ const { chromium } = require('playwright');
          * that is how a required field is marked. The old containment search is still the fallback,
          * so a board whose label carries extra words is no worse off than before.
          */
-        const wantedLabel = clean(action.text);
+        /* THE REQUIRED MARKER IS NOT PART OF THE QUESTION'S NAME. Lever welds a \u2733 to the
+         * heading with no space ("...United States?\u2733") while the stored question carries it
+         * with one ("...united states? \u2733"), so the whole-string match failed, the containment
+         * fallback failed on the same byte, and every reviewed radio on the live DGA form was
+         * silently skipped with her answers sitting in the packet (measured 2026-08-20). The
+         * marker is stripped from the WANTED side and allowed on the page side, exactly as the
+         * trailing asterisk already was. */
+        const wantedLabel = clean(action.text).replace(/[\s\u2733*]+$/, '');
         const wholeLabel = wantedLabel
-          ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:]?\\s*$', 'i')
+          ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2733]?\\s*$', 'i')
           : null;
         const exactLabel = wholeLabel ? page.getByText(wholeLabel).first() : null;
         const label = exactLabel && (await exactLabel.count()) > 0
           ? exactLabel
-          : page.getByText(action.text, { exact: false }).first();
+          : page.getByText(wantedLabel || action.text, { exact: false }).first();
         if (await label.count() === 0) {
           const message = 'fillByLabelText: label not found';
           if (action.optional) {
