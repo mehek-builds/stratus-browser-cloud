@@ -4320,7 +4320,7 @@ const { chromium } = require('playwright');
        *      inside, or be named by the control itself, so that refusing a form withholds the
        *      click rather than relocating it onto a decoy that collects a little more;
        *   5. never body and never documentElement, because "the whole page" is not a scope. */
-      const choices = await page.locator(action.selector).evaluateAll((elements, chooser) => {
+      const readSubmitChoices = async () => await page.locator(action.selector).evaluateAll((elements, chooser) => {
         const FIELD_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], input[type="file"]';
         const REQUIRED_CONTROLS = 'input:not([type="hidden"])[required], textarea[required], select[required], [aria-required="true"]';
         const WIDGET = '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
@@ -4586,8 +4586,74 @@ const { chromium } = require('playwright');
           };
         });
       }, { ...action.chooserPolicy, submitKind: action.submitKind, addressed: [...new Set(addressedSelectors)] }).catch(() => null);
-      const viable = Array.isArray(choices) ? choices.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent) : [];
-      viable.sort((a, b) => b.score - a.score || a.index - b.index);
+      const viableAmong = (rows) => {
+        const list = Array.isArray(rows) ? rows.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent) : [];
+        list.sort((a, b) => b.score - a.score || a.index - b.index);
+        return list;
+      };
+      let choices = await readSubmitChoices();
+      let viable = viableAmong(choices);
+      /* A SEND CONTROL THE FORM ITSELF IS HOLDING DISABLED over one unanswered opt-in.
+       *
+       * Measured on the live Easy Dynamics Rippling form (2026-08-20): with every required field
+       * filled and the resume uploaded, the Apply button stays aria-disabled="true", and it
+       * enables the moment the 'sms_opt_in' radio pair gets an answer. The pair carries no label
+       * element, no aria-required and no question structure - only a paragraph of copy about text
+       * message updates - so discovery cannot mint a question for it, no action ever reaches it,
+       * and the submit pass then reported "could not find the button" about a button that was on
+       * screen the whole run.
+       *
+       * WHAT IS DONE, AND ITS WHOLE EXTENT: when the only reason no candidate is viable is that
+       * every final-intent control is DISABLED, unanswered radio pairs whose NAME says they are a
+       * communications opt-in are answered with their DECLINE member, once, and the candidates are
+       * re-read. Decline, never accept, for the same rule the cookie-banner default follows: the
+       * privacy-preserving option on a consent prompt. Declining a marketing channel grants
+       * nothing away and states no fact about the applicant, which is what makes it answerable
+       * without her - an ACCEPT here would be a consent she never gave and stays out of reach of
+       * this pass by construction (the decline member is identified by its own wording).
+       *
+       * Bounded by NAME, not by page copy: the name is the tenant's own machine word for the
+       * control ('sms_opt_in'), and a name-anchored gate cannot be widened by whatever sentence
+       * sits nearby. A group with no identifiable decline member is left alone, and the pass
+       * falls through to the same refusal it would have raised anyway. */
+      if (viable.length === 0 && Array.isArray(choices)
+        && choices.some((choice) => choice.visible && choice.finalIntent && choice.disabled)) {
+        const declined = await page.evaluate(() => {
+          const OPTIN_NAME = /(?:sms|text|email|marketing|news(?:letter)?|updates?)[_-]?opt[_-]?in/i;
+          const DECLINE_VALUE = /^(?:false|no|0|decline[d]?)$/i;
+          const DECLINE_WORDING = /\bno\b[^a-z]|\bno\s*$|\bdo\s*(?:not|n[’']t)\s+consent\b|\bdecline\b|\bopt\s*out\b/i;
+          const groups = new Map();
+          for (const radio of document.querySelectorAll('input[type="radio"][name]')) {
+            const name = radio.getAttribute('name') || '';
+            if (!OPTIN_NAME.test(name)) continue;
+            if (!groups.has(name)) groups.set(name, []);
+            groups.get(name).push(radio);
+          }
+          const declinedNames = [];
+          for (const [name, members] of groups) {
+            if (members.some((radio) => radio.checked)) continue;
+            const decline = members.find((radio) => DECLINE_VALUE.test(String(radio.value || '')))
+              || members.find((radio) => DECLINE_WORDING.test(
+                String((radio.closest('label') || radio.parentElement || radio).textContent || '')
+              ));
+            if (!decline) continue;
+            decline.click();
+            decline.dispatchEvent(new Event('input', { bubbles: true }));
+            decline.dispatchEvent(new Event('change', { bubbles: true }));
+            declinedNames.push(name);
+          }
+          return declinedNames;
+        }).catch(() => []);
+        if (Array.isArray(declined) && declined.length > 0) {
+          await page.waitForTimeout(600).catch(() => undefined);
+          for (const name of declined) {
+            filledFields.push('question:' + name
+              + ' (an unanswered communications opt-in was holding the send button disabled; Litos declined it for you)');
+          }
+          choices = await readSubmitChoices();
+          viable = viableAmong(choices);
+        }
+      }
       const selected = viable[0];
       const ambiguous = !selected || (viable[1] && viable[1].score === selected.score);
       if (ambiguous) throw new Error('Atomic submit control was missing or ambiguous');
