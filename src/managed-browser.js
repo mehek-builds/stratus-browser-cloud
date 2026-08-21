@@ -7353,17 +7353,41 @@ const { chromium } = require('playwright');
             actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
             actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
           }
-          if (state.kind !== 'unknown') {
-            if (actionDiagnostic) actionDiagnostic.outcome = state.kind === 'chosen'
-              ? 'choice_already_answered'
-              : 'choice_unmatched';
-            if (action.label) {
-              skipped.push(state.kind === 'chosen'
-                ? action.label + ': left the answer already on the form, "' + clean(state.value) + '"'
-                : action.label + ': ' + unmatchedReason(action.value || ''));
-            }
-            continue;
+          /* THE SAME REFUSAL, AND 'unknown' IS NOT AN EXEMPTION FROM IT.
+           *
+           * readChoiceState's 'unknown' means "I cannot tell you whether this widget is answered",
+           * never "assume it is safe to type into". Every control that reaches this line already
+           * came in through the combobox/listbox/aria-haspopup gate above and already tried and
+           * failed every reading this file has for a real choice - the react-select classes, the
+           * role-less Greenhouse wrapper, and the committed-search-input value keyed to the exact
+           * row clicked. A control an anonymous Ashby autocomplete is exactly the shape none of
+           * those read: no chosen-value node, no placeholder class, and (measured live on Deepgram
+           * and Notion Ashby postings, 2026-08-21, packet 9f1d9e52) no row was ever offered for a
+           * bare city name to click in the first place, so lastClickedOptionText is empty and the
+           * committed-input check above never even had a candidate to compare against.
+           *
+           * Before this, 'unknown' fell through the gate below, past isBareOpener (false - this is
+           * a real, typeable <input>, not a bare div opener), straight into the plain-fill path a
+           * few lines down: locator.fill(action.value) followed by verifyFilled reading the SAME
+           * raw DOM value straight back. That is the identical shape the Five Rings comment above
+           * already names and already refuses for 'chosen' and 'empty' - a plain .fill() sets the
+           * native value attribute without ever driving the widget's real search-and-select
+           * lifecycle, so a React-controlled autocomplete can report the field filled while its own
+           * rendered state, and the employer's own required-field validator, still say "Start
+           * typing...". Measured end to end: filled_fields carried "location" on every run while
+           * the packet's own required-field scan kept naming "Current Location" empty, from the
+           * same run, every time. */
+          if (actionDiagnostic) actionDiagnostic.outcome = state.kind === 'chosen'
+            ? 'choice_already_answered'
+            : 'choice_unmatched';
+          if (action.label) {
+            skipped.push(state.kind === 'chosen'
+              ? action.label + ': left the answer already on the form, "' + clean(state.value) + '"'
+              : (lastChoiceUnreadable
+                ? action.label + ': ' + unreadableChoiceReason
+                : action.label + ': ' + unmatchedReason(action.value || '')));
           }
+          continue;
         }
         /* A bare opener that reached here had no option to click and no readable choice state.
            There is no box to type into - locator.fill on a div throws, the throw becomes one
