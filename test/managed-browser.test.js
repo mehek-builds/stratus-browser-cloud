@@ -405,7 +405,7 @@ test('fills are reported only after the page keeps the value', () => {
 });
 
 test('fillByLabelText can use scoped custom listbox controls', () => {
-  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) =>/);
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null\) =>/);
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
   assert.match(SANDBOX_RUNNER, /getByRole\('option', \{ name: option, exact: false \}\)/);
   assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(questionBlock, action\.value \|\| ''\)/);
@@ -479,7 +479,7 @@ test('a widget that renders its answer shorter than the row that set it is not a
   assert.equal((SANDBOX_RUNNER.match(/lastClickedOptionText = clean\(/g) || []).length, 1, 'one place records the row');
   // Cleared at the top of every fill, so a row left over from an earlier control can never stand in
   // for one this control never showed.
-  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
   // Both halves are required: the row had to carry the answer, and the control has to be showing
   // part of that same row.
   assert.match(SANDBOX_RUNNER, /if \(!row \|\| shown\.length < 2 \|\| !row\.includes\(shown\)\) return false;/);
