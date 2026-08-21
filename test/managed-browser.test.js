@@ -503,8 +503,12 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // real opener is '.select2-choice'. Passing it would redirect fillCustomChoice onto the wrong
   // element, not just narrow choiceLanded's blur target, so those three sites rely entirely on
   // blurDrivenChoiceControl's own document.activeElement fallback instead.
+  // driveTarget is computed once and reused by both the fillCustomChoice and choiceLanded calls at
+  // this site (hoisted 2026-08-21 so a future edit to the condition cannot update one call and miss
+  // the other, which is exactly the class of bug this whole review pass exists to catch).
+  assert.match(SANDBOX_RUNNER, /const driveTarget = targetInChoiceShell \|\| targetInGreenhouseQuestionChoice \? target : null;/);
   const landedReadbacks = (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length
-    + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+targetInChoiceShell \|\| targetInGreenhouseQuestionChoice \? target : null,/g) || []).length;
+    + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+driveTarget,/g) || []).length;
   assert.equal(landedReadbacks, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
   assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,

@@ -2072,7 +2072,7 @@ const { chromium } = require('playwright');
            * comment above states why a fixed wait is not trusted for a controlled component's
            * render lagging its own click, and a blur-triggered validation (Ashby's own included -
            * an autocomplete backed by a geocoder query, see the IMC Trading location field a few
-           * hundred lines up) is no less capable of lagging past 150ms than the click was. Reusing
+           * hundred lines below) is no less capable of lagging past 150ms than the click was. Reusing
            * settleVerified gives the post-blur read the identical up-to-500ms/eleven-read bound the
            * pre-blur read already gets, so a control that settles slowly is rescued instead of
            * being reported lost, and a control that stays answered still returns on its first poll
@@ -7249,10 +7249,15 @@ const { chromium } = require('playwright');
           // takes a refused row back off the form. Nothing about whether the caller named a field
           // changes what this run owes the form.
           if (actionDiagnostic) actionDiagnostic.choiceAttempted = true;
+          // Computed once and reused below: a labelled Greenhouse choice AND a targetInChoiceShell
+          // fill both drive 'target' directly, so both fillCustomChoice and choiceLanded's own blur
+          // step need the same element, not a guess across 'container'. One shared value means a
+          // future third shape added here cannot update one call and silently miss the other.
+          const driveTarget = targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null;
           const choiceFilled = await fillCustomChoice(
             container,
             action.value || '',
-            targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null,
+            driveTarget,
           );
           if (actionDiagnostic) {
             actionDiagnostic.choiceFilled = choiceFilled;
@@ -7261,13 +7266,10 @@ const { chromium } = require('playwright');
             actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
           }
           if (choiceFilled) {
-            // Same condition fillCustomChoice was just handed above: a labelled Greenhouse choice
-            // AND a targetInChoiceShell fill both drove 'target' directly, so choiceLanded's own
-            // blur step needs the same element rather than guessing across 'container'.
             const landed = await choiceLanded(
               container,
               action.value || '',
-              targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null,
+              driveTarget,
             );
             if (actionDiagnostic) {
               actionDiagnostic.choiceLanded = landed;
