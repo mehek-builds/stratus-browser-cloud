@@ -45,7 +45,7 @@ import { constSource, CHOOSER_NAMES } from './chooser-source.mjs';
 const SUPPORT_NAMES = [
   'optionMatches', 'optionMatchesExactly',
   'readChoiceState', 'readCommittedSearchInputValue', 'refuseChoice', 'nearMissChoiceReason',
-  'verifyChoiceInContainer',
+  'verifyChoiceInContainer', 'settleVerified',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
   'withdrawRefusedChoice', 'blurDrivenChoiceControl', 'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
@@ -202,7 +202,11 @@ test('the resolved container is the narrow shell, never the field wrapper carryi
 
 test('a control that reverts on the runner\'s own next-field blur is not reported landed', async () => {
   // THE FAILING CASE THIS FILE EXISTS FOR. Before the fix this returned landed: true while the
-  // real input ended up empty - the exact contradiction measured on the live Deepgram run.
+  // real input ended up empty - the exact contradiction measured on the live Deepgram run. This
+  // control stays reverted for the whole settleVerified window, so the verdict below is the same
+  // one the original single-150ms-wait fix gave, just reached after up to ~500ms of retry instead
+  // of one fixed wait - see choice-landed-settle-retry.test.js for the case that only that widened
+  // budget can catch: a control that reverts and then recovers within the window.
   const result = await run(
     fixture({ options: ['Dubai, United Arab Emirates'], withCaption: true, revertsOnBlur: true }),
     'Dubai',
@@ -241,7 +245,14 @@ test('a control with no committed-value signal at all is marked unreadable, not 
   assert.equal(result.state.lastChoiceUnreadable, true);
 });
 
-test('the post-blur reread is a fixed cost, not a retry loop, and never fires on an unverified read', () => {
+test('the post-blur reread gets the same retry budget as the read it follows, and the blur never fires on an unverified read', () => {
+  // 2026-08-21: this used to be a single fixed 150ms wait, asserted here as "not a retry loop" -
+  // deliberately, at the time, to keep the added cost bounded and small. A code review of that
+  // choice found the asymmetry itself was a defect: a blur-triggered validation with no more
+  // retry budget than a single wait can fail closed on a control that would have genuinely landed
+  // given the same ~500ms window the PRE-blur read already gets (this file's own IMC Trading
+  // geocoder-backed location field, a few hundred lines up, is proof such a control exists in
+  // production). The fix reuses settleVerified rather than inventing a second poll loop.
   const start = SANDBOX_RUNNER.indexOf('const choiceLanded = async (container, expected, directControl = null) => {');
   const end = SANDBOX_RUNNER.indexOf('withdrawRefusedChoice now gets one more look', start);
   assert.ok(start !== -1 && end > start, 'choiceLanded must precede its own withdrawal comment');
@@ -250,6 +261,13 @@ test('the post-blur reread is a fixed cost, not a retry loop, and never fires on
   // Exactly one blur call in the whole function: it only runs after a verified read, never on
   // every 50ms poll tick, and never a second time inside the same call.
   assert.equal((body.match(/await blurDrivenChoiceControl\(/g) || []).length, 1);
-  assert.equal((body.match(/await verifyChoiceInContainer\(/g) || []).length, 2,
-    'the ordinary poll read and exactly one post-blur reread, nothing looser');
+  // The pre-blur read is still a bare, directly-awaited call; the post-blur one is now wrapped in
+  // settleVerified rather than directly awaited, so only one bare "await verifyChoiceInContainer("
+  // remains in this function's body - the second is inside settleVerified's own check() closure.
+  assert.equal((body.match(/await verifyChoiceInContainer\(/g) || []).length, 1,
+    'the pre-blur poll read is still a bare await; the post-blur one now goes through settleVerified');
+  assert.match(body, /await blurDrivenChoiceControl\(container, directControl\);\n\s+if \(await settleVerified\(\(\) => verifyChoiceInContainer\(/,
+    'blur is followed immediately by a settleVerified-wrapped reread, not a fixed wait');
+  assert.equal((body.match(/await settleVerified\(/g) || []).length, 1,
+    'settleVerified runs exactly once per landed call, immediately after the blur');
 });
