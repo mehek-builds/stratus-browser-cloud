@@ -1518,7 +1518,14 @@ const { chromium } = require('playwright');
      * 'unknown' either way, and drawing a positive one out of a blob was the part that was wrong.
      */
     let lastChoiceUnreadable = false;
-    const verifyChoiceInContainer = async (container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer) => {
+    const verifyChoiceInContainer = async (
+      container,
+      expected,
+      clickedOptionText,
+      clickedForAnswer,
+      chooserTierAnswer,
+      directControl = null,
+    ) => {
       lastChoiceUnreadable = false;
       /* AND A JAPANESE ANSWER IS NOT A BLANK. normalized() keeps only [a-z0-9], so it erases a
        * Japanese, Arabic, Cyrillic, Greek or Chinese string entirely, and optionMatchesExactly
@@ -1599,6 +1606,64 @@ const { chromium } = require('playwright');
       lastChoiceUnreadable = state.kind === 'unknown';
       const text = state.value;
       if (holdsAnswer(text, expected) || declineMatches(text, expected)) { lastChoiceUnreadable = false; return true; }
+      /* A ROLE-LESS GREENHOUSE QUESTION WRAPPER CAN PUBLISH A COMMITTED VALUE WITHOUT ANY OF THE
+       * selected-value classes readChoiceState recognises. The live Jump degree field is exactly
+       * that shape: #question_<digits> wraps one search input, the option click closes its owned
+       * menu and replaces Select... with one visible degree value, but the wrapper still reads as
+       * unknown. This is a second read, not trust in the chooser. It is accepted only when:
+       *   - the caller passed the exact input it drove;
+       *   - one label in this question names one provider-owned #question_<digits> root containing
+       *     that sole input;
+       *   - the clicked row exactly names the reviewed answer;
+       *   - the input is empty and its declared menu is closed;
+       *   - no visible Select or Choose placeholder remains;
+       *   - and exactly one visible non-option leaf in that root is the whole clicked row.
+       * A loose job-description match, an open menu row, a typed search query, a second matching
+       * value, or an ordinary text question all fail this gate. */
+      if (state.kind === 'unknown' && directControl && clean(clickedOptionText || '')
+        && optionMatchesExactly(clickedOptionText, expected)
+        && optionMatchesExactly(clickedForAnswer, expected)) {
+        const committedInQuestion = await container.evaluate((element, payload) => {
+          const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+          const visible = (node) => {
+            if (!node || node.getClientRects().length === 0) return false;
+            const style = getComputedStyle(node);
+            return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+          };
+          const labels = [...element.querySelectorAll('label[for]')].filter((label) => (
+            /^question_\d+$/.test(label.getAttribute('for') || '')
+          ));
+          const bindings = labels.map((label) => {
+            const root = document.getElementById(label.getAttribute('for'));
+            const inputs = root && element.contains(root) ? [...root.querySelectorAll('input')] : [];
+            return { root, inputs };
+          }).filter((binding) => binding.root && binding.inputs.length === 1);
+          if (bindings.length !== 1) return false;
+          const root = bindings[0].root;
+          const input = bindings[0].inputs[0];
+          if (cleanText(input.value)) return false;
+          if (input.getAttribute('aria-expanded') === 'true') return false;
+          const menuId = cleanText(input.getAttribute('aria-controls') || input.getAttribute('aria-owns'));
+          const menu = menuId ? document.getElementById(menuId.split(/\s+/)[0]) : null;
+          if (menu && visible(menu) && menu.querySelector('[role="option"]')) return false;
+          const placeholder = [...root.querySelectorAll('*')].some((node) => {
+            if (!visible(node)) return false;
+            const ownText = [...node.childNodes]
+              .filter((child) => child.nodeType === Node.TEXT_NODE)
+              .map((child) => child.textContent || '')
+              .join(' ');
+            return /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(cleanText(ownText));
+          });
+          if (placeholder) return false;
+          const exactValues = [...root.querySelectorAll('*')].filter((node) => {
+            if (!visible(node) || cleanText(node.textContent).toLowerCase() !== payload.row) return false;
+            if (node.matches('[role="option"], [role="listbox"]') || node.closest('[role="option"], [role="listbox"]')) return false;
+            return ![...node.children].some((child) => cleanText(child.textContent).toLowerCase() === payload.row);
+          });
+          return exactValues.length === 1;
+        }, { row: clean(clickedOptionText).toLowerCase() }).catch(() => false);
+        if (committedInQuestion) { lastChoiceUnreadable = false; return true; }
+      }
       /* THE ROW THAT WAS CLICKED IS SITTING IN THE WIDGET'S OWN INPUT, on a control readChoiceState
        * cannot read. Measured on the live Easy Dynamics Rippling form: the race question is an
        * '<input role="combobox">' whose committed choice lands in input.value with the menu closed,
@@ -1842,7 +1907,7 @@ const { chromium } = require('playwright');
       }
       return false;
     };
-    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer, expected) => {
+    const withdrawRefusedChoice = async (container, clickedOptionText, clickedForAnswer, expected, directControl = null) => {
       // Nothing was clicked during this call, so this call has nothing on the form to take back. The
       // provenance rule the clicked-row tier already relies on, asked for the opposite purpose.
       if (!clean(clickedOptionText || '')) return false;
@@ -1904,7 +1969,14 @@ const { chromium } = require('playwright');
        * nothing to confirm the control wrong against, and guessing would be worse than the unreadable
        * treatment above already gives it. */
       if (expected !== undefined
-        && await verifyChoiceInContainer(container, expected, clickedOptionText, clickedForAnswer, lastChooserTierAnswer)) {
+        && await verifyChoiceInContainer(
+          container,
+          expected,
+          clickedOptionText,
+          clickedForAnswer,
+          lastChooserTierAnswer,
+          directControl,
+        )) {
         await unmarkChoice(container);
         lastChoiceRefusal = heldRefusal;
         lastChoiceUnreadable = false;
@@ -1929,11 +2001,18 @@ const { chromium } = require('playwright');
      * exactly one call site of four doing something the other three did, and a fifth is only a
      * matter of time. verifyChoiceInContainer stays a pure reading of the control, which is what
      * lets it be unit-tested against a container that is nothing but a state. */
-    const choiceLanded = async (container, expected) => {
+    const choiceLanded = async (container, expected, directControl = null) => {
       // React-controlled choices can publish their selected value on a later render. Give that
       // exact value a bounded window before withdrawing anything the option click may have set.
       for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
-        if (await verifyChoiceInContainer(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer)) {
+        if (await verifyChoiceInContainer(
+          container,
+          expected,
+          lastClickedOptionText,
+          lastClickedOptionAnswer,
+          lastChooserTierAnswer,
+          directControl,
+        )) {
           await unmarkChoice(container);
           return true;
         }
@@ -1942,7 +2021,13 @@ const { chromium } = require('playwright');
       // withdrawRefusedChoice now gets one more look at 'expected' before it presses anything, and a
       // confirmed match there is exactly as landed as one the loop above caught. See its own comment
       // for why clearing on that path would be destroying a correct answer to report a false loss.
-      return await withdrawRefusedChoice(container, lastClickedOptionText, lastClickedOptionAnswer, expected);
+      return await withdrawRefusedChoice(
+        container,
+        lastClickedOptionText,
+        lastClickedOptionAnswer,
+        expected,
+        directControl,
+      );
     };
     /* AN ANSWER THAT IS A BUTTON, not an input.
      *
@@ -6880,13 +6965,27 @@ const { chromium } = require('playwright');
         }
         const fillShape = await target.evaluate((element) => ({
           tag: element.tagName.toLowerCase(),
+          placeholder: element.getAttribute('placeholder') || '',
           role: element.getAttribute('role') || '',
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
-        })).catch(() => ({ tag: '', role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
+        })).catch(() => ({ tag: '', placeholder: '', role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
         const targetInChoiceShell = fillShape.tag === 'input' && await target.evaluate((element) => Boolean(
           element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
         )).catch(() => false);
+        /* Greenhouse also renders a role-less custom select whose durable #question_<digits>
+         * selector resolves to a wrapper and then to an inner search input. The live Jump Trading
+         * degree control exposes neither the ARIA role nor the class convention above, but it does
+         * publish the provider-owned question id and a visible Select placeholder. Both signals are
+         * required, so an ordinary text question never becomes a choice control merely because it
+         * happens to sit on the same form. */
+        const greenhouseQuestionId = String(action.selector || '').match(/^#(question_\d+)$/)?.[1] || '';
+        const selectorShowsChoicePlaceholder = greenhouseQuestionId && (
+          /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(fillShape.placeholder)
+          || (await locator.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)) > 0
+        );
+        const targetInGreenhouseQuestionChoice = fillShape.tag === 'input'
+          && Boolean(selectorShowsChoicePlaceholder);
         if (fillShape.tag === 'select') {
           const selected = await selectNativeOption(target, action.value || '');
           if (!selected) {
@@ -6902,18 +7001,35 @@ const { chromium } = require('playwright');
         }
         if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true'
           || fillShape.ariaHaspopup === 'listbox' || fillShape.ariaAutocomplete === 'list'
-          || targetInChoiceShell) {
-          const container = targetInChoiceShell
-            ? target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]')
-            : target.locator(
+          || targetInChoiceShell || targetInGreenhouseQuestionChoice) {
+          let container;
+          if (targetInChoiceShell) {
+            container = target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]');
+          } else if (targetInGreenhouseQuestionChoice) {
+            const label = page.locator('label[for="' + greenhouseQuestionId + '"]').first();
+            const labelledQuestion = label.locator(
+              'xpath=ancestor::*[(self::div or self::fieldset) and .//*[@id="' + greenhouseQuestionId + '"]][1]'
+            );
+            container = (await labelledQuestion.count()) > 0 ? labelledQuestion : locator;
+          } else {
+            container = target.locator(
               'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
             );
+          }
           // Read before the label is consulted, never behind it. Written as one short-circuit, a
           // labelless action skipped the verification entirely and, with it, the withdrawal that
           // takes a refused row back off the form. Nothing about whether the caller named a field
           // changes what this run owes the form.
-          if (await fillCustomChoice(container, action.value || '', targetInChoiceShell ? target : null)) {
-            const landed = await choiceLanded(container, action.value || '');
+          if (await fillCustomChoice(
+            container,
+            action.value || '',
+            targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null,
+          )) {
+            const landed = await choiceLanded(
+              container,
+              action.value || '',
+              targetInGreenhouseQuestionChoice ? target : null,
+            );
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '

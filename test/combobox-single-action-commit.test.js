@@ -30,7 +30,7 @@ import { constSource, CHOOSER_NAMES } from './chooser-source.mjs';
  * in source order. The chooser stack comes from chooser-source.mjs, THE single manifest for it. */
 const SUPPORT_NAMES = [
   'optionMatches', 'optionMatchesExactly',
-  'readChoiceState', 'refuseChoice', 'nearMissChoiceReason',
+  'readChoiceState', 'readCommittedSearchInputValue', 'refuseChoice', 'nearMissChoiceReason',
   'verifyChoiceInContainer',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
   'withdrawRefusedChoice', 'choiceLanded',
@@ -65,6 +65,7 @@ function build() {
     return {
       fillCustomChoice,
       choiceLanded,
+      verifyChoiceInContainer,
       readChoiceState,
       state: () => ({ lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer, lastChoiceRefusal, choiceRefusals, lastChoiceControlOpened })
     };
@@ -240,6 +241,67 @@ test('an exact role-less Greenhouse input commits through its widget shell', asy
   assert.equal(landed, true);
   assert.deepEqual(await page.evaluate(() => window.__clicked), ["Bachelor's Degree"]);
   assert.equal(await page.locator('.select__single-value').textContent(), "Bachelor's Degree");
+});
+
+test('a role-less Greenhouse wrapper verifies only one closed committed value', async () => {
+  await page.setContent(`<!doctype html><html><body>
+    <div id="question-block">
+      <label for="question_67595191">What degree are you currently pursuing?</label>
+      <div id="question_67595191">
+        <div id="question-placeholder" style="display:none">Select...</div>
+        <input id="question-input" type="text" value="">
+        <div id="question-value">Bachelor's Degree</div>
+      </div>
+    </div>
+    <div id="question-menu" role="listbox" style="display:none">
+      <div role="option">Bachelor's Degree</div>
+    </div>
+  </body></html>`);
+  const api = build();
+  const block = page.locator('#question-block');
+  const input = page.locator('#question-input');
+  const verify = async () => api.verifyChoiceInContainer(
+    block,
+    "Bachelor's Degree",
+    "Bachelor's Degree",
+    "Bachelor's Degree",
+    '',
+    input,
+  );
+
+  assert.equal(await verify(), true, 'one exact committed value with a closed menu verifies');
+
+  await page.locator('#question-placeholder').evaluate((node) => { node.style.display = 'block'; });
+  assert.equal(await verify(), false, 'a visible Select placeholder means the choice is not committed');
+
+  await page.locator('#question-placeholder').evaluate((node) => { node.style.display = 'none'; });
+  await page.locator('#question_67595191').evaluate((root) => {
+    const duplicate = document.createElement('div');
+    duplicate.id = 'question-value-duplicate';
+    duplicate.textContent = "Bachelor's Degree";
+    root.appendChild(duplicate);
+  });
+  assert.equal(await verify(), false, 'two matching rendered values are ambiguous');
+
+  await page.locator('#question-value-duplicate').evaluate((node) => node.remove());
+  await input.evaluate((node) => node.setAttribute('aria-controls', 'question-menu'));
+  await page.locator('#question-menu').evaluate((node) => { node.style.display = 'block'; });
+  assert.equal(await verify(), false, 'a still-open owned menu is not a committed choice');
+
+  await page.setContent(`<!doctype html><html><body>
+    <div id="ordinary-block">
+      <label for="question_67595192">If yes, please explain.</label>
+      <div id="question_67595192"><input id="ordinary-input" value="Bachelor's Degree"></div>
+    </div>
+  </body></html>`);
+  assert.equal(await api.verifyChoiceInContainer(
+    page.locator('#ordinary-block'),
+    "Bachelor's Degree",
+    "Bachelor's Degree",
+    "Bachelor's Degree",
+    '',
+    page.locator('#ordinary-input'),
+  ), false, 'typed text cannot satisfy the closed-choice readback');
 });
 
 test('a graded band and a date part commit through the same single attempt', async () => {

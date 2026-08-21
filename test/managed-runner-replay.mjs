@@ -250,6 +250,25 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     <button type="button" class="select__dropdown-indicator" aria-label="Toggle flyout">v</button>
   </div>
 </div>
+<!-- Jump Trading's Greenhouse degree question, measured in production on 2026-08-21. The durable
+     action selector names the question wrapper, not the inner search input. The input publishes no
+     role, popup attribute, or select__ class before it opens. The exact Select placeholder plus the
+     provider-owned question id are the only stable control-kind signals. -->
+<div class="field" id="jump-degree-field">
+  <label for="question_67595191">What degree are you currently pursuing?</label>
+  <div id="question_67595191">
+    <div class="jump-degree-widget">
+      <div id="jump-degree-placeholder">Select...</div>
+      <input id="jump-degree-input" type="text" autocomplete="off">
+    </div>
+  </div>
+</div>
+<!-- Same durable selector family, deliberately without a choice placeholder. This is an ordinary
+     open text question and must never be routed through the chooser. -->
+<div class="field" id="jump-explanation-field">
+  <label for="question_67595192">If yes, please explain.</label>
+  <div id="question_67595192"><input id="jump-explanation-input" type="text"></div>
+</div>
 <!-- GREENHOUSE'S PHONE COUNTRY CONTROL, copied node for node off the live rendered DOM.
      Captured 2026-08-09 from job-boards.greenhouse.io/embed/job_app?for=redwoodmaterials&token=6126784004,
      one of the 24 forms behind this user's stored "choice value did not persist after fill" reports.
@@ -530,6 +549,51 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') closeMenu();
   });
+
+  // ---- Greenhouse role-less #question wrapper choice, matching the live Jump degree field ----
+  var jumpDegreeRoot = document.getElementById('question_67595191');
+  var jumpDegreeInput = document.getElementById('jump-degree-input');
+  var jumpDegreePlaceholder = document.getElementById('jump-degree-placeholder');
+  var jumpDegreeMenu = null;
+  function closeJumpDegreeMenu() {
+    if (jumpDegreeMenu) jumpDegreeMenu.remove();
+    jumpDegreeMenu = null;
+    jumpDegreeInput.removeAttribute('aria-controls');
+    jumpDegreeInput.value = '';
+  }
+  function commitJumpDegree(value) {
+    var chosen = document.getElementById('jump-degree-chosen');
+    if (!chosen) {
+      chosen = document.createElement('div');
+      chosen.id = 'jump-degree-chosen';
+      jumpDegreeRoot.insertBefore(chosen, jumpDegreeRoot.firstChild);
+    }
+    chosen.textContent = value;
+    jumpDegreePlaceholder.style.display = 'none';
+    closeJumpDegreeMenu();
+  }
+  function openJumpDegreeMenu() {
+    if (jumpDegreeMenu) return;
+    jumpDegreeMenu = document.createElement('div');
+    jumpDegreeMenu.id = 'jump-degree-listbox';
+    jumpDegreeMenu.setAttribute('role', 'listbox');
+    ["Bachelor's Degree", "Master's Degree", 'PhD'].forEach(function (value) {
+      var option = document.createElement('div');
+      option.setAttribute('role', 'option');
+      option.textContent = value;
+      option.addEventListener('mousedown', function (event) {
+        event.preventDefault();
+        commitJumpDegree(value);
+      });
+      option.addEventListener('click', function () { commitJumpDegree(value); });
+      jumpDegreeMenu.appendChild(option);
+    });
+    jumpDegreeRoot.appendChild(jumpDegreeMenu);
+    jumpDegreeInput.setAttribute('aria-controls', 'jump-degree-listbox');
+  }
+  jumpDegreeInput.addEventListener('mousedown', openJumpDegreeMenu);
+  jumpDegreeInput.addEventListener('click', openJumpDegreeMenu);
+  jumpDegreeInput.addEventListener('input', openJumpDegreeMenu);
 
   // ---- The phone Country React Select, behaving the way the live one does ----
   //
@@ -1117,6 +1181,19 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 //     the control sweep clicks the "Clear selections" button.
 {
   const disciplineText = (result) => (valueOf(result, '#discipline-shell') || '').replace(/\s+/g, ' ').trim();
+
+  const rolelessQuestionChoice = await replay([
+    { type: 'fill', selector: '#question_67595191', value: "Bachelor's Degree", label: 'jump_degree', optional: false },
+    { type: 'extract', selector: '#jump-degree-field' },
+    { type: 'fill', selector: '#question_67595192', value: 'No explanation needed', label: 'jump_explanation', optional: false },
+    { type: 'extract', selector: '#jump-explanation-input', attribute: 'value' }
+  ]);
+  assert.match(valueOf(rolelessQuestionChoice, '#jump-degree-field') || '', /Bachelor's Degree/,
+    'the wrapper-scoped fill must commit the exact degree option');
+  assert.equal(valueOf(rolelessQuestionChoice, '#jump-explanation-input'), 'No explanation needed',
+    'a Greenhouse question id without a Select placeholder must remain a text fill');
+  assert.deepEqual(rolelessQuestionChoice.filledFields.sort(), ['jump_degree', 'jump_explanation'],
+    'both paths must report only after their values persist');
 
   const answered = await replay([
     { type: 'click', selector: '#discipline', label: 'discipline_open', optional: true },

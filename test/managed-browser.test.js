@@ -398,7 +398,7 @@ test('fillByLabelText dispatches on the control type', () => {
 
 test('fills are reported only after the page keeps the value', () => {
   assert.match(SANDBOX_RUNNER, /const verifyFilled = async \(field, expected\) =>/);
-  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \(container, expected, clickedOptionText, clickedForAnswer, chooserTierAnswer\) =>/);
+  assert.match(SANDBOX_RUNNER, /const verifyChoiceInContainer = async \([\s\S]*?directControl = null,[\s\S]*?\) =>/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /value did not persist after fillByLabelText/);
   assert.match(SANDBOX_RUNNER, /dispatchEvent\(new Event\('change', \{ bubbles: true \}\)\)/);
@@ -490,9 +490,10 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\(container, expected, lastClickedOptionText, lastClickedOptionAnswer, lastChooserTierAnswer\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected, directControl = null\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\([\s\S]*?directControl,[\s\S]*?\)\)/);
   const landedReadbacks = (SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length
-    + (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length;
+    + (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length
+    + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+targetInGreenhouseQuestionChoice \? target : null,/g) || []).length;
   assert.equal(landedReadbacks, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
   assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,
@@ -546,6 +547,10 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /waitForTimeout\(1200\)/);
   assert.match(SANDBOX_RUNNER, /choice value did not persist after fill/);
   assert.match(SANDBOX_RUNNER, /choice value did not persist after fillByLabelText/);
+  assert.match(SANDBOX_RUNNER, /const greenhouseQuestionId = String\(action\.selector \|\| ''\)\.match\(\/\^#\(question_\\d\+\)\$\/\)/);
+  assert.match(SANDBOX_RUNNER, /selectorShowsChoicePlaceholder/);
+  assert.match(SANDBOX_RUNNER, /label\[for="' \+ greenhouseQuestionId \+ '"\]/);
+  assert.match(SANDBOX_RUNNER, /targetInChoiceShell \|\| targetInGreenhouseQuestionChoice \? target : null/);
 });
 
 test('decline style EEO answers can match common portal option text', () => {
