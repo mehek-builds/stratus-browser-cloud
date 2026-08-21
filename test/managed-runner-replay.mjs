@@ -553,7 +553,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   var jumpDegreeRoot = document.getElementById('jump-degree-root');
   var jumpDegreeInput = document.getElementById('question_67595191');
   var jumpDegreeMenu = null;
-  var jumpDegreeClearTimer = null;
   function closeJumpDegreeMenu() {
     if (jumpDegreeMenu) jumpDegreeMenu.remove();
     jumpDegreeMenu = null;
@@ -561,7 +560,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     jumpDegreeInput.value = '';
   }
   function commitJumpDegree(value) {
-    clearTimeout(jumpDegreeClearTimer);
     var chosen = document.getElementById('jump-degree-chosen');
     if (!chosen) {
       chosen = document.createElement('div');
@@ -594,10 +592,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   jumpDegreeInput.addEventListener('click', openJumpDegreeMenu);
   jumpDegreeInput.addEventListener('input', function () {
     openJumpDegreeMenu();
-    clearTimeout(jumpDegreeClearTimer);
-    jumpDegreeClearTimer = setTimeout(function () {
-      if (!document.getElementById('jump-degree-chosen')) jumpDegreeInput.value = '';
-    }, 300);
+  });
+  jumpDegreeInput.addEventListener('blur', function () {
+    if (!document.getElementById('jump-degree-chosen')) jumpDegreeInput.value = '';
   });
 
   // ---- The phone Country React Select, behaving the way the live one does ----
