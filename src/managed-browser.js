@@ -6964,10 +6964,14 @@ const { chromium } = require('playwright');
           targetTag: 'unknown',
           targetInChoiceShell: false,
           targetPlaceholderSignal: false,
+          targetValuePlaceholderSignal: false,
+          targetPseudoPlaceholderSignal: false,
           labelCount: 0,
           labelledQuestionCount: 0,
           locatorChoicePlaceholderCount: 0,
           labelChoicePlaceholderCount: 0,
+          choicePeerCount: 0,
+          nearbyChoiceIndicator: false,
           route: 'unresolved',
           choiceAttempted: false,
           choiceFilled: false,
@@ -7044,16 +7048,93 @@ const { chromium } = require('playwright');
             /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i
           ).count().catch(() => 0)
           : 0;
+        /* A role-less Greenhouse search input can render its empty state without a placeholder
+         * attribute or a text node. The live Jump degree control does exactly that while sharing
+         * its field-shell structure with neighbouring controls that do publish combobox evidence,
+         * and it renders a small down-caret in the same one-control shell. Both facts are required
+         * for the peer arm, so a normal provider-owned text box cannot become a chooser merely
+         * because another question on the form is a dropdown. */
+        const greenhouseRolelessEvidence = greenhouseQuestionId
+          ? await target.evaluate((element) => {
+            const choicePlaceholder = (value) => /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(String(value || ''));
+            const visible = (node) => {
+              const rect = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+            };
+            const ancestors = [];
+            let cursor = element.parentElement;
+            while (cursor && ancestors.length < 5 && cursor.tagName !== 'FORM' && cursor.tagName !== 'BODY') {
+              ancestors.push(cursor);
+              cursor = cursor.parentElement;
+            }
+            const oneControlShell = ancestors.find((node) => (
+              node.querySelectorAll('input:not([type="hidden"]), textarea, select').length === 1
+            )) || element.parentElement;
+            const indicators = oneControlShell
+              ? [...oneControlShell.querySelectorAll(
+                'button, [role="button"], svg, [class*="indicator" i], [class*="dropdown" i], [class*="chevron" i], [class*="caret" i]'
+              )].filter((node) => node !== element && visible(node))
+              : [];
+            const pseudoNodes = [element, ...ancestors];
+            const pseudoPlaceholder = pseudoNodes.some((node) => ['::before', '::after'].some((part) => {
+              const content = getComputedStyle(node, part).content || '';
+              return choicePlaceholder(content.replace(/^['"]|['"]$/g, ''));
+            }));
+            const elementClass = String(element.className || '').trim();
+            const parentClass = String(element.parentElement?.className || '').trim();
+            const peerIds = new Set();
+            for (const peer of document.querySelectorAll('input[id^="question_"]')) {
+              if (peer === element) continue;
+              const sameInputClass = elementClass && String(peer.className || '').trim() === elementClass;
+              const sameParentClass = parentClass
+                && String(peer.parentElement?.className || '').trim() === parentClass;
+              if (!sameInputClass && !sameParentClass) continue;
+              const peerChoice = peer.getAttribute('role') === 'combobox'
+                || ['true', 'listbox'].includes(peer.getAttribute('aria-haspopup') || '')
+                || peer.getAttribute('aria-autocomplete') === 'list'
+                || Boolean(peer.closest(
+                  '[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]'
+                ));
+              if (peerChoice && peer.id) peerIds.add(peer.id);
+            }
+            return {
+              valuePlaceholder: choicePlaceholder(element.value),
+              pseudoPlaceholder,
+              choicePeerCount: peerIds.size,
+              nearbyChoiceIndicator: indicators.length > 0
+            };
+          }).catch(() => ({
+            valuePlaceholder: false,
+            pseudoPlaceholder: false,
+            choicePeerCount: 0,
+            nearbyChoiceIndicator: false
+          }))
+          : {
+            valuePlaceholder: false,
+            pseudoPlaceholder: false,
+            choicePeerCount: 0,
+            nearbyChoiceIndicator: false
+          };
         if (actionDiagnostic) {
           actionDiagnostic.labelCount = greenhouseQuestionLabelCount;
           actionDiagnostic.labelledQuestionCount = greenhouseLabelledQuestionCount;
           actionDiagnostic.locatorChoicePlaceholderCount = locatorChoicePlaceholderCount;
           actionDiagnostic.labelChoicePlaceholderCount = labelChoicePlaceholderCount;
+          actionDiagnostic.targetValuePlaceholderSignal = greenhouseRolelessEvidence.valuePlaceholder;
+          actionDiagnostic.targetPseudoPlaceholderSignal = greenhouseRolelessEvidence.pseudoPlaceholder;
+          actionDiagnostic.choicePeerCount = greenhouseRolelessEvidence.choicePeerCount;
+          actionDiagnostic.nearbyChoiceIndicator = greenhouseRolelessEvidence.nearbyChoiceIndicator;
         }
         const selectorShowsChoicePlaceholder = greenhouseQuestionId && (
           /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(fillShape.placeholder)
           || locatorChoicePlaceholderCount > 0
           || labelChoicePlaceholderCount > 0
+          || greenhouseRolelessEvidence.valuePlaceholder
+          || greenhouseRolelessEvidence.pseudoPlaceholder
+          || (greenhouseRolelessEvidence.choicePeerCount > 0
+            && greenhouseRolelessEvidence.nearbyChoiceIndicator)
         );
         const targetInGreenhouseQuestionChoice = fillShape.tag === 'input'
           && Boolean(selectorShowsChoicePlaceholder);

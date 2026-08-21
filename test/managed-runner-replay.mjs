@@ -251,17 +251,24 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   </div>
 </div>
 <!-- Jump Trading's Greenhouse degree question, measured in production on 2026-08-21. The durable
-     action selector names the question wrapper, not the inner search input. The input publishes no
-     role, popup attribute, or select__ class before it opens. The exact Select placeholder plus the
-     provider-owned question id are the only stable control-kind signals. -->
+     action selector names the role-less search input. It publishes no role, popup attribute,
+     select__ class, placeholder attribute, or Select text node before it opens. It does share its
+     input and shell classes with a proven combobox peer and renders a down-caret in that shell. -->
 <div class="field" id="jump-degree-field">
   <label for="question_67595191">What degree are you currently pursuing?</label>
   <div id="jump-degree-root">
     <div class="jump-degree-widget">
-      <div id="jump-degree-placeholder">Select...</div>
-      <input id="question_67595191" type="text" autocomplete="off">
+      <input id="question_67595191" class="jump-question-input" type="text" autocomplete="off">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"></path></svg>
     </div>
   </div>
+</div>
+<div class="field" id="jump-choice-peer-field">
+  <label for="question_67595190">A neighbouring proven choice</label>
+  <div><div class="jump-degree-widget">
+    <input id="question_67595190" class="jump-question-input" type="text" role="combobox" aria-autocomplete="list">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"></path></svg>
+  </div></div>
 </div>
 <!-- Same durable selector family, deliberately without a choice placeholder. This is an ordinary
      open text question and must never be routed through the chooser. -->
@@ -553,7 +560,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   // ---- Greenhouse role-less #question wrapper choice, matching the live Jump degree field ----
   var jumpDegreeRoot = document.getElementById('jump-degree-root');
   var jumpDegreeInput = document.getElementById('question_67595191');
-  var jumpDegreePlaceholder = document.getElementById('jump-degree-placeholder');
   var jumpDegreeMenu = null;
   function closeJumpDegreeMenu() {
     if (jumpDegreeMenu) jumpDegreeMenu.remove();
@@ -569,7 +575,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
       jumpDegreeRoot.insertBefore(chosen, jumpDegreeRoot.firstChild);
     }
     chosen.textContent = value;
-    jumpDegreePlaceholder.style.display = 'none';
     closeJumpDegreeMenu();
   }
   function openJumpDegreeMenu() {
@@ -1205,10 +1210,14 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     targetTag: 'input',
     targetInChoiceShell: false,
     targetPlaceholderSignal: false,
+    targetValuePlaceholderSignal: false,
+    targetPseudoPlaceholderSignal: false,
     labelCount: 1,
     labelledQuestionCount: 1,
     locatorChoicePlaceholderCount: 0,
-    labelChoicePlaceholderCount: 1,
+    labelChoicePlaceholderCount: 0,
+    choicePeerCount: 1,
+    nearbyChoiceIndicator: true,
     route: 'custom_choice',
     choiceAttempted: true,
     choiceFilled: true,
