@@ -247,9 +247,9 @@ test('a role-less Greenhouse wrapper verifies only one closed committed value', 
   await page.setContent(`<!doctype html><html><body>
     <div id="question-block">
       <label for="question_67595191">What degree are you currently pursuing?</label>
-      <div id="question_67595191">
+      <div id="question-root">
         <div id="question-placeholder" style="display:none">Select...</div>
-        <input id="question-input" type="text" value="">
+        <input id="question_67595191" type="text" value="">
         <div id="question-value">Bachelor's Degree</div>
       </div>
     </div>
@@ -259,7 +259,7 @@ test('a role-less Greenhouse wrapper verifies only one closed committed value', 
   </body></html>`);
   const api = build();
   const block = page.locator('#question-block');
-  const input = page.locator('#question-input');
+  const input = page.locator('#question_67595191');
   const verify = async () => api.verifyChoiceInContainer(
     block,
     "Bachelor's Degree",
@@ -275,7 +275,7 @@ test('a role-less Greenhouse wrapper verifies only one closed committed value', 
   assert.equal(await verify(), false, 'a visible Select placeholder means the choice is not committed');
 
   await page.locator('#question-placeholder').evaluate((node) => { node.style.display = 'none'; });
-  await page.locator('#question_67595191').evaluate((root) => {
+  await page.locator('#question-root').evaluate((root) => {
     const duplicate = document.createElement('div');
     duplicate.id = 'question-value-duplicate';
     duplicate.textContent = "Bachelor's Degree";
@@ -291,7 +291,7 @@ test('a role-less Greenhouse wrapper verifies only one closed committed value', 
   await page.setContent(`<!doctype html><html><body>
     <div id="ordinary-block">
       <label for="question_67595192">If yes, please explain.</label>
-      <div id="question_67595192"><input id="ordinary-input" value="Bachelor's Degree"></div>
+      <div><input id="question_67595192" value="Bachelor's Degree"></div>
     </div>
   </body></html>`);
   assert.equal(await api.verifyChoiceInContainer(
@@ -300,7 +300,7 @@ test('a role-less Greenhouse wrapper verifies only one closed committed value', 
     "Bachelor's Degree",
     "Bachelor's Degree",
     '',
-    page.locator('#ordinary-input'),
+    page.locator('#question_67595192'),
   ), false, 'typed text cannot satisfy the closed-choice readback');
 });
 

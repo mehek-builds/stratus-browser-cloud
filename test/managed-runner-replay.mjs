@@ -256,10 +256,10 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
      provider-owned question id are the only stable control-kind signals. -->
 <div class="field" id="jump-degree-field">
   <label for="question_67595191">What degree are you currently pursuing?</label>
-  <div id="question_67595191">
+  <div id="jump-degree-root">
     <div class="jump-degree-widget">
       <div id="jump-degree-placeholder">Select...</div>
-      <input id="jump-degree-input" type="text" autocomplete="off">
+      <input id="question_67595191" type="text" autocomplete="off">
     </div>
   </div>
 </div>
@@ -267,7 +267,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
      open text question and must never be routed through the chooser. -->
 <div class="field" id="jump-explanation-field">
   <label for="question_67595192">If yes, please explain.</label>
-  <div id="question_67595192"><input id="jump-explanation-input" type="text"></div>
+  <div><input id="question_67595192" type="text"></div>
 </div>
 <!-- GREENHOUSE'S PHONE COUNTRY CONTROL, copied node for node off the live rendered DOM.
      Captured 2026-08-09 from job-boards.greenhouse.io/embed/job_app?for=redwoodmaterials&token=6126784004,
@@ -551,8 +551,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   });
 
   // ---- Greenhouse role-less #question wrapper choice, matching the live Jump degree field ----
-  var jumpDegreeRoot = document.getElementById('question_67595191');
-  var jumpDegreeInput = document.getElementById('jump-degree-input');
+  var jumpDegreeRoot = document.getElementById('jump-degree-root');
+  var jumpDegreeInput = document.getElementById('question_67595191');
   var jumpDegreePlaceholder = document.getElementById('jump-degree-placeholder');
   var jumpDegreeMenu = null;
   function closeJumpDegreeMenu() {
@@ -1186,11 +1186,11 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     { type: 'fill', selector: '#question_67595191', value: "Bachelor's Degree", label: 'jump_degree', optional: false },
     { type: 'extract', selector: '#jump-degree-field' },
     { type: 'fill', selector: '#question_67595192', value: 'No explanation needed', label: 'jump_explanation', optional: false },
-    { type: 'extract', selector: '#jump-explanation-input', attribute: 'value' }
+    { type: 'extract', selector: '#question_67595192', attribute: 'value' }
   ]);
   assert.match(valueOf(rolelessQuestionChoice, '#jump-degree-field') || '', /Bachelor's Degree/,
     'the wrapper-scoped fill must commit the exact degree option');
-  assert.equal(valueOf(rolelessQuestionChoice, '#jump-explanation-input'), 'No explanation needed',
+  assert.equal(valueOf(rolelessQuestionChoice, '#question_67595192'), 'No explanation needed',
     'a Greenhouse question id without a Select placeholder must remain a text fill');
   assert.deepEqual(rolelessQuestionChoice.filledFields.sort(), ['jump_degree', 'jump_explanation'],
     'both paths must report only after their values persist');
