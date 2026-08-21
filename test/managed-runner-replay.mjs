@@ -252,23 +252,15 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 </div>
 <!-- Jump Trading's Greenhouse degree question, measured in production on 2026-08-21. The durable
      action selector names the role-less search input. It publishes no role, popup attribute,
-     select__ class, placeholder attribute, or Select text node before it opens. It does share its
-     input and shell classes with a proven combobox peer and renders a down-caret in that shell. -->
+     select__ class, placeholder attribute, Select text node, proven peer, or visible indicator.
+     Its only reliable signal is temporal: a typed query is accepted, then cleared by the widget. -->
 <div class="field" id="jump-degree-field">
   <label for="question_67595191">What degree are you currently pursuing?</label>
   <div id="jump-degree-root">
     <div class="jump-degree-widget">
       <input id="question_67595191" class="jump-question-input" type="text" autocomplete="off">
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"></path></svg>
     </div>
   </div>
-</div>
-<div class="field" id="jump-choice-peer-field">
-  <label for="question_67595190">A neighbouring proven choice</label>
-  <div><div class="jump-degree-widget">
-    <input id="question_67595190" class="jump-question-input" type="text" role="combobox" aria-autocomplete="list">
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5"></path></svg>
-  </div></div>
 </div>
 <!-- Same durable selector family, deliberately without a choice placeholder. This is an ordinary
      open text question and must never be routed through the chooser. -->
@@ -561,6 +553,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   var jumpDegreeRoot = document.getElementById('jump-degree-root');
   var jumpDegreeInput = document.getElementById('question_67595191');
   var jumpDegreeMenu = null;
+  var jumpDegreeClearTimer = null;
   function closeJumpDegreeMenu() {
     if (jumpDegreeMenu) jumpDegreeMenu.remove();
     jumpDegreeMenu = null;
@@ -568,6 +561,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     jumpDegreeInput.value = '';
   }
   function commitJumpDegree(value) {
+    clearTimeout(jumpDegreeClearTimer);
     var chosen = document.getElementById('jump-degree-chosen');
     if (!chosen) {
       chosen = document.createElement('div');
@@ -598,7 +592,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   }
   jumpDegreeInput.addEventListener('mousedown', openJumpDegreeMenu);
   jumpDegreeInput.addEventListener('click', openJumpDegreeMenu);
-  jumpDegreeInput.addEventListener('input', openJumpDegreeMenu);
+  jumpDegreeInput.addEventListener('input', function () {
+    openJumpDegreeMenu();
+    clearTimeout(jumpDegreeClearTimer);
+    jumpDegreeClearTimer = setTimeout(function () {
+      if (!document.getElementById('jump-degree-chosen')) jumpDegreeInput.value = '';
+    }, 300);
+  });
 
   // ---- The phone Country React Select, behaving the way the live one does ----
   //
@@ -1216,9 +1216,9 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     labelledQuestionCount: 1,
     locatorChoicePlaceholderCount: 0,
     labelChoicePlaceholderCount: 0,
-    choicePeerCount: 1,
-    nearbyChoiceIndicator: true,
-    route: 'custom_choice',
+    choicePeerCount: 0,
+    nearbyChoiceIndicator: false,
+    route: 'text_then_choice',
     choiceAttempted: true,
     choiceFilled: true,
     choiceLanded: true,
