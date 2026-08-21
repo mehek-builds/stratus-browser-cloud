@@ -68,6 +68,8 @@ test('the aria-label restatement is the measured empty state and stays empty', a
 test('placeholder-shaped text stays empty', async () => {
   assert.equal(await chosen(opener('Select...', 'Select...'), '#field-59'), false);
   assert.equal(await chosen(opener('Please select an option', 'Country'), '#field-59'), false);
+  assert.equal(await chosen(opener('Auswählen', 'Allgemeine Anrede'), '#field-59'), false);
+  assert.equal(await chosen(opener('Frau', 'Allgemeine Anrede'), '#field-59'), true);
 });
 
 test('an opener with an inner search input keeps the pre-existing treatment', async () => {
