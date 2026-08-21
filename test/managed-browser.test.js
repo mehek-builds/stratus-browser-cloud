@@ -9,6 +9,7 @@ import {
   ATOMIC_SUBMIT_POLICY,
   CLAIM_CONTINUATION_SCRIPT,
   EXTRACT_ASSERTIONS_CAPABILITY,
+  EXACT_PAGE_URL_CAPABILITY,
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
@@ -921,6 +922,63 @@ test('atomic required confirmation owns the submit with contract v2 and chooser 
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
   assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
   assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
+});
+
+test('exact employer page URL capability is required before actions and at the atomic click', async () => {
+  const expectedPageUrl = 'https://jobs.example.com/postings/cbs-123?source=litos';
+  const submit = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    chooserPolicy: ATOMIC_SUBMIT_POLICY,
+    label: 'final_submit',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'application',
+    expectedPageUrl,
+  };
+  const actions = normalizeManagedActions([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
+    submit,
+  ]);
+  assert.equal(actions[1].expectedPageUrl, expectedPageUrl);
+  const run = await normalizeManagedRun({ url: expectedPageUrl, actions }, {
+    urlValidator: async (value) => new URL(value),
+  });
+  assert.equal(run.actions[1].expectedPageUrl, expectedPageUrl);
+  await assert.rejects(
+    normalizeManagedRun({ url: expectedPageUrl, actions: [actions[0], { ...submit, expectedPageUrl: 'https://jobs.example.com/postings/other' }] }, {
+      urlValidator: async (value) => new URL(value),
+    }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  assert.match(SANDBOX_RUNNER, /Employer page URL changed before the first application action/);
+  assert.match(SANDBOX_RUNNER, /Employer page URL changed before applicant data could be applied/);
+  assert.match(SANDBOX_RUNNER, /Employer page URL changed before the final submit click/);
+  assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeActions = observed') < SANDBOX_RUNNER.indexOf('for (const action of currentInput.actions'));
+  assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeApplicantData = observed') < SANDBOX_RUNNER.indexOf('addressedSelectors.push'));
+  assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeSubmit = observed') < SANDBOX_RUNNER.indexOf('await submitHandle.click'));
+  const fillOnly = normalizeManagedActions([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    { type: 'fill', selector: '#email', value: 'person@example.com' },
+  ]);
+  const fillRun = await normalizeManagedRun({ url: expectedPageUrl, actions: fillOnly }, {
+    urlValidator: async (value) => new URL(value),
+  });
+  assert.equal(fillRun.actions[0].expectedPageUrl, expectedPageUrl);
+  assert.equal(normalizeManagedActions([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    ...Array.from({ length: 120 }, () => ({ type: 'click', selector: 'button' })),
+  ]).length, 121, 'capability declarations do not consume the browser-action budget');
+  const verification = normalizeManagedContinuation({
+    continuationToken: 'a'.repeat(43),
+    actions: [
+      { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+      { ...submit, submitKind: 'verification' },
+    ],
+  });
+  assert.equal(verification.actions[0].expectedPageUrl, expectedPageUrl);
+  assert.doesNotMatch(SANDBOX_RUNNER, /requiresExactPageUrl && action\.submitKind === 'application'/);
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {

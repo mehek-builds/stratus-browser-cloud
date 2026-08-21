@@ -10,6 +10,7 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
 });
 
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
+export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 
 export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
@@ -148,11 +149,18 @@ const { chromium } = require('playwright');
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
   const startedAt = Date.now();
   const extractAssertionsCapability = 'extract-assertions-v1';
+  const exactPageUrlCapability = 'exact-page-url-v1';
+  const canonicalPageUrl = (value) => {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    return parsed.href;
+  };
   const assertRequiredCapabilities = (actions) => {
     const required = (actions || [])
       .filter((action) => action.type === 'requireCapability')
       .map((action) => action.value);
-    const unsupported = required.filter((capability) => capability !== extractAssertionsCapability);
+    const unsupported = required.filter((capability) => capability !== extractAssertionsCapability
+      && capability !== exactPageUrlCapability);
     if (unsupported.length > 0) {
       throw new Error('Unsupported required runner capability: ' + unsupported.join(', '));
     }
@@ -212,6 +220,8 @@ const { chromium } = require('playwright');
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
+    let requiresExactPageUrl = false;
+    let exactPageUrlProof = null;
     // Continuations may keep the exact page and context alive, but they may not turn that context
     // into a general browser. Only main-frame navigations are host locked, so ordinary assets and
     // employer-owned CDN requests continue to work.
@@ -6055,6 +6065,13 @@ const { chromium } = require('playwright');
       }
       const blocked = unresolved.length > 0;
       if (!blocked) {
+        if (requiresExactPageUrl) {
+          const observed = canonicalPageUrl(page.url());
+          if (observed !== exactPageUrlProof.expected || action.expectedPageUrl !== exactPageUrlProof.expected) {
+            throw new Error('Employer page URL changed before the final submit click');
+          }
+          exactPageUrlProof.beforeSubmit = observed;
+        }
         armSubmitNetworkWatch();
         await submitHandle.click({ timeout: action.timeout || 10_000 });
         finalSubmitPressed = true;
@@ -6116,6 +6133,19 @@ const { chromium } = require('playwright');
     let currentInput = input;
     while (true) {
     assertRequiredCapabilities(currentInput.actions);
+    const exactPageUrlAction = (currentInput.actions || []).find((action) => typeof action.expectedPageUrl === 'string');
+    requiresExactPageUrl = (currentInput.actions || []).some((action) => action.type === 'requireCapability'
+      && action.value === exactPageUrlCapability);
+    exactPageUrlProof = requiresExactPageUrl
+      ? { expected: canonicalPageUrl(exactPageUrlAction?.expectedPageUrl || ''), beforeActions: null, beforeApplicantData: null, beforeSubmit: null }
+      : null;
+    if (requiresExactPageUrl) {
+      const observed = canonicalPageUrl(page.url());
+      if (observed !== exactPageUrlProof.expected) {
+        throw new Error('Employer page URL changed before the first application action');
+      }
+      exactPageUrlProof.beforeActions = observed;
+    }
     extracted.length = 0;
     filledFields.length = 0;
     actionDiagnostics.length = 0;
@@ -6123,6 +6153,7 @@ const { chromium } = require('playwright');
     discovered.length = 0;
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
+    let exactPageUrlCheckedBeforeApplicantData = false;
     for (const action of currentInput.actions || []) {
      // Cleared once per ACTION rather than once per chooser, so a question that goes through two of
      // them keeps the refusal whichever one produced it, and no answer inherits a sentence from the
@@ -6136,6 +6167,15 @@ const { chromium } = require('playwright');
           + action.selector + ', found ' + String(matchCount ?? 0));
       }
       if (action.type === 'requireCapability') continue;
+      if (requiresExactPageUrl && !exactPageUrlCheckedBeforeApplicantData
+        && ['click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'confirmAndSubmit'].includes(action.type)) {
+        const observed = canonicalPageUrl(page.url());
+        if (observed !== exactPageUrlProof.expected) {
+          throw new Error('Employer page URL changed before applicant data could be applied');
+        }
+        exactPageUrlProof.beforeApplicantData = observed;
+        exactPageUrlCheckedBeforeApplicantData = true;
+      }
       const locator = matches ? matches.first() : null;
       // Recorded before the action runs, and recorded whether or not it succeeds. What this list
       // claims is only that the caller aimed this run at that control, which is what makes the
@@ -8110,6 +8150,10 @@ const { chromium } = require('playwright');
         && action.value === extractAssertionsCapability)
         || usesExtractAssertions
         ? [extractAssertionsCapability]
+        : []),
+      ...(currentInput.actions.some((action) => action.type === 'requireCapability'
+        && action.value === exactPageUrlCapability)
+        ? [exactPageUrlCapability]
         : [])
     ];
     /* THE WINDOW OPENS HERE, on the page that raised the challenge, not back when the sandbox was
@@ -8144,7 +8188,7 @@ const { chromium } = require('playwright');
       }
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
@@ -8187,7 +8231,9 @@ function validateSelector(selector) {
 
 export function normalizeManagedActions(actions = []) {
   if (!Array.isArray(actions)) throw inputError('actions must be an array');
-  if (actions.length > MAX_ACTIONS) throw inputError(`A run may contain at most ${MAX_ACTIONS} actions`, 'TOO_MANY_ACTIONS');
+  if (actions.filter((action) => action?.type !== 'requireCapability').length > MAX_ACTIONS) {
+    throw inputError(`A run may contain at most ${MAX_ACTIONS} browser actions`, 'TOO_MANY_ACTIONS');
+  }
   if (actions.filter((action) => action?.type === 'confirmAndSubmit').length > 1) {
     throw inputError('A remote run may contain at most one atomic submit action', 'MULTIPLE_ATOMIC_SUBMITS');
   }
@@ -8204,10 +8250,27 @@ export function normalizeManagedActions(actions = []) {
     else if (action.type === 'press' && action.selector != null) normalized.selector = validateSelector(action.selector);
     if (action.optional != null) normalized.optional = Boolean(action.optional);
     if (action.type === 'requireCapability') {
-      if (action.value !== EXTRACT_ASSERTIONS_CAPABILITY) {
+      if (action.value !== EXTRACT_ASSERTIONS_CAPABILITY && action.value !== EXACT_PAGE_URL_CAPABILITY) {
         throw inputError('The required runner capability is unsupported', 'UNSUPPORTED_RUNNER_CAPABILITY');
       }
       normalized.value = action.value;
+    }
+    if (action.expectedPageUrl != null) {
+      if (action.type !== 'confirmAndSubmit'
+        && !(action.type === 'requireCapability' && action.value === EXACT_PAGE_URL_CAPABILITY)) {
+        throw inputError('expectedPageUrl requires the exact URL capability or atomic submit', 'INVALID_EXPECTED_PAGE_URL');
+      }
+      let expectedPageUrl;
+      try {
+        expectedPageUrl = new URL(action.expectedPageUrl);
+      } catch {
+        throw inputError('expectedPageUrl must be an absolute URL', 'INVALID_EXPECTED_PAGE_URL');
+      }
+      if (!['http:', 'https:'].includes(expectedPageUrl.protocol)) {
+        throw inputError('expectedPageUrl must use HTTP or HTTPS', 'INVALID_EXPECTED_PAGE_URL');
+      }
+      expectedPageUrl.hash = '';
+      normalized.expectedPageUrl = expectedPageUrl.href;
     }
     if (action.requireUnique != null) {
       if (typeof action.requireUnique !== 'boolean'
@@ -8338,6 +8401,15 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
   if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
   if (input.continuationToken != null) throw inputError('A continuation request must not include a URL run payload', 'INVALID_CONTINUATION');
   const url = await urlValidator(input.url);
+  const canonicalRunUrl = new URL(url.toString());
+  canonicalRunUrl.hash = '';
+  const actions = normalizeManagedActions(input.actions);
+  const requiresExactPageUrl = actions.some((action) => action.type === 'requireCapability'
+    && action.value === EXACT_PAGE_URL_CAPABILITY);
+  const exactPageUrlAction = actions.find((action) => action.expectedPageUrl);
+  if (requiresExactPageUrl && exactPageUrlAction?.expectedPageUrl !== canonicalRunUrl.href) {
+    throw inputError('Exact page URL capability requires the submitted posting URL', 'INVALID_EXPECTED_PAGE_URL');
+  }
   const viewport = input.viewport || {};
   const width = Math.min(Math.max(Number(viewport.width) || 1440, 320), 1920);
   const height = Math.min(Math.max(Number(viewport.height) || 900, 240), 1080);
@@ -8348,7 +8420,7 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
   );
   return {
     url: url.toString(),
-    actions: normalizeManagedActions(input.actions),
+    actions,
     screenshot: input.screenshot !== false,
     // DEFAULT DENY, and the default is the entire safety property. Every existing caller becomes a
     // run that cannot submit, which is what they all already believed they were, and only a caller
