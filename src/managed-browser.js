@@ -7256,14 +7256,20 @@ const { chromium } = require('playwright');
         // phone against the international form would report a correct fill as a failed one.
         let textPersisted = await verifyFilled(target, fillValue || '');
         /* A provider-owned role-less search input can hold the typed query long enough for one
-         * immediate read, then clear it when the custom selector repaints. The live Jump degree
-         * control did exactly that: the runner reported text_committed, while the screenshot and
-         * Greenhouse validator both showed Select. Only exact #question_<digits> inputs pay this
-         * bounded stability read. When the text disappears, the same exact control gets one scoped
-         * chooser attempt and must pass the ordinary committed-choice verifier before it counts. */
+         * immediate read, then clear it when the custom selector repaints or the search input loses
+         * focus. The live Jump degree control survived the original 650ms read while focused, then
+         * Greenhouse validation blurred it and showed Select. Only exact #question_<digits> inputs
+         * pay this bounded stability read and neutral blur. A real text field keeps its value when
+         * blurred. When the text disappears, the same exact control gets one scoped chooser attempt
+         * and must pass the ordinary committed-choice verifier before it counts. */
         if (textPersisted && greenhouseQuestionId && fillShape.tag === 'input') {
           await page.waitForTimeout(650);
           textPersisted = await verifyFilled(target, fillValue || '');
+          if (textPersisted) {
+            await target.evaluate((element) => element.blur()).catch(() => undefined);
+            await page.waitForTimeout(150);
+            textPersisted = await verifyFilled(target, fillValue || '');
+          }
         }
         if (textPersisted) {
           if (action.label) filledFields.push(action.label);
