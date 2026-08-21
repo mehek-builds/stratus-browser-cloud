@@ -43,14 +43,17 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   var reactDisplay = reactParams.get('react-display') || reactAnswer;
   var reactMulti = location.search.includes('react-multi');
   var reactMultiOne = location.search.includes('react-multi-one');
+  var reactMultiUnmarked = location.search.includes('react-multi-unmarked');
+  var reactMultiEmpty = location.search.includes('react-multi-empty');
   document.querySelector('label[for="react"]').textContent = reactLabel;
   document.querySelector('.select__single-value').textContent = reactDisplay;
   if (reactMulti) {
     var firstChip = document.querySelector('.select__single-value');
     firstChip.className = 'select__multi-value__label';
-    firstChip.textContent = 'Alpha';
-    firstChip.setAttribute('aria-label', 'Alpha');
-    if (!reactMultiOne) {
+    firstChip.textContent = reactMultiUnmarked ? 'Austin' : 'Alpha';
+    firstChip.setAttribute('aria-label', reactMultiUnmarked ? 'Austin' : 'Alpha');
+    if (reactMultiEmpty) firstChip.remove();
+    if (!reactMultiOne && !reactMultiUnmarked && !reactMultiEmpty) {
       var secondChip = document.createElement('div');
       secondChip.className = 'select__multi-value__label';
       secondChip.textContent = 'Beta';
@@ -95,7 +98,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
         location.search.includes('react-submit-option') ? 'button' : 'div'
       );
       option.setAttribute('role', 'option');
-      option.setAttribute('aria-selected', String(selected));
+      if (!reactMultiUnmarked) option.setAttribute('aria-selected', String(selected));
       option.textContent = text;
       option.addEventListener('click', function () {
         var optionClicks = document.getElementById('react-option-clicks');
@@ -127,8 +130,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
       listbox.appendChild(option);
     };
     if (reactMulti) {
-      addOption('Alpha', true);
-      if (!reactMultiOne) addOption('Beta', true);
+      if (reactMultiUnmarked) {
+        if (!location.search.includes('react-multi-unmarked-missing')) addOption('Austin', true);
+        if (location.search.includes('react-multi-unmarked-ambiguous')) addOption('Austin', true);
+      } else {
+        addOption('Alpha', true);
+        if (!reactMultiOne) addOption('Beta', true);
+      }
     } else {
       addOption(
         location.search.includes('missing-react-option')
@@ -141,6 +149,11 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     }
     this.setAttribute('aria-controls', listbox.id);
     this.closest('.select__container').appendChild(listbox);
+    if (location.search.includes('react-multi-chip-changes')) {
+      var chip = document.querySelector('.select__multi-value__label');
+      chip.textContent = 'Chicago';
+      chip.setAttribute('aria-label', 'Chicago');
+    }
   });
   document.getElementById('react').addEventListener('blur', function () {
     if (reactMulti) {
@@ -651,6 +664,31 @@ assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-
 assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-commits')?.value, '0');
 assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value, 'Alpha');
 assert.equal(oneValueReact.requiredFieldConfirmation.status, 'confirmed');
+
+const unmarkedMultiValueReact = await replay(
+  '?react-multi-unmarked',
+  confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value')
+);
+assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0');
+assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value, 'Austin');
+assert.equal(unmarkedMultiValueReact.requiredFieldConfirmation.status, 'confirmed');
+
+for (const unsafeMultiValueCase of [
+  'react-multi-unmarked-missing',
+  'react-multi-unmarked-ambiguous',
+  'react-multi-unmarked&react-submit-option',
+  'react-multi-unmarked&react-multi-chip-changes',
+  'react-multi-empty'
+]) {
+  const rejected = await replay(
+    '?' + unsafeMultiValueCase,
+    confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value')
+  );
+  assert.equal(rejected.extracted.find((entry) => entry.selector === '#submitted')?.value, '', unsafeMultiValueCase);
+  assert.equal(rejected.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0', unsafeMultiValueCase);
+  assert.equal(rejected.requiredFieldConfirmation.status, 'blocked', unsafeMultiValueCase);
+}
 
 const hiddenInvalidOnly = await replay('?hidden-invalid-only');
 assert.equal(hiddenInvalidOnly.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');

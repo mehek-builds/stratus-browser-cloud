@@ -5568,11 +5568,34 @@ const { chromium } = require('playwright');
           const afterOpen = await readChoiceState(target);
           const afterValues = (Array.isArray(afterOpen.values) ? afterOpen.values : [afterOpen.value])
             .map((value) => clean(value));
-          const unchanged = afterOpen.kind === 'chosen'
-            && selectedCount === beforeValues.length
+          const stableChips = afterOpen.kind === 'chosen'
             && afterValues.length === beforeValues.length
             && afterValues.every((value, index) => value === beforeValues[index]);
-          return { answerPreserved: unchanged, multiValue: true, arrival: before };
+          if (!stableChips) return { answerPreserved: false, multiValue: true, arrival: before };
+          if (selectedCount === beforeValues.length) {
+            return { answerPreserved: true, multiValue: true, arrival: before };
+          }
+          /* Greenhouse multi-selects can publish no aria-selected state at all. In that one shape,
+           * preserve without clicking only when every distinct stable chip names exactly one visible
+           * option in this control's own listbox and that row cannot submit. A partial selected state
+           * remains contradictory and fails closed. */
+          if (selectedCount !== 0
+            || new Set(beforeValues.map((value) => value.toLowerCase())).size !== beforeValues.length) {
+            return { answerPreserved: false, multiValue: true, arrival: before };
+          }
+          for (const value of beforeValues) {
+            const exactRows = menu.getByRole('option', { name: value, exact: true });
+            if (await exactRows.count() !== 1
+              || !await exactRows.first().isVisible().catch(() => false)) {
+              return { answerPreserved: false, multiValue: true, arrival: before };
+            }
+            const submitCapable = await exactRows.first().evaluate((element) => {
+              const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+              return Boolean(element.closest(selector) || element.querySelector(selector));
+            }).catch(() => true);
+            if (submitCapable) return { answerPreserved: false, multiValue: true, arrival: before };
+          }
+          return { answerPreserved: true, multiValue: true, arrival: before };
         }
         if (selectedCount !== 1) return { answerPreserved: false, arrival: before };
         // The rendered value can be an abbreviation such as "+971". The unique selected menu row is
