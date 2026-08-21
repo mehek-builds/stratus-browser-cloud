@@ -498,18 +498,32 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
   assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected, directControl = null\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\([\s\S]*?directControl,[\s\S]*?\)\)/);
-  const landedReadbacks = (SANDBOX_RUNNER.match(/await choiceLanded\(container, action\.value \|\| ''\)/g) || []).length
-    + (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length
-    + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+targetInGreenhouseQuestionChoice \? target : null,/g) || []).length;
+  // 2026-08-21: a code review of the Ashby fix (PR #98) found that choiceLanded's blurDrivenChoiceControl
+  // fallback searched the whole container for the first node matching a fixed selector, in DOM order,
+  // rather than asking the page what was actually focused - silently no-op'ing the whole fix on any
+  // container wider than the widget. The two call sites that already hand fillCustomChoice a
+  // directControl (the multi-line one below, and the react-select replay path) now hand the identical
+  // element to choiceLanded too, for consistency. The other three call sites deliberately do NOT gain
+  // a directControl here: 'field', the first typeable node fillByLabelText's shape dispatch finds, is
+  // not reliably the element fillCustomChoice's own CHOICE_CONTROLS discovery actually drives - measured
+  // on the choice-parity Select2 fixture, where 'field' resolves to a decoy typeahead input but the
+  // real opener is '.select2-choice'. Passing it would redirect fillCustomChoice onto the wrong
+  // element, not just narrow choiceLanded's blur target, so those three sites rely entirely on
+  // blurDrivenChoiceControl's own document.activeElement fallback instead.
+  const landedReadbacks = (SANDBOX_RUNNER.match(/await choiceLanded\(questionBlock, action\.value \|\| ''\)/g) || []).length
+    + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+targetInChoiceShell \|\| targetInGreenhouseQuestionChoice \? target : null,/g) || []).length;
   assert.equal(landedReadbacks, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
-  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 4,
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,
     'fill call sites cannot skip withdrawal; the second read waits for a delayed rollback to settle;'
-    + ' the third is choiceLanded\'s own post-blur reread, added for the Ashby location field (see'
-    + ' ashby-blur-reverts-choice-dom.test.js) so a value that only holds up while the control is'
-    + ' still focused cannot be reported before the runner\'s own next action would have found it'
-    + ' gone; the fourth is withdrawRefusedChoice\'s own confirm-before-clearing gate (see'
-    + ' choice-withdrawal-confirms-before-clearing.test.js)');
+    + ' the third is withdrawRefusedChoice\'s own confirm-before-clearing gate (see'
+    + ' choice-withdrawal-confirms-before-clearing.test.js). choiceLanded\'s own post-blur reread,'
+    + ' added for the Ashby location field (see ashby-blur-reverts-choice-dom.test.js), used to be a'
+    + ' fourth direct call here; 2026-08-21 it was rebuilt on settleVerified so a slow-settling blur'
+    + ' gets the same retry budget the pre-blur read already has (see the settleVerified assertion'
+    + ' below), so its verifyChoiceInContainer call is no longer a bare await at this call site.');
+  assert.match(SANDBOX_RUNNER, /await blurDrivenChoiceControl\(container, directControl\);\n\s+if \(await settleVerified\(\(\) => verifyChoiceInContainer\(/,
+    'the post-blur reread reuses settleVerified rather than a single fixed wait');
 });
 
 test('a choice option that is not on the list names the answer that went looking', () => {
@@ -611,7 +625,9 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   assert.match(SANDBOX_RUNNER, /let persisted = await settleVerified\(\(\) => verifyFilled\(field, action\.value \|\| ''\)\);/);
   assert.match(SANDBOX_RUNNER, /if \(!persisted\) \{\n\s+if \(await pickOptionPill\(questionBlock, action\.value \|\| ''\)\) persisted = true;/);
   // The row hint travels on this path too: a widget reached this way abbreviates its chosen value
-  // exactly as readily as one reached through the two branches above.
+  // exactly as readily as one reached through the two branches above. Neither call is handed
+  // 'field' as a directControl (2026-08-21) - see the landedReadbacks comment above for why that
+  // would redirect fillCustomChoice's own discovery rather than merely narrow choiceLanded's blur.
   assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(questionBlock, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(questionBlock, action\.value \|\| ''\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.

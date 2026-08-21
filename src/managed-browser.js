@@ -2008,15 +2008,32 @@ const { chromium } = require('playwright');
     /* THE ONE ELEMENT A BLUR CAN BE SENT TO, for the same reason clearChoiceControl is bounded to
      * the widget shell and not the question block: blurring something outside this control blurs
      * whatever the PAGE happens to have focused, which after a fill sequence can be anything.
-     * directControl is trusted first because it is the exact element fillCustomChoice drove; a
-     * bare container is searched for the same opener shapes CHOICE_CONTROLS already enumerates,
-     * narrowed to the ones a browser will actually accept focus-then-blur on. Best effort: a
-     * shape this cannot find is a shape choiceLanded already leaves exactly as it found it. */
+     * directControl is trusted first because it is the exact element fillCustomChoice drove.
+     *
+     * WHEN directControl IS NOT KNOWN, ASK THE PAGE WHAT IS FOCUSED - do not guess by selector.
+     * The first cut of this searched 'container' for the first node matching a fixed opener-shape
+     * list, and .first() is DOM ORDER, not "the element this fill drove". Three of this file's own
+     * call sites hand choiceLanded a container wider than one widget: a repeated section's own
+     * "Remove education" button (the exact shape CLEAR_CONTROLS' own comment, a few hundred lines
+     * up, already documents as reachable by a block-wide search), a multi-value combobox's earlier
+     * chip-remove control, or a sibling question sharing one wrapper - any of these sorts ahead of
+     * the actually-focused control and gets blurred instead, which is a silent no-op: the real
+     * control stays focused, the reread below sees the exact state the first read already saw, and
+     * the whole point of this function is defeated without anything failing loudly.
+     *
+     * document.activeElement is not a guess. It is the one thing the page itself can say was left
+     * focused by the click that drove the fill, and it needs no shape list to enumerate. Scoped to
+     * 'container' so a focus that has already moved elsewhere on the page - a description this
+     * fill never touched - is not blurred on this control's behalf. */
     const blurDrivenChoiceControl = async (container, directControl) => {
-      const control = directControl || container.locator(
-        'input, [role="combobox"], [role="button"], button'
-      ).first();
-      await control.evaluate((element) => element.blur()).catch(() => undefined);
+      if (directControl) {
+        await directControl.evaluate((element) => element.blur()).catch(() => undefined);
+        return;
+      }
+      await container.evaluate((element) => {
+        const active = element.ownerDocument && element.ownerDocument.activeElement;
+        if (active && element.contains(active)) active.blur();
+      }).catch(() => undefined);
     };
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
@@ -2050,23 +2067,31 @@ const { chromium } = require('playwright');
            * required-field scan called the control empty while this function's un-reverified read
            * had already reported it filled, from the SAME run.
            *
-           * So the same discipline is applied here, generically, once: blur the control this call
-           * actually drove and ask the SAME verifier again before trusting the first answer. A
-           * control that stays answered pays one extra ~150ms wait, which is the whole cost on
-           * every shape that already worked - the fixture suite below pins that this changes no
-           * existing verdict. A control that empties itself on blur is exactly what the applicant
-           * needs told, and falling through to the withdrawal below is what already tells her:
-           * mark it and let the pre-submit gate hold the run rather than send it. */
+           * So the same discipline is applied here, generically: blur the control this call
+           * actually drove and ask the SAME verifier again before trusting the first answer.
+           *
+           * THE REREAD GETS THE SAME BUDGET AS THE READ IT FOLLOWS, not a single fixed wait. A
+           * one-shot check 150ms after the blur was tried first and rejected: this loop's own
+           * comment above states why a fixed wait is not trusted for a controlled component's
+           * render lagging its own click, and a blur-triggered validation (Ashby's own included -
+           * an autocomplete backed by a geocoder query, see the IMC Trading location field a few
+           * hundred lines up) is no less capable of lagging past 150ms than the click was. Reusing
+           * settleVerified gives the post-blur read the identical up-to-500ms/eleven-read bound the
+           * pre-blur read already gets, so a control that settles slowly is rescued instead of
+           * being reported lost, and a control that stays answered still returns on its first poll
+           * - the fixture suite below pins that this changes no existing verdict. A control that
+           * empties itself on blur and stays empty for the whole window is exactly what the
+           * applicant needs told, and falling through to the withdrawal below is what already
+           * tells her: mark it and let the pre-submit gate hold the run rather than send it. */
           await blurDrivenChoiceControl(container, directControl);
-          await page.waitForTimeout(150).catch(() => undefined);
-          if (await verifyChoiceInContainer(
+          if (await settleVerified(() => verifyChoiceInContainer(
             container,
             expected,
             lastClickedOptionText,
             lastClickedOptionAnswer,
             lastChooserTierAnswer,
             directControl,
-          )) {
+          ))) {
             await unmarkChoice(container);
             return true;
           }
@@ -5922,7 +5947,10 @@ const { chromium } = require('playwright');
                 }
               }
               if (answerPreserved && !replayed.multiValue) {
-                answerPreserved = await choiceLanded(choiceScope, replayed.semanticAnswer).catch(() => false);
+                // 'target' carries the marker attribute and is what this same branch presses
+                // Escape and blurs a few lines down, so it is the exact element choiceLanded's own
+                // blur step needs - not a guess over 'choiceScope', which can be the outer shell.
+                answerPreserved = await choiceLanded(choiceScope, replayed.semanticAnswer, target).catch(() => false);
                 if (!answerPreserved) {
                   await waitForReactArrival(
                     target, replayed.arrival, replayed.semanticAnswer
@@ -7321,10 +7349,13 @@ const { chromium } = require('playwright');
             actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
           }
           if (choiceFilled) {
+            // Same condition fillCustomChoice was just handed above: a labelled Greenhouse choice
+            // AND a targetInChoiceShell fill both drove 'target' directly, so choiceLanded's own
+            // blur step needs the same element rather than guessing across 'container'.
             const landed = await choiceLanded(
               container,
               action.value || '',
-              targetInGreenhouseQuestionChoice ? target : null,
+              targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null,
             );
             if (actionDiagnostic) {
               actionDiagnostic.choiceLanded = landed;
@@ -7427,6 +7458,21 @@ const { chromium } = require('playwright');
         if (textPersisted && greenhouseQuestionId && fillShape.tag === 'input') {
           await page.waitForTimeout(650);
           textPersisted = await verifyFilled(target, fillValue || '');
+          /* THE SAME BLUR-REREAD choiceLanded ALREADY OWES A COMBOBOX, applied here because this
+           * value never went through choiceLanded at all - it is the role-less-text fallback, and
+           * a control that renders as a plain input under a role-less Greenhouse question can be
+           * blur-validated exactly like one that renders as a combobox. Checked BEFORE the
+           * questionMenuProbe click below, not after: the probe's own target.click() would
+           * re-focus a control this step just blurred, which is a normal follow-on action and
+           * cannot itself un-clear a value the blur already dropped, but running the probe first
+           * would let its click mask a blur that was about to fail on its own. See
+           * blurDrivenChoiceControl's own comment for why this reuses that primitive rather than a
+           * second hand-written element.blur(). */
+          if (textPersisted) {
+            await blurDrivenChoiceControl(target, target);
+            await page.waitForTimeout(150);
+            textPersisted = await verifyFilled(target, fillValue || '');
+          }
           if (textPersisted && greenhouseLabelledQuestionCount === 1) {
             const clicked = await target.click().then(() => true).catch(() => false);
             if (clicked) {
@@ -7753,6 +7799,14 @@ const { chromium } = require('playwright');
             continue;
           }
         } else if (shape.role === 'combobox' || shape.ariaHaspopup === 'true' || shape.ariaAutocomplete === 'list' || fieldInChoiceShell) {
+          /* 'field' is NOT handed to either call as directControl, on purpose. It is only the first
+           * typeable node the shape dispatch above found, and fillCustomChoice's own CHOICE_CONTROLS
+           * discovery can and does pick a different element as the real opener - measured on the
+           * choice-parity Select2 fixture, where 'field' resolves to the widget's decoy typeahead
+           * input but the control actually driven is '.select2-choice'. Passing 'field' here would
+           * not narrow blurDrivenChoiceControl's target, it would redirect fillCustomChoice itself
+           * onto the wrong element. blurDrivenChoiceControl's own document.activeElement fallback is
+           * what covers this call site instead, without needing to guess which element is real. */
           if (await fillCustomChoice(questionBlock, action.value || '')) {
             const landed = await choiceLanded(questionBlock, action.value || '');
             if (action.label && landed) filledFields.push(action.label);
@@ -7881,7 +7935,8 @@ const { chromium } = require('playwright');
           else if (await fillCustomChoice(questionBlock, action.value || '')) {
             // Same row hint as the two branches above, for the same reason: the fill that just
             // succeeded is the one whose row this is, and a widget on this path abbreviates its
-            // chosen value exactly as readily as one on the others.
+            // chosen value exactly as readily as one on the others. 'field' is deliberately not
+            // handed to either call here either - see the combobox arm above for why.
             persisted = await choiceLanded(questionBlock, action.value || '');
             if (!persisted && lastChoiceUnreadable) lastChoiceRefusal = unreadableChoiceReason;
           }

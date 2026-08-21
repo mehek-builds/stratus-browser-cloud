@@ -31,7 +31,7 @@ import { constSource, CHOOSER_NAMES } from './chooser-source.mjs';
 const SUPPORT_NAMES = [
   'optionMatches', 'optionMatchesExactly',
   'readChoiceState', 'readCommittedSearchInputValue', 'refuseChoice', 'nearMissChoiceReason',
-  'verifyChoiceInContainer',
+  'verifyChoiceInContainer', 'settleVerified',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
   'withdrawRefusedChoice', 'blurDrivenChoiceControl', 'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
