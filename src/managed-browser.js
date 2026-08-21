@@ -2002,6 +2002,19 @@ const { chromium } = require('playwright');
       else await markChoice(container, 'different');
       return false;
     };
+    /* THE ONE ELEMENT A BLUR CAN BE SENT TO, for the same reason clearChoiceControl is bounded to
+     * the widget shell and not the question block: blurring something outside this control blurs
+     * whatever the PAGE happens to have focused, which after a fill sequence can be anything.
+     * directControl is trusted first because it is the exact element fillCustomChoice drove; a
+     * bare container is searched for the same opener shapes CHOICE_CONTROLS already enumerates,
+     * narrowed to the ones a browser will actually accept focus-then-blur on. Best effort: a
+     * shape this cannot find is a shape choiceLanded already leaves exactly as it found it. */
+    const blurDrivenChoiceControl = async (container, directControl) => {
+      const control = directControl || container.locator(
+        'input, [role="combobox"], [role="button"], button'
+      ).first();
+      await control.evaluate((element) => element.blur()).catch(() => undefined);
+    };
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
      * this and none of them calls the verifier directly: the defect that made this necessary is
@@ -2020,8 +2033,41 @@ const { chromium } = require('playwright');
           lastChooserTierAnswer,
           directControl,
         )) {
-          await unmarkChoice(container);
-          return true;
+          /* A VERIFIED READ TAKEN WHILE THE CONTROL IS STILL FOCUSED CAN STILL BE AN UNFINISHED
+           * COMMIT, and this file already has the measured shape for it: #96 (Rescue blurred
+           * Greenhouse choice fills) found the live Jump degree control reading back correctly
+           * WHILE FOCUSED and then Greenhouse's own blur validation clearing it, because the click
+           * had driven the DOM's visible state without ever driving whatever bookkeeping a real
+           * user interaction leaves behind. #96 fixed that for Greenhouse's ROLE-LESS TEXT search
+           * input specifically, in the plain-fill branch below; it never reached this function, so
+           * every OTHER portal's custom combobox routed through fillCustomChoice kept trusting a
+           * single read taken before the one event this runner always sends next - moving on to
+           * fill the following field, which blurs this one. Measured live against a Deepgram
+           * Ashby "Current Location" field, 2026-08-21: the packet-audit review's own
+           * required-field scan called the control empty while this function's un-reverified read
+           * had already reported it filled, from the SAME run.
+           *
+           * So the same discipline is applied here, generically, once: blur the control this call
+           * actually drove and ask the SAME verifier again before trusting the first answer. A
+           * control that stays answered pays one extra ~150ms wait, which is the whole cost on
+           * every shape that already worked - the fixture suite below pins that this changes no
+           * existing verdict. A control that empties itself on blur is exactly what the applicant
+           * needs told, and falling through to the withdrawal below is what already tells her:
+           * mark it and let the pre-submit gate hold the run rather than send it. */
+          await blurDrivenChoiceControl(container, directControl);
+          await page.waitForTimeout(150).catch(() => undefined);
+          if (await verifyChoiceInContainer(
+            container,
+            expected,
+            lastClickedOptionText,
+            lastClickedOptionAnswer,
+            lastChooserTierAnswer,
+            directControl,
+          )) {
+            await unmarkChoice(container);
+            return true;
+          }
+          break;
         }
         if (elapsed < 500) await page.waitForTimeout(50).catch(() => undefined);
       }
