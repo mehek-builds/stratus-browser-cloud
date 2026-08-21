@@ -92,7 +92,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     var listbox = document.createElement('div');
     listbox.id = 'react-listbox';
     listbox.setAttribute('role', 'listbox');
-    if (reactMulti) listbox.setAttribute('aria-multiselectable', 'true');
+    if (reactMulti && !location.search.includes('react-multi-no-aria')) {
+      listbox.setAttribute('aria-multiselectable', 'true');
+    }
     var addOption = function (text, selected) {
       var option = document.createElement(
         location.search.includes('react-submit-option') ? 'button' : 'div'
@@ -133,6 +135,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
       if (reactMultiUnmarked) {
         if (!location.search.includes('react-multi-unmarked-missing')) addOption('Austin', true);
         if (location.search.includes('react-multi-unmarked-ambiguous')) addOption('Austin', true);
+        if (location.search.includes('react-multi-selected-hidden')) addOption('Chicago', false);
       } else {
         addOption('Alpha', true);
         if (!reactMultiOne) addOption('Beta', true);
@@ -673,6 +676,21 @@ assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector ==
 assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0');
 assert.equal(unmarkedMultiValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value, 'Austin');
 assert.equal(unmarkedMultiValueReact.requiredFieldConfirmation.status, 'confirmed');
+
+const greenhouseHiddenSelectedMultiValue = await replay(
+  '?react-multi-unmarked-missing&react-multi-selected-hidden&react-multi-no-aria',
+  confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value')
+);
+assert.equal(greenhouseHiddenSelectedMultiValue.extracted.find(
+  (entry) => entry.selector === '#submitted'
+)?.value, 'yes');
+assert.equal(greenhouseHiddenSelectedMultiValue.extracted.find(
+  (entry) => entry.selector === '#react-option-clicks'
+)?.value, '0');
+assert.equal(greenhouseHiddenSelectedMultiValue.extracted.find(
+  (entry) => entry.selector === '#react-multi-values'
+)?.value, 'Austin');
+assert.equal(greenhouseHiddenSelectedMultiValue.requiredFieldConfirmation.status, 'confirmed');
 
 for (const unsafeMultiValueCase of [
   'react-multi-unmarked-missing',
