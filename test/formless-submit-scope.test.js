@@ -392,6 +392,35 @@ const GREENHOUSE_STRAY = `<!doctype html><meta charset="utf-8"><title>Greenhouse
   });
 </script>`;
 
+/* Recruitee localizes its stock final button to the exact bare label "Senden" on German tenants.
+ * Captured on the live CBS Consulting application on 2026-08-21. The page-level decoy proves the
+ * new label still earns nothing by itself: only the copy inside the form this run addressed may
+ * bind a submission scope. */
+const RECRUITEE_GERMAN = `<!doctype html><meta charset="utf-8"><title>German Recruitee application</title>
+<div id="page">
+  <button id="page-send" type="button">Senden</button>
+  <form id="application" novalidate>
+    <div class="field"><label for="salutation">Allgemeine Anrede *</label><select id="salutation" required><option>Auswählen</option><option selected>Frau</option></select></div>
+    <div class="field"><label for="candidate-name">Name *</label><input id="candidate-name" name="candidate.name" required value="Mehek Mandal"></div>
+    <div class="field"><label for="candidate-email">E-Mail *</label><input id="candidate-email" name="candidate.email" type="email" required value="mehek@example.com"></div>
+    <div class="field"><label for="candidate-phone">Telefon *</label><input id="candidate-phone" name="candidate.phone" type="tel" required value="+491234567890"></div>
+    <div class="field"><label for="candidate-cv">Lebenslauf *</label><input id="candidate-cv" name="candidate.cv" type="file" required></div>
+    <div class="field"><label for="candidate-letter">Anschreiben</label><input id="candidate-letter" name="candidate.coverLetterFile" type="file"></div>
+    <fieldset><legend>Bevorzugter Arbeitsort</legend><label><input type="checkbox" name="workplace"> Berlin</label><label><input type="checkbox" name="workplace"> Remote</label></fieldset>
+    <button id="application-send" type="submit">Senden</button>
+  </form>
+</div>
+<div id="submitted"></div>
+<script>${HELPERS}
+  attach('candidate-cv');
+  attach('candidate-letter');
+  document.getElementById('page-send').addEventListener('click', function () { record('page'); });
+  document.getElementById('application').addEventListener('submit', function (event) {
+    event.preventDefault();
+    record('recruitee');
+  });
+</script>`;
+
 /* ONE FIELD, ONE BUTTON, AND NOTHING ELSE TO GO ON. Structure cannot separate this from a
  * newsletter, because there is nothing here a newsletter does not also have: one email, required,
  * and a button reading "Submit". The two cases below serve this identical page and differ only in
@@ -551,6 +580,7 @@ const FIXTURES = {
   '/stray-only': STRAY_ONLY,
   '/minimal-application': MINIMAL_APPLICATION,
   '/greenhouse-stray': GREENHOUSE_STRAY,
+  '/recruitee-german': RECRUITEE_GERMAN,
   '/one-field-form': ONE_FIELD_FORM,
   '/eeo-sticky-bar': EEO_STICKY_BAR,
   '/screening-sticky-bar': SCREENING_STICKY_BAR,
@@ -718,6 +748,21 @@ test('the Greenhouse shape still binds its real form and ignores the Apply butto
   // The decoy resolves no scope at all on a page that has a viable in-form candidate, so nothing
   // above the form is ever a submission scope.
   assert.equal(valueOf(result, '#page'), null);
+});
+
+test('German Recruitee binds exact Senden only inside the addressed application form', async () => {
+  const { status, result, clicks: recorded } = await run('/recruitee-german', [
+    { type: 'extract', selector: '#application', attribute: 'data-litos-submit-scope-v2' },
+    { type: 'extract', selector: '#page', attribute: 'data-litos-submit-scope-v2' }
+  ], [
+    { type: 'fill', selector: 'input[name="candidate.name"]', value: 'Mehek Mandal', label: 'name' }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['recruitee'], 'only the form-bound Senden control is pressed');
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
+  assert.match(valueOf(result, '#application') || '', /^\d+$/);
+  assert.equal(valueOf(result, '#page'), null, 'a page-level Senden control has no submission scope');
 });
 
 test('a header Apply Now cannot outscore the real in-form Submit', async () => {

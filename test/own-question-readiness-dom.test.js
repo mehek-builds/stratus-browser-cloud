@@ -478,7 +478,7 @@ test('a custom empty-state placeholder is not an answer', async () => {
   /* A tenant-configured placeholder is outside the shared furniture vocabulary, and reading it as
    * an answer silently skips a required field. Placeholder-shaped grammar and aria-label
    * restatement both read as empty. */
-  for (const empty of ['Please select an answer', 'Select a country', '-- Select --', 'Pick one', 'None selected']) {
+  for (const empty of ['Please select an answer', 'Select a country', '-- Select --', 'Pick one', 'None selected', 'Auswählen']) {
     const readiness = await readinessOf(`
       <div><div>
         <div class="q">Are you currently authorized to work in the U.S.?</div>
@@ -487,6 +487,23 @@ test('a custom empty-state placeholder is not an answer', async () => {
       </div></div>`);
     assert.equal(readiness.blocking.length, 1, empty + ': ' + JSON.stringify(readiness.blocking));
   }
+});
+
+test('a CBS Recruitee salutation is answered only after an exact option replaces Auswählen', async () => {
+  const empty = await readinessOf(`
+    <fieldset><legend>Meine Daten</legend><div class="field">
+      <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+      <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+        aria-label="Allgemeine Anrede">Auswählen</button>
+    </div></fieldset>`);
+  assert.equal(empty.blocking.length, 1, JSON.stringify(empty.blocking));
+  const answered = await readinessOf(`
+    <fieldset><legend>Meine Daten</legend><div class="field">
+      <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+      <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+        aria-label="Allgemeine Anrede">Frau</button>
+    </div></fieldset>`);
+  assert.equal(answered.blocking.length, 0, JSON.stringify(answered.blocking));
 });
 
 test('the furniture aria-label is a last resort, not a casualty', async () => {

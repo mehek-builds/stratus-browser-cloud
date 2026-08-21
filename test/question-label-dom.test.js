@@ -60,6 +60,11 @@ const CHOICE_SOURCE = [
   extractBraced('function optionsOf(el, block) {'),
 ].join('\n');
 
+const CLOSED_CHOICE_SOURCE = [
+  CHOICE_SOURCE,
+  extractBraced('function marksRequired(el, block) {'),
+].join('\n');
+
 /* Transcribed from https://jobs.lever.co/palantir/d5486403-c050-4920-b2e0-91b69b61ebb2/apply on
  * 2026-08-11, not sketched. Three details are load-bearing and all three are real:
  *   - the question text sits in a sibling div.application-label, never in a <label>, which is why
@@ -156,6 +161,21 @@ async function choiceDetailsFor(html) {
     }
     return labels;
   }, CHOICE_SOURCE);
+}
+
+async function closedChoiceDetailsFor(html, selector) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate(([source, target]) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, marksRequired, optionsOf, questionLabel };`)();
+    const control = document.querySelector(target);
+    const block = helpers.blockOf(control);
+    return {
+      label: helpers.questionLabel(control),
+      options: helpers.optionsOf(control, block),
+      required: helpers.marksRequired(control, block),
+    };
+  }, [CLOSED_CHOICE_SOURCE, selector]);
 }
 
 /* THE DEFECT, AND THE FIX, ON THE MARKUP THAT CAUSED IT.
@@ -739,6 +759,89 @@ test('a div combobox whose aria-labelledby points outside itself keeps that labe
         aria-label="Select..."></div>
     </div>`, '[role="combobox"]');
   assert.equal(label, 'gender');
+});
+
+test('CBS Recruitee salutation keeps its exact required label and bound closed options', async () => {
+  const details = await closedChoiceDetailsFor(`
+    <fieldset>
+      <legend>Meine Daten</legend>
+      <div class="field">
+        <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+        <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+          aria-label="Allgemeine Anrede">Auswählen</button>
+        <div role="listbox" aria-labelledby="input-candidate.salutation-2" style="display:none">
+          <div role="option">Herr</div>
+          <div role="option">Frau</div>
+          <div role="option">Kein/e</div>
+        </div>
+      </div>
+      <label for="candidate-name">Vor- und Nachname *</label><input id="candidate-name" name="candidate.name">
+      <label for="candidate-email">E-Mail-Adresse *</label><input id="candidate-email" name="candidate.email">
+      <label for="candidate-phone">Telefonnummer</label><input id="candidate-phone" name="candidate.phone">
+    </fieldset>
+    <div role="listbox" aria-labelledby="some-other-control"><div role="option">Wrong</div></div>
+  `, '#input-candidate\\.salutation-2');
+  assert.equal(details.label, 'allgemeine anrede *');
+  assert.equal(details.required, true);
+  assert.deepEqual(details.options, ['Herr', 'Frau', 'Kein/e']);
+});
+
+test('CBS Recruitee salutation refuses ambiguous reverse listbox bindings', async () => {
+  const details = await closedChoiceDetailsFor(`
+    <div class="field">
+      <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+      <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+        aria-label="Allgemeine Anrede">Auswählen</button>
+      <div role="listbox" aria-labelledby="input-candidate.salutation-2"><div role="option">Herr</div></div>
+      <div role="listbox" aria-labelledby="input-candidate.salutation-2"><div role="option">Frau</div></div>
+    </div>
+  `, '#input-candidate\\.salutation-2');
+  assert.equal(details.required, true);
+  assert.deepEqual(details.options, []);
+});
+
+test('CBS Recruitee salutation refuses a matching page-level listbox outside its field', async () => {
+  const details = await closedChoiceDetailsFor(`
+    <div class="field">
+      <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+      <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+        aria-label="Allgemeine Anrede">Auswählen</button>
+    </div>
+    <div role="listbox" aria-labelledby="input-candidate.salutation-2"><div role="option">Wrong</div></div>
+  `, '#input-candidate\\.salutation-2');
+  assert.equal(details.required, true);
+  assert.deepEqual(details.options, []);
+});
+
+test('CBS Recruitee salutation refuses duplicate exact label bindings', async () => {
+  const details = await closedChoiceDetailsFor(`
+    <div class="field">
+      <label for="input-candidate.salutation-2">Allgemeine Anrede <span>*</span></label>
+      <label for="input-candidate.salutation-2">Another label <span>*</span></label>
+      <button id="input-candidate.salutation-2" type="button" aria-haspopup="listbox"
+        aria-label="Allgemeine Anrede">Auswählen</button>
+      <div role="listbox" aria-labelledby="input-candidate.salutation-2"><div role="option">Herr</div></div>
+    </div>
+  `, '#input-candidate\\.salutation-2');
+  assert.equal(details.label, 'allgemeine anrede');
+  assert.equal(details.required, false);
+  assert.deepEqual(details.options, ['Herr']);
+});
+
+test('CBS Recruitee native salutation excludes only the exact German placeholder', async () => {
+  const details = await closedChoiceDetailsFor(`
+    <div class="field">
+      <label for="candidate-salutation">Allgemeine Anrede <span>*</span></label>
+      <select id="candidate-salutation" required>
+        <option value="">Auswählen</option>
+        <option>Herr</option>
+        <option>Frau</option>
+        <option>Kein/e</option>
+      </select>
+    </div>
+  `, '#candidate-salutation');
+  assert.equal(details.required, true);
+  assert.deepEqual(details.options, ['Herr', 'Frau', 'Kein/e']);
 });
 
 /* THE SELECT2 SELF-LABEL, ON LEVER'S OWN UNIVERSITY PICKER.

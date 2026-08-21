@@ -13,10 +13,10 @@ export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 
 export const ATOMIC_SUBMIT_POLICY = Object.freeze({
   name: 'litos-final-submit',
-  version: 2,
-  finalPattern: '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)',
+  version: 3,
+  finalPattern: '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|^\\s*senden\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)',
   exclusionPattern: '(?:\\b(?:apply|continue|autofill|import|sign\\s?in|log\\s?in)(?:\\s+with)?\\s+(?:linkedin|indeed|google|facebook|apple)\\b|\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:the\\s+|your\\s+|my\\s+|a\\s+|an\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b|^\\s*(?:continue|next|start(?:\\s+application)?|complete|finish|review\\s+(?:and\\s+submit|application)|save\\s+and\\s+continue)\\s*$|\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b)',
-  grammarHash: '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9'
+  grammarHash: '9bd60803e7a713555132b6740e9765599ba975e75f803f436841dbc6d340091e'
 });
 const atomicSubmitGrammarHash = crypto.createHash('sha256')
   .update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`)
@@ -1443,6 +1443,9 @@ const { chromium } = require('playwright');
     // See fillCustomChoice: true once this call has opened a candidate control, so a caller can tell
     // a block with no drivable control from a control whose list did not carry the answer.
     let lastChoiceControlOpened = false;
+    // Set only by the exact Greenhouse question probe immediately before its chooser call. Captured
+    // and cleared at function entry, so no later question can inherit the one skipped opener click.
+    let nextChoiceControlAlreadyOpen = false;
     /* WHY A REFUSAL NEEDS WORDS. Every chooser below can now decline a control it could once resolve
      * by position, and "no option matched" is the wrong sentence for a list that offered two. The
      * applicant reads these lines and finishes the field herself, and the two cases ask different
@@ -2302,6 +2305,12 @@ const { chromium } = require('playwright');
     const CLEAR_CONTROLS = CHOICE_CONTROLS
       + ', [class*="clear"], [class*="close"], [class*="remove"], [class*="deselect"], [class*="reset"], [aria-label], [title]';
     const fillCustomChoice = async (container, wanted, directControl = null) => {
+      /* Some focused contract tests extract this helper in isolation. Keep the production flag
+       * optional so the helper retains its standalone contract while the managed runner can pass
+       * the one-shot pre-open state through its surrounding scope. */
+      const controlAlreadyOpen = typeof nextChoiceControlAlreadyOpen !== 'undefined'
+        && nextChoiceControlAlreadyOpen;
+      if (typeof nextChoiceControlAlreadyOpen !== 'undefined') nextChoiceControlAlreadyOpen = false;
       // Cleared on every call, so the row this function publishes can only ever be the row THIS call
       // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
@@ -3011,7 +3020,11 @@ const { chromium } = require('playwright');
         }).catch(() => '');
         if (CLEAR_CONTROL_RE.test(clears)) continue;
         lastChoiceControlOpened = true;
-        await control.click().catch(() => undefined);
+        /* A role-less Greenhouse input is probed by one real pointer click before this chooser is
+         * called. Clicking the same input again can toggle its menu closed, which would discard the
+         * only structural evidence that separated it from a real text field. Only the exact control
+         * passed by that probe can skip this click; every existing caller keeps the old behaviour. */
+        if (!controlAlreadyOpen || index > 0) await control.click().catch(() => undefined);
         // Sized on measurement, not a guess: on a live Greenhouse education form the asynchronously
         // loaded School and Discipline menus arrived 563ms and 555ms after the control was touched.
         // The old flat 150ms expired before either, which is how the page-wide sweep was reached.
@@ -4289,7 +4302,7 @@ const { chromium } = require('playwright');
            * "none selected". A real ANSWER that happens to open with those words ("Choose not to
            * disclose") reads as empty and keeps its blocker, which fails toward a person looking
            * at an answered control - the direction this gate is allowed to be wrong in. */
-          const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$/i;
+          const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$|^auswählen$/i;
           const rendered = clean(renderedText(element));
           if (!rendered) return false;
           const openerAriaLabel = clean(element.getAttribute('aria-label') || '');
@@ -4427,7 +4440,7 @@ const { chromium } = require('playwright');
         if (!widget || !isVisible(widget)) return;
         const named = marker.getAttribute('for');
         const controls = [...widget.querySelectorAll(
-          'input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]'
+          'input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
         )];
         const explicitlyRequired = controls.filter((candidate) => marker.contains(candidate)
           && !candidate.disabled
@@ -5260,7 +5273,7 @@ const { chromium } = require('playwright');
             && (element.getAttribute('role') === 'combobox' || element.getAttribute('aria-haspopup') === 'listbox')
             && !element.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select')) {
             const BARE_OPENER_FURNITURE = /^(?:search|select(?: one| an option)?|choose(?: one| an option)?|start typing.*|type to search.*)?[.…\s]*$/i;
-            const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$/i;
+            const PLACEHOLDER_SHAPED = /^(?:--\s*)?(?:please\s+)?(?:select|choose|pick)\b|^none\s+selected$|^auswählen$/i;
             const rendered = clean(typeof element.innerText === 'string' ? element.innerText : (element.textContent || ''));
             if (rendered) {
               const openerAriaLabel = clean(element.getAttribute('aria-label') || '');
@@ -5341,7 +5354,7 @@ const { chromium } = require('playwright');
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
           const control = (named && document.getElementById(named))
-            || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')
+            || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]')
             || block;
           addControl(control);
         }
@@ -5353,7 +5366,7 @@ const { chromium } = require('playwright');
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
           const control = (named && document.getElementById(named))
-            || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]')
+            || block.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]')
             || block;
           addControl(control);
         }
@@ -6319,13 +6332,42 @@ const { chromium } = require('playwright');
               && sameNamePeers.every((input) => clean(input.getAttribute('aria-labelledby')) === referenceIds));
             if (referencedLabel && sharedChoiceReference) return referencedLabel.toLowerCase();
             const fieldsetNames = new Set(fieldsetChoices.map((input) => input.name).filter(Boolean));
-            const fieldsetOwnsChoice = !choice || fieldsetNames.size <= 1;
+            /* A FIELDSET LEGEND NAMES A CHOICE GROUP, NOT EVERY ORDINARY CONTROL UNDER IT.
+             * CBS wraps all contact controls in fieldset legend "Meine Daten". The non-choice
+             * salutation opener has its own exact label, "Allgemeine Anrede *", but the old
+             * non-choice arm returned the section legend first. Backend then saw an optional
+             * unknown control called Meine Daten and dropped it. Only a radio or checkbox group
+             * may take the legend before its control-level label. An unlabeled ordinary control
+             * can still reach the same legend through the bounded fallback walk below. */
+            const fieldsetOwnsChoice = choice && fieldsetNames.size <= 1;
             const legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
             const legendText = clean(renderedText(legend));
             if (legendText) return legendText.toLowerCase();
-            const labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
+            const ordinaryFieldsetLegendText = !choice && fieldset
+              ? clean(renderedText(fieldset.querySelector('legend'))).toLowerCase()
+              : '';
+            const semanticLabels = el.labels ? [...el.labels] : [];
+            const explicitLabels = el.id
+              ? [...document.querySelectorAll('label[for="' + CSS.escape(el.id) + '"]')]
+              : [];
+            const labelEl = semanticLabels.length === 1
+              ? semanticLabels[0]
+              : (semanticLabels.length === 0 && explicitLabels.length === 1 ? explicitLabels[0] : null);
             const labelText = renderedText(labelEl);
             const ariaLabel = el.getAttribute('aria-label') || '';
+            /* A BARE LISTBOX BUTTON WITH ONE EXACT LABEL IS ALREADY FULLY NAMED.
+             *
+             * Recruitee's CBS salutation opener is a button with aria-haspopup=listbox, an exact
+             * label[for], and an aria-label repeating the same words. Appending aria-label and the
+             * provider id produces a duplicated, unstable dashboard question that differs from
+             * direct discovery. Keep this narrow to button-shaped openers so Greenhouse input
+             * handles remain available to its option-probe routing. If duplicate exact labels make
+             * labelText unavailable, the unique aria-label is still the safest human name and the
+             * provider id is not promoted to question text. */
+            const bareListboxButton = el.tagName === 'BUTTON'
+              && el.getAttribute('aria-haspopup') === 'listbox';
+            if (bareListboxButton && clean(labelText)) return clean(labelText).toLowerCase();
+            if (bareListboxButton && clean(ariaLabel)) return clean(ariaLabel).toLowerCase();
             // A radio or checkbox is labelled with its OPTION - "Male", "Yes", "Hispanic or Latino" -
             // and the applicant is answering the QUESTION above it. The pre-submit gate already
             // prefers the group's own text for exactly this reason; discovery has to agree with it,
@@ -6551,7 +6593,7 @@ const { chromium } = require('playwright');
                 if (siblingLabel) return siblingLabel;
               }
             }
-            const fallbackText = nearestQuestionText(el);
+            const fallbackText = ordinaryFieldsetLegendText || nearestQuestionText(el);
             if (own && !genericControlText(own)) return own;
             return fallbackText || own;
           }
@@ -6606,7 +6648,30 @@ const { chromium } = require('playwright');
             if (el.required || el.getAttribute('aria-required') === 'true') return true;
             if (block && block.getAttribute && block.getAttribute('aria-required') === 'true') return true;
             const label = block && block.querySelector('label[class*="_required_"], legend[class*="_required_"]');
-            return Boolean(label);
+            if (label) return true;
+            /* A PROVIDER-WRITTEN REQUIRED MARKER ON THIS CONTROL'S OWN LABEL.
+             *
+             * Recruitee renders the CBS salutation as a button-shaped listbox opener with no
+             * required or aria-required attribute. Its exact label[for] reads
+             * "Allgemeine Anrede *". Discovery previously reported the control as optional, so
+             * the unknown closed choice was dropped before the dashboard could ask it. Read only
+             * the label explicitly associated with this control, or the one label wrapping this
+             * control alone. A page legend such as "* marks required fields" is not associated
+             * with one control and cannot make every question required. */
+            const hasRequiredMarker = (candidate) => {
+              const text = clean(renderedText(candidate));
+              if (!text || /\*\s*(?:indicates|denotes|means|=)\b/i.test(text)) return false;
+              return /\*(?:\s|$)/.test(text) || /(?:^|\s)\*/.test(text);
+            };
+            const byFor = el.id
+              ? [...document.querySelectorAll('label[for="' + CSS.escape(el.id) + '"]')]
+              : [];
+            if (byFor.length === 1 && hasRequiredMarker(byFor[0])) return true;
+            const wrapping = el.closest && el.closest('label');
+            if (wrapping && wrapping.querySelectorAll(
+              'input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
+            ).length === 1 && hasRequiredMarker(wrapping)) return true;
+            return false;
           }
           // A stable way back to this control on a LATER page load. The marker attribute below is
           // written into this page's DOM and is gone by the time the fill run opens the form again
@@ -6656,7 +6721,28 @@ const { chromium } = require('playwright');
             if (el.tagName === 'SELECT') {
               return [...el.options]
                 .map((option) => clean(option.textContent || option.value))
-                .filter((text) => text && !/^(select|choose|please|--)/i.test(text));
+                .filter((text) => text && !/^(?:select|choose|please|--|auswählen$)/i.test(text));
+            }
+            /* A CLOSED CUSTOM LIST WHOSE POPUP NAMES THIS EXACT OPENER.
+             *
+             * CBS Recruitee keeps the salutation rows in a sibling role=listbox while it is
+             * closed. The opener has id input-candidate.salutation-2 and the listbox points back
+             * with aria-labelledby. Reading the exact reverse ARIA relation costs no click and
+             * lets the dashboard show Herr, Frau and Kein/e. One bound listbox is required. Two
+             * are ambiguous and an unrelated page list is ignored. textContent is deliberate:
+             * the bound popup may be display:none while closed, but its option nodes are still the
+             * employer's declared closed vocabulary. */
+            if (el.id && (el.getAttribute('role') === 'combobox'
+              || el.getAttribute('aria-haspopup') === 'listbox')) {
+              const bound = [...document.querySelectorAll('[role="listbox"][aria-labelledby]')]
+                .filter((listbox) => listbox.parentElement === el.parentElement
+                  && clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id));
+              if (bound.length === 1) {
+                return [...new Set([...bound[0].querySelectorAll('[role="option"]')]
+                  .map((option) => clean(option.getAttribute('aria-label') || option.textContent || ''))
+                  .filter((text) => text && text.length <= 120))];
+              }
+              if (bound.length > 1) return [];
             }
             if (!block) return [];
             const texts = [];
@@ -6779,7 +6865,8 @@ const { chromium } = require('playwright');
                   : (/^(?:INPUT)$/.test(el.tagName) ? (el.type || 'text') : 'text')),
               // A React-select is still an <input type="text">. Its DOM role is the wire evidence
               // that distinguishes it from a genuine open text field such as end-year--0.
-              role: el.getAttribute('role') || null,
+              role: el.getAttribute('role')
+                || (el.getAttribute('aria-haspopup') === 'listbox' ? 'combobox' : null),
               required: marksRequired(el, block),
               options: options.length > 0 ? options : null,
               maxLength: el.maxLength > 0 ? el.maxLength : null
@@ -6972,6 +7059,7 @@ const { chromium } = require('playwright');
           labelChoicePlaceholderCount: 0,
           choicePeerCount: 0,
           nearbyChoiceIndicator: false,
+          questionMenuProbe: 'not_run',
           route: 'unresolved',
           choiceAttempted: false,
           choiceFilled: false,
@@ -7255,20 +7343,81 @@ const { chromium } = require('playwright');
         // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
         // phone against the international form would report a correct fill as a failed one.
         let textPersisted = await verifyFilled(target, fillValue || '');
-        /* A provider-owned role-less search input can hold the typed query long enough for one
-         * immediate read, then clear it when the custom selector repaints or the search input loses
-         * focus. The live Jump degree control survived the original 650ms read while focused, then
-         * Greenhouse validation blurred it and showed Select. Only exact #question_<digits> inputs
-         * pay this bounded stability read and neutral blur. A real text field keeps its value when
-         * blurred. When the text disappears, the same exact control gets one scoped chooser attempt
-         * and must pass the ordinary committed-choice verifier before it counts. */
+        /* A provider-owned role-less search input can hold the typed query through a timer and a
+         * programmatic blur, then clear it only when employer validation runs. The live Jump degree
+         * control has exactly that shape. Waiting for disappearance therefore cannot distinguish it
+         * from a text field.
+         *
+         * A real pointer click does expose the distinction: the input declares one visible listbox,
+         * or renders one inside its exact label-bound question. The probe accepts only those two
+         * author-scoped relationships, never an option elsewhere on the page. Zero menus stays text;
+         * more than one fails closed; exactly one enters the existing chooser, which still has to
+         * click an exact row and read a committed value back before the field counts. */
+        let questionMenuProbe = 'not_run';
         if (textPersisted && greenhouseQuestionId && fillShape.tag === 'input') {
           await page.waitForTimeout(650);
           textPersisted = await verifyFilled(target, fillValue || '');
-          if (textPersisted) {
-            await target.evaluate((element) => element.blur()).catch(() => undefined);
-            await page.waitForTimeout(150);
-            textPersisted = await verifyFilled(target, fillValue || '');
+          if (textPersisted && greenhouseLabelledQuestionCount === 1) {
+            const clicked = await target.click().then(() => true).catch(() => false);
+            if (clicked) {
+              const listboxCountIn = async (root) => await root.evaluate((element) => {
+                const visible = (node) => {
+                  const rect = node.getBoundingClientRect();
+                  const style = getComputedStyle(node);
+                  return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                    && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+                };
+                const menus = element.getAttribute('role') === 'listbox'
+                  ? [element]
+                  : [...element.querySelectorAll('[role="listbox"]')];
+                return menus.filter((menu) => visible(menu)
+                  && [...menu.querySelectorAll('[role="option"]')].some(visible)).length;
+              }).catch(() => 0);
+              /* aria-controls and aria-owns are the input author's exact statement of which node is
+               * its popup. Once that exact node is one visible listbox, zero rendered options means
+               * the choice menu is still loading or has no result, not that the input is free text.
+               * A referenced wrapper keeps the older visible-option requirement because the wrapper
+               * itself is not the declared listbox. */
+              const declaredListboxCountIn = async (root) => await root.evaluate((element) => {
+                const visible = (node) => {
+                  const rect = node.getBoundingClientRect();
+                  const style = getComputedStyle(node);
+                  return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                    && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+                };
+                if (element.getAttribute('role') === 'listbox' && visible(element)) return 1;
+                return [...element.querySelectorAll('[role="listbox"]')].filter((menu) => (
+                  visible(menu) && [...menu.querySelectorAll('[role="option"]')].some(visible)
+                )).length;
+              }).catch(() => 0);
+              const readProbe = async () => {
+                const references = await target.evaluate((element) => String(
+                  element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || ''
+                ).trim().split(/\s+/).filter(Boolean)).catch(() => []);
+                let declaredMenus = 0;
+                let malformedReference = false;
+                for (const id of [...new Set(references)]) {
+                  const referenced = page.locator('[id="' + String(id).replace(/["\\]/g, '\\$&') + '"]');
+                  const count = await referenced.count().catch(() => 0);
+                  if (count > 1) malformedReference = true;
+                  if (count === 1) declaredMenus += await declaredListboxCountIn(referenced);
+                }
+                if (malformedReference || declaredMenus > 1) return 'ambiguous';
+                if (declaredMenus === 1) return 'menu';
+                const containedMenus = await listboxCountIn(greenhouseLabelledQuestion);
+                if (containedMenus > 1) return 'ambiguous';
+                if (containedMenus === 1) return 'menu';
+                return 'none';
+              };
+              const deadline = Date.now() + 1200;
+              for (;;) {
+                questionMenuProbe = await readProbe();
+                if (questionMenuProbe !== 'none' || Date.now() >= deadline) break;
+                await page.waitForTimeout(50).catch(() => undefined);
+              }
+            } else questionMenuProbe = 'none';
+            if (actionDiagnostic) actionDiagnostic.questionMenuProbe = questionMenuProbe;
+            if (questionMenuProbe !== 'none') textPersisted = false;
           }
         }
         if (textPersisted) {
@@ -7282,16 +7431,47 @@ const { chromium } = require('playwright');
             actionDiagnostic.route = 'text_then_choice';
             actionDiagnostic.choiceAttempted = true;
           }
-          const choiceFilled = await fillCustomChoice(rescueContainer, action.value || '', target);
+          const clearDirectUncommittedSearch = async () => {
+            const directValue = await target.inputValue().catch(() => '');
+            if (!directValue) return false;
+            await target.fill('').catch(() => undefined);
+            return true;
+          };
+          if (questionMenuProbe === 'ambiguous') {
+            // This is the search query Litos just wrote, not a committed answer. Leaving it visible
+            // could make a later required-field scan mistake the query for a choice, so return the
+            // control to empty before handing the question back to the applicant. Never dispatch an
+            // empty fill against an already-empty search input: some React Selects treat that as a
+            // request to delete the restored committed chip.
+            await clearDirectUncommittedSearch();
+            await page.keyboard.press('Escape').catch(() => undefined);
+          }
+          nextChoiceControlAlreadyOpen = questionMenuProbe === 'menu';
+          const choiceFilled = questionMenuProbe === 'ambiguous'
+            ? false
+            : await fillCustomChoice(rescueContainer, action.value || '', target);
           const landed = choiceFilled
             ? await choiceLanded(rescueContainer, action.value || '', target)
             : false;
+          if (questionMenuProbe === 'menu' && !landed) {
+            /* fillCustomChoice has already restored any committed state it found on arrival. What
+             * remains in this exact role-less input is the search query Litos typed, and leaving it
+             * there could make the required-field scan call an unanswered choice complete. Clear
+             * only that direct search input, then close its menu. Rendered chips stay untouched. */
+            await clearDirectUncommittedSearch();
+            await page.keyboard.press('Escape').catch(() => undefined);
+          }
           if (actionDiagnostic) {
             actionDiagnostic.choiceFilled = choiceFilled;
             actionDiagnostic.choiceLanded = landed;
-            actionDiagnostic.choiceControlOpened = lastChoiceControlOpened;
-            actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
-            actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
+            actionDiagnostic.choiceControlOpened = questionMenuProbe === 'ambiguous'
+              ? true
+              : lastChoiceControlOpened;
+            actionDiagnostic.choiceUnreadable = questionMenuProbe === 'ambiguous'
+              ? false
+              : lastChoiceUnreadable;
+            actionDiagnostic.choiceRefused = questionMenuProbe === 'ambiguous'
+              || Boolean(lastChoiceRefusal);
             actionDiagnostic.outcome = landed ? 'choice_committed' : 'choice_uncommitted';
           }
           if (action.label && landed) filledFields.push(action.label);
@@ -7299,7 +7479,9 @@ const { chromium } = require('playwright');
             skipped.push(action.label + ': '
               + (lastChoiceUnreadable
                 ? unreadableChoiceReason
-                : (lastChoiceRefusal || 'value did not persist after fill')));
+                : (questionMenuProbe === 'ambiguous'
+                  ? 'more than one question-scoped option menu opened, left for you to choose'
+                  : (lastChoiceRefusal || 'value did not persist after fill'))));
           }
         }
         /* WHAT WAS WRITTEN AND WHAT THE FIELD HOLDS, because the bare sentence cannot be acted on.

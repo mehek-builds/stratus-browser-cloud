@@ -806,7 +806,7 @@ test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
 });
 
-test('atomic required confirmation owns the submit and accepts only contract v2', () => {
+test('atomic required confirmation owns the submit with contract v2 and chooser policy v3', () => {
   const actions = normalizeManagedActions([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
   ]);
@@ -824,8 +824,8 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
     (error) => error.code === 'INVALID_SUBMIT_KIND'
   );
   assert.equal(ATOMIC_SUBMIT_POLICY.name, 'litos-final-submit');
-  assert.equal(ATOMIC_SUBMIT_POLICY.version, 2);
-  assert.equal(ATOMIC_SUBMIT_POLICY.grammarHash, '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9');
+  assert.equal(ATOMIC_SUBMIT_POLICY.version, 3);
+  assert.equal(ATOMIC_SUBMIT_POLICY.grammarHash, '9bd60803e7a713555132b6740e9765599ba975e75f803f436841dbc6d340091e');
   assert.equal(
     crypto.createHash('sha256').update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`).digest('hex'),
     ATOMIC_SUBMIT_POLICY.grammarHash
@@ -850,6 +850,7 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
     ['Finish & apply', true],
     ['Submit your application - Contact Center Agent', true],
     ['Submit application - Acme Corp', true],
+    ['Senden', true],
     ['Apply with LinkedIn', false],
     ['Apply With Indeed', false],
     ['Continue with Google', false],
@@ -873,7 +874,11 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
     ['Sign in with Google', false],
     ['Start application', false],
     ['Submit application using Career Services', false],
-    ['Send application from recruiting partner', false]
+    ['Send application from recruiting partner', false],
+    ['Nachricht senden', false],
+    ['Senden und weiter', false],
+    ['Senden mit LinkedIn', false],
+    ['Absenden', false]
   ];
   for (const [label, expected] of chooserCases) {
     assert.equal(applicationFinal.test(label) && !excluded.test(label), expected, label);
@@ -891,6 +896,7 @@ test('atomic required confirmation owns the submit and accepts only contract v2'
   assert.equal(score('Submit'), 1);
   assert.equal(score('Apply'), 1);
   assert.equal(score('Submit with attachments'), 1);
+  assert.equal(score('Senden'), 1);
   assert.equal(score('Apply with LinkedIn'), null);
   const { chooserPolicy: _chooserPolicy, ...missingPolicy } = actions[0];
   assert.throws(
@@ -929,7 +935,7 @@ test('discover scans choice controls as well as text-shaped ones', () => {
   assert.match(SANDBOX_RUNNER, /const discovered = \[\];/);
   assert.match(SANDBOX_RUNNER, /const runnerCapabilities = \[/);
   assert.match(SANDBOX_RUNNER, /inputType: el\.tagName === 'TEXTAREA'/);
-  assert.match(SANDBOX_RUNNER, /role: el\.getAttribute\('role'\) \|\| null/);
+  assert.match(SANDBOX_RUNNER, /el\.getAttribute\('aria-haspopup'\) === 'listbox' \? 'combobox' : null/);
   assert.match(SANDBOX_RUNNER, /\? \['discovery-control-role-v1'\] : \[\]/);
   assert.match(SANDBOX_RUNNER, /\.\.\.\(runnerCapabilities\.length > 0 \? \{ capabilities: runnerCapabilities \} : \{\}\)/);
 });
