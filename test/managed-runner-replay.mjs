@@ -253,7 +253,9 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <!-- Jump Trading's Greenhouse degree question, measured in production on 2026-08-21. The durable
      action selector names the role-less search input. It publishes no role, popup attribute,
      select__ class, placeholder attribute, Select text node, proven peer, or visible indicator.
-     Its only reliable signal is temporal: a typed query is accepted, then cleared by the widget. -->
+     A typed query remains visible through a timer and programmatic blur. Only a real pointer click
+     makes the input declare and render its listbox, and employer validation clears an uncommitted
+     query later. -->
 <div class="field" id="jump-degree-field">
   <label for="question_67595191">What degree are you currently pursuing?</label>
   <div id="jump-degree-root">
@@ -267,6 +269,31 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <div class="field" id="jump-explanation-field">
   <label for="question_67595192">If yes, please explain.</label>
   <div><input id="question_67595192" type="text"></div>
+</div>
+<!-- A visible option elsewhere on the page cannot turn the ordinary text question above into a
+     chooser. The probe must stay inside the label-bound question or a menu that input declares. -->
+<div role="listbox" id="unrelated-question-listbox">
+  <div role="option" id="unrelated-question-option">No explanation needed</div>
+</div>
+<div id="unrelated-question-clicked">not-clicked</div>
+<!-- Two visible menus inside one exact question are not enough evidence to choose either one. -->
+<div class="field" id="jump-ambiguous-field">
+  <label for="question_67595193">Select a degree from the ambiguous fixture.</label>
+  <div><input id="question_67595193" type="text" autocomplete="off"></div>
+</div>
+<div id="jump-ambiguous-clicked">not-clicked</div>
+<!-- A pointer-opened input-declared listbox can be visible before its remote options arrive. -->
+<div class="field" id="jump-empty-declared-field">
+  <label for="question_67595194">Explain the empty declared listbox fixture.</label>
+  <div><input id="question_67595194" type="text" autocomplete="off"></div>
+</div>
+<!-- A failed new query must not erase the committed chip that was present on arrival. -->
+<div class="field" id="jump-restored-chip-field">
+  <label for="question_67595195">Select a different degree from the restored chip fixture.</label>
+  <div id="jump-restored-chip-root">
+    <div class="select__single-value" id="jump-restored-chip">Master's Degree</div>
+    <input id="question_67595195" type="text" autocomplete="off">
+  </div>
 </div>
 <!-- GREENHOUSE'S PHONE COUNTRY CONTROL, copied node for node off the live rendered DOM.
      Captured 2026-08-09 from job-boards.greenhouse.io/embed/job_app?for=redwoodmaterials&token=6126784004,
@@ -590,11 +617,72 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
   }
   jumpDegreeInput.addEventListener('mousedown', openJumpDegreeMenu);
   jumpDegreeInput.addEventListener('click', openJumpDegreeMenu);
-  jumpDegreeInput.addEventListener('input', function () {
-    openJumpDegreeMenu();
+  document.getElementById('unrelated-question-option').addEventListener('click', function () {
+    document.getElementById('unrelated-question-clicked').textContent = 'clicked';
   });
-  jumpDegreeInput.addEventListener('blur', function () {
-    if (!document.getElementById('jump-degree-chosen')) jumpDegreeInput.value = '';
+  document.getElementById('question_67595193').addEventListener('click', function () {
+    var question = document.getElementById('jump-ambiguous-field');
+    if (question.querySelector('[role="listbox"]')) return;
+    ['first', 'second'].forEach(function (suffix) {
+      var menu = document.createElement('div');
+      menu.setAttribute('role', 'listbox');
+      menu.id = 'jump-ambiguous-' + suffix;
+      var option = document.createElement('div');
+      option.setAttribute('role', 'option');
+      option.textContent = "Bachelor's Degree";
+      option.addEventListener('click', function () {
+        document.getElementById('jump-ambiguous-clicked').textContent = 'clicked';
+      });
+      menu.appendChild(option);
+      question.appendChild(menu);
+    });
+  });
+  var jumpEmptyDeclaredInput = document.getElementById('question_67595194');
+  function openJumpEmptyDeclaredMenu() {
+    if (document.getElementById('jump-empty-declared-listbox')) return;
+    var menu = document.createElement('div');
+    menu.id = 'jump-empty-declared-listbox';
+    menu.setAttribute('role', 'listbox');
+    menu.textContent = 'Loading choices';
+    document.getElementById('jump-empty-declared-field').appendChild(menu);
+    jumpEmptyDeclaredInput.setAttribute('aria-controls', menu.id);
+  }
+  jumpEmptyDeclaredInput.addEventListener('mousedown', openJumpEmptyDeclaredMenu);
+  jumpEmptyDeclaredInput.addEventListener('click', openJumpEmptyDeclaredMenu);
+  var jumpRestoredChipInput = document.getElementById('question_67595195');
+  function openJumpRestoredChipMenu() {
+    if (document.getElementById('jump-restored-chip-listbox')) return;
+    var menu = document.createElement('div');
+    menu.id = 'jump-restored-chip-listbox';
+    menu.setAttribute('role', 'listbox');
+    menu.textContent = 'Loading choices';
+    document.getElementById('jump-restored-chip-field').appendChild(menu);
+    jumpRestoredChipInput.setAttribute('aria-controls', menu.id);
+  }
+  jumpRestoredChipInput.addEventListener('mousedown', openJumpRestoredChipMenu);
+  jumpRestoredChipInput.addEventListener('click', openJumpRestoredChipMenu);
+  var jumpRestoredChipEscaped = false;
+  jumpRestoredChipInput.addEventListener('input', function () {
+    if (jumpRestoredChipInput.value !== '') return;
+    var chip = document.getElementById('jump-restored-chip');
+    if (chip) chip.remove();
+  });
+  jumpRestoredChipInput.addEventListener('focus', function () {
+    if (!jumpRestoredChipEscaped || jumpRestoredChipInput.value !== '') return;
+    // Playwright's redundant fill focuses before clearing. This models a controlled widget whose
+    // empty-search clear step applies backspaceRemovesValue to the restored chip.
+    var chip = document.getElementById('jump-restored-chip');
+    if (chip) chip.remove();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    var menu = document.getElementById('jump-restored-chip-listbox');
+    if (!menu) return;
+    menu.remove();
+    jumpRestoredChipInput.removeAttribute('aria-controls');
+    jumpRestoredChipInput.value = '';
+    jumpRestoredChipInput.blur();
+    jumpRestoredChipEscaped = true;
   });
 
   // ---- The phone Country React Select, behaving the way the live one does ----
@@ -1188,7 +1276,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     { type: 'fill', selector: '#question_67595191', value: "Bachelor's Degree", label: 'jump_degree', optional: false },
     { type: 'extract', selector: '#jump-degree-field' },
     { type: 'fill', selector: '#question_67595192', value: 'No explanation needed', label: 'jump_explanation', optional: false },
-    { type: 'extract', selector: '#question_67595192', attribute: 'value' }
+    { type: 'extract', selector: '#question_67595192', attribute: 'value' },
+    { type: 'extract', selector: '#unrelated-question-clicked' }
   ]);
   assert.match(valueOf(rolelessQuestionChoice, '#jump-degree-field') || '', /Bachelor's Degree/,
     'the wrapper-scoped fill must commit the exact degree option');
@@ -1215,6 +1304,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     labelChoicePlaceholderCount: 0,
     choicePeerCount: 0,
     nearbyChoiceIndicator: false,
+    questionMenuProbe: 'menu',
     route: 'text_then_choice',
     choiceAttempted: true,
     choiceFilled: true,
@@ -1230,9 +1320,74 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   );
   assert.equal(explanationDiagnostic.route, 'text');
   assert.equal(explanationDiagnostic.outcome, 'text_committed');
+  assert.equal(explanationDiagnostic.questionMenuProbe, 'none');
+  assert.equal(valueOf(rolelessQuestionChoice, '#unrelated-question-clicked'), 'not-clicked',
+    'a visible listbox outside the exact question must never be used by the text-field probe');
   const serializedDiagnostics = JSON.stringify(rolelessQuestionChoice.actionDiagnostics);
   assert.doesNotMatch(serializedDiagnostics, /Bachelor's Degree|What degree are you currently pursuing|No explanation needed/,
     'diagnostics must never carry answers, option labels, or employer question text');
+
+  const ambiguousRolelessQuestion = await replay([
+    { type: 'fill', selector: '#question_67595193', value: "Bachelor's Degree", label: 'jump_ambiguous', optional: false },
+    { type: 'extract', selector: '#question_67595193', attribute: 'value' },
+    { type: 'extract', selector: '#jump-ambiguous-clicked' }
+  ]);
+  assert.deepEqual(ambiguousRolelessQuestion.filledFields, [],
+    'two question-scoped menus must fail closed instead of reporting a choice');
+  assert.equal(valueOf(ambiguousRolelessQuestion, '#question_67595193'), '',
+    'the uncommitted search query must be cleared before the question is handed back');
+  assert.equal(valueOf(ambiguousRolelessQuestion, '#jump-ambiguous-clicked'), 'not-clicked',
+    'neither ambiguous menu may receive a click');
+  assert.ok(ambiguousRolelessQuestion.skipped.some((entry) => (
+    /more than one question-scoped option menu opened/.test(entry)
+  )), 'the refusal must tell the applicant why Litos left the question for her');
+  const ambiguousDiagnostic = ambiguousRolelessQuestion.actionDiagnostics.find(
+    (entry) => entry.controlId === 'question_67595193'
+  );
+  assert.equal(ambiguousDiagnostic.questionMenuProbe, 'ambiguous');
+  assert.equal(ambiguousDiagnostic.choiceRefused, true);
+  assert.equal(ambiguousDiagnostic.outcome, 'choice_uncommitted');
+
+  const emptyDeclaredRolelessQuestion = await replay([
+    { type: 'fill', selector: '#question_67595194', value: 'No explanation needed', label: 'jump_empty_declared', optional: false },
+    { type: 'extract', selector: '#question_67595194', attribute: 'value' },
+    { type: 'extract', selector: '#unrelated-question-clicked' }
+  ]);
+  assert.deepEqual(emptyDeclaredRolelessQuestion.filledFields, [],
+    'a query inside an input-declared empty listbox must never be reported as filled text');
+  assert.equal(valueOf(emptyDeclaredRolelessQuestion, '#question_67595194'), '',
+    'an uncommitted query must be cleared before required-field confirmation reads the input');
+  assert.equal(valueOf(emptyDeclaredRolelessQuestion, '#unrelated-question-clicked'), 'not-clicked',
+    'an empty declared listbox must never widen to an unrelated page option');
+  assert.ok(emptyDeclaredRolelessQuestion.skipped.some((entry) => (
+    /jump_empty_declared: value did not persist after fill/.test(entry)
+  )), 'the empty declared menu must be handed back instead of counted as text');
+  const emptyDeclaredDiagnostic = emptyDeclaredRolelessQuestion.actionDiagnostics.find(
+    (entry) => entry.controlId === 'question_67595194'
+  );
+  assert.equal(emptyDeclaredDiagnostic.questionMenuProbe, 'menu');
+  assert.equal(emptyDeclaredDiagnostic.choiceFilled, false);
+  assert.equal(emptyDeclaredDiagnostic.choiceLanded, false);
+  assert.equal(emptyDeclaredDiagnostic.choiceControlOpened, true);
+  assert.equal(emptyDeclaredDiagnostic.outcome, 'choice_uncommitted');
+
+  const restoredChipRolelessQuestion = await replay([
+    { type: 'fill', selector: '#question_67595195', value: "Bachelor's Degree", label: 'jump_restored_chip', optional: false },
+    { type: 'extract', selector: '#jump-restored-chip-field' },
+    { type: 'extract', selector: '#question_67595195', attribute: 'value' }
+  ]);
+  assert.deepEqual(restoredChipRolelessQuestion.filledFields, [],
+    'a failed new query must not be reported as a committed replacement');
+  assert.match(valueOf(restoredChipRolelessQuestion, '#jump-restored-chip-field') || '', /Master's Degree/,
+    'the committed chip present on arrival must survive the failed new query');
+  assert.equal(valueOf(restoredChipRolelessQuestion, '#question_67595195'), '',
+    'Escape must leave the restored chip search input empty');
+  const restoredChipDiagnostic = restoredChipRolelessQuestion.actionDiagnostics.find(
+    (entry) => entry.controlId === 'question_67595195'
+  );
+  assert.equal(restoredChipDiagnostic.questionMenuProbe, 'menu');
+  assert.equal(restoredChipDiagnostic.choiceFilled, false);
+  assert.equal(restoredChipDiagnostic.outcome, 'choice_uncommitted');
 
   const answered = await replay([
     { type: 'click', selector: '#discipline', label: 'discipline_open', optional: true },
