@@ -1635,7 +1635,9 @@ const { chromium } = require('playwright');
           ));
           const bindings = labels.map((label) => {
             const root = document.getElementById(label.getAttribute('for'));
-            const inputs = root && element.contains(root) ? [...root.querySelectorAll('input')] : [];
+            const inputs = root && element.contains(root)
+              ? (root.matches('input') ? [root] : [...root.querySelectorAll('input')])
+              : [];
             return { root, inputs };
           }).filter((binding) => binding.root && binding.inputs.length === 1);
           if (bindings.length !== 1) return false;
@@ -1646,7 +1648,7 @@ const { chromium } = require('playwright');
           const menuId = cleanText(input.getAttribute('aria-controls') || input.getAttribute('aria-owns'));
           const menu = menuId ? document.getElementById(menuId.split(/\s+/)[0]) : null;
           if (menu && visible(menu) && menu.querySelector('[role="option"]')) return false;
-          const placeholder = [...root.querySelectorAll('*')].some((node) => {
+          const placeholder = [...element.querySelectorAll('*')].some((node) => {
             if (!visible(node)) return false;
             const ownText = [...node.childNodes]
               .filter((child) => child.nodeType === Node.TEXT_NODE)
@@ -1655,9 +1657,10 @@ const { chromium } = require('playwright');
             return /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(cleanText(ownText));
           });
           if (placeholder) return false;
-          const exactValues = [...root.querySelectorAll('*')].filter((node) => {
+          const exactValues = [...element.querySelectorAll('*')].filter((node) => {
             if (!visible(node) || cleanText(node.textContent).toLowerCase() !== payload.row) return false;
             if (node.matches('[role="option"], [role="listbox"]') || node.closest('[role="option"], [role="listbox"]')) return false;
+            if (node.matches('label, label *') || node.closest('label')) return false;
             return ![...node.children].some((child) => cleanText(child.textContent).toLowerCase() === payload.row);
           });
           return exactValues.length === 1;
@@ -6974,15 +6977,30 @@ const { chromium } = require('playwright');
           element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
         )).catch(() => false);
         /* Greenhouse also renders a role-less custom select whose durable #question_<digits>
-         * selector resolves to a wrapper and then to an inner search input. The live Jump Trading
-         * degree control exposes neither the ARIA role nor the class convention above, but it does
-         * publish the provider-owned question id and a visible Select placeholder. Both signals are
-         * required, so an ordinary text question never becomes a choice control merely because it
-         * happens to sit on the same form. */
+         * selector can name either the wrapper or the inner search input. The live Jump Trading
+         * degree control names the input while its Select placeholder is a sibling in the exact
+         * label-bound question. It exposes neither the ARIA role nor the class convention above,
+         * so the provider-owned question id and that visible placeholder are both required. An
+         * ordinary text question never becomes a choice control merely because it shares the form. */
         const greenhouseQuestionId = String(action.selector || '').match(/^#(question_\d+)$/)?.[1] || '';
+        const greenhouseQuestionLabel = greenhouseQuestionId
+          ? page.locator('label[for="' + greenhouseQuestionId + '"]').first()
+          : null;
+        const greenhouseLabelledQuestion = greenhouseQuestionLabel
+          ? greenhouseQuestionLabel.locator(
+            'xpath=ancestor::*[(self::div or self::fieldset) and .//*[@id="' + greenhouseQuestionId + '"]][1]'
+          )
+          : null;
+        const greenhouseLabelledQuestionCount = greenhouseLabelledQuestion
+          ? await greenhouseLabelledQuestion.count().catch(() => 0)
+          : 0;
         const selectorShowsChoicePlaceholder = greenhouseQuestionId && (
           /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(fillShape.placeholder)
           || (await locator.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)) > 0
+          || (greenhouseLabelledQuestionCount > 0
+            && (await greenhouseLabelledQuestion.getByText(
+              /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i
+            ).count().catch(() => 0)) > 0)
         );
         const targetInGreenhouseQuestionChoice = fillShape.tag === 'input'
           && Boolean(selectorShowsChoicePlaceholder);
@@ -7006,11 +7024,7 @@ const { chromium } = require('playwright');
           if (targetInChoiceShell) {
             container = target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]');
           } else if (targetInGreenhouseQuestionChoice) {
-            const label = page.locator('label[for="' + greenhouseQuestionId + '"]').first();
-            const labelledQuestion = label.locator(
-              'xpath=ancestor::*[(self::div or self::fieldset) and .//*[@id="' + greenhouseQuestionId + '"]][1]'
-            );
-            container = (await labelledQuestion.count()) > 0 ? labelledQuestion : locator;
+            container = greenhouseLabelledQuestionCount > 0 ? greenhouseLabelledQuestion : locator;
           } else {
             container = target.locator(
               'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
