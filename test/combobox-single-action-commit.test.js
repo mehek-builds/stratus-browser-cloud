@@ -33,7 +33,7 @@ const SUPPORT_NAMES = [
   'readChoiceState', 'readCommittedSearchInputValue', 'refuseChoice', 'nearMissChoiceReason',
   'verifyChoiceInContainer',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
-  'withdrawRefusedChoice', 'choiceLanded',
+  'withdrawRefusedChoice', 'blurDrivenChoiceControl', 'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
   'fillCustomChoice',
 ];

@@ -496,9 +496,12 @@ test('a widget that renders its answer shorter than the row that set it is not a
     + (SANDBOX_RUNNER.match(/const landed = await choiceLanded\(\n\s+container,\n\s+action\.value \|\| '',\n\s+targetInGreenhouseQuestionChoice \? target : null,/g) || []).length;
   assert.equal(landedReadbacks, 4,
     'every fillCustomChoice call site reads the control back through the same helper');
-  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 3,
+  assert.equal((SANDBOX_RUNNER.match(/await verifyChoiceInContainer\(/g) || []).length, 4,
     'fill call sites cannot skip withdrawal; the second read waits for a delayed rollback to settle;'
-    + ' the third is withdrawRefusedChoice\'s own confirm-before-clearing gate (see'
+    + ' the third is choiceLanded\'s own post-blur reread, added for the Ashby location field (see'
+    + ' ashby-blur-reverts-choice-dom.test.js) so a value that only holds up while the control is'
+    + ' still focused cannot be reported before the runner\'s own next action would have found it'
+    + ' gone; the fourth is withdrawRefusedChoice\'s own confirm-before-clearing gate (see'
     + ' choice-withdrawal-confirms-before-clearing.test.js)');
 });
 
