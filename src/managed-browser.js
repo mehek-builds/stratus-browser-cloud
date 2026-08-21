@@ -230,6 +230,10 @@ const { chromium } = require('playwright');
     }
     const extracted = [];
     const filledFields = [];
+    /* Privacy-safe execution breadcrumbs for provider-owned question controls. These deliberately
+     * carry only durable control ids, counts, booleans and bounded enum-like outcomes. Applicant
+     * answers, employer question text, option text and page content never enter this array. */
+    const actionDiagnostics = [];
     /* THE CONTROLS THIS RUN WAS SENT TO WRITE INTO, kept for the whole session rather than per
      * phase. The submit chooser uses them to tell the application form apart from any other form
      * on the page: a form holding a control this run typed into, uploaded to or chose an option in
@@ -6055,6 +6059,7 @@ const { chromium } = require('playwright');
     assertRequiredCapabilities(currentInput.actions);
     extracted.length = 0;
     filledFields.length = 0;
+    actionDiagnostics.length = 0;
     skipped.length = 0;
     discovered.length = 0;
     submitGateBlockers.length = 0;
@@ -6950,10 +6955,35 @@ const { chromium } = require('playwright');
         }
       }
       if (action.type === 'fill') {
+        const diagnosticControlId = String(action.selector || '').match(/^#(question_\d+)$/)?.[1] || '';
+        const actionDiagnostic = diagnosticControlId ? {
+          controlId: diagnosticControlId,
+          locatorCount: await locator.count().catch(() => 0),
+          targetResolved: false,
+          targetVisible: false,
+          targetTag: 'unknown',
+          targetInChoiceShell: false,
+          targetPlaceholderSignal: false,
+          labelCount: 0,
+          labelledQuestionCount: 0,
+          locatorChoicePlaceholderCount: 0,
+          labelChoicePlaceholderCount: 0,
+          route: 'unresolved',
+          choiceAttempted: false,
+          choiceFilled: false,
+          choiceLanded: false,
+          choiceControlOpened: false,
+          choiceUnreadable: false,
+          choiceRefused: false,
+          choiceStateKind: 'not_read',
+          outcome: 'started'
+        } : null;
+        if (actionDiagnostic) actionDiagnostics.push(actionDiagnostic);
         // See fillTargetWithin. The selector is allowed to name the question rather than the
         // control, because for one shape of control that is the only name it has.
         const target = await fillTargetWithin(locator);
         if (!target) {
+          if (actionDiagnostic) actionDiagnostic.outcome = 'target_unresolved';
           const message = 'the selector ' + action.selector
             + ' does not name a control Litos can type into, and the block it names holds no single field';
           if (action.label) skipped.push(action.label + ': ' + message);
@@ -6976,6 +7006,15 @@ const { chromium } = require('playwright');
         const targetInChoiceShell = fillShape.tag === 'input' && await target.evaluate((element) => Boolean(
           element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
         )).catch(() => false);
+        if (actionDiagnostic) {
+          actionDiagnostic.targetResolved = true;
+          actionDiagnostic.targetVisible = await target.isVisible().catch(() => false);
+          actionDiagnostic.targetTag = ['input', 'select', 'textarea', 'button', 'div'].includes(fillShape.tag)
+            ? fillShape.tag
+            : 'other';
+          actionDiagnostic.targetInChoiceShell = targetInChoiceShell;
+          actionDiagnostic.targetPlaceholderSignal = /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(fillShape.placeholder);
+        }
         /* Greenhouse also renders a role-less custom select whose durable #question_<digits>
          * selector can name either the wrapper or the inner search input. The live Jump Trading
          * degree control names the input while its Select placeholder is a sibling in the exact
@@ -6986,6 +7025,9 @@ const { chromium } = require('playwright');
         const greenhouseQuestionLabel = greenhouseQuestionId
           ? page.locator('label[for="' + greenhouseQuestionId + '"]').first()
           : null;
+        const greenhouseQuestionLabelCount = greenhouseQuestionLabel
+          ? await greenhouseQuestionLabel.count().catch(() => 0)
+          : 0;
         const greenhouseLabelledQuestion = greenhouseQuestionLabel
           ? greenhouseQuestionLabel.locator(
             'xpath=ancestor::*[(self::div or self::fieldset) and .//*[@id="' + greenhouseQuestionId + '"]][1]'
@@ -6994,19 +7036,32 @@ const { chromium } = require('playwright');
         const greenhouseLabelledQuestionCount = greenhouseLabelledQuestion
           ? await greenhouseLabelledQuestion.count().catch(() => 0)
           : 0;
+        const locatorChoicePlaceholderCount = greenhouseQuestionId
+          ? await locator.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)
+          : 0;
+        const labelChoicePlaceholderCount = greenhouseLabelledQuestionCount > 0
+          ? await greenhouseLabelledQuestion.getByText(
+            /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i
+          ).count().catch(() => 0)
+          : 0;
+        if (actionDiagnostic) {
+          actionDiagnostic.labelCount = greenhouseQuestionLabelCount;
+          actionDiagnostic.labelledQuestionCount = greenhouseLabelledQuestionCount;
+          actionDiagnostic.locatorChoicePlaceholderCount = locatorChoicePlaceholderCount;
+          actionDiagnostic.labelChoicePlaceholderCount = labelChoicePlaceholderCount;
+        }
         const selectorShowsChoicePlaceholder = greenhouseQuestionId && (
           /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i.test(fillShape.placeholder)
-          || (await locator.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)) > 0
-          || (greenhouseLabelledQuestionCount > 0
-            && (await greenhouseLabelledQuestion.getByText(
-              /^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i
-            ).count().catch(() => 0)) > 0)
+          || locatorChoicePlaceholderCount > 0
+          || labelChoicePlaceholderCount > 0
         );
         const targetInGreenhouseQuestionChoice = fillShape.tag === 'input'
           && Boolean(selectorShowsChoicePlaceholder);
         if (fillShape.tag === 'select') {
+          if (actionDiagnostic) actionDiagnostic.route = 'native_select';
           const selected = await selectNativeOption(target, action.value || '');
           if (!selected) {
+            if (actionDiagnostic) actionDiagnostic.outcome = 'native_option_unmatched';
             if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
             continue;
           }
@@ -7015,11 +7070,15 @@ const { chromium } = require('playwright');
           // rendered selectedIndex on a later tick, and this used to read verifyFilled exactly once.
           if (action.label && await settleVerified(() => verifyFilled(target, action.value || ''))) filledFields.push(action.label);
           else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
+          if (actionDiagnostic) actionDiagnostic.outcome = filledFields.includes(action.label)
+            ? 'native_committed'
+            : 'native_uncommitted';
           continue;
         }
         if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true'
           || fillShape.ariaHaspopup === 'listbox' || fillShape.ariaAutocomplete === 'list'
           || targetInChoiceShell || targetInGreenhouseQuestionChoice) {
+          if (actionDiagnostic) actionDiagnostic.route = 'custom_choice';
           let container;
           if (targetInChoiceShell) {
             container = target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]');
@@ -7034,16 +7093,29 @@ const { chromium } = require('playwright');
           // labelless action skipped the verification entirely and, with it, the withdrawal that
           // takes a refused row back off the form. Nothing about whether the caller named a field
           // changes what this run owes the form.
-          if (await fillCustomChoice(
+          if (actionDiagnostic) actionDiagnostic.choiceAttempted = true;
+          const choiceFilled = await fillCustomChoice(
             container,
             action.value || '',
             targetInChoiceShell || targetInGreenhouseQuestionChoice ? target : null,
-          )) {
+          );
+          if (actionDiagnostic) {
+            actionDiagnostic.choiceFilled = choiceFilled;
+            actionDiagnostic.choiceControlOpened = lastChoiceControlOpened;
+            actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
+            actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
+          }
+          if (choiceFilled) {
             const landed = await choiceLanded(
               container,
               action.value || '',
               targetInGreenhouseQuestionChoice ? target : null,
             );
+            if (actionDiagnostic) {
+              actionDiagnostic.choiceLanded = landed;
+              actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
+              actionDiagnostic.outcome = landed ? 'choice_committed' : 'choice_uncommitted';
+            }
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -7058,7 +7130,18 @@ const { chromium } = require('playwright');
           // form both Discipline candidates were reported filled and the employer's own validator
           // then called the field empty. A choice we could not make belongs to the applicant.
           const state = await readChoiceState(container);
+          if (actionDiagnostic) {
+            actionDiagnostic.choiceStateKind = ['chosen', 'empty', 'unknown'].includes(state.kind)
+              ? state.kind
+              : 'other';
+            actionDiagnostic.choiceControlOpened = lastChoiceControlOpened;
+            actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
+            actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
+          }
           if (state.kind !== 'unknown') {
+            if (actionDiagnostic) actionDiagnostic.outcome = state.kind === 'chosen'
+              ? 'choice_already_answered'
+              : 'choice_unmatched';
             if (action.label) {
               skipped.push(state.kind === 'chosen'
                 ? action.label + ': left the answer already on the form, "' + clean(state.value) + '"'
@@ -7072,12 +7155,17 @@ const { chromium } = require('playwright');
            silent line in skipped, and the field reads as attempted. The choice was not made and
            it belongs to the applicant, said in the same words the readable-state arm uses. */
         if (await target.evaluate(isBareOpener).catch(() => false)) {
+          if (actionDiagnostic) {
+            actionDiagnostic.route = 'bare_opener';
+            actionDiagnostic.outcome = 'choice_unmatched';
+          }
           if (action.label) skipped.push(action.label + ': ' + unmatchedReason(action.value || ''));
           continue;
         }
         // What actually goes in the box. Identical to action.value for everything except a phone
         // field whose own group already carries this number's dial code; see phoneValueForField.
         const fillValue = await phoneValueForField(target, action.value || '');
+        if (actionDiagnostic) actionDiagnostic.route = 'text';
         await target.fill(fillValue || '');
         await target.evaluate((element) => {
           element.dispatchEvent(new Event('input', { bubbles: true }));
@@ -7085,7 +7173,10 @@ const { chromium } = require('playwright');
         }).catch(() => undefined);
         // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
         // phone against the international form would report a correct fill as a failed one.
-        if (action.label && await verifyFilled(target, fillValue || '')) filledFields.push(action.label);
+        if (action.label && await verifyFilled(target, fillValue || '')) {
+          filledFields.push(action.label);
+          if (actionDiagnostic) actionDiagnostic.outcome = 'text_committed';
+        }
         /* WHAT WAS WRITTEN AND WHAT THE FIELD HOLDS, because the bare sentence cannot be acted on.
          *
          * "value did not persist after fill" says a write was lost and nothing else, and on
@@ -7105,6 +7196,7 @@ const { chromium } = require('playwright');
          * going back to the applicant's own dashboard, and a run that SUCCEEDS still records nothing
          * but the label. */
         else if (action.label) {
+          if (actionDiagnostic) actionDiagnostic.outcome = 'text_uncommitted';
           const held = await target.evaluate((element) => (
             'value' in element ? String(element.value || '') : (element.textContent || '')
           )).catch(() => '');
@@ -7699,7 +7791,7 @@ const { chromium } = require('playwright');
       }
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {

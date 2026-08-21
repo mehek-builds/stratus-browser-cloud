@@ -1194,6 +1194,39 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'a Greenhouse question id without a Select placeholder must remain a text fill');
   assert.deepEqual(rolelessQuestionChoice.filledFields.sort(), ['jump_degree', 'jump_explanation'],
     'both paths must report only after their values persist');
+  const degreeDiagnostic = rolelessQuestionChoice.actionDiagnostics.find(
+    (entry) => entry.controlId === 'question_67595191'
+  );
+  assert.deepEqual(degreeDiagnostic, {
+    controlId: 'question_67595191',
+    locatorCount: 1,
+    targetResolved: true,
+    targetVisible: true,
+    targetTag: 'input',
+    targetInChoiceShell: false,
+    targetPlaceholderSignal: false,
+    labelCount: 1,
+    labelledQuestionCount: 1,
+    locatorChoicePlaceholderCount: 0,
+    labelChoicePlaceholderCount: 1,
+    route: 'custom_choice',
+    choiceAttempted: true,
+    choiceFilled: true,
+    choiceLanded: true,
+    choiceControlOpened: true,
+    choiceUnreadable: false,
+    choiceRefused: false,
+    choiceStateKind: 'not_read',
+    outcome: 'choice_committed'
+  }, 'the live-shaped route must explain its boundary using only structural facts');
+  const explanationDiagnostic = rolelessQuestionChoice.actionDiagnostics.find(
+    (entry) => entry.controlId === 'question_67595192'
+  );
+  assert.equal(explanationDiagnostic.route, 'text');
+  assert.equal(explanationDiagnostic.outcome, 'text_committed');
+  const serializedDiagnostics = JSON.stringify(rolelessQuestionChoice.actionDiagnostics);
+  assert.doesNotMatch(serializedDiagnostics, /Bachelor's Degree|What degree are you currently pursuing|No explanation needed/,
+    'diagnostics must never carry answers, option labels, or employer question text');
 
   const answered = await replay([
     { type: 'click', selector: '#discipline', label: 'discipline_open', optional: true },
