@@ -7254,9 +7254,47 @@ const { chromium } = require('playwright');
         }).catch(() => undefined);
         // Verified against what was WRITTEN, not against what was asked for. Checking a stripped
         // phone against the international form would report a correct fill as a failed one.
-        if (action.label && await verifyFilled(target, fillValue || '')) {
-          filledFields.push(action.label);
+        let textPersisted = await verifyFilled(target, fillValue || '');
+        /* A provider-owned role-less search input can hold the typed query long enough for one
+         * immediate read, then clear it when the custom selector repaints. The live Jump degree
+         * control did exactly that: the runner reported text_committed, while the screenshot and
+         * Greenhouse validator both showed Select. Only exact #question_<digits> inputs pay this
+         * bounded stability read. When the text disappears, the same exact control gets one scoped
+         * chooser attempt and must pass the ordinary committed-choice verifier before it counts. */
+        if (textPersisted && greenhouseQuestionId && fillShape.tag === 'input') {
+          await page.waitForTimeout(650);
+          textPersisted = await verifyFilled(target, fillValue || '');
+        }
+        if (textPersisted) {
+          if (action.label) filledFields.push(action.label);
           if (actionDiagnostic) actionDiagnostic.outcome = 'text_committed';
+        } else if (greenhouseQuestionId && fillShape.tag === 'input') {
+          const rescueContainer = greenhouseLabelledQuestionCount > 0
+            ? greenhouseLabelledQuestion
+            : locator;
+          if (actionDiagnostic) {
+            actionDiagnostic.route = 'text_then_choice';
+            actionDiagnostic.choiceAttempted = true;
+          }
+          const choiceFilled = await fillCustomChoice(rescueContainer, action.value || '', target);
+          const landed = choiceFilled
+            ? await choiceLanded(rescueContainer, action.value || '', target)
+            : false;
+          if (actionDiagnostic) {
+            actionDiagnostic.choiceFilled = choiceFilled;
+            actionDiagnostic.choiceLanded = landed;
+            actionDiagnostic.choiceControlOpened = lastChoiceControlOpened;
+            actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
+            actionDiagnostic.choiceRefused = Boolean(lastChoiceRefusal);
+            actionDiagnostic.outcome = landed ? 'choice_committed' : 'choice_uncommitted';
+          }
+          if (action.label && landed) filledFields.push(action.label);
+          else if (action.label) {
+            skipped.push(action.label + ': '
+              + (lastChoiceUnreadable
+                ? unreadableChoiceReason
+                : (lastChoiceRefusal || 'value did not persist after fill')));
+          }
         }
         /* WHAT WAS WRITTEN AND WHAT THE FIELD HOLDS, because the bare sentence cannot be acted on.
          *
@@ -7276,7 +7314,7 @@ const { chromium } = require('playwright');
          * Both sides truncated, and only ever on the failure path: this is the applicant's own data
          * going back to the applicant's own dashboard, and a run that SUCCEEDS still records nothing
          * but the label. */
-        else if (action.label) {
+        else if (action.label && !textPersisted) {
           if (actionDiagnostic) actionDiagnostic.outcome = 'text_uncommitted';
           const held = await target.evaluate((element) => (
             'value' in element ? String(element.value || '') : (element.textContent || '')
