@@ -5741,46 +5741,39 @@ const { chromium } = require('playwright');
               return Boolean(element.querySelector?.('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]'));
             }).catch(() => false);
           } else {
-            await target.evaluate((element) => {
+            answerPreserved = await target.evaluate((element) => {
+              /* A Select2 source that reached this generic arm failed the identity checks that
+               * would bind it to one exact rendered opener. Its nonempty source value is not enough
+               * to prove which visible choice the application is carrying. */
+              if (element.classList?.contains('select2-offscreen')) return false;
               element.focus();
               element.dispatchEvent(new Event('input', { bubbles: true }));
               element.dispatchEvent(new Event('change', { bubbles: true }));
               element.blur();
-            }).catch(() => undefined);
+              if (element instanceof HTMLInputElement
+                && (element.type === 'radio' || element.type === 'checkbox')) {
+                if (element.checked) return true;
+                if (!element.name) return false;
+                return [...(element.form || document).querySelectorAll(
+                  'input[name="' + CSS.escape(element.name) + '"]'
+                )].some((peer) => peer.checked);
+              }
+              if (element instanceof HTMLSelectElement
+                || element instanceof HTMLInputElement
+                || element instanceof HTMLTextAreaElement) {
+                return Boolean(String(element.value || '').replace(/\s+/g, ' ').trim());
+              }
+              return true;
+            }).catch(() => false);
           }
           await page.waitForTimeout(150).catch(() => undefined);
-          const stillAffected = !answerPreserved || await scope.evaluate((root, marker) => {
-            const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-            const visible = (node) => {
-              const rect = node.getBoundingClientRect();
-              const style = getComputedStyle(node);
-              return (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
-            };
-            const targetSelector = '[data-litos-required-confirm="' + CSS.escape(marker) + '"]';
-            const element = root.matches?.(targetSelector) ? root : root.querySelector(targetSelector);
-            if (!element) return true;
-            const widget = element.closest(
-              '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
-              + ' [data-field-path], [class*="_fieldEntry_"]'
-            ) || element.parentElement || element;
-            const hasError = [...widget.querySelectorAll('*')].some((node) => {
-              if (node.children.length > 0 || !visible(node)) return false;
-              const text = clean(node.textContent);
-              return text.length <= 160 && /\bis required\b|\brequires an answer\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i.test(text);
-            });
-            const sourceSelector = '[data-litos-required-confirm-source="'
-              + CSS.escape(marker) + '"]';
-            const markedSources = [
-              ...(root.matches?.(sourceSelector) ? [root] : []),
-              ...root.querySelectorAll(sourceSelector)
-            ];
-            const validationSources = markedSources.length > 0 ? markedSources : [element];
-            const invalid = validationSources.some((control) => Boolean(
-              (control.validity && control.validity.valueMissing)
-              || control.getAttribute?.('aria-invalid') === 'true'
-            ));
-            return invalid || hasError;
-          }, candidate.marker).catch(() => true);
+          /* Replay answers the narrow question this per-control attempt owns: did the exact answer
+           * survive the employer control's commit lifecycle? Greenhouse can retain aria-invalid and
+           * required copy after that answer survives, including on every filled custom question at
+           * once. Treating those retained markers as a second verdict here contradicts the exhaustive
+           * scoped readiness pass below, which already distinguishes a real empty control from stale
+           * validation copy and separately blocks runner-marked unverified choices. */
+          const stillAffected = !answerPreserved;
           if (!stillAffected) { outcome = 'confirmed'; break; }
           if (attemptNumber + 1 < maxAttempts) retries = 1;
         }

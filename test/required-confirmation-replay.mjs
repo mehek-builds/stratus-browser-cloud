@@ -30,6 +30,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
 <div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div><div id="react-commits">0</div><div id="react-option-clicks">0</div><div id="react-multi-values"></div>
 <script>
   function clear(id) {
+    if (location.search.includes('sticky-required-copy')) return;
     var control = document.getElementById(id);
     control.setAttribute('aria-invalid', 'false');
     var error = control.closest('.field, fieldset').querySelector('span');
@@ -61,6 +62,10 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     document.getElementById('react').setAttribute('aria-invalid', 'false');
     document.getElementById('react-hidden').setAttribute('aria-invalid', 'true');
     document.querySelector('.select__container > span').remove();
+  }
+  if (location.search.includes('marked-unverified-choice')) {
+    document.getElementById('question_123[]').closest('.field')
+      .setAttribute('data-litos-unverified-choice', 'unreadable');
   }
   document.getElementById('newsletter-email').addEventListener('blur', function () { clear('newsletter-email'); });
   ['text', 'email-field', 'phone-field', 'essay', 'date'].forEach(function (id) {
@@ -372,8 +377,10 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
       var control = document.getElementById('custom');
       var selected = this.classList.toggle('_active_test');
       document.getElementById('custom-state').textContent = selected ? 'selected' : 'deselected';
-      control.setAttribute('aria-invalid', 'false');
-      if (control.querySelector('span')) control.querySelector('span').remove();
+      if (!location.search.includes('sticky-required-copy')) {
+        control.setAttribute('aria-invalid', 'false');
+        if (control.querySelector('span')) control.querySelector('span').remove();
+      }
     });
   }
   var submitShape = new URLSearchParams(location.search).get('submit-shape');
@@ -531,6 +538,15 @@ assert.equal(result.extracted.find((entry) => entry.selector === '#newsletter-er
 assert.equal(result.extracted.find((entry) => entry.selector === '#file-state')?.value, 'resume.pdf');
 assert.equal(applicationPass.attempts.find((attempt) => attempt.selector === '#resume')?.outcome, 'already_committed');
 
+const stickyRequiredCopy = await replay('?sticky-required-copy');
+assert.equal(
+  stickyRequiredCopy.extracted.find((entry) => entry.selector === '#submitted')?.value,
+  'yes',
+  'filled controls whose exact answers survive replay must not be blocked by sticky required copy'
+);
+assert.equal(stickyRequiredCopy.requiredFieldConfirmation.status, 'confirmed');
+assert.deepEqual(stickyRequiredCopy.requiredFieldConfirmation.passes[0].unresolved, []);
+
 for (const reviewed of [
   { label: 'Interview Code of Conduct *', answer: 'I agree' },
   { label: 'When did you graduate from High School? *', answer: '2023' }
@@ -546,15 +562,20 @@ for (const reviewed of [
   assert.equal(pass.attempts.filter((attempt) => attempt.fieldType === 'react-select').length, 1);
 }
 
-const refused = await replay('?leave-custom-invalid');
-assert.equal(refused.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
-assert.equal(refused.requiredFieldConfirmation.status, 'blocked');
-assert.equal(refused.submitOutcome.pressed, false, 'a blocked atomic confirmation must not claim a submit attempt');
-assert.equal(refused.requiredFieldConfirmation.passes[0].unresolved.length, 1);
-assert.equal(refused.requiredFieldConfirmation.passes[0].retries, 1);
-assert.equal(refused.requiredFieldConfirmation.passes[0].attempts.find((attempt) => attempt.selector === '#custom')?.attemptCount, 2);
-assert.ok(refused.blockers.some((message) => /Schedule.*could not be confirmed/.test(message)));
-assert.ok(refused.skipped.some((message) => /atomic confirmation blocked submission/.test(message)));
+const stickyCustomValidation = await replay('?leave-custom-invalid');
+assert.equal(stickyCustomValidation.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(stickyCustomValidation.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(stickyCustomValidation.requiredFieldConfirmation.passes[0].unresolved.length, 0);
+assert.equal(stickyCustomValidation.requiredFieldConfirmation.passes[0].attempts.find(
+  (attempt) => attempt.selector === '#custom'
+)?.attemptCount, 1);
+
+const markedUnverifiedChoice = await replay('?marked-unverified-choice');
+assert.equal(markedUnverifiedChoice.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
+assert.equal(markedUnverifiedChoice.requiredFieldConfirmation.status, 'blocked');
+assert.ok(markedUnverifiedChoice.requiredFieldConfirmation.passes[0].unresolved.some(
+  (entry) => /could not be confirmed/.test(entry)
+));
 
 const missingReactOption = await replay('?missing-react-option');
 assert.equal(missingReactOption.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
@@ -641,11 +662,11 @@ assert.equal(hiddenInvalidOnly.requiredFieldConfirmation.passes[0].attempts.filt
 ).length, 1);
 
 const hiddenInvalidStays = await replay('?hidden-invalid-only&keep-hidden-invalid');
-assert.equal(hiddenInvalidStays.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
-assert.equal(hiddenInvalidStays.extracted.find((entry) => entry.selector === '#react-commits')?.value, '2');
+assert.equal(hiddenInvalidStays.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(hiddenInvalidStays.extracted.find((entry) => entry.selector === '#react-commits')?.value, '1');
 assert.equal(hiddenInvalidStays.extracted.find((entry) => entry.selector === '#react-hidden')?.value, 'true');
-assert.equal(hiddenInvalidStays.requiredFieldConfirmation.status, 'blocked');
-assert.equal(hiddenInvalidStays.requiredFieldConfirmation.passes[0].unresolved.includes('Privacy Statement *'), true);
+assert.equal(hiddenInvalidStays.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(hiddenInvalidStays.requiredFieldConfirmation.passes[0].unresolved.includes('Privacy Statement *'), false);
 
 const select2Actions = [
   ...confirmedSubmitActions,
@@ -734,20 +755,20 @@ assert.equal(
 );
 
 const stickySelect2 = await replay('?select2-case&select2-sticky-invalid', select2Actions);
-assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
-assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-clicks')?.value, '2');
-assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-option-clicks')?.value, '2');
+assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-clicks')?.value, '1');
+assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-option-clicks')?.value, '1');
 assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-decoy-option-clicks')?.value, '0');
-assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '2');
+assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '1');
 assert.equal(stickySelect2.extracted.find((entry) => entry.selector === '#select2-decoy-clicks')?.value, '0');
-assert.equal(stickySelect2.requiredFieldConfirmation.status, 'blocked');
-assert.equal(stickySelect2.requiredFieldConfirmation.passes[0].unresolved.includes('Legacy choice *'), true);
+assert.equal(stickySelect2.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(stickySelect2.requiredFieldConfirmation.passes[0].unresolved.includes('Legacy choice *'), false);
 
 const mismatchedSelect2 = await replay('?select2-case&select2-id-mismatch', select2Actions);
 assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#submitted')?.value, '');
 assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#select2-clicks')?.value, '0');
 assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#select2-option-clicks')?.value, '0');
-assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '2');
+assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '0');
 assert.equal(mismatchedSelect2.extracted.find((entry) => entry.selector === '#select2-decoy-clicks')?.value, '0');
 assert.equal(mismatchedSelect2.requiredFieldConfirmation.status, 'blocked');
 
@@ -768,7 +789,7 @@ for (const openerShape of ['zero', 'hidden', 'two']) {
   assert.equal(rejected.extracted.find((entry) => entry.selector === '#submitted')?.value, '', openerShape);
   assert.equal(rejected.extracted.find((entry) => entry.selector === '#select2-clicks')?.value, '0', openerShape);
   assert.equal(rejected.extracted.find((entry) => entry.selector === '#select2-option-clicks')?.value, '0', openerShape);
-  assert.equal(rejected.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '2', openerShape);
+  assert.equal(rejected.extracted.find((entry) => entry.selector === '#select2-changes')?.value, '0', openerShape);
   assert.equal(rejected.extracted.find((entry) => entry.selector === '#select2-decoy-clicks')?.value, '0', openerShape);
   assert.equal(rejected.requiredFieldConfirmation.status, 'blocked', openerShape);
 }
