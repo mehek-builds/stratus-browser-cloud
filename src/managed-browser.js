@@ -2209,7 +2209,7 @@ const { chromium } = require('playwright');
     // not a candidate however it is named. CLEAR_CONTROL_RE then decides which of these is the clear.
     const CLEAR_CONTROLS = CHOICE_CONTROLS
       + ', [class*="clear"], [class*="close"], [class*="remove"], [class*="deselect"], [class*="reset"], [aria-label], [title]';
-    const fillCustomChoice = async (container, wanted) => {
+    const fillCustomChoice = async (container, wanted, directControl = null) => {
       // Cleared on every call, so the row this function publishes can only ever be the row THIS call
       // clicked. Nothing costs an action here: reading an option's own text is a DOM read, and the
       // ceiling normalizeManagedActions enforces counts queued actions, not round trips.
@@ -2225,7 +2225,11 @@ const { chromium } = require('playwright');
       // function has clicked anything.
       lastChoiceArrival = alreadyAnswered;
       if (alreadyAnswered.kind === 'chosen' && optionMatches(alreadyAnswered.value, wanted)) return true;
-      const controls = container.locator(CHOICE_CONTROLS);
+      /* A provider-owned input id can name a React Select search control even when that input has
+       * no combobox role or popup attribute. In that measured Greenhouse shape, the surrounding
+       * widget classes prove the control kind and the caller can pass the exact input here. Keeping
+       * this explicit avoids widening CHOICE_CONTROLS to every text input inside a question. */
+      const controls = directControl ?? container.locator(CHOICE_CONTROLS);
       // Wait for the menu THIS control owns, then only ever click inside it.
       //
       // The old fallback locator swept the whole page for 'li, [data-value]' and clicked the first
@@ -6880,6 +6884,9 @@ const { chromium } = require('playwright');
           ariaHaspopup: element.getAttribute('aria-haspopup') || '',
           ariaAutocomplete: element.getAttribute('aria-autocomplete') || ''
         })).catch(() => ({ tag: '', role: '', ariaHaspopup: '', ariaAutocomplete: '' }));
+        const targetInChoiceShell = fillShape.tag === 'input' && await target.evaluate((element) => Boolean(
+          element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
+        )).catch(() => false);
         if (fillShape.tag === 'select') {
           const selected = await selectNativeOption(target, action.value || '');
           if (!selected) {
@@ -6894,15 +6901,18 @@ const { chromium } = require('playwright');
           continue;
         }
         if (fillShape.role === 'combobox' || fillShape.ariaHaspopup === 'true'
-          || fillShape.ariaHaspopup === 'listbox' || fillShape.ariaAutocomplete === 'list') {
-          const container = target.locator(
-            'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
-          );
+          || fillShape.ariaHaspopup === 'listbox' || fillShape.ariaAutocomplete === 'list'
+          || targetInChoiceShell) {
+          const container = targetInChoiceShell
+            ? target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]')
+            : target.locator(
+              'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
+            );
           // Read before the label is consulted, never behind it. Written as one short-circuit, a
           // labelless action skipped the verification entirely and, with it, the withdrawal that
           // takes a refused row back off the form. Nothing about whether the caller named a field
           // changes what this run owes the form.
-          if (await fillCustomChoice(container, action.value || '')) {
+          if (await fillCustomChoice(container, action.value || '', targetInChoiceShell ? target : null)) {
             const landed = await choiceLanded(container, action.value || '');
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {

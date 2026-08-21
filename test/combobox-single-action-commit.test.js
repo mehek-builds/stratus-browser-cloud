@@ -79,7 +79,7 @@ function build() {
  * aria-controls. Committing removes the placeholder and renders select__single-value, exactly the
  * nodes readChoiceState reads; Escape drops any uncommitted search text, which is the blur
  * behaviour that made the live typed-but-never-committed attempts end empty. */
-function fixture({ options, portalled = false, renderDelayMs = 400 }) {
+function fixture({ options, portalled = false, renderDelayMs = 400, roleless = false }) {
   return `<!doctype html><html><body>
   <div id="question">
     <label id="q-label">Assessment and proctoring*</label>
@@ -88,8 +88,8 @@ function fixture({ options, portalled = false, renderDelayMs = 400 }) {
         <div class="select__value-container">
           <div class="select__placeholder">Select...</div>
           <div class="select__input-container">
-            <input id="combo" class="select__input" type="text" role="combobox"
-              aria-expanded="false" aria-autocomplete="none" autocomplete="off">
+            <input id="combo" class="select__input" type="text"
+              ${roleless ? '' : 'role="combobox" aria-expanded="false" aria-autocomplete="none"'} autocomplete="off">
           </div>
         </div>
       </div>
@@ -224,6 +224,22 @@ test('the same commit works when the menu is portalled to <body> (the R-076 Remi
   assert.equal(result.landed, true);
   assert.deepEqual(result.clicked, ['I consent to the above.']);
   assert.equal(result.shown, 'I consent to the above.');
+});
+
+test('an exact role-less Greenhouse input commits through its widget shell', async () => {
+  await page.setContent(fixture({
+    options: ["Bachelor's Degree", "Master's Degree", 'PhD'],
+    roleless: true,
+  }));
+  const api = build();
+  const input = page.locator('#combo');
+  const shell = input.locator('xpath=ancestor::*[contains(@class,"select__control")][1]');
+  const filled = await api.fillCustomChoice(shell, "Bachelor's Degree", input);
+  const landed = filled ? await api.choiceLanded(shell, "Bachelor's Degree") : false;
+  assert.equal(filled, true);
+  assert.equal(landed, true);
+  assert.deepEqual(await page.evaluate(() => window.__clicked), ["Bachelor's Degree"]);
+  assert.equal(await page.locator('.select__single-value').textContent(), "Bachelor's Degree");
 });
 
 test('a graded band and a date part commit through the same single attempt', async () => {
