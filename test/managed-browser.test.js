@@ -453,8 +453,15 @@ test('a choice we could not make is reported as the applicant\'s, not as filled'
   // verifyFilled then read it straight back out of that same box and called the field filled while
   // the control still said "Select...". A wrong "filled" is worse than a blank: it is the reason a
   // required-and-empty blocker arrived alongside a filled_fields list that claimed the opposite.
+  //
+  // The refusal used to be gated on `state.kind !== 'unknown'`, which is exactly the shape
+  // readChoiceState reports for every non-react-select combobox (Ashby's homegrown location
+  // autocomplete among them - see ashby-unknown-combobox-refuses-plain-fill.test.js): the guard
+  // never fired for those, and the same plain-fill false success this test was written against
+  // reproduced on a control this one never covered. The gate is gone; 'unknown' refuses exactly
+  // like every other outcome now.
   assert.match(SANDBOX_RUNNER, /const state = await readChoiceState\(container\);/);
-  assert.match(SANDBOX_RUNNER, /if \(state\.kind !== 'unknown'\) \{/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /if \(state\.kind !== 'unknown'\) \{/);
   assert.match(SANDBOX_RUNNER, /left for you to choose/);
 });
 
