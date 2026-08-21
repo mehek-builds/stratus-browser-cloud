@@ -1366,6 +1366,9 @@ const { chromium } = require('playwright');
         kind: 'chosen',
         value: chosen.textContent || '',
         values: (chosenNodes.length > 0 ? chosenNodes : [chosen]).map((node) => node.textContent || ''),
+        multiValue: (chosenNodes.length > 0 ? chosenNodes : [chosen]).every((node) => (
+          String(node.className || '').includes('select__multi-value__label')
+        )),
         semanticValues: (chosenNodes.length > 0 ? chosenNodes : [chosen]).map((node) => (
           node.getAttribute?.('aria-label') || node.getAttribute?.('data-value')
             || node.getAttribute?.('title') || node.textContent || ''
@@ -5560,7 +5563,11 @@ const { chromium } = require('playwright');
         if (!menu || await menu.count() !== 1) return { answerPreserved: false, arrival: before };
         const selectedRows = menu.getByRole('option', { selected: true });
         const selectedCount = await selectedRows.count();
-        const multiValue = await menu.getAttribute('aria-multiselectable').catch(() => null) === 'true';
+        /* Greenhouse's React Select does not consistently publish aria-multiselectable on the
+         * listbox. The rendered multi-value chip is the other widget-owned declaration of the same
+         * shape. It is read before opening, then required to remain a multi-value chip afterwards. */
+        const multiValue = before.multiValue === true
+          || await menu.getAttribute('aria-multiselectable').catch(() => null) === 'true';
         if (multiValue) {
           // Clicking any selected row in a multi-select removes that value. Opening, closing and
           // blurring is enough to replay the field lifecycle, but only if every displayed chip and
@@ -5569,6 +5576,7 @@ const { chromium } = require('playwright');
           const afterValues = (Array.isArray(afterOpen.values) ? afterOpen.values : [afterOpen.value])
             .map((value) => clean(value));
           const stableChips = afterOpen.kind === 'chosen'
+            && afterOpen.multiValue === true
             && afterValues.length === beforeValues.length
             && afterValues.every((value, index) => value === beforeValues[index]);
           if (!stableChips) return { answerPreserved: false, multiValue: true, arrival: before };
@@ -5583,17 +5591,46 @@ const { chromium } = require('playwright');
             || new Set(beforeValues.map((value) => value.toLowerCase())).size !== beforeValues.length) {
             return { answerPreserved: false, multiValue: true, arrival: before };
           }
+          let presentExactRows = 0;
           for (const value of beforeValues) {
             const exactRows = menu.getByRole('option', { name: value, exact: true });
-            if (await exactRows.count() !== 1
-              || !await exactRows.first().isVisible().catch(() => false)) {
+            const exactCount = await exactRows.count();
+            if (exactCount > 1) {
               return { answerPreserved: false, multiValue: true, arrival: before };
             }
+            if (exactCount === 0) continue;
+            if (!await exactRows.first().isVisible().catch(() => false)) {
+              return { answerPreserved: false, multiValue: true, arrival: before };
+            }
+            presentExactRows += 1;
             const submitCapable = await exactRows.first().evaluate((element) => {
               const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
               return Boolean(element.closest(selector) || element.querySelector(selector));
             }).catch(() => true);
             if (submitCapable) return { answerPreserved: false, multiValue: true, arrival: before };
+          }
+          /* React Select commonly hides selected values from the open menu. In that shape the
+           * stable chip is the positive state and the bound listbox proves the control opened. Do
+           * not confuse an empty or still-loading menu with that omission: require at least one
+           * other visible, non-submit option, and reject mixed present/omitted chip evidence. */
+          if (presentExactRows === 0) {
+            const optionRows = menu.getByRole('option');
+            let safeVisibleOptions = 0;
+            for (let index = 0; index < await optionRows.count(); index += 1) {
+              const row = optionRows.nth(index);
+              if (!await row.isVisible().catch(() => false)) continue;
+              const submitCapable = await row.evaluate((element) => {
+                const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+                return Boolean(element.closest(selector) || element.querySelector(selector));
+              }).catch(() => true);
+              if (submitCapable) return { answerPreserved: false, multiValue: true, arrival: before };
+              safeVisibleOptions += 1;
+            }
+            if (safeVisibleOptions === 0) {
+              return { answerPreserved: false, multiValue: true, arrival: before };
+            }
+          } else if (presentExactRows !== beforeValues.length) {
+            return { answerPreserved: false, multiValue: true, arrival: before };
           }
           return { answerPreserved: true, multiValue: true, arrival: before };
         }
@@ -5694,6 +5731,7 @@ const { chromium } = require('playwright');
         let outcome = 'still_requires_answer';
         const maxAttempts = 1 + action.maxRetries;
         let attemptNumber = 0;
+        let reactArrivalValues = null;
         for (; attemptNumber < maxAttempts; attemptNumber += 1) {
           let answerPreserved = true;
           if (fieldType === 'radio') {
@@ -5717,6 +5755,17 @@ const { chromium } = require('playwright');
             if ((await choiceScope.count()) === 1) {
               const replayed = await replayExactReactSelection(target);
               answerPreserved = replayed.answerPreserved;
+              if (replayed.multiValue) {
+                const arrivalValues = (Array.isArray(replayed.arrival?.values)
+                  ? replayed.arrival.values : [replayed.arrival?.value]
+                ).map((value) => clean(value));
+                if (reactArrivalValues === null) {
+                  reactArrivalValues = arrivalValues;
+                } else if (arrivalValues.length !== reactArrivalValues.length
+                  || arrivalValues.some((value, index) => value !== reactArrivalValues[index])) {
+                  answerPreserved = false;
+                }
+              }
               if (answerPreserved && !replayed.multiValue) {
                 answerPreserved = await choiceLanded(choiceScope, replayed.semanticAnswer).catch(() => false);
                 if (!answerPreserved) {
