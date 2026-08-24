@@ -38,7 +38,13 @@ export async function authorize(request, response, env = process.env, verifyOidc
 
 export function sendError(response, error) {
   const status = Number(error?.status) || 500;
-  response.status(status).json({ error: { code: error?.code || 'INTERNAL_ERROR', message: status >= 500 && !error?.code ? 'The request could not be completed' : error.message } });
+  response.status(status).json({
+    error: {
+      code: error?.code || 'INTERNAL_ERROR',
+      message: status >= 500 && !error?.code ? 'The request could not be completed' : error.message,
+      ...(error?.runProgress ? { runProgress: error.runProgress } : {})
+    }
+  });
 }
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 

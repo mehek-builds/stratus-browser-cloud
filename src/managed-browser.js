@@ -163,6 +163,23 @@ const { chromium } = require('playwright');
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
   const startedAt = Date.now();
+  let crashProgress = {
+    version: 1,
+    phase: 0,
+    stage: 'launch',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: null,
+    policyVersion: null
+  };
+  const recordCrashProgress = (patch = {}) => {
+    crashProgress = { ...crashProgress, ...patch };
+    try {
+      fs.writeFileSync('stratus-progress.json', JSON.stringify(crashProgress));
+    } catch { /* failure telemetry must never change the employer action */ }
+  };
+  recordCrashProgress();
   const extractAssertionsCapability = 'extract-assertions-v1';
   const exactPageUrlCapability = 'exact-page-url-v1';
   const atomicSubmitV4Capability = 'atomic-submit-v4';
@@ -9164,6 +9181,12 @@ const { chromium } = require('playwright');
         }
         if (!blocked) {
           armSubmitNetworkWatch();
+          recordCrashProgress({
+            phase,
+            stage: 'submit_activation_started',
+            submitKind: action.submitKind,
+            policyVersion: action.chooserPolicy?.version ?? null
+          });
           let guardResult = null;
           let activationError = null;
           try {
@@ -9204,10 +9227,19 @@ const { chromium } = require('playwright');
             }
             blocked = true;
             finalSubmitPressed = false;
+            recordCrashProgress({ phase, stage: 'submit_blocked', submitPressed: false });
             await finishSubmitTransportGate();
             activationGate = null;
           } else {
             finalSubmitPressed = true;
+            recordCrashProgress({
+              phase,
+              stage: 'submit_released',
+              submitPressed: true,
+              ...(action.submitKind === 'application'
+                ? { applicationSubmitPressed: true }
+                : { verificationSubmitPressed: true })
+            });
           }
         }
       }
@@ -9273,6 +9305,15 @@ const { chromium } = require('playwright');
     let currentInput = input;
     try {
     while (true) {
+    const phaseSubmitAction = (currentInput.actions || []).find((action) => action.type === 'confirmAndSubmit');
+    recordCrashProgress({
+      phase,
+      stage: 'phase_started',
+      ...(phaseSubmitAction ? {
+        submitKind: phaseSubmitAction.submitKind,
+        policyVersion: phaseSubmitAction.chooserPolicy?.version ?? null
+      } : {})
+    });
     assertRequiredCapabilities(currentInput.actions);
     retainedV4SecurityCodeContinuation = false;
     const phaseRequestsAtomicV4 = (currentInput.actions || []).some((action) => (
@@ -10462,13 +10503,31 @@ const { chromium } = require('playwright');
         // Armed BEFORE the click for the same reason finalSubmitPressed is set before the wait: the
         // response worth recording is the one the click itself causes, and a watch attached after
         // the click races the request it exists to see.
-        if (isFinalSubmitAction(action)) armSubmitNetworkWatch();
+        if (isFinalSubmitAction(action)) {
+          armSubmitNetworkWatch();
+          recordCrashProgress({
+            phase,
+            stage: 'submit_activation_started',
+            submitKind: action.securityCode ? 'verification' : 'application',
+            policyVersion: null
+          });
+        }
         await locator.click();
         // RECORDED BEFORE THE WAIT, not after. A submit click that lands and then navigates, times
         // out, or takes the sandbox down with it has still been pressed, and "was the button
         // pressed" is the one fact the applicant's next move depends on. Setting it after the wait
         // would lose it in exactly the case that matters.
-        if (isFinalSubmitAction(action)) finalSubmitPressed = true;
+        if (isFinalSubmitAction(action)) {
+          finalSubmitPressed = true;
+          recordCrashProgress({
+            phase,
+            stage: 'submit_released',
+            submitPressed: true,
+            ...(action.securityCode
+              ? { verificationSubmitPressed: true }
+              : { applicationSubmitPressed: true })
+          });
+        }
         await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
         /* THE PAGE AFTER SEND IS THE ONLY PROOF, SO THE RUN HAS TO STAY AND WATCH IT.
          *
@@ -11808,6 +11867,7 @@ const { chromium } = require('playwright');
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
     fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, ...(finalSubmitChooser ? { finalSubmitChooser } : {}), blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    recordCrashProgress({ phase, stage: 'result_written' });
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
@@ -12240,12 +12300,50 @@ async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
 /** Turn a crash the detached runner recorded into the error it would have thrown in-line. */
 async function throwSandboxRunnerError(sandbox) {
   const buffer = await sandbox.readFileToBuffer({ path: 'stratus-error.json' }).catch(() => null);
+  const progressBuffer = await sandbox.readFileToBuffer({ path: 'stratus-progress.json' }).catch(() => null);
   let message = 'Sandbox browser run failed';
   try {
     const parsed = JSON.parse(buffer.toString('utf8'));
     if (parsed?.message) message = String(parsed.message).slice(0, 500);
   } catch { /* a crash we cannot read is still a crash, and the generic message says so */ }
-  throw Object.assign(new Error(message), { status: 502, code: 'SANDBOX_RUN_FAILED' });
+  let runProgress = null;
+  // A false applicationSubmitPressed value proves no employer transmission only for chooser v4,
+  // whose containment starts before applicant mutation. For v3 it is diagnostic state only.
+  try {
+    const parsed = JSON.parse(progressBuffer.toString('utf8'));
+    const validStage = [
+      'launch', 'phase_started', 'submit_activation_started',
+      'submit_blocked', 'submit_released', 'result_written'
+    ].includes(parsed?.stage);
+    const validSubmitKind = parsed?.submitKind === null
+      || parsed?.submitKind === 'application'
+      || parsed?.submitKind === 'verification';
+    const validPolicyVersion = parsed?.policyVersion === null
+      || parsed?.policyVersion === 3
+      || parsed?.policyVersion === 4;
+    if (parsed?.version === 1
+      && Number.isInteger(parsed?.phase) && parsed.phase >= 0 && parsed.phase <= 1
+      && validStage && typeof parsed?.submitPressed === 'boolean'
+      && typeof parsed?.applicationSubmitPressed === 'boolean'
+      && typeof parsed?.verificationSubmitPressed === 'boolean'
+      && validSubmitKind && validPolicyVersion) {
+      runProgress = {
+        version: 1,
+        phase: parsed.phase,
+        stage: parsed.stage,
+        submitPressed: parsed.submitPressed,
+        applicationSubmitPressed: parsed.applicationSubmitPressed,
+        verificationSubmitPressed: parsed.verificationSubmitPressed,
+        submitKind: parsed.submitKind,
+        policyVersion: parsed.policyVersion
+      };
+    }
+  } catch { /* absent or malformed progress is simply unavailable */ }
+  throw Object.assign(new Error(message), {
+    status: 502,
+    code: 'SANDBOX_RUN_FAILED',
+    ...(runProgress ? { runProgress } : {})
+  });
 }
 
 export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);const required=JSON.parse(requiredJson);if(required.includes('atomic-submit-v4')){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";

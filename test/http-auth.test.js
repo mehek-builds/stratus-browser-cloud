@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorize } from '../api/_http.js';
+import { authorize, sendError } from '../api/_http.js';
 
 function responseRecorder() {
   const output = { statusCode: 200, body: null };
@@ -76,4 +76,29 @@ test('production never widens to the development subject', async () => {
     async (_token, subject) => { subjectSeen = subject; },
   ), true);
   assert.equal(subjectSeen, 'owner:mehek-builds-projects:project:student-outreach-backend:environment:production');
+});
+
+test('managed crash responses expose only the validated bounded run progress', () => {
+  const { output, response } = responseRecorder();
+  const runProgress = {
+    version: 1,
+    phase: 0,
+    stage: 'submit_released',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  sendError(response, Object.assign(new Error('Sandbox browser run failed'), {
+    status: 502,
+    code: 'SANDBOX_RUN_FAILED',
+    runProgress,
+  }));
+  assert.equal(output.statusCode, 502);
+  assert.deepEqual(output.body.error, {
+    code: 'SANDBOX_RUN_FAILED',
+    message: 'Sandbox browser run failed',
+    runProgress,
+  });
 });
