@@ -11,6 +11,12 @@ export default async function handler(request, response) {
     const projectBinding = process.env.VERCEL_PROJECT_ID || process.env.VERCEL_PROJECT_NAME || 'stratus-managed';
     response.status(200).json({ run: await executeManagedRun(request.body, { projectBinding }) });
   } catch (error) {
+    console.error(JSON.stringify({
+      event: 'managed_browser_run_failed',
+      code: error?.code || 'INTERNAL_ERROR',
+      status: Number(error?.status) || 500,
+      runProgress: error?.runProgress || null
+    }));
     sendError(response, error);
   }
 }

@@ -2388,7 +2388,7 @@ test('one unanswered React Select is not reported twice', () => {
  * caller does about it. On origin/main this waits 60 seconds and reports "Managed browser
  * continuation timed out" on a run that requested no continuation of anything.
  */
-function silentSandboxApi({ crash = null, result = null } = {}) {
+function silentSandboxApi({ crash = null, result = null, progress = null } = {}) {
   const template = { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
   const calls = [];
   const forkCalls = [];
@@ -2398,6 +2398,7 @@ function silentSandboxApi({ crash = null, result = null } = {}) {
     async runCommand(command, args) {
       if (typeof command === 'object') {
         if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+        if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify(progress)));
         if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(result)));
         return { exitCode: null };
       }
@@ -2472,7 +2473,17 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
 });
 
 test('a detached runner that crashes reports the crash, not a timeout', async () => {
-  const fake = silentSandboxApi({ crash: 'page.goto: net::ERR_CONNECTION_REFUSED' });
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'submit_released',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  const fake = silentSandboxApi({ crash: 'page.goto: net::ERR_CONNECTION_REFUSED', progress });
   await assert.rejects(
     executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
@@ -2481,9 +2492,46 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
       // too long" after the full budget - a wrong cause and a slow one.
       assert.equal(error.code, 'SANDBOX_RUN_FAILED');
       assert.match(error.message, /ERR_CONNECTION_REFUSED/);
+      assert.deepEqual(error.runProgress, progress);
       return true;
     }
   );
+});
+
+test('malformed crash progress is not returned as submit evidence', async () => {
+  const fake = silentSandboxApi({
+    crash: 'page crashed',
+    progress: {
+      version: 1,
+      phase: 0,
+      stage: 'submit_released',
+      submitPressed: 'yes',
+      applicationSubmitPressed: true,
+      verificationSubmitPressed: false,
+      submitKind: 'application',
+      policyVersion: 4,
+      applicantAnswer: 'must never cross the boundary',
+    },
+  });
+  await assert.rejects(
+    executeSandboxRun(
+      { url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+      { sandboxApi: fake.api, urlValidator: urlOnly },
+    ),
+    (error) => {
+      assert.equal(error.code, 'SANDBOX_RUN_FAILED');
+      assert.equal('runProgress' in error, false);
+      return true;
+    },
+  );
+});
+
+test('the runner checkpoints only bounded submit progress around activation and result writes', () => {
+  assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
+  assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
+  assert.match(SANDBOX_RUNNER, /finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*applicationSubmitPressed: true/);
+  assert.match(SANDBOX_RUNNER, /fs\.writeFileSync\('stratus-result-' \+ phase[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}\)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /recordCrashProgress\([^)]*(?:value|text|file|email|phone|name):/i);
 });
 
 test('the runner decides whether a continuation is held open, not the caller\'s text sweep', async () => {
@@ -2530,7 +2578,10 @@ test('the runner reads the submit outcome off the page and reports it', () => {
   );
   // Only on a run that pressed the button, and the press is recorded before the wait that can lose
   // it. "Was it pressed" is the fact the applicant's next move depends on.
-  assert.match(SANDBOX_RUNNER, /if \(isFinalSubmitAction\(action\)\) finalSubmitPressed = true;/);
+  assert.match(
+    SANDBOX_RUNNER,
+    /if \(isFinalSubmitAction\(action\)\) \{\n\s*finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*submitPressed: true,[\s\S]*applicationSubmitPressed: true[\s\S]*\}\);\n\s*\}/,
+  );
   assert.match(SANDBOX_RUNNER, /const submitOutcome = finalSubmitPressed/);
   // Body text alone cannot confirm anything while the form is still sitting there filled.
   assert.match(SANDBOX_RUNNER, /if \(!formStillPresent && CONFIRMED_TEXT\.test\(body\)\)/);
