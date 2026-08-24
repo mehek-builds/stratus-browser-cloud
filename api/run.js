@@ -1,4 +1,4 @@
-import { applyApiHeaders, authorize, requireMethod, sendError } from './_http.js';
+import { applyApiHeaders, authorize, privateErrorDiagnostic, requireMethod, sendError } from './_http.js';
 import { executeManagedRun } from '../src/managed-browser.js';
 
 export const config = { maxDuration: 300 };
@@ -15,6 +15,7 @@ export default async function handler(request, response) {
       event: 'managed_browser_run_failed',
       code: error?.code || 'INTERNAL_ERROR',
       status: Number(error?.status) || 500,
+      diagnostic: privateErrorDiagnostic(error),
       runProgress: error?.runProgress || null
     }));
     sendError(response, error);
