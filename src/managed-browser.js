@@ -11,19 +11,34 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
 
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
+export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
 
-export const ATOMIC_SUBMIT_POLICY = Object.freeze({
+export const ATOMIC_SUBMIT_POLICY_V3 = Object.freeze({
   name: 'litos-final-submit',
   version: 3,
   finalPattern: '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|^\\s*senden\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)',
   exclusionPattern: '(?:\\b(?:apply|continue|autofill|import|sign\\s?in|log\\s?in)(?:\\s+with)?\\s+(?:linkedin|indeed|google|facebook|apple)\\b|\\b(?:apply|submit|send|autofill|sign\\s?in|log\\s?in|continue|register|import)\\b(?:\\s+\\w+){0,4}\\s+(?:with|using|via|from)\\s+(?!(?:the\\s+|your\\s+|my\\s+|a\\s+|an\\s+)?(?:attachments?|resumes?|cvs?|cover\\s+letters?|documents?|files?|e-?signature|profiles?|accounts?|saved\\s+(?:details|information))\\b)|\\bquick apply\\b|\\bone[-\\s]?click apply\\b|\\bpowered\\s+by\\b|^\\s*(?:continue|next|start(?:\\s+application)?|complete|finish|review\\s+(?:and\\s+submit|application)|save\\s+and\\s+continue)\\s*$|\\bapplication\\s+(?:feedback|survey|issue|question|review|experience)\\b|\\bfeedback\\s+on\\s+your\\s+application\\b|^(?!.*\\bapplication\\b).*\\b(?:feedback|request|ticket|comment|search|report|question|issue|review|rating|survey|contact|bug)\\b)',
   grammarHash: '9bd60803e7a713555132b6740e9765599ba975e75f803f436841dbc6d340091e'
 });
-const atomicSubmitGrammarHash = crypto.createHash('sha256')
-  .update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`)
-  .digest('hex');
-if (atomicSubmitGrammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash) {
-  throw new Error('Atomic submit chooser grammar hash mismatch');
+export const ATOMIC_SUBMIT_POLICY_V4 = Object.freeze({
+  name: 'litos-final-submit',
+  version: 4,
+  finalPattern: '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*send\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|^\\s*senden\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)',
+  exclusionPattern: ATOMIC_SUBMIT_POLICY_V3.exclusionPattern,
+  grammarHash: 'ee6697971965f0ab360f77da88d935a58b0b7af8ea412ad5d5b3813e9cc11263'
+});
+export const ATOMIC_SUBMIT_POLICY = ATOMIC_SUBMIT_POLICY_V3;
+const ATOMIC_SUBMIT_POLICIES = Object.freeze({
+  3: ATOMIC_SUBMIT_POLICY_V3,
+  4: ATOMIC_SUBMIT_POLICY_V4
+});
+for (const policy of Object.values(ATOMIC_SUBMIT_POLICIES)) {
+  const atomicSubmitGrammarHash = crypto.createHash('sha256')
+    .update(`${policy.finalPattern}\n${policy.exclusionPattern}`)
+    .digest('hex');
+  if (atomicSubmitGrammarHash !== policy.grammarHash) {
+    throw new Error('Atomic submit chooser grammar hash mismatch');
+  }
 }
 /* THE PRE-SUBMIT READINESS GATE'S GRAMMAR, UNDER THE SAME GUARD AS THE CHOOSER'S, AND FOR A REASON
  * THAT HAS ALREADY COST SEVEN PACKETS.
@@ -150,6 +165,7 @@ const { chromium } = require('playwright');
   const startedAt = Date.now();
   const extractAssertionsCapability = 'extract-assertions-v1';
   const exactPageUrlCapability = 'exact-page-url-v1';
+  const atomicSubmitV4Capability = 'atomic-submit-v4';
   const canonicalPageUrl = (value) => {
     const parsed = new URL(value);
     parsed.hash = '';
@@ -160,17 +176,81 @@ const { chromium } = require('playwright');
       .filter((action) => action.type === 'requireCapability')
       .map((action) => action.value);
     const unsupported = required.filter((capability) => capability !== extractAssertionsCapability
-      && capability !== exactPageUrlCapability);
+      && capability !== exactPageUrlCapability
+      && capability !== atomicSubmitV4Capability);
     if (unsupported.length > 0) {
       throw new Error('Unsupported required runner capability: ' + unsupported.join(', '));
+    }
+    const v4Submit = (actions || []).find((action) => (
+      action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+    ));
+    if (v4Submit) {
+      const exactCapability = (actions || []).find((action) => (
+        action.type === 'requireCapability' && action.value === exactPageUrlCapability
+      ));
+      const atomicV4Capabilities = (actions || []).filter((action) => (
+        action.type === 'requireCapability' && action.value === atomicSubmitV4Capability
+      ));
+      if (!exactCapability || !exactCapability.expectedPageUrl || !v4Submit.expectedPageUrl
+        || exactCapability.expectedPageUrl !== v4Submit.expectedPageUrl) {
+        throw new Error('Atomic submit chooser v4 requires one matching exact employer page URL capability');
+      }
+      if (atomicV4Capabilities.length !== 1 || atomicV4Capabilities[0].optional !== false
+        || !atomicV4Capabilities[0].applicationScopeSelector) {
+        throw new Error('Atomic submit chooser v4 requires one non-optional capability with an exact application form selector');
+      }
     }
   };
   // Reject the contract before Chromium opens or any employer page receives an action.
   assertRequiredCapabilities(input.actions);
+  const retainedAtomicV4Run = (input.actions || []).some((action) => (
+    action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+  ));
+  const v4ContainmentToken = retainedAtomicV4Run ? crypto.randomBytes(24).toString('hex') : null;
+  fs.writeFileSync('stratus-runner-capabilities.json', JSON.stringify({
+    protocolVersion: 4,
+    capabilities: [extractAssertionsCapability, exactPageUrlCapability, atomicSubmitV4Capability]
+  }));
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   try {
-    const browserContext = await browser.newContext({ viewport: input.viewport || { width: 1440, height: 900 } });
+    const browserContext = await browser.newContext({
+      viewport: input.viewport || { width: 1440, height: 900 },
+      ...(retainedAtomicV4Run ? {
+      // A service worker can originate a request outside Playwright routing. V4's final-submit
+      // interlock depends on every candidate transport passing through browserContext.route, so a
+      // run that can submit must not inherit or install that bypass.
+      serviceWorkers: 'block'
+      } : {})
+    });
     const page = await browserContext.newPage();
+    let v4PreSubmitTransportContainment = null;
+    if (retainedAtomicV4Run) {
+      const containment = { mode: 'initial_navigation', handler: null };
+      containment.handler = async (route) => {
+        const request = route.request();
+        const method = request.method().toUpperCase();
+        const write = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+        const navigation = request.isNavigationRequest();
+        const mainFrameNavigation = request.isNavigationRequest()
+          && request.frame() === page.mainFrame();
+        if (containment.mode === 'initial_navigation' && mainFrameNavigation
+          && canonicalPageUrl(request.url()) === canonicalPageUrl(input.url)) {
+          return route.fallback();
+        }
+        // Bootstrap assets may load only while page.goto owns the initial navigation. Once that
+        // await returns, every request is blocked until one exact native submit is authorized.
+        // This includes GET query fetches, images, pings and other read-shaped exfiltration.
+        if (containment.mode === 'initial_navigation' && !write && !navigation) return route.fallback();
+        if (containment.mode === 'activation') return route.fallback();
+        return route.abort('blockedbyclient');
+      };
+      await browserContext.route('**/*', containment.handler);
+      if (typeof browserContext.routeWebSocket !== 'function') {
+        throw new Error('Atomic submit v4 requires WebSocket transport containment');
+      }
+      await browserContext.routeWebSocket('**/*', (socket) => socket.close());
+      v4PreSubmitTransportContainment = containment;
+    }
     // A RUN THAT WAS NOT ASKED TO SUBMIT MUST BE STRUCTURALLY UNABLE TO SUBMIT.
     //
     // Measured on 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) reached
@@ -208,18 +288,127 @@ const { chromium } = require('playwright');
         }, true);
         // form.submit() dispatches no submit event at all, by specification, so the listener above
         // cannot see it. requestSubmit() does dispatch one and is therefore already covered.
-        const nativeSubmit = HTMLFormElement.prototype.submit;
         HTMLFormElement.prototype.submit = function litosBlockedSubmit() {
           window.__litosBlockedSubmits += 1;
           return undefined;
         };
-        // Kept referenced so a minifier or a future edit cannot quietly drop the original and leave
-        // no way back for a run that IS allowed to submit.
-        HTMLFormElement.prototype.submit.nativeSubmit = nativeSubmit;
+        // No original-method reference is exposed. A page-visible escape hatch here would hand
+        // employer code a direct bypass around this lock.
       }).catch(() => undefined);
+    } else if (v4ContainmentToken) {
+      /* A V4 RUN IS LOCKED BEFORE THE EMPLOYER'S FIRST SCRIPT RUNS.
+       *
+       * Filling a field is allowed to dispatch input and change because controlled ATS widgets
+       * need those events to commit. It is not allowed to turn either event into an application
+       * submission before the atomic chooser has selected, rebound and revalidated one exact
+       * submitter. The same rule protects emailed-code entry on a retained page. Installing this
+       * capture listener through addInitScript puts it ahead of document, form and framework submit
+       * handlers, while the prototype guard covers form.submit(), which emits no event.
+       *
+       * The random capability stays in this closure. The page can see the frozen control methods,
+       * but cannot unlock them without the runner-owned token. Final activation temporarily admits
+       * one exact form and submitter; its stricter snapshot guard below still decides whether that
+       * activation is current enough to transmit. */
+      await page.addInitScript(({ token }) => {
+        const state = { mode: 'locked', root: null, submitter: null };
+        const refuseConstructor = (name) => {
+          try {
+            Object.defineProperty(globalThis, name, {
+              value: class LitosBlockedTransport {
+                constructor() { throw new DOMException('Blocked by atomic submit containment', 'SecurityError'); }
+              },
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+          } catch { /* the browser-context route remains the network authority */ }
+        };
+        for (const name of [
+          'WebSocket', 'WebTransport', 'EventSource', 'Worker', 'SharedWorker',
+          'RTCPeerConnection', 'webkitRTCPeerConnection'
+        ]) {
+          if (name in globalThis) refuseConstructor(name);
+        }
+        try {
+          Object.defineProperty(Navigator.prototype, 'sendBeacon', {
+            value() { return false; },
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+        } catch { /* browser routing still blocks ping requests */ }
+        for (const name of ['pushState', 'replaceState']) {
+          try {
+            const original = History.prototype[name];
+            Object.defineProperty(History.prototype, name, {
+              value: function litosExactUrlHistory(data, unused, url) {
+                if (url != null) {
+                  const before = new URL(location.href);
+                  const after = new URL(String(url), location.href);
+                  before.hash = '';
+                  after.hash = '';
+                  if (before.href !== after.href) {
+                    throw new DOMException('Blocked by atomic submit URL containment', 'SecurityError');
+                  }
+                }
+                return Reflect.apply(original, this, [data, unused, url]);
+              },
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+          } catch { /* exact URL checks remain fail-closed at every action boundary */ }
+        }
+        const block = (event = null) => {
+          event?.preventDefault();
+          event?.stopImmediatePropagation();
+        };
+        document.addEventListener('submit', (event) => {
+          const exactActivation = state.mode === 'activation'
+            && event.target === state.root
+            && event.submitter === state.submitter
+            && event.submitter;
+          if (!exactActivation) block(event);
+        }, true);
+        const guardedSubmit = function () {
+          // Direct submit has no SubmitEvent and therefore cannot prove the exact submitter. It is
+          // never admitted, including during the one authorized activation. Native default action
+          // does not call this JavaScript property and remains available through the event path.
+          return undefined;
+        };
+        HTMLFormElement.prototype.submit = guardedSubmit;
+        const control = Object.freeze({
+          authorize(provided, root, submitter, usesAssociatedForm) {
+            if (provided !== token || !(root instanceof HTMLFormElement)
+              || !root.isConnected || !submitter?.isConnected) return false;
+            const associated = usesAssociatedForm
+              ? submitter.form === root
+              : submitter.closest?.('form') === root;
+            if (!associated) return false;
+            state.mode = 'activation';
+            state.root = root;
+            state.submitter = submitter;
+            return true;
+          },
+          relock(provided) {
+            if (provided !== token) return false;
+            state.mode = 'locked';
+            state.root = null;
+            state.submitter = null;
+            return true;
+          }
+        });
+        Object.defineProperty(globalThis, '__litosV4SubmissionContainment', {
+          value: control,
+          configurable: false,
+          enumerable: false,
+          writable: false
+        });
+      }, { token: v4ContainmentToken }).catch(() => undefined);
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
+    if (v4PreSubmitTransportContainment) v4PreSubmitTransportContainment.mode = 'locked';
     let requiresExactPageUrl = false;
     let exactPageUrlProof = null;
     // Continuations may keep the exact page and context alive, but they may not turn that context
@@ -228,14 +417,14 @@ const { chromium } = require('playwright');
     if (input.requestContinuation) {
       await browserContext.route('**/*', async (route) => {
         const request = route.request();
-        if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return route.continue();
+        if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return route.fallback();
         try {
           const targetHost = new URL(request.url()).hostname.toLowerCase();
           if (targetHost !== input.allowedHost) return route.abort('blockedbyclient');
         } catch {
           return route.abort('blockedbyclient');
         }
-        return route.continue();
+        return route.fallback();
       });
     }
     const extracted = [];
@@ -250,6 +439,20 @@ const { chromium } = require('playwright');
      * is the form this run was filling. A continuation phase submits the page an earlier phase
      * filled, so clearing this per phase would throw away the evidence exactly when it is needed. */
     const addressedSelectors = [];
+    // V4 bare Send authority is earned only by controls whose mutation completed and was read back.
+    // Handles, values and selectors stay inside this sandbox process and never enter the result.
+    const successfulAddresses = [];
+    const unsuccessfulChoices = [];
+    let applicationScopeProofHandle = null;
+    let applicationScopeProofState = null;
+    let applicationScopeFailureReason = null;
+    let tracksChoiceFailures = false;
+    let mirrorsLegacyChoiceMarkers = false;
+    let retainedV4SecurityCodeContinuation = false;
+    // Submitted field values are bound with a run-random key before any chooser fingerprint can be
+    // returned. This keeps CSRF tokens, applicant ids and low-entropy answers out of deterministic
+    // public hashes while preserving exact equality checks inside this one browser run.
+    let chooserBindingHmacKey = null;
     const skipped = [];
     const discovered = [];
     // Filled by the pre-submit gate, and merged into 'blockers' after the loop. It has to be
@@ -291,6 +494,12 @@ const { chromium } = require('playwright');
      * matters is worse than no witness, so every read is wrapped and a failure to record is
      * silently a missing entry. */
     let submitNetwork = null;
+    let submitTransportDisposition = null;
+    let postSubmitObservationDisposition = null;
+    const markPostSubmitObservationFailed = () => {
+      postSubmitObservationDisposition = postSubmitObservationDisposition
+        || 'post_submit_observation_failed';
+    };
     const armSubmitNetworkWatch = () => {
       if (submitNetwork) return;
       submitNetwork = [];
@@ -320,7 +529,331 @@ const { chromium } = require('playwright');
         } catch (error) { /* a witness must never break the run */ }
       });
     };
+    /* V4'S LAST MUTATION BOUNDARY IS THE REQUEST, NOT THE ELEMENT HANDLE.
+     *
+     * A retained button handle proves which node Playwright will activate, but the page still runs
+     * pointer, focus, click and submit handlers before the browser performs the native default.
+     * Any one of those handlers can retarget the same node, rewrite the form action, or call a
+     * cached native submit method. The only safe release is therefore one exact native document
+     * request whose method, destination, encoding and semantic entry list still match the binding
+     * captured before activation. Every potentially submit-shaped request is held until that
+     * decision. A release uses fallback, never continue, so the continuation host lock remains in
+     * the chain. The route stays installed through receipt settlement so delayed transports cannot
+     * bypass the decision.
+     *
+     * The binding and payload below never enter the result. They live only in this runner process,
+     * for this click, and are discarded with the route. */
+    let activeSubmitTransportGate = null;
+    const armV4PreSubmitTransportContainment = async () => {
+      if (v4PreSubmitTransportContainment) return v4PreSubmitTransportContainment;
+      const containment = { mode: 'locked', handler: null };
+      containment.handler = async (route) => {
+        const request = route.request();
+        if (containment.mode === 'activation') return route.fallback();
+        return route.abort('blockedbyclient');
+      };
+      await browserContext.route('**/*', containment.handler);
+      v4PreSubmitTransportContainment = containment;
+      return containment;
+    };
+    const authorizeV4SubmitTransport = () => {
+      if (!v4PreSubmitTransportContainment) return false;
+      v4PreSubmitTransportContainment.mode = 'activation';
+      return true;
+    };
+    const relockV4SubmitTransport = () => {
+      if (v4PreSubmitTransportContainment) v4PreSubmitTransportContainment.mode = 'locked';
+    };
+    const finishV4PreSubmitTransportContainment = async () => {
+      const containment = v4PreSubmitTransportContainment;
+      if (!containment) return;
+      v4PreSubmitTransportContainment = null;
+      containment.mode = 'locked';
+      // Keep the final lock installed until browserContext closes. Removing the last route while
+      // the page is still alive would give delayed page code a write window during handle cleanup.
+    };
+    const normalizeFormText = (value) => String(value == null ? '' : value).replace(/\r\n|\r|\n/g, '\r\n');
+    const payloadDigest = (binding, entry) => crypto.createHmac(
+      'sha256', Buffer.from(binding.hmacKey, 'base64')
+    )
+      .update(entry.kind === 'file' ? entry.bytes : Buffer.from(normalizeFormText(entry.value), 'utf8'))
+      .digest('hex');
+    const bindActualEntries = (actual, binding) => Array.isArray(actual)
+      ? actual.map((entry) => ({ ...entry, digest: payloadDigest(binding, entry) }))
+      : null;
+    const samePayloadEntries = (actual, expected) => Array.isArray(actual)
+      && Array.isArray(expected)
+      && actual.length === expected.length
+      && actual.every((entry, index) => {
+        const wanted = expected[index];
+        if (!wanted || entry.name !== wanted.name || entry.kind !== wanted.kind) return false;
+        if (entry.kind === 'file') {
+          return entry.filename === wanted.filename
+            && String(entry.contentType).toLowerCase() === String(wanted.contentType).toLowerCase()
+            && entry.size === wanted.size
+            && entry.digest === wanted.digest;
+        }
+        return entry.digest === wanted.digest;
+      });
+    const unquoteDisposition = (value) => String(value || '').replace(/\\([\\"])/g, '$1');
+    const dispositionParameter = (header, name) => {
+      const match = String(header || '').match(new RegExp('(?:^|;)\\s*' + name + '="((?:\\\\.|[^"])*)"', 'i'));
+      return match ? unquoteDisposition(match[1]) : null;
+    };
+    const parseMultipartEntries = (body, contentType) => {
+      if (!Buffer.isBuffer(body) || body.length > 12_000_000) return null;
+      const boundaryMatch = String(contentType || '').match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
+      const boundary = boundaryMatch && (boundaryMatch[1] || boundaryMatch[2]);
+      if (!boundary || boundary.length > 200) return null;
+      const delimiter = Buffer.from('--' + boundary);
+      const entries = [];
+      let cursor = body.indexOf(delimiter);
+      while (cursor !== -1) {
+        cursor += delimiter.length;
+        if (body.subarray(cursor, cursor + 2).toString() === '--') break;
+        if (body.subarray(cursor, cursor + 2).toString() !== '\r\n') return null;
+        cursor += 2;
+        const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), cursor);
+        if (headerEnd === -1) return null;
+        const headers = body.subarray(cursor, headerEnd).toString('utf8');
+        const next = body.indexOf(Buffer.from('\r\n--' + boundary), headerEnd + 4);
+        if (next === -1) return null;
+        const part = body.subarray(headerEnd + 4, next);
+        const disposition = headers.split(/\r\n/).find((line) => /^content-disposition:/i.test(line)) || '';
+        const name = dispositionParameter(disposition, 'name');
+        if (name === null) return null;
+        const filename = dispositionParameter(disposition, 'filename');
+        if (filename !== null) {
+          const typeLine = headers.split(/\r\n/).find((line) => /^content-type:/i.test(line));
+          const contentTypeValue = typeLine ? typeLine.slice(typeLine.indexOf(':') + 1).trim() : 'application/octet-stream';
+          entries.push({
+            name,
+            kind: 'file',
+            filename,
+            contentType: contentTypeValue,
+            size: part.length,
+            bytes: part
+          });
+        } else {
+          entries.push({ name, kind: 'text', value: part.toString('utf8') });
+        }
+        cursor = next + 2;
+      }
+      return entries;
+    };
+    const requestPayloadEntries = (request, binding) => {
+      const method = request.method().toUpperCase();
+      if (method === 'GET') {
+        const parsed = new URL(request.url());
+        return [...parsed.searchParams].map(([name, value]) => ({ name, kind: 'text', value }));
+      }
+      const body = request.postDataBuffer();
+      if (!body) return [];
+      const headers = request.headers();
+      const contentType = String(headers['content-type'] || '');
+      const normalizedContentType = contentType.toLowerCase();
+      if (normalizedContentType.startsWith('application/x-www-form-urlencoded')) {
+        return [...new URLSearchParams(body.toString('utf8'))].map(([name, value]) => ({
+          name,
+          kind: 'text',
+          value
+        }));
+      }
+      if (normalizedContentType.startsWith('multipart/form-data')) return parseMultipartEntries(body, contentType);
+      return null;
+    };
+    const expectedUrlForBinding = (binding) => {
+      const expected = new URL(binding.action);
+      expected.hash = '';
+      return expected;
+    };
+    const requestMatchesNativeBinding = (request, binding) => {
+      if (!request.isNavigationRequest() || request.resourceType() !== 'document'
+        || request.frame() !== page.mainFrame()) {
+        return { allowed: false, reason: 'submit_transport_unpinned' };
+      }
+      if (binding.target !== '_self' || binding.method !== 'POST') {
+        return { allowed: false, reason: 'submit_transport_unsupported' };
+      }
+      if (request.method().toUpperCase() !== binding.method) {
+        return { allowed: false, reason: 'submit_method_changed' };
+      }
+      const actualUrl = new URL(request.url());
+      actualUrl.hash = '';
+      if (input.requestContinuation
+        && actualUrl.hostname.toLowerCase() !== String(input.allowedHost || '').toLowerCase()) {
+        return { allowed: false, reason: 'submit_destination_changed' };
+      }
+      const expectedUrl = expectedUrlForBinding(binding);
+      const sameDestination = binding.method === 'GET'
+        ? actualUrl.origin === expectedUrl.origin && actualUrl.pathname === expectedUrl.pathname
+        : actualUrl.href === expectedUrl.href;
+      if (!sameDestination) {
+        return { allowed: false, reason: 'submit_destination_changed' };
+      }
+      if (binding.method !== 'GET') {
+        const contentType = String(request.headers()['content-type'] || '').toLowerCase();
+        if (!contentType.startsWith(binding.enctype.toLowerCase())) {
+          return { allowed: false, reason: 'submit_enctype_changed' };
+        }
+      }
+      const rawEntries = requestPayloadEntries(request, binding);
+      const actualEntries = bindActualEntries(rawEntries, binding);
+      const expectedEntries = binding.method === 'GET' || binding.enctype === 'application/x-www-form-urlencoded'
+        ? binding.entries.map((entry) => entry.kind === 'file'
+            ? {
+                name: entry.name,
+                kind: 'text',
+                digest: crypto.createHmac('sha256', Buffer.from(binding.hmacKey, 'base64'))
+                  .update(Buffer.from(normalizeFormText(entry.filename), 'utf8')).digest('hex')
+              }
+            : entry)
+        : binding.entries;
+      if (!samePayloadEntries(actualEntries, expectedEntries)) {
+        return { allowed: false, reason: 'submit_payload_changed' };
+      }
+      return { allowed: true, reason: null };
+    };
+    const requestIsRedirectOf = (request, ancestor) => {
+      let current = request.redirectedFrom();
+      while (current) {
+        if (current === ancestor) return true;
+        current = current.redirectedFrom();
+      }
+      return false;
+    };
+    const managedRequestCarriesApplication = (request, binding) => {
+      if (request.resourceType() === 'document') return false;
+      return true;
+    };
+    const routeDecisionForAllowedGate = (gate, request) => {
+      if (request === gate.allowedRequest) return 'release';
+      if (requestIsRedirectOf(request, gate.allowedRequest)) {
+        const method = request.method().toUpperCase();
+        return method === 'GET' || method === 'HEAD' ? 'fallback' : 'abort';
+      }
+      return 'abort';
+    };
+    const settleHeldRoute = async (record, decision) => {
+      try {
+        if (decision === 'release') {
+          /* Playwright's ordinary fallback follows a 307 or 308 inside the same routed request,
+           * before a second handler can reject the preserved application POST. Fetch exactly one
+           * response hop, then give that response to the browser. Write-preserving redirects are
+           * stopped before their Location can receive the body; safe receipt redirects re-enter
+           * the route stack as GET or HEAD. The continuation host constraint is checked above
+           * because route.fetch deliberately bypasses older handlers for this one proven request. */
+          const response = await record.route.fetch({ maxRedirects: 0, timeout: 20_000 });
+          const method = record.request.method().toUpperCase();
+          if (!['GET', 'HEAD', 'OPTIONS'].includes(method)
+            && (response.status() === 307 || response.status() === 308)) {
+            submitTransportDisposition = 'write_redirect_blocked';
+            await record.route.fulfill({
+              status: 409,
+              contentType: 'text/html; charset=utf-8',
+              body: '<!doctype html><meta charset="utf-8"><title>Submission redirect blocked</title>'
+                + '<p>Stratus blocked a write-preserving submit redirect.</p>'
+            });
+          } else {
+            await record.route.fulfill({ response });
+          }
+        } else if (decision === 'fallback') {
+          await record.route.fallback();
+        } else {
+          await record.route.abort('blockedbyclient');
+        }
+      } catch {
+        // A release failure is never converted into an unguarded retry.
+        await record.route.abort('blockedbyclient').catch(() => undefined);
+      }
+    };
+    const armSubmitTransportGate = async (binding) => {
+      if (activeSubmitTransportGate) throw new Error('A submit transport gate is already active');
+      const gate = {
+        binding,
+        terminal: 'armed',
+        reason: null,
+        pending: [],
+        allowedRequest: null,
+        inFlight: 0,
+        handler: null
+      };
+      gate.handler = async (route) => {
+        gate.inFlight += 1;
+        try {
+          const request = route.request();
+          if (gate.terminal === 'blocked' || gate.terminal === 'closed') {
+            return await route.abort('blockedbyclient');
+          }
+          if (gate.terminal === 'allowed') {
+            return await settleHeldRoute({ route, request }, routeDecisionForAllowedGate(gate, request));
+          }
+          const record = { route, request, resolve: null };
+          gate.pending.push(record);
+          const decision = await new Promise((resolve) => { record.resolve = resolve; });
+          return await settleHeldRoute(record, decision);
+        } catch { /* fail-closed resolution happens in the gate owner */ }
+        finally { gate.inFlight -= 1; }
+      };
+      await browserContext.route('**/*', gate.handler);
+      activeSubmitTransportGate = gate;
+      return gate;
+    };
+    const waitForHeldSubmitRequest = async (gate) => {
+      const deadline = Date.now() + 750;
+      // Keep the exact native request held for the whole bounded activation window. Returning as
+      // soon as the document request arrived let a fetch, image or ping queued by the same click
+      // reach this handler one task later, after the native request had already been released.
+      // Nothing can transmit while this gate is armed, so waiting the declared window lets every
+      // competing activation transport veto the native release without exposing applicant data.
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const decideSubmitTransportGate = async (gate, guardResult) => {
+      await waitForHeldSubmitRequest(gate);
+      let reason = guardResult?.status === 'allowed' ? null : (guardResult?.reason || 'submit_activation_unobserved');
+      const native = gate.pending.filter((record) => record.request.resourceType() === 'document');
+      const managedCandidates = gate.pending.filter((record) => (
+        record.request.resourceType() !== 'document'
+        && managedRequestCarriesApplication(record.request, gate.binding)
+      ));
+      if (!reason && managedCandidates.length > 0) reason = 'submit_transport_unpinned';
+      if (!reason && native.length !== 1) {
+        reason = native.length === 0 ? 'submit_request_unobserved' : 'submit_multiple_native_requests';
+      }
+      if (!reason) {
+        const match = requestMatchesNativeBinding(native[0].request, gate.binding);
+        if (!match.allowed) reason = match.reason;
+      }
+      gate.reason = reason;
+      gate.terminal = reason ? 'blocked' : 'allowed';
+      gate.allowedRequest = reason ? null : native[0].request;
+      for (const record of gate.pending) {
+        const decision = reason ? 'abort' : routeDecisionForAllowedGate(gate, record.request);
+        record.resolve?.(decision);
+      }
+      return { status: gate.terminal, reason };
+    };
+    const finishSubmitTransportGate = async () => {
+      const gate = activeSubmitTransportGate;
+      if (!gate) return;
+      activeSubmitTransportGate = null;
+      if (gate.terminal === 'armed') {
+        gate.terminal = 'blocked';
+        gate.reason = gate.reason || 'submit_activation_unobserved';
+      }
+      for (const record of gate.pending) record.resolve?.('abort');
+      const deadline = Date.now() + 1000;
+      while (gate.inFlight > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      gate.terminal = 'closed';
+      relockV4SubmitTransport();
+      await browserContext.unroute('**/*', gate.handler).catch(() => undefined);
+    };
     let requiredFieldConfirmation = null;
+    let finalSubmitChooser = null;
     const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     /* A REFUSAL TO STATE, RECOGNISED BY WHAT IT MEANS RATHER THAN BY HOW IT IS SPELLED.
@@ -865,6 +1398,67 @@ const { chromium } = require('playwright');
       };
       return actual.some((candidate) => optionMatches(candidate, expected) || sameAnswer(candidate));
     };
+    /* Bare-Send authority needs a stricter witness than ordinary fill success. The ordinary text
+     * verifier intentionally treats punctuation-normalized answers as equivalent for form UX, but
+     * that would also treat an applicant answer of "10" as the different answer "10+". Native
+     * selects keep their existing label/value verifier, and phone controls keep the guarded digit
+     * formatting verifier. Every other native text control must preserve punctuation exactly. */
+    const verifySuccessfulAddressIntent = async (field, expected) => {
+      const datePrecision = await dateControlPrecisionOf(field).catch(() => '');
+      if (datePrecision) {
+        const shown = await field.evaluate((element) => String(element.value || '')).catch(() => '');
+        const wanted = calendarPointOf(expected);
+        if (!wanted || wanted.precision === 'year') return false;
+        const asked = wanted.precision === 'month' && datePrecision === 'day'
+          ? { year: wanted.year, month: wanted.month, day: 1, precision: 'day' }
+          : wanted;
+        return sameCalendarPoint(calendarPointOf(shown), asked);
+      }
+      const state = await field.evaluate((element) => {
+        if (element instanceof HTMLSelectElement) {
+          const selected = element.selectedOptions?.[0];
+          return {
+            kind: 'select',
+            actual: selected
+              ? [selected.textContent || '', selected.value || '', selected.label || '']
+              : [element.value || '']
+          };
+        }
+        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+          return { kind: 'unsupported' };
+        }
+        if (element instanceof HTMLInputElement
+          && ['file', 'checkbox', 'radio'].includes(String(element.type || '').toLowerCase())) {
+          return { kind: 'unsupported' };
+        }
+        const telShaped = element instanceof HTMLInputElement && (
+          element.type === 'tel'
+          || (element.getAttribute('inputmode') || '').toLowerCase() === 'tel'
+          || /(?:^|\s|:)tel(?:$|\s|-)/.test((element.getAttribute('autocomplete') || '').toLowerCase())
+          || /(?:\b|_)(?:phone|mobile|telephone|tel)(?:\b|_)/i.test([
+            element.getAttribute('placeholder') || '',
+            element.getAttribute('aria-label') || '',
+            element.getAttribute('name') || '',
+            element.id || '',
+            element.getAttribute('data-input') || '',
+            element.getAttribute('data-testid') || ''
+          ].join(' '))
+        );
+        return { kind: telShaped ? 'tel' : 'strict', actual: String(element.value || '') };
+      }).catch(() => ({ kind: 'unsupported' }));
+      if (state.kind === 'select') {
+        const exactAnswers = answerOptions(expected).map((value) => clean(value).toLowerCase());
+        return (state.actual || []).some((candidate) => (
+          exactAnswers.includes(clean(candidate).toLowerCase()) || declineMatches(candidate, expected)
+        ));
+      }
+      if (state.kind === 'tel') {
+        return verifyFilled(field, expected);
+      }
+      return state.kind === 'strict'
+        && Boolean(clean(state.actual))
+        && clean(state.actual) === clean(expected);
+    };
     /* THE SAME BOUNDED WINDOW choiceLanded GIVES A REACT SELECT'S REPAINT, OFFERED TO EVERY OTHER
      * VERIFICATION IN THIS FILE THAT USED TO READ A CONTROL BACK EXACTLY ONCE.
      *
@@ -1006,6 +1600,528 @@ const { chromium } = require('playwright');
         if (await first.evaluate(isBareOpener).catch(() => false)) return first;
       }
       return null;
+    };
+    /* A Locator is a recipe, not an element. V4 actions cross from discovery to authority once and
+     * retain the exact ElementHandles they found. This small adapter keeps the existing helper
+     * vocabulary while every nested query stays rooted at those exact handles and every item is
+     * cached before a later read or mutation can resolve it again. */
+    const exactLocatorContext = (
+      expectedPageUrl = null,
+      requiredApplicationForm = null,
+      requiredApplicationState = null
+    ) => {
+      const owned = new Set();
+      const assertExactUrl = async () => {
+        if (!expectedPageUrl) return;
+        const browserUrl = canonicalPageUrl(page.url());
+        const documentUrl = await page.evaluate(() => {
+          const current = new URL(location.href);
+          current.hash = '';
+          return current.href;
+        }).catch(() => null);
+        if (browserUrl !== expectedPageUrl || documentUrl !== expectedPageUrl) {
+          throw new Error('Employer page URL changed across an exact applicant action');
+        }
+      };
+      const assertApplicationScope = async () => {
+        if (!requiredApplicationForm || !requiredApplicationState) return;
+        const mismatches = await requiredApplicationForm.evaluate((form, expected) => {
+          if (!(form instanceof HTMLFormElement) || !form.isConnected) return ['form'];
+          const action = new URL(form.getAttribute('action') || location.href, document.baseURI).href;
+          const rawMethod = String(form.getAttribute('method') || '').toLowerCase();
+          const method = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
+          const rawEnctype = String(form.getAttribute('enctype') || '').toLowerCase();
+          const enctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+            ? rawEnctype
+            : 'application/x-www-form-urlencoded';
+          const changed = [];
+          if (action !== expected.resolvedAction) changed.push('action');
+          if (method !== expected.method) changed.push('method');
+          if (String(form.getAttribute('target')
+            || document.querySelector('base[target]')?.getAttribute('target') || '')
+            .toLowerCase() !== expected.target) changed.push('target');
+          if (enctype !== expected.enctype) changed.push('enctype');
+          if (form.hasAttribute('novalidate') !== expected.noValidate) changed.push('noValidate');
+          if (String(form.getAttribute('accept-charset') || '') !== expected.acceptCharset) changed.push('acceptCharset');
+          return changed;
+        }, requiredApplicationState).catch(() => ['form']);
+        if (mismatches.length > 0) {
+          throw new Error('Caller-bound application form semantics changed across an exact applicant action: '
+            + mismatches.join(','));
+        }
+      };
+      const own = (handle) => {
+        if (handle) owned.add(handle);
+        return handle;
+      };
+      const collection = (resolver, authorityResolver = null, semanticBinding = null) => {
+        let cached = null;
+        let authorityCached = null;
+        const handles = async () => {
+          if (cached) return cached;
+          cached = (await resolver().catch(() => [])).filter(Boolean);
+          for (const handle of cached) own(handle);
+          return cached;
+        };
+        const authorityHandles = async () => {
+          if (authorityCached) return authorityCached;
+          authorityCached = authorityResolver ? (await authorityResolver().catch(() => [])).filter(Boolean) : [];
+          for (const handle of authorityCached) own(handle);
+          return authorityCached;
+        };
+        const one = async () => (await handles())[0] || null;
+        const assertBound = async (handle) => {
+          await assertExactUrl();
+          await assertApplicationScope();
+          const roots = await authorityHandles();
+          if (roots.length === 0) return;
+          const current = await handle.evaluate((element, candidates) => (
+            element.isConnected && candidates.some((root) => (
+              root?.isConnected && (root === element || root.contains(element))
+            ))
+          ), roots).catch(() => false);
+          if (!current) throw new Error('Exact action target left its bound scope');
+          if (semanticBinding) {
+            const associated = await handle.evaluate((element, bound) => {
+              if (!element.isConnected || !bound.scope?.isConnected) return false;
+              const form = element.form instanceof HTMLFormElement
+                ? element.form
+                : element.closest?.('form');
+              const action = bound.form
+                ? new URL(bound.form.getAttribute('action') || location.href, document.baseURI).href
+                : '';
+              const rawMethod = bound.form ? String(bound.form.getAttribute('method') || '').toLowerCase() : '';
+              const method = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
+              const rawEnctype = bound.form ? String(bound.form.getAttribute('enctype') || '').toLowerCase() : '';
+              const enctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+                ? rawEnctype
+                : 'application/x-www-form-urlencoded';
+              const sameFormState = !bound.form || !bound.formState || (
+                bound.form.isConnected
+                && action === bound.formState.resolvedAction
+                && method === bound.formState.method
+                && String(bound.form.getAttribute('target')
+                  || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
+                    === bound.formState.target
+                && enctype === bound.formState.enctype
+                && bound.form.hasAttribute('novalidate') === bound.formState.noValidate
+                && String(bound.form.getAttribute('accept-charset') || '') === bound.formState.acceptCharset
+              );
+              return bound.form
+                ? form === bound.form && sameFormState
+                : !form && (element === bound.scope || bound.scope.contains(element));
+            }, {
+              form: semanticBinding.formHandle || null,
+              scope: semanticBinding.scopeHandle,
+              formState: semanticBinding.formState || null
+            }).catch(() => false);
+            if (!associated) throw new Error('Exact action target changed its form association');
+          }
+        };
+        const api = {
+          count: async () => (await handles()).length,
+          first: () => collection(
+            async () => (await handles()).slice(0, 1),
+            authorityHandles,
+            semanticBinding
+          ),
+          nth: (index) => collection(async () => {
+            const all = await handles();
+            const at = index < 0 ? all.length + index : index;
+            return at >= 0 && at < all.length ? [all[at]] : [];
+          }, authorityHandles, semanticBinding),
+          locator: (selector) => collection(async () => {
+            const nested = [];
+            for (const handle of await handles()) {
+              nested.push(...await handle.$$(selector).catch(() => []));
+            }
+            return nested;
+          }, authorityHandles, semanticBinding),
+          getByText: (text, options = {}) => collection(async () => {
+            const matches = [];
+            for (const root of await handles()) {
+              const descendants = await root.$$('*').catch(() => []);
+              for (const candidate of descendants) {
+                const value = String(await candidate.textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+                const matched = text instanceof RegExp
+                  ? (text.lastIndex = 0, text.test(value))
+                  : options.exact ? value === String(text) : value.includes(String(text));
+                if (matched) matches.push(candidate);
+                else await candidate.dispose().catch(() => undefined);
+              }
+            }
+            return matches;
+          }, authorityHandles, semanticBinding),
+          getByRole: (role, options = {}) => collection(async () => {
+            const roots = await handles();
+            if (roots.length === 0) return [];
+            const candidates = await page.getByRole(role, options).elementHandles().catch(() => []);
+            const matches = [];
+            for (const candidate of candidates) {
+              const inside = await candidate.evaluate((element, exactRoots) => (
+                element.isConnected && exactRoots.some((root) => (
+                  root?.isConnected && (root === element || root.contains(element))
+                ))
+              ), roots).catch(() => false);
+              if (inside) matches.push(candidate);
+              else await candidate.dispose().catch(() => undefined);
+            }
+            return matches;
+          }, authorityHandles, semanticBinding),
+          filter: ({ hasText } = {}) => collection(async () => {
+            if (hasText == null) return await handles();
+            const filtered = [];
+            for (const handle of await handles()) {
+              const text = await handle.textContent().catch(() => '');
+              const matched = hasText instanceof RegExp
+                ? (hasText.lastIndex = 0, hasText.test(String(text || '')))
+                : String(text || '').includes(String(hasText));
+              if (matched) filtered.push(handle);
+            }
+            return filtered;
+          }, authorityHandles, semanticBinding),
+          elementHandle: async () => await one(),
+          elementHandles: async () => [...await handles()],
+          evaluate: async (fn, arg) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            return handle.evaluate(fn, arg);
+          },
+          evaluateHandle: async (fn, arg) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            return handle.evaluateHandle(fn, arg);
+          },
+          evaluateAll: async (_fn, arg) => {
+            const all = await handles();
+            if (all.length === 0) return [];
+            for (const handle of all) await assertBound(handle);
+            if (Array.isArray(arg)) {
+              return all[0].evaluate((_, payload) => payload.indices.map(
+                (index) => /\bnotice\b/i.test(payload.nodes[index]?.className || '')
+              ), { nodes: all, indices: arg });
+            }
+            return all[0].evaluate((_, nodes) => {
+              const textOf = (node) => (node.textContent || '').replace(/\s+/g, ' ').trim();
+              const shown = (node) => {
+                if (node.closest('[aria-hidden="true"]')) return false;
+                const view = node.ownerDocument && node.ownerDocument.defaultView;
+                if (view && view.getComputedStyle(node).visibility === 'hidden') return false;
+                return [...node.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
+              };
+              const live = nodes.filter(shown);
+              return live.filter((node) => {
+                if (live.some((other) => other !== node && node.contains(other) && textOf(other) !== textOf(node))) return false;
+                return !live.some((other) => other !== node && other.contains(node) && textOf(other) === textOf(node));
+              }).map((node) => nodes.indexOf(node));
+            }, all);
+          },
+          isVisible: async () => {
+            const handle = await one();
+            if (!handle) return false;
+            await assertBound(handle);
+            return Boolean(await handle.isVisible().catch(() => false));
+          },
+          textContent: async () => {
+            const handle = await one();
+            if (!handle) return null;
+            await assertBound(handle);
+            return handle.textContent();
+          },
+          getAttribute: async (name) => {
+            const handle = await one();
+            if (!handle) return null;
+            await assertBound(handle);
+            return handle.getAttribute(name);
+          },
+          inputValue: async () => {
+            const handle = await one();
+            if (!handle) return '';
+            await assertBound(handle);
+            return handle.inputValue();
+          },
+          click: async (options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.click(options);
+            await assertBound(handle);
+            return result;
+          },
+          fill: async (value, options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.fill(value, options);
+            await assertBound(handle);
+            return result;
+          },
+          type: async (value, options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.type(value, options);
+            await assertBound(handle);
+            return result;
+          },
+          check: async (options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.check(options);
+            await assertBound(handle);
+            return result;
+          },
+          press: async (key, options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.press(key, options);
+            await assertBound(handle);
+            return result;
+          },
+          selectOption: async (values, options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.selectOption(values, options);
+            await assertBound(handle);
+            return result;
+          },
+          setInputFiles: async (files, options) => {
+            const handle = await one();
+            if (!handle) throw new Error('Exact action target is no longer available');
+            await assertBound(handle);
+            const result = await handle.setInputFiles(files, options);
+            await assertBound(handle);
+            return result;
+          }
+        };
+        return api;
+      };
+      const fromHandle = (handle, semanticBinding = null) => collection(
+        async () => handle ? [handle] : [],
+        async () => handle ? [handle] : [],
+        semanticBinding
+      );
+      const dispose = async () => {
+        for (const handle of owned) await handle.dispose().catch(() => undefined);
+        owned.clear();
+      };
+      const assertAuthority = async () => {
+        await assertExactUrl();
+        await assertApplicationScope();
+      };
+      return { own, fromHandle, collection, dispose, assertAuthority };
+    };
+    const exactBoundRootFromLocator = async (locator, context) => {
+      const reference = await locator.evaluateHandle((element) => {
+        const form = element.form instanceof HTMLFormElement
+          ? element.form
+          : element.closest?.('form');
+        const rawMethod = form ? String(form.getAttribute('method') || '').toLowerCase() : '';
+        const rawEnctype = form ? String(form.getAttribute('enctype') || '').toLowerCase() : '';
+        const formState = form ? {
+          resolvedAction: new URL(form.getAttribute('action') || location.href, document.baseURI).href,
+          method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
+          target: String(form.getAttribute('target')
+            || document.querySelector('base[target]')?.getAttribute('target') || '')
+            .toLowerCase(),
+          enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+            ? rawEnctype
+            : 'application/x-www-form-urlencoded',
+          noValidate: form.hasAttribute('novalidate'),
+          acceptCharset: String(form.getAttribute('accept-charset') || '')
+        } : null;
+        return { element, form: form || null, scope: form || element.parentElement || element, formState };
+      }).catch(() => null);
+      if (!reference) return null;
+      const readElement = async (name) => {
+        const property = await reference.getProperty(name).catch(() => null);
+        const handle = property?.asElement?.() || null;
+        if (!handle) await property?.dispose?.().catch(() => undefined);
+        else context.own(handle);
+        return handle;
+      };
+      const handle = await readElement('element');
+      const formHandle = await readElement('form');
+      const scopeHandle = await readElement('scope');
+      const formStateProperty = await reference.getProperty('formState').catch(() => null);
+      const formState = await formStateProperty?.jsonValue?.().catch(() => null);
+      await formStateProperty?.dispose?.().catch(() => undefined);
+      await reference.dispose().catch(() => undefined);
+      return handle && scopeHandle ? { handle, formHandle, scopeHandle, formState } : null;
+    };
+    const exactFillBinding = async (locator, context, rootBinding = null) => {
+      const boundRoot = rootBinding || await exactBoundRootFromLocator(locator, context);
+      const root = boundRoot?.handle || null;
+      if (!root) return null;
+      const targetReference = await root.evaluateHandle((element, input) => {
+        const rootForm = element.form instanceof HTMLFormElement
+          ? element.form
+          : element.closest?.('form');
+        if (!element.isConnected || !input.scope?.isConnected) return null;
+        if (input.form ? rootForm !== input.form : rootForm || !(element === input.scope || input.scope.contains(element))) {
+          return null;
+        }
+        const isBare = (candidate) => (
+          (candidate.getAttribute('role') === 'combobox' || candidate.getAttribute('aria-haspopup') === 'listbox')
+          && !/^(?:INPUT|SELECT|TEXTAREA)$/.test(candidate.tagName)
+          && !candidate.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select:not([aria-hidden="true"])')
+        );
+        let target = null;
+        if (element.matches(input.fillable) || isBare(element)) target = element;
+        else {
+          const inside = [...element.querySelectorAll(input.fillable)];
+          if (inside.length === 1) target = inside[0];
+          else {
+            const openers = [...element.querySelectorAll(input.openers)].filter(isBare);
+            if (openers.length === 1) target = openers[0];
+          }
+        }
+        if (!target) return null;
+        const targetForm = target.form instanceof HTMLFormElement
+          ? target.form
+          : target.closest?.('form');
+        if (input.form ? targetForm !== input.form : targetForm || !(target === input.scope || input.scope.contains(target))) {
+          return null;
+        }
+        return target;
+      }, {
+        fillable: FILLABLE_WITHIN,
+        openers: BARE_OPENER_WITHIN,
+        form: boundRoot.formHandle,
+        scope: boundRoot.scopeHandle
+      }).catch(() => null);
+      const target = targetReference?.asElement?.() || null;
+      if (!target) {
+        await targetReference?.dispose?.().catch(() => undefined);
+        return null;
+      }
+      context.own(target);
+      return {
+        root: context.fromHandle(root, boundRoot),
+        target: context.fromHandle(target, boundRoot),
+        targetHandle: target,
+        rootBinding: boundRoot
+      };
+    };
+    const exactUploadBinding = async (locator, context, rootBinding = null) => {
+      const boundRoot = rootBinding || await exactBoundRootFromLocator(locator, context);
+      const root = boundRoot?.handle || null;
+      if (!root) return null;
+      const targetReference = await root.evaluateHandle((element, bound) => {
+        const rootForm = element.form instanceof HTMLFormElement
+          ? element.form
+          : element.closest?.('form');
+        if (!element.isConnected || !bound.scope?.isConnected) return null;
+        if (bound.form ? rootForm !== bound.form : rootForm || !(element === bound.scope || bound.scope.contains(element))) {
+          return null;
+        }
+        const files = element instanceof HTMLInputElement && element.type === 'file'
+          ? [element]
+          : [...element.querySelectorAll('input[type="file"]')];
+        if (files.length !== 1) return null;
+        const target = files[0];
+        const targetForm = target.form instanceof HTMLFormElement
+          ? target.form
+          : target.closest?.('form');
+        if (bound.form ? targetForm !== bound.form : targetForm || !(target === bound.scope || bound.scope.contains(target))) {
+          return null;
+        }
+        return target;
+      }, { form: boundRoot.formHandle, scope: boundRoot.scopeHandle }).catch(() => null);
+      const target = targetReference?.asElement?.() || null;
+      if (!target) {
+        await targetReference?.dispose?.().catch(() => undefined);
+        return null;
+      }
+      context.own(target);
+      return {
+        target: context.fromHandle(target, boundRoot),
+        targetHandle: target,
+        rootBinding: boundRoot
+      };
+    };
+    const exactFillByBinding = async (action, context) => {
+      const bindingReference = await page.evaluateHandle((input) => {
+        const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const wanted = cleanText(input.wanted).replace(/[\s\u2733*]+$/, '');
+        const exact = wanted
+          ? new RegExp('^\\s*' + wanted.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2733]?\\s*$', 'i')
+          : null;
+        const nodes = [...document.querySelectorAll('body *')].filter((node) => (
+          !['SCRIPT', 'STYLE', 'NOSCRIPT', 'OPTION'].includes(node.tagName)
+        ));
+        const minimal = (test) => nodes.filter((node) => {
+          const text = cleanText(node.textContent);
+          if (!test(text)) return false;
+          return ![...node.children].some((child) => test(cleanText(child.textContent)));
+        });
+        const exactMatches = exact ? minimal((text) => exact.test(text)) : [];
+        const fallbackNeedle = cleanText(wanted || input.raw).toLowerCase();
+        const fallbackMatches = fallbackNeedle
+          ? minimal((text) => text.toLowerCase().includes(fallbackNeedle))
+          : [];
+        const anchor = exactMatches[0] || fallbackMatches[0] || null;
+        if (!anchor) return { container: null, scope: null, field: null, form: null };
+        const hasField = (node) => Boolean(node.querySelector(
+          'textarea, input:not([type="file"]):not([type="hidden"]), select,'
+          + ' [role="combobox"], [aria-haspopup="listbox"]'
+        ));
+        let container = anchor;
+        while (container && container !== document.body) {
+          if ((container instanceof HTMLDivElement || container instanceof HTMLFieldSetElement)
+            && hasField(container)) break;
+          container = container.parentElement;
+        }
+        if (!container || container === document.body) {
+          return { container: null, scope: null, field: null, form: null };
+        }
+        let scope = anchor;
+        while (scope && scope !== container.parentElement) {
+          const group = scope instanceof HTMLFieldSetElement
+            || scope.hasAttribute('data-field-path')
+            || ['radiogroup', 'group'].includes(scope.getAttribute('role') || '')
+            || String(scope.className || '').includes('_fieldEntry_');
+          if (group && scope.querySelector('input[type="radio"], input[type="checkbox"]')) break;
+          scope = scope.parentElement;
+        }
+        if (!scope || scope === container.parentElement) scope = container;
+        const fields = [...scope.querySelectorAll(
+          'textarea, input:not([type="file"]):not([type="hidden"]), select'
+        )];
+        const field = fields[0] || null;
+        const form = field?.form instanceof HTMLFormElement ? field.form : scope.closest?.('form');
+        return { container, scope, field, form: form || null };
+      }, { wanted: action.text || '', raw: action.text || '' }).catch(() => null);
+      if (!bindingReference) return null;
+      const readElement = async (name) => {
+        const reference = await bindingReference.getProperty(name).catch(() => null);
+        const handle = reference?.asElement?.() || null;
+        if (!handle) await reference?.dispose?.().catch(() => undefined);
+        else context.own(handle);
+        return handle;
+      };
+      const containerHandle = await readElement('container');
+      const scopeHandle = await readElement('scope');
+      const fieldHandle = await readElement('field');
+      const formHandle = await readElement('form');
+      await bindingReference.dispose().catch(() => undefined);
+      if (!containerHandle || !scopeHandle) return null;
+      const semanticBinding = { formHandle, scopeHandle };
+      return {
+        container: context.fromHandle(containerHandle, semanticBinding),
+        scope: context.fromHandle(scopeHandle, semanticBinding),
+        field: fieldHandle
+          ? context.fromHandle(fieldHandle, semanticBinding)
+          : context.collection(async () => []),
+        fieldHandle,
+        scopeHandle,
+        formHandle
+      };
     };
     /* A CONTROL THAT DEMANDS A DATE, and how much of one.
      *
@@ -1899,12 +3015,114 @@ const { chromium } = require('playwright');
      * defect above. */
     const CHOICE_SHELL_CLASSES = 'contains(@class,"select__container") or contains(@class,"select-shell")'
       + ' or contains(@class,"select2-container")';
-    const markChoice = async (container, kind) => await container.evaluate(
-      (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
-    ).catch(() => undefined);
-    const unmarkChoice = async (container) => await container.evaluate(
-      (element) => element.removeAttribute('data-litos-unverified-choice')
-    ).catch(() => undefined);
+    const exactElementHandle = async (target) => {
+      if (!target?.evaluateHandle || !target?.count) return null;
+      if (await target.count().catch(() => 0) !== 1) return null;
+      const reference = await target.evaluateHandle((element) => element).catch(() => null);
+      const handle = reference?.asElement?.() || null;
+      if (!handle) await reference?.dispose?.().catch(() => undefined);
+      return handle;
+    };
+    const disposeUnsuccessfulChoice = async (failure) => {
+      await Promise.all([
+        failure?.handle,
+        failure?.formHandle,
+        failure?.ancestryHandle
+      ].filter(Boolean).map((handle) => handle.dispose().catch(() => undefined)));
+    };
+    const unsuccessfulChoiceIndexesFor = async (candidate) => {
+      const pageUrl = canonicalPageUrl(page.url());
+      const entries = unsuccessfulChoices
+        .map((failure, index) => ({ failure, index }))
+        .filter(({ failure }) => failure.pageUrl === pageUrl);
+      if (entries.length === 0) return [];
+      return candidate.evaluate((element, candidates) => candidates
+        .filter((candidateEntry) => candidateEntry.handle === element)
+        .map((candidateEntry) => candidateEntry.index), entries.map(({ failure, index }) => ({
+        index,
+        handle: failure.handle
+      }))).catch(async () => {
+        const indexes = [];
+        for (const { failure, index } of entries) {
+          const same = await failure.handle.evaluate(
+            (existing, current) => existing === current,
+            candidate
+          ).catch(() => false);
+          if (same) indexes.push(index);
+        }
+        return indexes;
+      });
+    };
+    const markChoice = async (container, kind) => {
+      if (!tracksChoiceFailures) {
+        await container.evaluate(
+          (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
+        ).catch(() => undefined);
+        return;
+      }
+      if (mirrorsLegacyChoiceMarkers) {
+        await container.evaluate(
+          (element, payload) => element.setAttribute('data-litos-unverified-choice', payload), kind
+        ).catch(() => undefined);
+      }
+      const handle = await exactElementHandle(container);
+      if (!handle) return;
+      const formReference = await handle.evaluateHandle((element) => (
+        element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')
+      )).catch(() => null);
+      const formHandle = formReference?.asElement?.() || null;
+      if (!formHandle) await formReference?.dispose?.().catch(() => undefined);
+      let ancestryHandle = null;
+      if (!formHandle) {
+        ancestryHandle = await handle.evaluateHandle((element) => {
+          const ancestors = [];
+          let current = element;
+          while (current && current !== document.body && current !== document.documentElement
+            && ancestors.length < 32) {
+            ancestors.push(current);
+            current = current.parentElement;
+          }
+          return ancestors;
+        }).catch(() => null);
+      }
+      const record = {
+        handle,
+        formHandle,
+        ancestryHandle,
+        kind,
+        pageUrl: canonicalPageUrl(page.url())
+      };
+      const existingIndexes = await unsuccessfulChoiceIndexesFor(handle);
+      if (existingIndexes.length > 0) {
+        for (const index of existingIndexes) unsuccessfulChoices[index].kind = kind;
+        await disposeUnsuccessfulChoice(record);
+        return;
+      }
+      unsuccessfulChoices.push(record);
+    };
+    const unmarkChoice = async (container) => {
+      if (!tracksChoiceFailures) {
+        await container.evaluate(
+          (element) => element.removeAttribute('data-litos-unverified-choice')
+        ).catch(() => undefined);
+        return;
+      }
+      if (mirrorsLegacyChoiceMarkers) {
+        await container.evaluate(
+          (element) => element.removeAttribute('data-litos-unverified-choice')
+        ).catch(() => undefined);
+      }
+      const current = await exactElementHandle(container);
+      if (!current) return;
+      const indexes = await unsuccessfulChoiceIndexesFor(current);
+      const removed = [];
+      for (const index of [...indexes].sort((a, b) => b - a)) {
+        const [failure] = unsuccessfulChoices.splice(index, 1);
+        if (failure) removed.push(failure);
+      }
+      await Promise.all(removed.map(disposeUnsuccessfulChoice));
+      await current.dispose().catch(() => undefined);
+    };
     const clearChoiceControl = async (container) => {
       // Two asks in a fixed order, not one union. See the direction paragraph above: a union is
       // sorted in document order, so it hands back the outermost match and a wrapper named like a
@@ -2385,7 +3603,7 @@ const { chromium } = require('playwright');
     // not a candidate however it is named. CLEAR_CONTROL_RE then decides which of these is the clear.
     const CLEAR_CONTROLS = CHOICE_CONTROLS
       + ', [class*="clear"], [class*="close"], [class*="remove"], [class*="deselect"], [class*="reset"], [aria-label], [title]';
-    const fillCustomChoice = async (container, wanted, directControl = null) => {
+    const fillCustomChoice = async (container, wanted, directControl = null, exactContext = null) => {
       /* Some focused contract tests extract this helper in isolation. Keep the production flag
        * optional so the helper retains its standalone contract while the managed runner can pass
        * the one-shot pre-open state through its surrounding scope. */
@@ -2464,6 +3682,29 @@ const { chromium } = require('playwright');
        */
       let declaredMenu = null;
       const readDeclaredMenu = async (control) => {
+        if (exactContext) {
+          const reference = await control.evaluateHandle((element) => {
+            const referenced = element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || '';
+            const id = String(referenced).trim().split(/\s+/)[0] || '';
+            if (id) return document.getElementById(id);
+            if (!element.id) return null;
+            const conventional = document.getElementById(element.id + '-list');
+            return conventional && conventional.getAttribute('role') === 'listbox'
+              && [...conventional.querySelectorAll('[role="option"]')]
+                .some((row) => row.getClientRects().length > 0)
+              ? conventional
+              : null;
+          }).catch(() => null);
+          const handle = reference?.asElement?.() || null;
+          if (!handle) {
+            await reference?.dispose?.().catch(() => undefined);
+            declaredMenu = null;
+          } else {
+            exactContext.own(handle);
+            declaredMenu = exactContext.fromHandle(handle);
+          }
+          return;
+        }
         const owns = await control.evaluate((element) => {
           const referenced = element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || '';
           const id = String(referenced).trim().split(/\s+/)[0] || '';
@@ -2496,7 +3737,7 @@ const { chromium } = require('playwright');
       // inside a listbox or a select2 results panel, never loose in the page.
       const OPTION_NODES = '[role="option"], [class*="select__option"], [role="listbox"] li,'
         + ' [role="listbox"] [class*="option"], .select2-result, .select2-results li, [class*="select2-result"]';
-      const optionsRoot = () => (scopedMenu ?? page).locator(OPTION_NODES);
+      const optionsRoot = () => (scopedMenu ?? (exactContext ? container : page)).locator(OPTION_NODES);
       /* WHERE THE MENU ACTUALLY RENDERED, because a recognised shell is not proof it renders there.
        *
        * R-076, measured on the live DV Trading Greenhouse board (job-boards.greenhouse.io, the
@@ -3828,8 +5069,8 @@ const { chromium } = require('playwright');
      *     the platform-name branch of the detector never fires on Greenhouse and the maxLength-1
      *     group branch is what finds it. That is why the group branch is not a fallback.
      *   - it AUTO-ADVANCES. Its onChange writes the character, joins all eight box values, and calls
-     *     select() on the NEXT box's ref. So one focus and eight keystrokes puts one character in
-     *     each box, and typing eight characters is right rather than typing one and moving on.
+     *     select() on the NEXT box's ref. Every character must still be applied through its exact
+     *     retained box handle, because focus is page-owned state and can be redirected by a handler.
      *   - it also DISTRIBUTES A PASTE from the pasted box rightwards, which is a second correct way
      *     in and needs a real clipboard event to reach; typing needs none, so typing is what this
      *     does.
@@ -3840,21 +5081,74 @@ const { chromium } = require('playwright');
      *     confirmAndSubmitPass filters its candidates on !disabled and would report the form's own
      *     submit as missing.
      *
-     * Focus-and-type first, then per-box filling for a group that does not auto-advance, then the
-     * whole-value fill for a single field.
+     * Each retained box receives its own value through the native input setter and exact event
+     * dispatch. A single field receives the whole value through that same exact-handle path.
      *
      * NEVER GUESSES A CODE. It types the one it was handed or it reports that it could not. */
-    const enterSecurityCode = async (code) => {
-      const marked = await page.evaluate(() => {
+    const enterSecurityCode = async (code, requiredFormHandle = null) => {
+      let detected = null;
+      let boxesProperty = null;
+      let formProperty = null;
+      let parentProperty = null;
+      const boxHandles = [];
+      let formHandle = null;
+      let parentHandle = null;
+      try {
+      detected = await page.evaluateHandle((requiredForm) => {
         const isVisible = (element) => {
           const rect = element.getBoundingClientRect();
           return (rect.width > 0 || rect.height > 0) && getComputedStyle(element).visibility !== 'hidden';
         };
-        const typed = [...document.querySelectorAll('input')].filter((element) => (
-          isVisible(element) && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
+        const strictForm = requiredForm instanceof HTMLFormElement && requiredForm.isConnected
+          ? requiredForm
+          : null;
+        if (requiredForm && !strictForm) {
+          return { boxes: [], form: null, parent: null, scopeInvalid: true };
+        }
+        const inputPool = strictForm
+          ? [...strictForm.elements].filter((element) => element.form === strictForm)
+          : [...document.querySelectorAll('input')];
+        const typed = inputPool.filter((element) => (
+          element instanceof HTMLInputElement
+          && element.isConnected
+          && isVisible(element)
+          && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
         ));
-        let boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
-        if (boxes.length === 0) {
+        let boxes = [];
+        if (strictForm) {
+          const groups = [];
+          const oneTime = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
+          if (oneTime.length === 1) {
+            groups.push(oneTime);
+          } else if (oneTime.length > 1) {
+            const byParent = new Map();
+            for (const element of oneTime) {
+              const parent = element.parentElement;
+              if (!parent) continue;
+              if (!byParent.has(parent)) byParent.set(parent, []);
+              byParent.get(parent).push(element);
+            }
+            groups.push(...byParent.values());
+          }
+          if (groups.length === 0) {
+            const byParent = new Map();
+            for (const element of typed) {
+              if (element.maxLength !== 1) continue;
+              const parent = element.parentElement;
+              if (!parent) continue;
+              if (!byParent.has(parent)) byParent.set(parent, []);
+              byParent.get(parent).push(element);
+            }
+            groups.push(...[...byParent.values()].filter((group) => group.length >= 4));
+          }
+          if (groups.length !== 1) {
+            return { boxes: [], form: strictForm, parent: null, ambiguous: groups.length > 1 };
+          }
+          boxes = groups[0];
+        } else {
+          boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
+        }
+        if (!strictForm && boxes.length === 0) {
           const byParent = new Map();
           for (const element of typed) {
             if (element.maxLength !== 1) continue;
@@ -3867,26 +5161,80 @@ const { chromium } = require('playwright');
             if (group.length >= 4 && group.length > boxes.length) boxes = group;
           }
         }
-        if (boxes.length === 0) return 0;
-        boxes.forEach((element, index) => element.setAttribute('data-litos-security-code-box', String(index)));
-        return boxes.length;
-      }).catch(() => 0);
-      if (marked === 0) return 'no_control';
-      const first = page.locator('[data-litos-security-code-box="0"]');
-      await first.click().catch(() => undefined);
-      await page.keyboard.type(code, { delay: 30 }).catch(() => undefined);
-      const readBack = () => page.evaluate(() => [...document.querySelectorAll('[data-litos-security-code-box]')]
-        .map((element) => element.value || '').join('')).catch(() => '');
-      if ((await readBack()) !== code) {
-        for (let index = 0; index < marked; index += 1) {
-          const value = marked === 1 ? code : (code[index] || '');
-          const box = page.locator('[data-litos-security-code-box="' + index + '"]');
-          await box.fill(value).catch(() => undefined);
-          await box.evaluate((element) => {
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-            element.dispatchEvent(new Event('change', { bubbles: true }));
-          }).catch(() => undefined);
+        if (boxes.length === 0) return { boxes: [], form: null, parent: null };
+        const form = strictForm || (boxes[0].form instanceof HTMLFormElement
+          ? boxes[0].form
+          : boxes[0].closest('form'));
+        if (strictForm && boxes.some((element) => element.form !== strictForm)) {
+          return { boxes: [], form: strictForm, parent: null, scopeInvalid: true };
         }
+        const parent = boxes.every((element) => element.parentElement === boxes[0].parentElement)
+          ? boxes[0].parentElement
+          : null;
+        return { boxes, form, parent };
+      }, requiredFormHandle).catch(() => null);
+      if (!detected) return 'no_control';
+      boxesProperty = await detected.getProperty('boxes');
+      const indexedBoxes = [...(await boxesProperty.getProperties()).entries()]
+        .filter(([key]) => /^\d+$/.test(key))
+        .sort((a, b) => Number(a[0]) - Number(b[0]));
+      for (const [, property] of indexedBoxes) {
+        const element = property.asElement();
+        if (element) boxHandles.push(element);
+        else await property.dispose().catch(() => undefined);
+      }
+      if (boxHandles.length === 0) return 'no_control';
+      formProperty = await detected.getProperty('form');
+      formHandle = formProperty.asElement();
+      if (!formHandle) await formProperty.dispose().catch(() => undefined);
+      parentProperty = await detected.getProperty('parent');
+      parentHandle = parentProperty.asElement();
+      if (!parentHandle) await parentProperty.dispose().catch(() => undefined);
+      const bindingCurrent = async () => page.evaluate((bound) => {
+        if (!Array.isArray(bound.boxes) || bound.boxes.length === 0) return false;
+        if (bound.requiredForm && (!(bound.requiredForm instanceof HTMLFormElement)
+          || !bound.requiredForm.isConnected || bound.form !== bound.requiredForm)) return false;
+        if (bound.boxes.some((element) => !(element instanceof HTMLInputElement) || !element.isConnected)) return false;
+        const currentForm = bound.boxes[0].form instanceof HTMLFormElement
+          ? bound.boxes[0].form
+          : bound.boxes[0].closest('form');
+        if (currentForm !== bound.form) return false;
+        if (bound.boxes.some((element) => {
+          const owner = element.form instanceof HTMLFormElement ? element.form : element.closest('form');
+          return owner !== currentForm;
+        })) return false;
+        if (bound.parent && bound.boxes.some((element) => element.parentElement !== bound.parent)) return false;
+        return !bound.parent || bound.parent.isConnected;
+      }, {
+        boxes: boxHandles,
+        form: formHandle,
+        parent: parentHandle,
+        requiredForm: requiredFormHandle
+      }).catch(() => false);
+      if (!await bindingCurrent()) return 'not_entered';
+      const first = boxHandles[0];
+      const readBack = async () => {
+        if (!await bindingCurrent()) return '';
+        return page.evaluate((boxes) => boxes.map((element) => element.value || '').join(''), boxHandles)
+          .catch(() => '');
+      };
+      for (let index = 0; index < boxHandles.length; index += 1) {
+        if (!await bindingCurrent()) return 'not_entered';
+        const value = boxHandles.length === 1 ? code : (code[index] || '');
+        const box = boxHandles[index];
+        const committed = await box.evaluate((element, nextValue) => {
+          if (!(element instanceof HTMLInputElement) || !element.isConnected) return false;
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+          if (typeof setter !== 'function') return false;
+          setter.call(element, nextValue);
+          const inputEvent = typeof InputEvent === 'function'
+            ? new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue })
+            : new Event('input', { bubbles: true });
+          element.dispatchEvent(inputEvent);
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+          return element.isConnected && element.value === nextValue;
+        }, value).catch(() => false);
+        if (!committed || !await bindingCurrent()) return 'not_entered';
       }
       if ((await readBack()) !== code) return 'not_entered';
       /* THE CHARACTERS ARE IN THE BOXES AND THE FORM IS NOT NECESSARILY READY YET.
@@ -3907,11 +5255,17 @@ const { chromium } = require('playwright');
        * still gets its one honest attempt below and fails there with the reason, rather than being
        * reported from here as a code that was not entered. The code IS entered, which is what
        * readBack just proved. */
-      const submitReady = async () => page.evaluate(() => {
-        const codeBox = document.querySelector('[data-litos-security-code-box="0"]');
-        const form = codeBox && codeBox.closest('form');
+      const submitReady = async () => page.evaluate((bound) => {
+        if (!bound.codeBox?.isConnected) return false;
+        const currentForm = bound.codeBox.form instanceof HTMLFormElement
+          ? bound.codeBox.form
+          : bound.codeBox.closest('form');
+        if (currentForm !== bound.form) return false;
+        const form = bound.form;
         if (!form) return true;
-        return [...form.querySelectorAll('button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]')]
+        return [...form.elements].filter((element) => (
+          element.matches?.('button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]')
+        ))
           .some((element) => {
             const rect = element.getBoundingClientRect();
             const style = getComputedStyle(element);
@@ -3919,12 +5273,19 @@ const { chromium } = require('playwright');
             const disabled = Boolean(element.disabled) || element.getAttribute('aria-disabled') === 'true';
             return visible && !disabled;
           });
-      }).catch(() => true);
+      }, { codeBox: first, form: formHandle }).catch(() => false);
       const deadline = Date.now() + 3_000;
       while (Date.now() < deadline && !(await submitReady())) {
         await page.waitForTimeout(50).catch(() => undefined);
       }
       return 'entered';
+      } finally {
+        await boxesProperty?.dispose().catch(() => undefined);
+        await detected?.dispose().catch(() => undefined);
+        for (const handle of boxHandles) await handle.dispose().catch(() => undefined);
+        await formHandle?.dispose().catch(() => undefined);
+        await parentHandle?.dispose().catch(() => undefined);
+      }
     };
 
     const readSubmitReadiness = (scope = null) => {
@@ -4030,7 +5391,8 @@ const { chromium } = require('playwright');
           const comboShaped = carrier.getAttribute('role') === 'combobox'
             || carrier.getAttribute('aria-haspopup') === 'listbox';
           for (const id of ids) {
-            const target = root.querySelector('#' + CSS.escape(id));
+            const target = (root instanceof HTMLFormElement ? document : root)
+              .querySelector('#' + CSS.escape(id));
             if (!target) continue;
             if (comboShaped && carrier.contains(target)) continue;
             return target;
@@ -4042,7 +5404,8 @@ const { chromium } = require('playwright');
           : null;
         const referenced = referenceLabelOf(widget) || referenceLabelOf(element);
         const proxyReferenced = referenceLabelOf(proxyCombobox);
-        const byFor = element && element.id && root.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+        const byFor = element && element.id && (root instanceof HTMLFormElement ? document : root)
+          .querySelector('label[for="' + CSS.escape(element.id) + '"]');
         const legend = widget && widget.querySelector('legend');
         const own = widget && widget.querySelector('label, .label, .upload-label, legend');
         /* A GROUPED CHOICE IS LABELLED WITH ITS OPTION, and wrappingLabelTextOf below returns it.
@@ -4397,6 +5760,26 @@ const { chromium } = require('playwright');
       };
       const required = [];
       const seen = new Set();
+      const scopedControls = (selector) => {
+        const found = new Set(root.querySelectorAll(selector));
+        if (root instanceof HTMLFormElement) {
+          for (const control of root.elements) {
+            if (control.form === root && control.matches?.(selector)) found.add(control);
+          }
+        }
+        return [...found];
+      };
+      const scopedMarkers = (selector) => {
+        const found = new Set(root.querySelectorAll(selector));
+        if (root instanceof HTMLFormElement) {
+          for (const marker of document.querySelectorAll(selector)) {
+            const named = marker.getAttribute?.('for');
+            const control = marker.control || (named ? document.getElementById(named) : null);
+            if (control?.form === root) found.add(marker);
+          }
+        }
+        return [...found];
+      };
       // Keyed on the CONTROL, not the block, so a block holding two required controls can report
       // both. Greenhouse's phone fieldset holds exactly that: the country select and the number.
       // The error scan below hands back the same element object the required scan flagged, so the
@@ -4453,7 +5836,7 @@ const { chromium } = require('playwright');
        * separately and much more usefully as humanVerification. */
       const securityCodeBoxes = new Set();
       {
-        const typed = [...root.querySelectorAll('input')].filter((element) => (
+        const typed = scopedControls('input').filter((element) => (
           !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
         ));
         for (const element of typed) {
@@ -4474,7 +5857,7 @@ const { chromium } = require('playwright');
       // Native required, plus aria-required. React Select's input carries aria-required="true" and
       // no a "required" attribute at all, so a gate built only on [required] cannot see an unanswered
       // Greenhouse screener question - which is precisely the control this gate exists to catch.
-      for (const element of root.querySelectorAll(
+      for (const element of scopedControls(
         '${SUBMIT_READINESS_POLICY.requiredAttributes}'
       )) {
         if (element.disabled) continue;
@@ -4539,7 +5922,7 @@ const { chromium } = require('playwright');
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
-      for (const marker of root.querySelectorAll('${SUBMIT_READINESS_POLICY.requiredClassMarkers}')) {
+      for (const marker of scopedMarkers('${SUBMIT_READINESS_POLICY.requiredClassMarkers}')) {
         // An Ashby question block with no readable control still has to block, which is where PR #22
         // measured this arm.
         noteMarkedLabel(marker, true);
@@ -4576,7 +5959,7 @@ const { chromium } = require('playwright');
        */
       const ASTERISK_MARK = /${SUBMIT_READINESS_POLICY.asteriskMark}/;
       const ASTERISK_LEGEND = /${SUBMIT_READINESS_POLICY.asteriskLegend}/i;
-      for (const marker of root.querySelectorAll('label, legend')) {
+      for (const marker of scopedMarkers('label, legend')) {
         const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
         if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
         noteMarkedLabel(marker, false);
@@ -4745,6 +6128,324 @@ const { chromium } = require('playwright');
       const failed = { blocking: ['Required-field readiness scan failed'], stale: [], unmatched: [] };
       return scope ? scope.evaluate(scan).catch(() => failed) : page.evaluate(scan).catch(() => failed);
     };
+    const successfulAddressSnapshot = async (element, binding = {}) => {
+      if (!element || !element.isConnected || element.ownerDocument !== document) return null;
+      const form = element.form instanceof HTMLFormElement
+        ? element.form
+        : element.closest?.('form');
+      const nativeFormControl = element instanceof HTMLInputElement
+        || element instanceof HTMLTextAreaElement
+        || element instanceof HTMLSelectElement
+        || element instanceof HTMLButtonElement;
+      if (!(form instanceof HTMLFormElement)
+        || !(nativeFormControl ? element.form === form : form.contains(element))) return null;
+      if (binding.originalForm && form !== binding.originalForm) return null;
+      if (binding.requiredForm && form !== binding.requiredForm) return null;
+      if (element.matches?.(':disabled') || element.getAttribute?.('aria-disabled') === 'true') return null;
+      if ('readOnly' in element && element.readOnly === true) return null;
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const rawMethod = String(form.getAttribute('method') || '').toLowerCase();
+      const rawEnctype = String(form.getAttribute('enctype') || '').toLowerCase();
+      const formState = {
+        id: form.id || null,
+        name: form.getAttribute('name') || null,
+        action: form.getAttribute('action') || null,
+        resolvedAction: new URL(form.getAttribute('action') || location.href, document.baseURI).href,
+        method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
+        effectiveTarget: form.getAttribute('target')
+          || document.querySelector('base[target]')?.getAttribute('target') || '',
+        enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+          ? rawEnctype
+          : 'application/x-www-form-urlencoded',
+        noValidate: form.hasAttribute('novalidate'),
+        acceptCharset: form.getAttribute('accept-charset') || '',
+        ariaLabel: form.getAttribute('aria-label') || null
+      };
+      const controlState = {
+        tag: String(element.tagName || '').toLowerCase(),
+        id: element.id || null,
+        name: element.getAttribute?.('name') || null,
+        type: element.getAttribute?.('type') || null,
+        ariaLabel: element.getAttribute?.('aria-label') || null,
+        disabled: Boolean(element.matches?.(':disabled') || element.getAttribute?.('aria-disabled') === 'true'),
+        readOnly: Boolean('readOnly' in element && element.readOnly === true),
+        labels: element.labels
+          ? [...element.labels].map((label) => clean(label.textContent))
+          : []
+      };
+      if (binding.onlyIdentity === true) return { formState, controlState };
+      if (element instanceof HTMLInputElement) {
+        const type = String(element.type || '').toLowerCase();
+        if (type === 'file') {
+          if (!element.files || element.files.length === 0 || !globalThis.crypto?.subtle) return null;
+          const files = [];
+          for (const file of element.files) {
+            const digest = await globalThis.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+            files.push({
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              lastModified: file.lastModified,
+              sha256: [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+            });
+          }
+          return { kind: 'file', files, formState, controlState };
+        }
+        if (type === 'checkbox' || type === 'radio') {
+          if (!element.checked) return null;
+          const label = element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
+          return {
+            kind: 'choice',
+            checked: true,
+            value: element.value,
+            name: element.name || null,
+            ariaLabel: element.getAttribute('aria-label') || null,
+            label: clean(label?.textContent || element.closest('label')?.textContent),
+            formState,
+            controlState
+          };
+        }
+        const value = String(element.value || '');
+        return value ? { kind: 'value', value, formState, controlState } : null;
+      }
+      if (element instanceof HTMLTextAreaElement) {
+        const value = String(element.value || '');
+        return value ? { kind: 'value', value, formState, controlState } : null;
+      }
+      if (element instanceof HTMLSelectElement) {
+        const value = String(element.value || '');
+        return value ? {
+          kind: 'select',
+          value,
+          selectedIndex: element.selectedIndex,
+          selectedText: clean(element.selectedOptions[0]?.textContent),
+          selectedLabel: clean(element.selectedOptions[0]?.label),
+          formState,
+          controlState
+        } : null;
+      }
+      const selected = element.matches?.(
+        '[aria-checked="true"], [aria-selected="true"], [aria-pressed="true"],'
+        + ' button[class*="_active_"], button[class*="_selected_"], button[class*="_checked_"]'
+      ) ? element : null;
+      if (!selected) return null;
+      const text = String(selected.textContent || '').replace(/\s+/g, ' ').trim();
+      return text ? {
+        kind: 'custom-choice',
+        text,
+        ariaChecked: selected.getAttribute('aria-checked'),
+        ariaSelected: selected.getAttribute('aria-selected'),
+        ariaPressed: selected.getAttribute('aria-pressed'),
+        formState,
+        controlState
+      } : null;
+    };
+    const disposeSuccessfulAddressWitness = async (witness) => {
+      if (!witness) return;
+      await witness.formHandle?.dispose?.().catch(() => undefined);
+      await witness.handle?.dispose?.().catch(() => undefined);
+    };
+    /* Bare-Send proof ownership is fixed before the mutation begins. A selector is allowed to be
+     * useful for locating the control once, but never to name the proof after input/change handlers
+     * have had a chance to move that id or give it to a same-valued decoy. The exact control and its
+     * effective form are retained as runner-owned handles, and their non-value identity is compared
+     * again when the successful action is memorialized. */
+    const captureSuccessfulAddressWitness = async (target, requiredForm = null) => {
+      if (!target) return null;
+      const sourceHandle = typeof target.elementHandle === 'function'
+        ? await target.elementHandle().catch(() => null)
+        : target;
+      if (!sourceHandle) return null;
+      const handleReference = await sourceHandle.evaluateHandle((element) => element).catch(() => null);
+      const handle = handleReference?.asElement?.() || null;
+      if (!handle) {
+        await handleReference?.dispose?.().catch(() => undefined);
+        return null;
+      }
+      const formReference = await handle.evaluateHandle((element) => (
+        element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')
+      )).catch(() => null);
+      const formHandle = formReference?.asElement?.() || null;
+      if (!formHandle) {
+        await formReference?.dispose?.().catch(() => undefined);
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      if (requiredForm && !await handle.evaluate((element, originalForm) => (
+        (element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')) === originalForm
+      ), requiredForm).catch(() => false)) {
+        await formHandle.dispose().catch(() => undefined);
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      const identity = await handle.evaluate(successfulAddressSnapshot, {
+        originalForm: formHandle,
+        requiredForm: null,
+        onlyIdentity: true
+      }).catch(() => null);
+      if (!identity) {
+        await formHandle.dispose().catch(() => undefined);
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      return {
+        handle,
+        formHandle,
+        identityDigest: crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
+        pageUrl: canonicalPageUrl(page.url())
+      };
+    };
+    const intendedFillByChoiceTarget = async (scope, wanted, kind) => {
+      if (!scope || !clean(wanted)) return null;
+      const candidates = kind === 'native'
+        ? scope.locator('input[type=checkbox], input[type=radio]')
+        : scope.locator('button');
+      const total = await candidates.count().catch(() => 0);
+      if (total === 0 || total > 64) return null;
+      const texts = [];
+      const indexes = [];
+      const actionText = /upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i;
+      for (let index = 0; index < total; index += 1) {
+        const candidate = candidates.nth(index);
+        if (kind === 'pill' && !await candidate.isVisible().catch(() => false)) continue;
+        const text = kind === 'native'
+          ? await optionTextOf(candidate)
+          : clean(await candidate.textContent().catch(() => ''));
+        if (!text || (kind === 'pill' && (text.length > 200 || actionText.test(text)))) continue;
+        texts.push(text);
+        indexes.push(index);
+      }
+      const chosen = chooseOptionIndex(texts, wanted);
+      return chosen === -1 ? null : candidates.nth(indexes[chosen]);
+    };
+    const rememberSuccessfulAddress = async (action, witness) => {
+      if (!witness) return;
+      const { handle, formHandle } = witness;
+      let retained = false;
+      try {
+      if (witness.pageUrl !== canonicalPageUrl(page.url())) return;
+      const target = handle;
+      const fillByUsesNativeVerifier = action.type === 'fillByLabelText'
+        && await target.evaluate((element) => (
+          element instanceof HTMLTextAreaElement
+          || element instanceof HTMLSelectElement
+          || (element instanceof HTMLInputElement
+            && element.type !== 'checkbox' && element.type !== 'radio' && element.type !== 'file')
+        )).catch(() => false);
+      if ((action.type === 'fill' || action.type === 'select' || fillByUsesNativeVerifier)
+        && !await verifySuccessfulAddressIntent(target, action.value || '').catch(() => false)) {
+        return;
+      }
+      const snapshot = await handle.evaluate(
+        successfulAddressSnapshot,
+        { originalForm: formHandle, requiredForm: null }
+      ).catch(() => null);
+      if (!snapshot) {
+        return;
+      }
+      const currentIdentityDigest = crypto.createHash('sha256').update(JSON.stringify({
+        formState: snapshot.formState,
+        controlState: snapshot.controlState
+      })).digest('hex');
+      if (currentIdentityDigest !== witness.identityDigest) return;
+      const expectedFileSize = action.type === 'upload' && action.file?.base64
+        ? Buffer.from(action.file.base64, 'base64').length
+        : null;
+      const expectedFileSha256 = action.type === 'upload' && action.file?.base64
+        ? crypto.createHash('sha256').update(Buffer.from(action.file.base64, 'base64')).digest('hex')
+        : null;
+      const cleanExact = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const expectedExact = cleanExact(action.value);
+      const fillByChoiceMatches = action.type === 'fillByLabelText' && !fillByUsesNativeVerifier
+        && (snapshot.kind === 'choice'
+          ? [snapshot.value, snapshot.label, snapshot.ariaLabel, ...(snapshot.controlState?.labels || [])]
+            .some((value) => cleanExact(value) === expectedExact)
+          : snapshot.kind === 'custom-choice' && cleanExact(snapshot.text) === expectedExact);
+      const matchesAction = fillByChoiceMatches
+        || ((action.type === 'fill' || action.type === 'select' || fillByUsesNativeVerifier)
+          && await verifySuccessfulAddressIntent(target, action.value || '').catch(() => false))
+        || (action.type === 'upload' && snapshot.kind === 'file'
+          && snapshot.files.length === 1
+          && snapshot.files[0].name === action.file?.name
+          && snapshot.files[0].type === action.file?.mimeType
+          && snapshot.files[0].size === expectedFileSize
+          && snapshot.files[0].sha256 === expectedFileSha256);
+      if (!matchesAction) {
+        return;
+      }
+      successfulAddresses.push({
+        handle,
+        formHandle,
+        snapshotDigest: crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'),
+        pageUrl: canonicalPageUrl(page.url())
+      });
+      retained = true;
+      } finally {
+        if (!retained) await disposeSuccessfulAddressWitness(witness);
+      }
+    };
+    const currentSuccessfulAddressHandles = async (requiredForm = null) => {
+      const currentHandles = [];
+      for (const address of successfulAddresses) {
+        if (address.pageUrl !== canonicalPageUrl(page.url())) continue;
+        const current = await address.handle.evaluate(
+          successfulAddressSnapshot,
+          { originalForm: address.formHandle, requiredForm }
+        ).catch(() => null);
+        const currentDigest = current
+          ? crypto.createHash('sha256').update(JSON.stringify(current)).digest('hex')
+          : null;
+        if (!currentDigest || currentDigest !== address.snapshotDigest) continue;
+        currentHandles.push(address.handle);
+      }
+      return currentHandles;
+    };
+    const unsuccessfulChoiceFailuresForScope = async (requiredScope, scopeKind) => {
+      if (!requiredScope) return [];
+      const currentPageFailures = unsuccessfulChoices.filter((failure) => (
+        failure.pageUrl === canonicalPageUrl(page.url())
+      ));
+      if (currentPageFailures.length === 0) return [];
+      return requiredScope.evaluate((scope, input) => {
+        const failures = [];
+        for (const failure of input.failures) {
+          const controlConnected = Boolean(failure.handle?.isConnected);
+          const ancestry = Array.isArray(failure.ancestry) ? failure.ancestry : [];
+          const boundScopeConnected = failure.form
+            ? Boolean(failure.form.isConnected)
+            : ancestry.some((element) => element?.isConnected);
+          // A known wrong answer cannot become safe because the page replaced its bound scope.
+          if (!controlConnected || !boundScopeConnected) {
+            failures.push(failure.kind);
+            continue;
+          }
+          const belongs = input.scopeKind === 'form' && failure.form
+            ? failure.form === scope
+            : input.scopeKind === 'container' && !failure.form
+              ? ancestry.includes(scope)
+              : false;
+          if (belongs) failures.push(failure.kind);
+        }
+        return failures;
+      }, {
+        scopeKind,
+        failures: currentPageFailures.map((failure) => ({
+          handle: failure.handle,
+          form: failure.formHandle,
+          ancestry: failure.ancestryHandle,
+          kind: failure.kind
+        }))
+      }).catch(() => currentPageFailures.map((failure) => failure.kind));
+    };
+    const protectChooserBinding = (binding) => {
+      if (!binding || !Array.isArray(binding.formShape?.submittedControls)) return binding;
+      if (!chooserBindingHmacKey) throw new Error('Atomic submit chooser value-binding key was unavailable');
+      binding.formShape.submittedControlStateDigest = crypto.createHmac('sha256', chooserBindingHmacKey)
+        .update(JSON.stringify(binding.formShape.submittedControls))
+        .digest('hex');
+      delete binding.formShape.submittedControls;
+      return binding;
+    };
     /* Commit answers that the page paints as filled while its own validation still calls them
      * unanswered. This action does not search for a convenient place to click. It marks the exact
      * affected control in the current DOM, commits that control using events appropriate to its
@@ -4757,6 +6458,34 @@ const { chromium } = require('playwright');
       if (chooserHash !== action.chooserPolicy.grammarHash) {
         throw new Error('Atomic submit chooser grammar hash mismatch');
       }
+      const chooserVersion = action.chooserPolicy.version;
+      const requiresNativeTransport = chooserVersion === 4
+        || (retainedV4SecurityCodeContinuation
+          && chooserVersion === 3
+          && action.submitKind === 'verification');
+      if (chooserVersion === 4) {
+        if (!requiresExactPageUrl || !exactPageUrlProof
+          || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          throw new Error('Atomic submit chooser v4 requires the exact employer page URL capability');
+        }
+        const observed = canonicalPageUrl(page.url());
+        if (observed !== exactPageUrlProof.expected) {
+          throw new Error('Employer page URL changed before the final submit chooser');
+        }
+        exactPageUrlProof.beforeFinalChooser = observed;
+      } else if (requiresNativeTransport) {
+        if (!requiresExactPageUrl || !exactPageUrlProof
+          || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          throw new Error('A retained atomic submit verification requires the exact employer page URL capability');
+        }
+        const observed = canonicalPageUrl(page.url());
+        if (observed !== exactPageUrlProof.expected) {
+          throw new Error('Employer page URL changed before the retained verification chooser');
+        }
+      }
+      let chooserSuccessfulControls = chooserVersion === 4
+        ? await currentSuccessfulAddressHandles()
+        : [];
       /* THE SUBMISSION SCOPE IS NOT ALWAYS A <form>, AND ON ASHBY IT NEVER IS.
        *
        * This filter used to require element.closest('form'). Measured on the live kos.ai Ashby
@@ -4783,7 +6512,13 @@ const { chromium } = require('playwright');
        *      inside, or be named by the control itself, so that refusing a form withholds the
        *      click rather than relocating it onto a decoy that collects a little more;
        *   5. never body and never documentElement, because "the whole page" is not a scope. */
-      const readSubmitChoices = async () => await page.locator(action.selector).evaluateAll((elements, chooser) => {
+      const readSubmitChoices = async (successfulControls = []) => {
+        const candidateHandles = await page.locator(action.selector).elementHandles().catch(() => []);
+        let evaluated = null;
+        let choiceReadHandle = null;
+        try {
+          evaluated = await page.evaluateHandle((chooser) => {
+        const elements = chooser.elements;
         const FIELD_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], input[type="file"]';
         const REQUIRED_CONTROLS = 'input:not([type="hidden"])[required], textarea[required], select[required], [aria-required="true"]';
         const WIDGET = '[class*="select__container"], .field, .field-wrapper, fieldset, [role="group"],'
@@ -4802,7 +6537,7 @@ const { chromium } = require('playwright');
           }
           for (const node of root.querySelectorAll('*')) if (node.shadowRoot) clearMarkers(node.shadowRoot);
         };
-        clearMarkers(document);
+        if (chooser.version !== 4) clearMarkers(document);
         const isVisible = (element) => {
           if (!element || !element.getBoundingClientRect) return false;
           const rect = element.getBoundingClientRect();
@@ -4920,26 +6655,64 @@ const { chromium } = require('playwright');
           const type = String(control.getAttribute('type') || 'text').toLowerCase();
           return type !== 'search' && TEXT_ENTRY_TYPES.has(type);
         };
+        const successfulAddresses = Array.isArray(chooser.successfulControls)
+          ? [...new Set(chooser.successfulControls.filter((control) => (
+              control instanceof Element && control.isConnected && control.ownerDocument === document
+            )))]
+          : [];
         const addressed = new Set();
-        for (const selector of chooser.addressed || []) {
-          let node = null;
-          // document.querySelector, singular, because the fill it stands for used locator.first().
-          try { node = document.querySelector(selector); } catch { node = null; }
-          if (node) addressed.add(node);
+        if (chooser.version === 4) {
+          for (const control of successfulAddresses) addressed.add(control);
+        } else {
+          for (const selector of chooser.addressed || []) {
+            let node = null;
+            // document.querySelector, singular, because the fill it stands for used locator.first().
+            try { node = document.querySelector(selector); } catch { node = null; }
+            if (node) addressed.add(node);
+          }
         }
-        const writtenInto = (node) => [...addressed].some((control) => node.contains(control));
+        const writtenInto = (node) => [...addressed].some((control) => belongsTo(node, control));
+        const nativeFormOwner = (control) => (
+          control instanceof HTMLInputElement
+          || control instanceof HTMLTextAreaElement
+          || control instanceof HTMLSelectElement
+          || control instanceof HTMLButtonElement
+        ) ? control.form : null;
+        const belongsTo = (node, control) => node instanceof HTMLFormElement && nativeFormOwner(control)
+          ? nativeFormOwner(control) === node
+          : node.contains(control);
+        const successfulControlsIn = (node) => successfulAddresses.filter((control) => belongsTo(node, control));
+        const addressedForms = new Set(successfulAddresses
+          .map((control) => nativeFormOwner(control) || control.closest('form'))
+          .filter((form) => form instanceof HTMLFormElement));
         const intakeEvidence = new Map();
         const isApplicationSurface = (node, score) => {
           if (String(node.getAttribute('role') || '').toLowerCase() === 'search') return false;
           if (score >= 3) return true;
           if (!intakeEvidence.has(node)) {
-            const fields = [...node.querySelectorAll(FIELD_CONTROLS)];
+            const fields = node instanceof HTMLFormElement
+              ? [...node.elements].filter((control) => control.matches?.(FIELD_CONTROLS))
+              : [...node.querySelectorAll(FIELD_CONTROLS)];
             const textEntry = fields.filter(isTextEntry);
             const files = fields.filter((control) => control.matches('input[type="file"]'));
             intakeEvidence.set(node, writtenInto(node) || textEntry.length >= 2 || (files.length >= 1 && fields.length >= 2));
           }
           return intakeEvidence.get(node);
         };
+        /* Bare Send has no semantic statement of intent in its own text. V4 therefore never earns
+         * authority from form ids, class names, actions, resume labels, or any other page-authored
+         * token. The caller must bind one exact form through the negotiated capability before any
+         * applicant action. Every distinct successful control must still belong to that retained
+         * form, and at least two must have survived read-back. */
+        const isV4BareSendForm = (form) => chooser.version === 4
+          && form instanceof HTMLFormElement
+          && chooser.applicationScopeForm instanceof HTMLFormElement
+          && chooser.applicationScopeForm.isConnected
+          && chooser.applicationScopeForm === form
+          && addressedForms.size === 1
+          && addressedForms.has(form)
+          && successfulControlsIn(form).length >= 2
+          && successfulControlsIn(form).length === successfulAddresses.length;
         /* WHAT A CONTAINER NEEDS WHEN IT IS DISPLACING A FORM THIS RUN REFUSED, which is strictly
          * more than the intake test above.
          *
@@ -4961,6 +6734,7 @@ const { chromium } = require('playwright');
          * submits exactly as it does today. */
         const canDisplaceRefusedForm = (container, score) => score >= 3 || writtenInto(container);
         const markScope = (node, index) => {
+          if (chooser.version === 4) return;
           const current = node.getAttribute('data-litos-submit-scope-v2');
           const tokens = current ? current.split(/\s+/).filter(Boolean) : [];
           if (!tokens.includes(String(index))) tokens.push(String(index));
@@ -4970,22 +6744,73 @@ const { chromium } = require('playwright');
         const rect = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const visible = (rect.width > 0 || rect.height > 0) && style.display !== 'none' && style.visibility !== 'hidden';
-        const form = element.closest('form');
         const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
         const finalPattern = new RegExp(chooser.finalPattern, 'i');
         const exclusionPattern = new RegExp(chooser.exclusionPattern, 'i');
+        const bareSend = chooser.version === 4 && /^\s*send\s*$/i.test(text);
+        const closestForm = element.closest('form');
+        const nativeFormControl = element instanceof HTMLButtonElement || element instanceof HTMLInputElement;
+        const associatedForm = nativeFormControl
+          ? element.form
+          : null;
+        const invalidFormOverride = chooser.version === 4 && nativeFormControl
+          && element.hasAttribute('form') && !(associatedForm instanceof HTMLFormElement);
+        const usesAssociatedForm = (chooser.version === 4 || chooser.requiresNativeTransport) && nativeFormControl
+          && associatedForm instanceof HTMLFormElement;
+        const form = usesAssociatedForm ? associatedForm : closestForm;
+        const baseTarget = document.querySelector('base[target]')?.getAttribute('target') || '';
+        const effectiveFormTarget = form instanceof HTMLFormElement
+          ? String(form.getAttribute('target') || baseTarget).toLowerCase()
+          : '';
+        const formAction = form instanceof HTMLFormElement
+          ? new URL(form.getAttribute('action') || location.href, document.baseURI).href
+          : '';
+        const formMethodRaw = form instanceof HTMLFormElement
+          ? String(form.getAttribute('method') || '').toLowerCase()
+          : '';
+        const formMethod = /^(?:get|post|dialog)$/.test(formMethodRaw) ? formMethodRaw : 'get';
+        const formEnctypeRaw = form instanceof HTMLFormElement
+          ? String(form.getAttribute('enctype') || '').toLowerCase()
+          : '';
+        const formEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
+          .test(formEnctypeRaw) ? formEnctypeRaw : 'application/x-www-form-urlencoded';
+        const submitterMatchesForm = form instanceof HTMLFormElement
+          && associatedForm === form
+          && (!effectiveFormTarget || effectiveFormTarget === '_self')
+          && (!element.hasAttribute('formaction')
+            || new URL(element.getAttribute('formaction') || location.href, document.baseURI).href === formAction)
+          && (!element.hasAttribute('formmethod')
+            || String(element.getAttribute('formmethod') || '').toLowerCase() === formMethod)
+          && (!element.hasAttribute('formtarget')
+            || String(element.getAttribute('formtarget') || '').toLowerCase()
+              === String(form.getAttribute('target') || '').toLowerCase())
+          && (!element.hasAttribute('formenctype')
+            || String(element.getAttribute('formenctype') || '').toLowerCase() === formEnctype)
+          && !element.hasAttribute('formnovalidate');
+        const nativeBareSend = bareSend && chooser.submitKind === 'application'
+          && submitterMatchesForm
+          && ((element instanceof HTMLButtonElement && element.type === 'submit')
+            || (element instanceof HTMLInputElement && (element.type === 'submit' || element.type === 'image')));
         const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code))$/i.test(text);
         const canonicalFinal = finalPattern.test(text) && !exclusionPattern.test(text);
+        // The no-override and self-target restriction belongs only to the new bare-Send tier.
+        // Explicit application and verification controls keep their existing semantics, while all
+        // v4 native controls still bind to their actual associated form and reject a broken form=.
+        const v4NativeSubmissionSafe = !invalidFormOverride;
         const finalIntent = chooser.submitKind === 'verification'
-          ? finalVerification || canonicalFinal
-          : canonicalFinal;
+          ? (finalVerification || (canonicalFinal && !bareSend)) && v4NativeSubmissionSafe
+          : canonicalFinal && (!bareSend || nativeBareSend) && v4NativeSubmissionSafe;
         let score = 0;
         if (chooser.submitKind === 'verification' && finalVerification) score = 3;
         else if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(text)) score = 3;
         else if (/\bfinish\s+(?:and|&)\s+apply\b|^\s*apply\s+now\s*$/i.test(text)) score = 2;
-        else if (finalIntent) score = 1;
-        element.setAttribute('data-litos-submit-candidate-v2', String(index));
-        return { element, index, visible, disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'), form, finalIntent, text, score };
+        else if (finalIntent && !bareSend) score = 1;
+        if (chooser.version !== 4) element.setAttribute('data-litos-submit-candidate-v2', String(index));
+        return {
+          element, index, visible,
+          disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'),
+          form, finalIntent, text, score, bareSend, nativeBareSend, usesAssociatedForm
+        };
         });
         /* THE CONTAINER PATH ENGAGES ONLY WHERE THE FORM PATH FOUND NOTHING AT ALL.
          *
@@ -5020,19 +6845,48 @@ const { chromium } = require('playwright');
          * rules stand exactly as they are: nearest field-bearing ancestor, every required field
          * outside a form inside it, never body. That is the whole delta, and it is why a formless
          * page carrying a single field still submits exactly as it does today. */
-        const applicationFormOf = (row) => (row.form && isApplicationSurface(row.form, row.score) ? row.form : null);
         const inPlay = (row) => row.visible && !row.disabled && row.finalIntent;
+        const bareSendApplicationForms = new Set(rows
+          .filter((row) => row.visible && row.finalIntent && row.bareSend
+            && row.nativeBareSend && isV4BareSendForm(row.form))
+          .map((row) => row.form));
+        const proofAuthorizedBareSendForm = bareSendApplicationForms.size === 1
+          ? [...bareSendApplicationForms][0]
+          : null;
+        const capabilityBoundApplicationForm = (
+          (chooser.version === 4 && chooser.submitKind === 'application')
+          || chooser.requiresNativeTransport
+        )
+          && chooser.applicationScopeForm instanceof HTMLFormElement
+          ? chooser.applicationScopeForm
+          : null;
+        const applicationFormOf = (row) => {
+          /* The capability binds the application, not only the bare-Send tier. If its retained form
+           * detaches or its successful proofs disappear, no explicit control from another form may
+           * inherit the authority merely because its page-authored text scores higher. */
+          if (capabilityBoundApplicationForm && row.form !== capabilityBoundApplicationForm) return null;
+          // Once one exact application form earns bare-Send authority, no untouched form or
+          // formless control may compete with it. Explicit application wording can still outrank
+          // Send inside that same form, but a newsletter's generic Submit cannot take the click.
+          if (proofAuthorizedBareSendForm && row.form !== proofAuthorizedBareSendForm) return null;
+          if (row.bareSend) {
+            return bareSendApplicationForms.size === 1 && bareSendApplicationForms.has(row.form)
+              ? row.form
+              : null;
+          }
+          return row.form && isApplicationSurface(row.form, row.score) ? row.form : null;
+        };
         const formCandidateExists = rows.some((row) => inPlay(row) && Boolean(applicationFormOf(row)));
         const refusedFormExists = rows.some((row) => inPlay(row) && row.form && !applicationFormOf(row));
         const containerCache = new Map();
-        return rows.map((row) => {
+        const boundChoices = rows.map((row) => {
           const applicationForm = applicationFormOf(row);
           let scopeNode = applicationForm;
           let scopeKind = applicationForm ? 'form' : null;
           // row.form, not scopeNode: a control whose own form is not the application has no scope
           // at all. Letting it climb to a container would hand the stray form the click by another
           // route, and the container it would find is not the form its click would submit.
-          if (!row.form && !formCandidateExists) {
+          if (!capabilityBoundApplicationForm && !row.form && !row.usesAssociatedForm && !formCandidateExists) {
             const container = containerOf(row.element);
             if (container && (!refusedFormExists || canDisplaceRefusedForm(container, row.score))) {
               if (!containerCache.has(container)) containerCache.set(container, !requiredOutside(container));
@@ -5042,19 +6896,61 @@ const { chromium } = require('playwright');
               }
             }
           }
-          if (scopeNode) markScope(scopeNode, row.index);
+          if (scopeNode && chooser.version !== 4) markScope(scopeNode, row.index);
           return {
             index: row.index, visible: row.visible, disabled: row.disabled,
-            hasScope: Boolean(scopeNode), scopeKind, finalIntent: row.finalIntent, text: row.text, score: row.score
+            hasScope: Boolean(scopeNode), scopeKind, finalIntent: row.finalIntent,
+            text: row.text, score: row.score, bareSend: row.bareSend,
+            usesAssociatedForm: row.usesAssociatedForm,
+            element: row.element, scopeNode
           };
         });
-      }, { ...action.chooserPolicy, submitKind: action.submitKind, addressed: [...new Set(addressedSelectors)] }).catch(() => null);
-      const viableAmong = (rows) => {
-        const list = Array.isArray(rows) ? rows.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent) : [];
+        const choices = boundChoices.map(({ element: _element, scopeNode: _scopeNode, ...choice }) => choice);
+        const addressedScopeCount = addressedForms.size;
+        const viable = boundChoices.filter((choice) => (
+          choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent
+        )).sort((a, b) => b.score - a.score || a.index - b.index);
+        const selected = viable[0] || null;
+        const tied = Boolean(selected && viable[1] && viable[1].score === selected.score);
+        return {
+          choiceRead: { choices, addressedScopeCount },
+          selectedElement: selected && !tied ? selected.element : null,
+          selectedScope: selected && !tied ? selected.scopeNode : null
+        };
+      }, {
+        ...action.chooserPolicy,
+        requiresNativeTransport,
+        submitKind: action.submitKind,
+        addressed: [...new Set(addressedSelectors)],
+        successfulControls,
+        applicationScopeForm: applicationScopeProofHandle,
+        elements: candidateHandles
+      }).catch(() => null);
+          if (!evaluated) return null;
+          choiceReadHandle = await evaluated.getProperty('choiceRead');
+          const choiceRead = await choiceReadHandle.jsonValue();
+          const selectedProperty = await evaluated.getProperty('selectedElement');
+          const selectedScopeProperty = await evaluated.getProperty('selectedScope');
+          const selectedHandle = selectedProperty.asElement();
+          const selectedScopeHandle = selectedScopeProperty.asElement();
+          if (!selectedHandle) await selectedProperty.dispose().catch(() => undefined);
+          if (!selectedScopeHandle) await selectedScopeProperty.dispose().catch(() => undefined);
+          return { ...choiceRead, selectedHandle, selectedScopeHandle };
+        } catch {
+          return null;
+        } finally {
+          await choiceReadHandle?.dispose().catch(() => undefined);
+          await evaluated?.dispose().catch(() => undefined);
+          for (const handle of candidateHandles) await handle.dispose().catch(() => undefined);
+        }
+      };
+      const viableAmong = (choiceRead) => {
+        const rows = Array.isArray(choiceRead?.choices) ? choiceRead.choices : [];
+        const list = rows.filter((choice) => choice.visible && !choice.disabled && choice.hasScope && choice.finalIntent);
         list.sort((a, b) => b.score - a.score || a.index - b.index);
         return list;
       };
-      let choices = await readSubmitChoices();
+      let choices = await readSubmitChoices(chooserSuccessfulControls);
       let viable = viableAmong(choices);
       /* A SEND CONTROL THE FORM ITSELF IS HOLDING DISABLED over one unanswered opt-in.
        *
@@ -5079,9 +6975,12 @@ const { chromium } = require('playwright');
        * control ('sms_opt_in'), and a name-anchored gate cannot be widened by whatever sentence
        * sits nearby. A group with no identifiable decline member is left alone, and the pass
        * falls through to the same refusal it would have raised anyway. */
-      if (viable.length === 0 && Array.isArray(choices)
-        && choices.some((choice) => choice.visible && choice.finalIntent && choice.disabled)) {
-        const declined = await page.evaluate(() => {
+      if (viable.length === 0 && Array.isArray(choices?.choices)
+        && choices.choices.some((choice) => choice.visible && choice.finalIntent && choice.disabled)) {
+        const declineCandidateHandles = requiresNativeTransport
+          ? await page.locator(action.selector).elementHandles().catch(() => [])
+          : [];
+        const declined = await page.evaluate((input) => {
           const OPTIN_NAME = /(?:^|[_-])(?:sms|text|email|marketing|news(?:letter)?|updates?)[_-]?opt[_-]?in/i;
           const DECLINE_VALUE = /^(?:false|no|0|decline[d]?)$/i;
           /* ANCHORED AND ONE-SIDED, and the review that tightened this is worth keeping in mind.
@@ -5096,8 +6995,37 @@ const { chromium } = require('playwright');
            * disqualified from being that member. */
           const DECLINE_WORDING = /^\s*no\b|\bdo\s*(?:not|n[’']t)\s+consent\b|\bdecline\b/i;
           const ACCEPT_WORDING = /\byes\b|\bagree\b|\bsign\s+me\s+up\b|\b(?:text|email|send)\s+me\b|\bopt\s*in\b/i;
+          const boundForm = input.form instanceof HTMLFormElement && input.form.isConnected
+            ? input.form
+            : null;
+          if (input.requiresBoundForm) {
+            if (!boundForm) return [];
+            const finalPattern = new RegExp(input.finalPattern, 'i');
+            const exclusionPattern = new RegExp(input.exclusionPattern, 'i');
+            const hasExactDisabledTrigger = input.candidates.some((element) => {
+              if (!element?.isConnected || element.form !== boundForm) return false;
+              if (!(element instanceof HTMLButtonElement) && !(element instanceof HTMLInputElement)) return false;
+              const rect = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              const visible = (rect.width > 0 || rect.height > 0)
+                && style.display !== 'none' && style.visibility !== 'hidden';
+              const disabled = Boolean(element.disabled) || element.getAttribute('aria-disabled') === 'true';
+              const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '')
+                .replace(/\s+/g, ' ').trim();
+              return visible && disabled && finalPattern.test(text) && !exclusionPattern.test(text);
+            });
+            if (!hasExactDisabledTrigger) return [];
+          }
           const groups = new Map();
-          for (const radio of document.querySelectorAll('input[type="radio"][name]')) {
+          const radios = boundForm
+            ? [...boundForm.elements].filter((element) => (
+                element instanceof HTMLInputElement
+                && element.type === 'radio'
+                && element.form === boundForm
+                && element.hasAttribute('name')
+              ))
+            : [...document.querySelectorAll('input[type="radio"][name]')];
+          for (const radio of radios) {
             const name = radio.getAttribute('name') || '';
             if (!OPTIN_NAME.test(name)) continue;
             if (!groups.has(name)) groups.set(name, []);
@@ -5120,53 +7048,391 @@ const { chromium } = require('playwright');
               }
             }
             if (!decline) continue;
+            if (!decline.isConnected || (boundForm && decline.form !== boundForm)) continue;
             decline.click();
             decline.dispatchEvent(new Event('input', { bubbles: true }));
             decline.dispatchEvent(new Event('change', { bubbles: true }));
+            if (!decline.isConnected || !decline.checked || (boundForm && decline.form !== boundForm)) continue;
             declinedNames.push(name);
           }
           return declinedNames;
+        }, {
+          requiresBoundForm: requiresNativeTransport,
+          form: requiresNativeTransport ? applicationScopeProofHandle : null,
+          candidates: declineCandidateHandles,
+          finalPattern: action.chooserPolicy.finalPattern,
+          exclusionPattern: action.chooserPolicy.exclusionPattern
         }).catch(() => []);
+        for (const handle of declineCandidateHandles) await handle.dispose().catch(() => undefined);
         if (Array.isArray(declined) && declined.length > 0) {
           await page.waitForTimeout(600).catch(() => undefined);
           for (const name of declined) {
             filledFields.push('question:' + name
               + ' (an unanswered communications opt-in was holding the send button disabled; Litos declined it for you)');
           }
-          choices = await readSubmitChoices();
+          if (chooserVersion === 4) chooserSuccessfulControls = await currentSuccessfulAddressHandles();
+          await choices?.selectedHandle?.dispose().catch(() => undefined);
+          await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
+          choices = await readSubmitChoices(chooserSuccessfulControls);
           viable = viableAmong(choices);
         }
       }
+      if (chooserVersion === 4 && !choices) throw new Error('Atomic submit chooser evaluation failed');
+      if (chooserVersion === 4) {
+        const observed = canonicalPageUrl(page.url());
+        if (observed !== exactPageUrlProof.expected || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          throw new Error('Employer page URL changed during the final submit chooser');
+        }
+      }
       const selected = viable[0];
-      const ambiguous = !selected || (viable[1] && viable[1].score === selected.score);
-      if (ambiguous) throw new Error('Atomic submit control was missing or ambiguous');
-      const submitLocator = page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
-      const submitHandle = await submitLocator.elementHandle();
+      const tied = Boolean(selected && viable[1] && viable[1].score === selected.score);
+      if (chooserVersion === 4) {
+        const rows = Array.isArray(choices?.choices) ? choices.choices : [];
+        const topScore = selected ? selected.score : null;
+        finalSubmitChooser = {
+          version: 1,
+          policyName: action.chooserPolicy.name,
+          policyVersion: action.chooserPolicy.version,
+          grammarHash: action.chooserPolicy.grammarHash,
+          submitKind: action.submitKind,
+          outcome: !selected ? 'no_submit_control' : (tied ? 'ambiguous_submit' : 'selected'),
+          candidateCount: rows.filter((choice) => choice.visible && !choice.disabled && choice.finalIntent).length,
+          viableCandidateCount: viable.length,
+          topScore,
+          topScoreCount: topScore === null ? 0 : viable.filter((choice) => choice.score === topScore).length,
+          addressedScopeCount: Number(choices?.addressedScopeCount) || 0,
+          bareSendCandidateCount: rows.filter((choice) => choice.visible && !choice.disabled && choice.bareSend).length
+        };
+        if (!selected || tied) {
+          await choices?.selectedHandle?.dispose().catch(() => undefined);
+          await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
+          return { noClick: true };
+        }
+      } else if (!selected || tied) {
+        throw new Error('Atomic submit control was missing or ambiguous');
+      }
       const scopeKind = selected.scopeKind;
-      // The marker is written by the same pass that scored the control, so this addresses the exact
-      // node the walk resolved. The count check is the one that was here before: exactly one scope,
-      // or nothing is clicked.
-      const scope = page.locator('[data-litos-submit-scope-v2~="' + selected.index + '"]');
-      if (!submitHandle || await scope.count() !== 1) throw new Error('Atomic submit control had no exact application form');
-      const scopeHandle = await scope.elementHandle();
-      const binding = await submitHandle.evaluate((element, bound) => {
+      const usesAssociatedForm = requiresNativeTransport && selected.usesAssociatedForm === true;
+      const submitLocator = chooserVersion === 4
+        ? null
+        : page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
+      const scope = chooserVersion === 4
+        ? null
+        : page.locator('[data-litos-submit-scope-v2~="' + selected.index + '"]');
+      const submitHandle = choices.selectedHandle || null;
+      const scopeHandle = choices.selectedScopeHandle || null;
+      const chooserBindingCurrent = Boolean(submitHandle && scopeHandle) && await submitHandle.evaluate(
+        (element, bound) => {
+          if (!element.isConnected || !bound.scope?.isConnected) return false;
+          if (bound.scopeKind === 'form') {
+            return bound.usesAssociatedForm
+              ? element.form === bound.scope
+              : element.closest('form') === bound.scope;
+          }
+          return bound.scope.contains(element);
+        },
+        { scope: scopeHandle, scopeKind, usesAssociatedForm }
+      ).catch(() => false);
+      if (!submitHandle || !scopeHandle || !chooserBindingCurrent) {
+        await submitHandle?.dispose().catch(() => undefined);
+        await scopeHandle?.dispose().catch(() => undefined);
+        if (chooserVersion === 4) {
+          finalSubmitChooser = {
+            ...finalSubmitChooser,
+            outcome: 'no_submit_control',
+            viableCandidateCount: 0,
+            topScore: null,
+            topScoreCount: 0
+          };
+          return { noClick: true };
+        }
+        throw new Error('Atomic submit control had no exact application form');
+      }
+      const approvedTransportHmacKey = requiresNativeTransport
+        ? crypto.randomBytes(32).toString('base64')
+        : null;
+      const initialBindingBundle = await submitHandle.evaluate(async (element, bound) => {
         const root = bound.scope;
+        const canonical = (value) => {
+          const parsed = new URL(value, document.baseURI);
+          parsed.hash = '';
+          return parsed.href;
+        };
+        const normalizeMethod = (value) => {
+          const raw = String(value || '').toLowerCase();
+          return /^(?:get|post|dialog)$/.test(raw) ? raw : 'get';
+        };
+        const normalizeEnctype = (value) => {
+          const raw = String(value || '').toLowerCase();
+          return /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(raw)
+            ? raw
+            : 'application/x-www-form-urlencoded';
+        };
+        const formAction = bound.scopeKind === 'form'
+          ? canonical(root.getAttribute('action') || location.href)
+          : null;
+        const formMethod = bound.scopeKind === 'form' ? normalizeMethod(root.getAttribute('method')) : null;
+        const formTarget = bound.scopeKind === 'form'
+          ? (root.getAttribute('target') || document.querySelector('base[target]')?.getAttribute('target') || '')
+          : null;
+        const formEnctype = bound.scopeKind === 'form' ? normalizeEnctype(root.getAttribute('enctype')) : null;
+        const submittedElements = bound.bindSubmittedState
+          ? (bound.scopeKind === 'form'
+              ? [...root.elements]
+              : [...root.querySelectorAll('input, textarea, select')])
+          : [];
+        const submittedControls = submittedElements.map((control, index) => {
+          const isInput = control instanceof HTMLInputElement;
+          const isSelect = control instanceof HTMLSelectElement;
+          const type = String(control.getAttribute?.('type') || '').toLowerCase();
+          return {
+            index,
+            tag: String(control.tagName || '').toLowerCase(),
+            id: control.id || null,
+            name: control.getAttribute?.('name') || null,
+            type: type || null,
+            disabled: Boolean(control.disabled),
+            readOnly: 'readOnly' in control ? Boolean(control.readOnly) : null,
+            formAssociation: control.getAttribute?.('form') || null,
+            associatedWithRoot: control.form === root,
+            value: isInput && type === 'file' ? null : ('value' in control ? String(control.value || '') : null),
+            checked: isInput && (type === 'checkbox' || type === 'radio') ? Boolean(control.checked) : null,
+            selected: isSelect ? [...control.selectedOptions].map((option) => ({
+              index: option.index,
+              value: String(option.value || ''),
+              label: String(option.label || option.textContent || ''),
+              disabled: Boolean(option.disabled)
+            })) : null,
+            files: isInput && type === 'file' ? [...(control.files || [])].map((file) => ({
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              lastModified: file.lastModified
+            })) : null
+          };
+        });
+        const submittedControlsJson = JSON.stringify(submittedControls);
+        const submittedControlsWithinBound = submittedControls.length <= 256
+          && submittedControlsJson.length <= 2_000_000
+          && submittedControls.every((control) => (
+            String(control.id || '').length <= 256
+            && String(control.name || '').length <= 256
+            && String(control.type || '').length <= 64
+            && String(control.formAssociation || '').length <= 256
+            && String(control.value || '').length <= 16_384
+            && (!control.selected || (control.selected.length <= 128 && control.selected.every((option) => (
+              String(option.value || '').length <= 16_384 && String(option.label || '').length <= 16_384
+            ))))
+            && (!control.files || (control.files.length <= 16 && control.files.every((file) => (
+              String(file.name || '').length <= 512 && String(file.type || '').length <= 256
+            ))))
+          ));
         const formShape = {
           scopeKind: bound.scopeKind,
           id: root.id || null,
           action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
           method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
+          ...(bound.usesAssociatedForm && bound.scopeKind === 'form' ? {
+            resolvedAction: formAction,
+            effectiveMethod: formMethod,
+            effectiveTarget: formTarget,
+            effectiveEnctype: formEnctype,
+            noValidate: root.hasAttribute('novalidate'),
+            acceptCharset: root.getAttribute('accept-charset') || ''
+          } : {}),
+          ...(bound.bindSubmittedState ? {
+            submittedControlCount: submittedControls.length,
+            submittedControlsWithinBound,
+            submittedControls: submittedControlsWithinBound ? submittedControls : []
+          } : {}),
           controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
             tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
             type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
           }))
         };
-        const submitShape = { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() };
-        return { formShape, submitShape };
-      }, { scope: scopeHandle, scopeKind });
+        const submitShape = {
+          tag: element.tagName.toLowerCase(), id: element.id || null,
+          name: element.getAttribute('name') || null, type: element.getAttribute('type') || null,
+          text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
+          ...(bound.bindSubmittedState ? {
+            value: element.getAttribute('value') || null,
+            formAction: element.getAttribute('formaction') || null,
+            formMethod: element.getAttribute('formmethod') || null,
+            formTarget: element.getAttribute('formtarget') || null,
+            formEnctype: element.getAttribute('formenctype') || null,
+            formNoValidate: element.hasAttribute('formnovalidate'),
+            formAssociation: element.getAttribute('form') || null
+          } : {})
+        };
+        const canonicalUrl = () => {
+          const current = new URL(location.href);
+          current.hash = '';
+          return current.href;
+        };
+        const approvedSnapshot = { url: canonicalUrl(), formShape, submitShape };
+        let transportBinding = null;
+        if (bound.bindSubmittedState) {
+          if (!(root instanceof HTMLFormElement) || root !== bound.applicationScope
+            || !root.isConnected || !element.isConnected || element.form !== root
+            || !globalThis.crypto?.subtle) {
+            transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+          } else {
+            const isNativeSubmitter = (element instanceof HTMLButtonElement && element.type === 'submit')
+              || (element instanceof HTMLInputElement && element.type === 'submit');
+            if (!isNativeSubmitter || bound.scopeKind !== 'form' || bound.usesAssociatedForm !== true) {
+              transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+            } else {
+              const method = normalizeMethod(element.hasAttribute('formmethod')
+                ? element.getAttribute('formmethod')
+                : root.getAttribute('method')).toUpperCase();
+              const action = canonical(element.hasAttribute('formaction')
+                ? element.getAttribute('formaction') || location.href
+                : root.getAttribute('action') || location.href);
+              const target = String(element.hasAttribute('formtarget')
+                ? element.getAttribute('formtarget')
+                : (root.getAttribute('target')
+                  || document.querySelector('base[target]')?.getAttribute('target') || '_self'))
+                .toLowerCase() || '_self';
+              const enctype = normalizeEnctype(element.hasAttribute('formenctype')
+                ? element.getAttribute('formenctype')
+                : root.getAttribute('enctype'));
+              if (target !== '_self' || method !== 'POST'
+                || !['application/x-www-form-urlencoded', 'multipart/form-data'].includes(enctype)) {
+                transportBinding = { unsupportedReason: 'submit_transport_unsupported' };
+              } else {
+                const disabledByFieldset = (control) => {
+                  for (let fieldset = control.parentElement?.closest('fieldset[disabled]'); fieldset;
+                    fieldset = fieldset.parentElement?.closest('fieldset[disabled]')) {
+                    const firstLegend = [...fieldset.children].find((child) => child instanceof HTMLLegendElement);
+                    if (!firstLegend || !firstLegend.contains(control)) return true;
+                  }
+                  return false;
+                };
+                const successful = [];
+                const listed = [...root.elements];
+                if (listed.length > 512) {
+                  transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+                } else {
+                  for (const control of listed) {
+                    if (control.form !== root || control.disabled || disabledByFieldset(control)) continue;
+                    if (control instanceof HTMLFieldSetElement || control instanceof HTMLOutputElement) continue;
+                    if (!(control instanceof HTMLInputElement)
+                      && !(control instanceof HTMLTextAreaElement)
+                      && !(control instanceof HTMLSelectElement)
+                      && !(control instanceof HTMLButtonElement)) {
+                      transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+                      break;
+                    }
+                    const name = control.getAttribute('name') || '';
+                    if (!name) continue;
+                    if (control.hasAttribute('dirname') || name === '_charset_') {
+                      transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+                      break;
+                    }
+                    if (control instanceof HTMLButtonElement) {
+                      if (control === element && control.type === 'submit') successful.push([name, control.value]);
+                      continue;
+                    }
+                    if (control instanceof HTMLInputElement) {
+                      const type = control.type.toLowerCase();
+                      if (type === 'image') {
+                        transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+                        break;
+                      }
+                      if (type === 'submit') {
+                        if (control === element) successful.push([name, control.value]);
+                        continue;
+                      }
+                      if (type === 'button' || type === 'reset') continue;
+                      if ((type === 'checkbox' || type === 'radio') && !control.checked) continue;
+                      if (type === 'file') {
+                        const files = [...(control.files || [])];
+                        if (files.length === 0) {
+                          successful.push([name, new File([], '', { type: 'application/octet-stream' })]);
+                        } else {
+                          for (const file of files) successful.push([name, file]);
+                        }
+                        continue;
+                      }
+                      successful.push([name, control.value]);
+                      continue;
+                    }
+                    if (control instanceof HTMLSelectElement) {
+                      for (const option of control.options) {
+                        if (!option.selected || option.disabled || option.parentElement?.disabled) continue;
+                        successful.push([name, option.value]);
+                      }
+                      continue;
+                    }
+                    successful.push([name, control.value]);
+                  }
+                  if (!transportBinding && successful.length > 1024) {
+                    transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
+                  }
+                  if (!transportBinding) {
+                    const keyBytes = Uint8Array.from(atob(bound.hmacKey), (character) => character.charCodeAt(0));
+                    const key = await globalThis.crypto.subtle.importKey(
+                      'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+                    );
+                    const digest = async (bytes) => {
+                      const signature = await globalThis.crypto.subtle.sign('HMAC', key, bytes);
+                      return [...new Uint8Array(signature)]
+                        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+                    };
+                    const entries = await Promise.all(successful.map(async ([name, value]) => {
+                      if (value instanceof File) {
+                        return {
+                          name,
+                          kind: 'file',
+                          filename: value.name,
+                          contentType: value.type || 'application/octet-stream',
+                          size: value.size,
+                          digest: await digest(await value.arrayBuffer())
+                        };
+                      }
+                      const normalized = String(value).replace(/\r\n|\r|\n/g, '\r\n');
+                      return {
+                        name,
+                        kind: 'text',
+                        digest: await digest(new TextEncoder().encode(normalized))
+                      };
+                    }));
+                    transportBinding = { action, method, target, enctype, entries };
+                  }
+                }
+              }
+            }
+          }
+        }
+        return { formShape, submitShape, approvedSnapshot, transportBinding };
+      }, {
+        scope: scopeHandle,
+        scopeKind,
+        chooserVersion,
+        usesAssociatedForm,
+        bindSubmittedState: requiresNativeTransport,
+        applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
+        hmacKey: approvedTransportHmacKey
+      }).catch(() => null);
+      const approvedActivationSnapshot = initialBindingBundle?.approvedSnapshot
+        ? JSON.parse(JSON.stringify(initialBindingBundle.approvedSnapshot))
+        : null;
+      const approvedTransportBinding = initialBindingBundle?.transportBinding || null;
+      const binding = protectChooserBinding(initialBindingBundle ? JSON.parse(JSON.stringify({
+        formShape: initialBindingBundle.formShape,
+        submitShape: initialBindingBundle.submitShape
+      })) : null);
       const formFingerprint = crypto.createHash('sha256').update(JSON.stringify(binding.formShape)).digest('hex');
       const submitFingerprint = crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
-      const candidates = await scope.evaluate((root, boundFingerprint) => {
+      const scopeTarget = scopeHandle;
+      let requiredScanHandle = null;
+      let requiredRowsHandle = null;
+      let requiredElementsHandle = null;
+      let requiredOpenersHandle = null;
+      const requiredTargetHandles = [];
+      const requiredOpenerHandles = [];
+      requiredScanHandle = await scopeTarget.evaluateHandle((root, bound) => {
+        const boundFingerprint = bound.formFingerprint;
         const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
         const renderedText = (node) => {
           if (!node) return '';
@@ -5376,6 +7642,35 @@ const { chromium } = require('playwright');
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
           return nativeMissing || element.getAttribute?.('aria-invalid') === 'true';
         };
+        const belongsToRoot = (element) => {
+          if (!element) return false;
+          if (!(root instanceof HTMLFormElement)) return root.contains(element);
+          const native = element instanceof HTMLInputElement
+            || element instanceof HTMLTextAreaElement
+            || element instanceof HTMLSelectElement
+            || element instanceof HTMLButtonElement;
+          return native ? element.form === root : root.contains(element);
+        };
+        const controlsForRoot = (selector) => {
+          const found = new Set(root.querySelectorAll(selector));
+          if (root instanceof HTMLFormElement) {
+            for (const control of root.elements) {
+              if (control.form === root && control.matches?.(selector)) found.add(control);
+            }
+          }
+          return [...found];
+        };
+        const markersForRoot = (selector) => {
+          const found = new Set(root.querySelectorAll(selector));
+          if (root instanceof HTMLFormElement) {
+            for (const marker of document.querySelectorAll(selector)) {
+              const named = marker.getAttribute?.('for');
+              const control = marker.control || (named ? document.getElementById(named) : null);
+              if (control?.form === root) found.add(marker);
+            }
+          }
+          return [...found];
+        };
         const select2Binding = (control) => {
           if (!control) return null;
           let source = null;
@@ -5399,8 +7694,8 @@ const { chromium } = require('playwright');
             || shell.id !== 's2id_' + source.id
             || source.previousElementSibling !== shell
             || widgetOf(source) !== widgetOf(shell)
-            || !root.contains(source)
-            || !root.contains(shell)) return null;
+            || !belongsToRoot(source)
+            || !(root.contains(shell) || source.parentElement?.contains(shell))) return null;
           const targets = [...shell.querySelectorAll(
             ':scope > .select2-choice'
           )].filter((candidate) => isVisible(candidate));
@@ -5418,7 +7713,7 @@ const { chromium } = require('playwright');
         };
         const addControl = (control) => {
           const canonical = canonicalControl(control);
-          if (!canonical || !root.contains(canonical)) return;
+          if (!canonical || !belongsToRoot(canonical)) return;
           const validationSources = controls.get(canonical) || new Set([canonical]);
           validationSources.add(control);
           const select2 = select2Binding(control);
@@ -5428,10 +7723,10 @@ const { chromium } = require('playwright');
           }
           controls.set(canonical, validationSources);
         };
-        for (const control of root.querySelectorAll(
+        for (const control of controlsForRoot(
           'input[required], textarea[required], select[required], [aria-required="true"]'
         )) addControl(control);
-        for (const marker of root.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+        for (const marker of markersForRoot('label[class*="_required_"], legend[class*="_required_"]')) {
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
           const control = (named && document.getElementById(named))
@@ -5441,7 +7736,7 @@ const { chromium } = require('playwright');
         }
         const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
         const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
-        for (const marker of root.querySelectorAll('label, legend')) {
+        for (const marker of markersForRoot('label, legend')) {
           const text = clean(marker.textContent);
           if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
           const block = widgetOf(marker);
@@ -5451,14 +7746,18 @@ const { chromium } = require('playwright');
             || block;
           addControl(control);
         }
-        for (const stale of root.querySelectorAll(
-          '[data-litos-required-confirm], [data-litos-required-confirm-source], [data-litos-select2-confirm]'
-        )) {
-          stale.removeAttribute('data-litos-required-confirm');
-          stale.removeAttribute('data-litos-required-confirm-source');
-          stale.removeAttribute('data-litos-select2-confirm');
+        if (bound.mirrorMarkers) {
+          for (const stale of root.querySelectorAll(
+            '[data-litos-required-confirm], [data-litos-required-confirm-source], [data-litos-select2-confirm]'
+          )) {
+            stale.removeAttribute('data-litos-required-confirm');
+            stale.removeAttribute('data-litos-required-confirm-source');
+            stale.removeAttribute('data-litos-select2-confirm');
+          }
         }
         const out = [];
+        const directElements = [];
+        const directOpeners = [];
         let index = 0;
         const seenGroups = new Set();
         for (const [element, validationSources] of controls) {
@@ -5472,13 +7771,15 @@ const { chromium } = require('playwright');
           if (groupKey) seenGroups.add(groupKey);
           index += 1;
           const marker = 'litos-required-confirm-' + index;
-          element.setAttribute('data-litos-required-confirm', marker);
-          for (const source of validationSources) {
-            source.setAttribute('data-litos-required-confirm-source', marker);
+          if (bound.mirrorMarkers) {
+            element.setAttribute('data-litos-required-confirm', marker);
+            for (const source of validationSources) {
+              source.setAttribute('data-litos-required-confirm-source', marker);
+            }
           }
           const rawType = element instanceof HTMLInputElement ? (element.type || 'text').toLowerCase() : '';
           const select2 = select2Binding(element);
-          if (select2) select2.opener.setAttribute('data-litos-select2-confirm', marker);
+          if (select2 && bound.mirrorMarkers) select2.opener.setAttribute('data-litos-select2-confirm', marker);
           const type = select2?.source === element
             ? 'select2'
             : element.getAttribute?.('role') === 'combobox'
@@ -5508,11 +7809,17 @@ const { chromium } = require('playwright');
           };
           const nameSelector = quotedSelector('name', ownName);
           const pathSelector = quotedSelector('data-field-path', fieldPath);
-          let durableSelector = ownId && root.querySelectorAll(ownId).length === 1
+          const matchesForRoot = (selector) => {
+            const matches = root instanceof HTMLFormElement
+              ? [...document.querySelectorAll(selector)].filter((candidate) => belongsToRoot(candidate))
+              : [...root.querySelectorAll(selector)];
+            return matches;
+          };
+          let durableSelector = ownId && matchesForRoot(ownId).length === 1
             ? ownId
-            : nameSelector && root.querySelectorAll(nameSelector).length === 1
+            : nameSelector && matchesForRoot(nameSelector).length === 1
               ? nameSelector
-              : pathSelector && root.querySelectorAll(pathSelector).length === 1
+              : pathSelector && matchesForRoot(pathSelector).length === 1
                 ? pathSelector
                 : null;
           if (!durableSelector) {
@@ -5522,10 +7829,11 @@ const { chromium } = require('playwright');
             const stableId = 'v2-' + boundFingerprint.slice(0, 24) + '-' + index;
             element.setAttribute('data-litos-stable-id-v1', stableId);
             const stableSelector = '[data-litos-stable-id-v1="' + stableId + '"]';
-            if (root.querySelectorAll(stableSelector).length === 1) durableSelector = stableSelector;
+            if (matchesForRoot(stableSelector).length === 1) durableSelector = stableSelector;
           }
           out.push({
             marker,
+            directIndex: directElements.length,
             selector: durableSelector,
             label: labelOf(element, widget) || null,
             fieldType: type === 'combobox' ? 'react-select' : type,
@@ -5533,9 +7841,49 @@ const { chromium } = require('playwright');
               || [...validationSources].some((source) => chosenValue(source, widget)),
             affected: [...validationSources].some(hasValidationIssue) || errorText(widget)
           });
+          directElements.push(element);
+          directOpeners.push(select2?.opener || null);
         }
-        return out;
-      }, formFingerprint).catch(() => null);
+        return {
+          candidates: out,
+          directElements: bound.directHandles ? directElements : [],
+          directOpeners: bound.directHandles ? directOpeners : []
+        };
+      }, {
+        formFingerprint,
+        directHandles: true,
+        mirrorMarkers: chooserVersion === 3
+      }).catch(() => null);
+      if (requiredScanHandle) {
+        requiredRowsHandle = await requiredScanHandle.getProperty('candidates').catch(() => null);
+        requiredElementsHandle = await requiredScanHandle.getProperty('directElements').catch(() => null);
+        requiredOpenersHandle = await requiredScanHandle.getProperty('directOpeners').catch(() => null);
+      }
+      const candidates = await requiredRowsHandle?.jsonValue().catch(() => null);
+      if (requiredElementsHandle) {
+        const indexed = [...(await requiredElementsHandle.getProperties()).entries()]
+          .filter(([key]) => /^\d+$/.test(key))
+          .sort((a, b) => Number(a[0]) - Number(b[0]));
+        for (const [, property] of indexed) {
+          const element = property.asElement();
+          if (element) requiredTargetHandles.push(element);
+          else await property.dispose().catch(() => undefined);
+        }
+      }
+      if (requiredOpenersHandle) {
+        const indexed = [...(await requiredOpenersHandle.getProperties()).entries()]
+          .filter(([key]) => /^\d+$/.test(key))
+          .sort((a, b) => Number(a[0]) - Number(b[0]));
+        for (const [, property] of indexed) {
+          const element = property.asElement();
+          requiredOpenerHandles.push(element || null);
+          if (!element) await property.dispose().catch(() => undefined);
+        }
+      }
+      await requiredRowsHandle?.dispose().catch(() => undefined);
+      await requiredElementsHandle?.dispose().catch(() => undefined);
+      await requiredOpenersHandle?.dispose().catch(() => undefined);
+      await requiredScanHandle?.dispose().catch(() => undefined);
       if (!Array.isArray(candidates)) throw new Error('Atomic required-field scan failed');
       const requiredControls = candidates.filter((candidate) => candidate.selector).map((candidate) => ({
         selector: candidate.selector,
@@ -5545,16 +7893,39 @@ const { chromium } = require('playwright');
       }));
       const attempts = [];
       const unresolved = [];
+      const runnerChoiceFailures = tracksChoiceFailures
+        ? await unsuccessfulChoiceFailuresForScope(scopeHandle, scopeKind)
+        : [];
+      for (const kind of new Set(runnerChoiceFailures)) {
+        unresolved.push(kind === 'unreadable'
+          ? 'A choice this run could not verify remains unresolved in the bound application scope'
+          : 'A choice this run could not preserve remains unresolved in the bound application scope');
+      }
+      if (requiresNativeTransport && binding.formShape.submittedControlsWithinBound === false) {
+        unresolved.push('The bound application form has too many or oversized submitted controls to fingerprint safely');
+      }
       let retries = 0;
-      let reactConfirmationMarker = 0;
-      const replayExactSelect2Selection = async (target, marker) => {
-        const opener = scope.locator(
-          '[data-litos-select2-confirm="' + String(marker).replace(/["\\]/g, '\\$&') + '"]'
-        );
-        if (await opener.count() !== 1 || !await opener.first().isVisible().catch(() => false)) {
-          return false;
-        }
-        const before = await target.evaluate((source, expectedMarker) => {
+      const replayExactSelect2Selection = async (target, marker, directOpener = null) => {
+        if (!directOpener) return false;
+        const boundOpener = await target.evaluate((source, expectedOpener) => {
+          if (!(source instanceof HTMLSelectElement
+            || (source instanceof HTMLInputElement && source.type === 'hidden'))
+            || !source.id || !source.classList.contains('select2-offscreen')) return false;
+          const shell = source.previousElementSibling;
+          if (!shell?.matches('.select2-container') || shell.id !== 's2id_' + source.id) return false;
+          const openers = [...shell.querySelectorAll(':scope > .select2-choice')].filter((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            const style = getComputedStyle(candidate);
+            return (rect.width > 0 || rect.height > 0)
+              && style.display !== 'none'
+              && style.visibility !== 'hidden';
+          });
+          return openers.length === 1 && openers[0] === expectedOpener;
+        }, directOpener).catch(() => false);
+        if (!boundOpener) return false;
+        const opener = directOpener;
+        if (!await opener.isVisible().catch(() => false)) return false;
+        const before = await target.evaluate((source, bound) => {
           const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
           const isSource = source instanceof HTMLSelectElement
             || (source instanceof HTMLInputElement && source.type === 'hidden');
@@ -5568,8 +7939,10 @@ const { chromium } = require('playwright');
               && style.display !== 'none'
               && style.visibility !== 'hidden';
           });
-          if (openers.length !== 1
-            || openers[0].getAttribute('data-litos-select2-confirm') !== expectedMarker) return null;
+          if (openers.length !== 1) return null;
+          if (bound.direct
+            ? openers[0] !== bound.opener
+            : openers[0].getAttribute('data-litos-select2-confirm') !== bound.marker) return null;
           const displays = [...shell.querySelectorAll(':scope > .select2-choice .select2-chosen')];
           if (displays.length !== 1) return null;
           const display = cleanText(displays[0].textContent);
@@ -5599,16 +7972,16 @@ const { chromium } = require('playwright');
             sourceValue,
             semantic: display
           };
-        }, marker).catch(() => null);
+        }, { marker, direct: true, opener }).catch(() => null);
         if (!before) return false;
 
-        const opened = await opener.first().click({ timeout: 2000 })
+        const opened = await opener.click({ timeout: 2000 })
           .then(() => true)
           .catch(() => false);
         if (!opened) return false;
         const close = async () => {
-          await opener.first().press('Escape').catch(() => undefined);
-          await opener.first().evaluate((element) => element.blur()).catch(() => undefined);
+          await opener.press('Escape').catch(() => undefined);
+          await opener.evaluate((element) => element.blur()).catch(() => undefined);
         };
         const dropdown = page.locator('#select2-drop.select2-drop-active:visible');
         if (await dropdown.count() !== 1) {
@@ -5620,16 +7993,18 @@ const { chromium } = require('playwright');
           await close();
           return false;
         }
-        const rowMatchesSource = await exactRows.first().evaluate((row, proof) => {
+        const rowMatchesSource = await exactRows.first().evaluate((row, bound) => {
+          const proof = bound.proof;
           const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
-          const source = document.getElementById(proof.sourceId);
+          const source = bound.source || document.getElementById(proof.sourceId);
           const shell = source?.previousElementSibling;
           const dropdown = row.closest('#select2-drop.select2-drop-active');
           if (!source || !shell?.matches('.select2-container')
             || shell.id !== 's2id_' + proof.sourceId
             || !shell.classList.contains('select2-dropdown-open')
             || !dropdown
-            || document.querySelectorAll('#select2-drop.select2-drop-active').length !== 1) return false;
+            || document.querySelectorAll('#select2-drop.select2-drop-active').length !== 1
+            || (bound.opener && !shell.contains(bound.opener))) return false;
           const jquery = window.jQuery;
           if (typeof jquery !== 'function') return false;
           const wrapped = jquery(source);
@@ -5642,7 +8017,7 @@ const { chromium } = require('playwright');
             || typeof instance.id !== 'function' || data == null) return false;
           return cleanText(row.textContent) === proof.semantic
             && cleanText(instance.id(data)) === proof.sourceValue;
-        }, before).catch(() => false);
+        }, { proof: before, source: target, opener }).catch(() => false);
         if (!rowMatchesSource) {
           await close();
           return false;
@@ -5707,7 +8082,7 @@ const { chromium } = require('playwright');
         await close();
         if (!recommitted) return false;
         await page.waitForTimeout(100).catch(() => undefined);
-        return target.evaluate((source, proof) => {
+        return await target.evaluate((source, proof) => {
           const cleanText = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
           const shell = source.previousElementSibling;
           const display = shell?.querySelector(':scope > .select2-choice .select2-chosen');
@@ -5853,16 +8228,29 @@ const { chromium } = require('playwright');
         if (await exactRows.count() !== 1 || !await exactRows.first().isVisible().catch(() => false)) {
           return { answerPreserved: false, arrival: before };
         }
-        const marker = 'litos-react-confirm-' + (++reactConfirmationMarker);
-        await selectedRows.first().evaluate((element, value) => {
-          element.setAttribute('data-litos-react-confirm-selected', value);
-        }, marker).catch(() => undefined);
-        const selectedExactRow = await exactRows.first().getAttribute(
-          'data-litos-react-confirm-selected'
-        ).catch(() => null) === marker;
-        await selectedRows.first().evaluate((element) => {
-          element.removeAttribute('data-litos-react-confirm-selected');
-        }).catch(() => undefined);
+        let selectedExactRow = false;
+        const selectedRowHandle = await selectedRows.first().elementHandle().catch(() => null);
+        const exactRowHandle = await exactRows.first().elementHandle().catch(() => null);
+        try {
+          if (chooserVersion === 3) {
+            await selectedRowHandle?.evaluate((element) => {
+              element.setAttribute('data-litos-react-confirm-selected', 'litos-react-confirm-mirror');
+            }).catch(() => undefined);
+          }
+          selectedExactRow = Boolean(selectedRowHandle && exactRowHandle)
+            && await selectedRowHandle.evaluate(
+              (selected, exact) => selected === exact,
+              exactRowHandle
+            ).catch(() => false);
+        } finally {
+          if (chooserVersion === 3) {
+            await selectedRowHandle?.evaluate((element) => {
+              element.removeAttribute('data-litos-react-confirm-selected');
+            }).catch(() => undefined);
+          }
+          await selectedRowHandle?.dispose().catch(() => undefined);
+          await exactRowHandle?.dispose().catch(() => undefined);
+        }
         if (!selectedExactRow) return { answerPreserved: false, arrival: before };
         const submitCapable = await exactRows.first().evaluate((element) => {
           const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
@@ -5895,16 +8283,24 @@ const { chromium } = require('playwright');
         }
         return false;
       };
-      for (const candidate of candidates) {
-        const runtimeSelector = '[data-litos-required-confirm="' + candidate.marker + '"]';
-        const target = page.locator(runtimeSelector).first();
+      for (const candidate of runnerChoiceFailures.length > 0 ? [] : candidates) {
+        const target = requiredTargetHandles[candidate.directIndex] || null;
         const proofSelector = candidate.selector || '';
         const fieldType = candidate.fieldType;
         if (!proofSelector) {
           unresolved.push(candidate.label || 'Selectorless required field');
           continue;
         }
-        if (await target.count() !== 1) {
+        const targetIsCurrent = Boolean(target) && await target.evaluate((element, root) => {
+          if (!element.isConnected || !root.isConnected) return false;
+          if (!(root instanceof HTMLFormElement)) return root.contains(element);
+          const native = element instanceof HTMLInputElement
+            || element instanceof HTMLTextAreaElement
+            || element instanceof HTMLSelectElement
+            || element instanceof HTMLButtonElement;
+          return native ? element.form === root : root.contains(element);
+        }, scopeHandle).catch(() => false);
+        if (!targetIsCurrent) {
           attempts.push({ selector: proofSelector, label: candidate.label, fieldType, outcome: 'failed', attemptCount: 1, reason: 'required control selector did not resolve exactly once' });
           unresolved.push(candidate.label || proofSelector);
           continue;
@@ -5932,17 +8328,27 @@ const { chromium } = require('playwright');
               selected?.blur();
             }).catch(() => undefined);
           } else if (fieldType === 'select2') {
-            answerPreserved = await replayExactSelect2Selection(target, candidate.marker);
+            answerPreserved = await replayExactSelect2Selection(
+              target,
+              candidate.marker,
+              requiredOpenerHandles[candidate.directIndex] || null
+            );
           } else if (fieldType === 'react-select') {
-            const ownedControl = target.locator(
-              'xpath=ancestor-or-self::*[contains(@class,"select__control")][1]'
-            );
-            const outerShell = target.locator(
-              'xpath=ancestor-or-self::*[contains(@class,"select__container")'
-              + ' or contains(@class,"select-shell")][1]'
-            );
-            const choiceScope = (await ownedControl.count()) === 1 ? ownedControl : outerShell;
-            if ((await choiceScope.count()) === 1) {
+            let directChoiceScopeReference = null;
+            let directChoiceScopeHandle = null;
+            let choiceScope = null;
+            let choiceScopeCount = 0;
+            directChoiceScopeReference = await target.evaluateHandle((element) => (
+              element.closest('[class*="select__control"]')
+              || element.closest('[class*="select__container"], [class*="select-shell"]')
+            )).catch(() => null);
+            directChoiceScopeHandle = directChoiceScopeReference?.asElement?.() || null;
+            if (!directChoiceScopeHandle) {
+              await directChoiceScopeReference?.dispose?.().catch(() => undefined);
+            }
+            choiceScope = directChoiceScopeHandle;
+            choiceScopeCount = directChoiceScopeHandle ? 1 : 0;
+            if (choiceScopeCount === 1) {
               const replayed = await replayExactReactSelection(target);
               answerPreserved = replayed.answerPreserved;
               if (replayed.multiValue) {
@@ -5975,6 +8381,7 @@ const { chromium } = require('playwright');
             }
             await target.press('Escape').catch(() => undefined);
             await target.evaluate((element) => element.blur()).catch(() => undefined);
+            await directChoiceScopeHandle?.dispose().catch(() => undefined);
           } else if (fieldType === 'custom') {
             answerPreserved = await target.evaluate((element) => {
               const selected = element.querySelector(
@@ -5982,6 +8389,16 @@ const { chromium } = require('playwright');
                 + ' button[class*="_active_"], button[class*="_selected_"], button[class*="_checked_"]'
               );
               if (!selected) return false;
+              const activations = [
+                selected.closest('button, input'),
+                ...selected.querySelectorAll('button, input')
+              ].filter(Boolean);
+              const submitCapable = activations.some((activation) => (
+                (activation instanceof HTMLButtonElement && activation.type === 'submit' && activation.form)
+                || (activation instanceof HTMLInputElement
+                  && /^(?:submit|image)$/i.test(activation.type) && activation.form)
+              ));
+              if (submitCapable) return false;
               const semanticText = String(selected.textContent || '').replace(/\s+/g, ' ').trim();
               selected.setAttribute('data-litos-confirm-custom-option', '1');
               const remainsSelected = () => {
@@ -6051,39 +8468,141 @@ const { chromium } = require('playwright');
       }
       // The same exhaustive detector used by prepare-time readiness is read again against this
       // exact bound form. No newsletter, search, or login form can contribute a blocker here.
-      const scopedReadiness = await readSubmitReadiness(scope);
+      const scopedReadiness = await readSubmitReadiness(scopeTarget);
       unresolved.push(...scopedReadiness.blocking, ...scopedReadiness.unmatched.map(
         (text) => 'The bound application form still shows an unmatched validation error: ' + text
       ));
       const sameNode = Boolean(scopeHandle) && await submitHandle.evaluate(
         (element, bound) => {
           if (!element.isConnected) return false;
-          if (bound.scopeKind === 'form') return element.closest('form') === bound.scope;
+          if (bound.scopeKind === 'form') {
+            return bound.usesAssociatedForm
+              ? element.form === bound.scope
+              : element.closest('form') === bound.scope;
+          }
           return bound.scope.isConnected && bound.scope.contains(element);
         },
-        { scope: scopeHandle, scopeKind }
+        { scope: scopeHandle, scopeKind, usesAssociatedForm }
       ).catch(() => false);
       let blockerReason = null;
+      let readCurrentBinding = null;
       if (!sameNode) {
         blockerReason = 'submit_node_replaced';
         unresolved.push('Bound submit control or application form was replaced before submission');
       } else {
-        const currentBinding = await submitHandle.evaluate((element, bound) => {
+        readCurrentBinding = async () => protectChooserBinding(await submitHandle.evaluate((element, bound) => {
           const root = bound.scope;
+          const resolvedAction = bound.scopeKind === 'form'
+            ? new URL(root.getAttribute('action') || location.href, document.baseURI).href
+            : null;
+          const rawMethod = bound.scopeKind === 'form'
+            ? String(root.getAttribute('method') || '').toLowerCase()
+            : '';
+          const effectiveMethod = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
+          const rawEnctype = bound.scopeKind === 'form'
+            ? String(root.getAttribute('enctype') || '').toLowerCase()
+            : '';
+          const effectiveEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
+            .test(rawEnctype) ? rawEnctype : 'application/x-www-form-urlencoded';
+          const submittedElements = bound.bindSubmittedState
+            ? (bound.scopeKind === 'form'
+                ? [...root.elements]
+                : [...root.querySelectorAll('input, textarea, select')])
+            : [];
+          const submittedControls = submittedElements.map((control, index) => {
+            const isInput = control instanceof HTMLInputElement;
+            const isSelect = control instanceof HTMLSelectElement;
+            const type = String(control.getAttribute?.('type') || '').toLowerCase();
+            return {
+              index,
+              tag: String(control.tagName || '').toLowerCase(),
+              id: control.id || null,
+              name: control.getAttribute?.('name') || null,
+              type: type || null,
+              disabled: Boolean(control.disabled),
+              readOnly: 'readOnly' in control ? Boolean(control.readOnly) : null,
+              formAssociation: control.getAttribute?.('form') || null,
+              associatedWithRoot: control.form === root,
+              value: isInput && type === 'file' ? null : ('value' in control ? String(control.value || '') : null),
+              checked: isInput && (type === 'checkbox' || type === 'radio') ? Boolean(control.checked) : null,
+              selected: isSelect ? [...control.selectedOptions].map((option) => ({
+                index: option.index,
+                value: String(option.value || ''),
+                label: String(option.label || option.textContent || ''),
+                disabled: Boolean(option.disabled)
+              })) : null,
+              files: isInput && type === 'file' ? [...(control.files || [])].map((file) => ({
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                lastModified: file.lastModified
+              })) : null
+            };
+          });
+          const submittedControlsJson = JSON.stringify(submittedControls);
+          const submittedControlsWithinBound = submittedControls.length <= 256
+            && submittedControlsJson.length <= 2_000_000
+            && submittedControls.every((control) => (
+              String(control.id || '').length <= 256
+              && String(control.name || '').length <= 256
+              && String(control.type || '').length <= 64
+              && String(control.formAssociation || '').length <= 256
+              && String(control.value || '').length <= 16_384
+              && (!control.selected || (control.selected.length <= 128 && control.selected.every((option) => (
+                String(option.value || '').length <= 16_384 && String(option.label || '').length <= 16_384
+              ))))
+              && (!control.files || (control.files.length <= 16 && control.files.every((file) => (
+                String(file.name || '').length <= 512 && String(file.type || '').length <= 256
+              ))))
+            ));
           return {
             formShape: {
               scopeKind: bound.scopeKind,
               id: root.id || null,
               action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
               method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
+              ...(bound.usesAssociatedForm && bound.scopeKind === 'form' ? {
+                resolvedAction,
+                effectiveMethod,
+                effectiveTarget: root.getAttribute('target')
+                  || document.querySelector('base[target]')?.getAttribute('target') || '',
+                effectiveEnctype,
+                noValidate: root.hasAttribute('novalidate'),
+                acceptCharset: root.getAttribute('accept-charset') || ''
+              } : {}),
+              ...(bound.bindSubmittedState ? {
+                submittedControlCount: submittedControls.length,
+                submittedControlsWithinBound,
+                submittedControls: submittedControlsWithinBound ? submittedControls : []
+              } : {}),
               controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')].map((control) => ({
                 tag: control.tagName.toLowerCase(), id: control.id || null, name: control.getAttribute('name') || null,
                 type: control.getAttribute('type') || null, label: control.getAttribute('aria-label') || null
               }))
             },
-            submitShape: { tag: element.tagName.toLowerCase(), id: element.id || null, name: element.getAttribute('name') || null, type: element.getAttribute('type') || null, text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim() }
+            submitShape: {
+              tag: element.tagName.toLowerCase(), id: element.id || null,
+              name: element.getAttribute('name') || null, type: element.getAttribute('type') || null,
+              text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
+              ...(bound.bindSubmittedState ? {
+                value: element.getAttribute('value') || null,
+                formAction: element.getAttribute('formaction') || null,
+                formMethod: element.getAttribute('formmethod') || null,
+                formTarget: element.getAttribute('formtarget') || null,
+                formEnctype: element.getAttribute('formenctype') || null,
+                formNoValidate: element.hasAttribute('formnovalidate'),
+                formAssociation: element.getAttribute('form') || null
+              } : {})
+            }
           };
-        }, { scope: scopeHandle, scopeKind }).catch(() => null);
+        }, {
+          scope: scopeHandle,
+          scopeKind,
+          chooserVersion,
+          usesAssociatedForm,
+          bindSubmittedState: requiresNativeTransport
+        }).catch(() => null));
+        const currentBinding = await readCurrentBinding();
         const currentFormFingerprint = currentBinding && crypto.createHash('sha256').update(JSON.stringify(currentBinding.formShape)).digest('hex');
         const currentSubmitFingerprint = currentBinding && crypto.createHash('sha256').update(currentFormFingerprint + ':' + JSON.stringify(currentBinding.submitShape)).digest('hex');
         if (currentFormFingerprint !== formFingerprint || currentSubmitFingerprint !== submitFingerprint) {
@@ -6091,7 +8610,85 @@ const { chromium } = require('playwright');
           unresolved.push('Bound application form or submit identity changed during confirmation');
         }
       }
-      const blocked = unresolved.length > 0;
+      if (requiresNativeTransport) {
+        const finalSuccessfulControls = await currentSuccessfulAddressHandles();
+        const finalChoices = await readSubmitChoices(finalSuccessfulControls);
+        const finalViable = viableAmong(finalChoices);
+        const finalSelected = finalViable[0];
+        const finalTied = Boolean(finalSelected && finalViable[1]
+          && finalViable[1].score === finalSelected.score);
+        const finalRows = Array.isArray(finalChoices?.choices) ? finalChoices.choices : [];
+        const finalTopScore = finalSelected ? finalSelected.score : null;
+        if (chooserVersion === 4) {
+          finalSubmitChooser = {
+            ...finalSubmitChooser,
+            outcome: !finalSelected ? 'no_submit_control' : (finalTied ? 'ambiguous_submit' : 'selected'),
+            candidateCount: finalRows.filter((choice) => choice.visible && !choice.disabled && choice.finalIntent).length,
+            viableCandidateCount: finalViable.length,
+            topScore: finalTopScore,
+            topScoreCount: finalTopScore === null
+              ? 0
+              : finalViable.filter((choice) => choice.score === finalTopScore).length,
+            addressedScopeCount: Number(finalChoices?.addressedScopeCount) || 0,
+            bareSendCandidateCount: finalRows.filter((choice) => (
+              choice.visible && !choice.disabled && choice.bareSend
+            )).length
+          };
+        }
+        let sameChooserBinding = false;
+        if (finalSelected && !finalTied && finalSelected.scopeKind === scopeKind) {
+          const finalSubmitHandle = finalChoices.selectedHandle || null;
+          const finalScopeHandle = finalChoices.selectedScopeHandle || null;
+          try {
+            const sameSubmit = finalSubmitHandle && await submitHandle.evaluate(
+              (element, current) => element === current,
+              finalSubmitHandle
+            ).catch(() => false);
+            const sameScope = finalScopeHandle && await scopeHandle.evaluate(
+              (root, current) => root === current,
+              finalScopeHandle
+            ).catch(() => false);
+            const finalAssociation = finalSubmitHandle && finalScopeHandle
+              && await finalSubmitHandle.evaluate((element, bound) => {
+                if (!element.isConnected || !bound.scope?.isConnected) return false;
+                if (bound.scopeKind === 'form') {
+                  return bound.usesAssociatedForm
+                    ? element.form === bound.scope
+                    : element.closest('form') === bound.scope;
+                }
+                return bound.scope.contains(element);
+              }, {
+                scope: finalScopeHandle,
+                scopeKind: finalSelected.scopeKind,
+                usesAssociatedForm: finalSelected.usesAssociatedForm === true
+              }).catch(() => false);
+            sameChooserBinding = Boolean(sameSubmit && sameScope && finalAssociation);
+          } finally {
+            await finalSubmitHandle?.dispose().catch(() => undefined);
+            await finalScopeHandle?.dispose().catch(() => undefined);
+          }
+        } else {
+          await finalChoices?.selectedHandle?.dispose().catch(() => undefined);
+          await finalChoices?.selectedScopeHandle?.dispose().catch(() => undefined);
+        }
+        if (!sameChooserBinding) {
+          if (!blockerReason) blockerReason = 'submit_chooser_changed';
+          unresolved.push('Final submit chooser changed during required-field confirmation');
+        } else if (readCurrentBinding) {
+          const finalBinding = await readCurrentBinding();
+          const finalFormFingerprint = finalBinding
+            && crypto.createHash('sha256').update(JSON.stringify(finalBinding.formShape)).digest('hex');
+          const finalSubmitFingerprint = finalBinding
+            && crypto.createHash('sha256').update(
+              finalFormFingerprint + ':' + JSON.stringify(finalBinding.submitShape)
+            ).digest('hex');
+          if (finalFormFingerprint !== formFingerprint || finalSubmitFingerprint !== submitFingerprint) {
+            blockerReason = 'form_identity_changed';
+            unresolved.push('The immutable application form, submitter, or submitted state changed during the final chooser');
+          }
+        }
+      }
+      let blocked = unresolved.length > 0;
       if (!blocked) {
         if (requiresExactPageUrl) {
           const observed = canonicalPageUrl(page.url());
@@ -6100,11 +8697,521 @@ const { chromium } = require('playwright');
           }
           exactPageUrlProof.beforeSubmit = observed;
         }
-        armSubmitNetworkWatch();
-        await submitHandle.click({ timeout: action.timeout || 10_000 });
-        finalSubmitPressed = true;
+        let activationGuardToken = null;
+        let activationGate = null;
+        if (requiresNativeTransport) {
+          const transportHmacKey = approvedTransportHmacKey;
+          const currentTransportBinding = await submitHandle.evaluate(async (element, input) => {
+            const root = input.scope;
+            if (!(root instanceof HTMLFormElement) || root !== input.applicationScope
+              || !root.isConnected || !element.isConnected || element.form !== root
+              || !globalThis.crypto?.subtle) return null;
+            const isNativeSubmitter = (element instanceof HTMLButtonElement && element.type === 'submit')
+              || (element instanceof HTMLInputElement && element.type === 'submit');
+            if (!isNativeSubmitter || input.scopeKind !== 'form' || input.usesAssociatedForm !== true) return null;
+            const canonical = (value) => {
+              const parsed = new URL(value, document.baseURI);
+              parsed.hash = '';
+              return parsed.href;
+            };
+            const normalizeMethod = (value) => {
+              const raw = String(value || '').toLowerCase();
+              return /^(?:get|post|dialog)$/.test(raw) ? raw : 'get';
+            };
+            const normalizeEnctype = (value) => {
+              const raw = String(value || '').toLowerCase();
+              return /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(raw)
+                ? raw
+                : 'application/x-www-form-urlencoded';
+            };
+            const method = normalizeMethod(element.hasAttribute('formmethod')
+              ? element.getAttribute('formmethod')
+              : root.getAttribute('method')).toUpperCase();
+            const action = canonical(element.hasAttribute('formaction')
+              ? element.getAttribute('formaction') || location.href
+              : root.getAttribute('action') || location.href);
+            const target = String(element.hasAttribute('formtarget')
+              ? element.getAttribute('formtarget')
+              : (root.getAttribute('target')
+                || document.querySelector('base[target]')?.getAttribute('target') || '_self'))
+              .toLowerCase() || '_self';
+            const enctype = normalizeEnctype(element.hasAttribute('formenctype')
+              ? element.getAttribute('formenctype')
+              : root.getAttribute('enctype'));
+            if (target !== '_self' || method !== 'POST'
+              || !['application/x-www-form-urlencoded', 'multipart/form-data'].includes(enctype)) {
+              return { unsupportedReason: 'submit_transport_unsupported' };
+            }
+            const keyBytes = Uint8Array.from(atob(input.hmacKey), (character) => character.charCodeAt(0));
+            const key = await globalThis.crypto.subtle.importKey(
+              'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+            );
+            const digest = async (bytes) => {
+              const signature = await globalThis.crypto.subtle.sign('HMAC', key, bytes);
+              return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+            };
+            const disabledByFieldset = (control) => {
+              for (let fieldset = control.parentElement?.closest('fieldset[disabled]'); fieldset;
+                fieldset = fieldset.parentElement?.closest('fieldset[disabled]')) {
+                const firstLegend = [...fieldset.children].find((child) => child instanceof HTMLLegendElement);
+                if (!firstLegend || !firstLegend.contains(control)) return true;
+              }
+              return false;
+            };
+            const successful = [];
+            const listed = [...root.elements];
+            if (listed.length > 512) return null;
+            for (const control of listed) {
+              if (control.form !== root || control.disabled || disabledByFieldset(control)) continue;
+              if (control instanceof HTMLFieldSetElement || control instanceof HTMLOutputElement) continue;
+              if (!(control instanceof HTMLInputElement)
+                && !(control instanceof HTMLTextAreaElement)
+                && !(control instanceof HTMLSelectElement)
+                && !(control instanceof HTMLButtonElement)) return null;
+              const name = control.getAttribute('name') || '';
+              if (!name) continue;
+              if (control.hasAttribute('dirname') || name === '_charset_') return null;
+              if (control instanceof HTMLButtonElement) {
+                if (control === element && control.type === 'submit') successful.push([name, control.value]);
+                continue;
+              }
+              if (control instanceof HTMLInputElement) {
+                const type = control.type.toLowerCase();
+                if (type === 'image') return null;
+                if (type === 'submit') {
+                  if (control === element) successful.push([name, control.value]);
+                  continue;
+                }
+                if (type === 'button' || type === 'reset') continue;
+                if ((type === 'checkbox' || type === 'radio') && !control.checked) continue;
+                if (type === 'file') {
+                  const files = [...(control.files || [])];
+                  if (files.length === 0) {
+                    successful.push([name, new File([], '', { type: 'application/octet-stream' })]);
+                  } else {
+                    for (const file of files) successful.push([name, file]);
+                  }
+                  continue;
+                }
+                successful.push([name, control.value]);
+                continue;
+              }
+              if (control instanceof HTMLSelectElement) {
+                for (const option of control.options) {
+                  if (!option.selected || option.disabled || option.parentElement?.disabled) continue;
+                  successful.push([name, option.value]);
+                }
+                continue;
+              }
+              successful.push([name, control.value]);
+            }
+            if (successful.length > 1024) return null;
+            const entries = await Promise.all(successful.map(async ([name, value]) => {
+              if (value instanceof File) {
+                return {
+                  name,
+                  kind: 'file',
+                  filename: value.name,
+                  contentType: value.type || 'application/octet-stream',
+                  size: value.size,
+                  digest: await digest(await value.arrayBuffer())
+                };
+              }
+              const normalized = String(value).replace(/\r\n|\r|\n/g, '\r\n');
+              return { name, kind: 'text', digest: await digest(new TextEncoder().encode(normalized)) };
+            }));
+            return { action, method, target, enctype, entries };
+          }, {
+            scope: scopeHandle,
+            applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
+            hmacKey: transportHmacKey,
+            scopeKind,
+            usesAssociatedForm
+          }).catch(() => null);
+          const transportBinding = approvedTransportBinding;
+          if (!transportBinding || !approvedActivationSnapshot) {
+            blockerReason = 'submit_payload_unverifiable';
+            unresolved.push('The exact native submit transport or payload could not be bound');
+            blocked = true;
+          } else if (transportBinding.unsupportedReason) {
+            blockerReason = transportBinding.unsupportedReason;
+            unresolved.push('The native submit transport is not supported by atomic submit v4');
+            blocked = true;
+          } else if (!currentTransportBinding
+            || JSON.stringify(currentTransportBinding) !== JSON.stringify(transportBinding)) {
+            blockerReason = 'form_identity_changed';
+            unresolved.push('The approved native submit transport or payload changed before activation');
+            blocked = true;
+          } else {
+          activationGate = await armSubmitTransportGate({
+            ...transportBinding,
+            hmacKey: transportHmacKey
+          }).catch(() => null);
+          if (!activationGate) {
+            relockV4SubmitTransport();
+            blockerReason = 'submit_transport_guard_unavailable';
+            unresolved.push('The exact native submit transport gate could not be armed');
+            blocked = true;
+          } else if (!authorizeV4SubmitTransport()) {
+            blockerReason = 'submit_transport_guard_unavailable';
+            unresolved.push('The run-wide v4 submission transport containment could not be authorized');
+            blocked = true;
+            await finishSubmitTransportGate();
+            activationGate = null;
+          }
+          if (!blocked) {
+          activationGuardToken = crypto.randomBytes(24).toString('hex');
+          const guardArmed = await submitHandle.evaluate((element, input) => {
+            const root = input.scope;
+            if (!(root instanceof HTMLFormElement) || root !== input.applicationScope
+              || !root.isConnected || !element.isConnected || element.form !== root) return false;
+            const canonicalUrl = () => {
+              const current = new URL(location.href);
+              current.hash = '';
+              return current.href;
+            };
+            const associatedWithBoundScope = () => input.usesAssociatedForm && element.form === root;
+            if (!associatedWithBoundScope()) return false;
+            const snapshot = () => {
+              const submittedControls = [...root.elements].map((control, index) => {
+                const isInput = control instanceof HTMLInputElement;
+                const isSelect = control instanceof HTMLSelectElement;
+                const type = String(control.getAttribute?.('type') || '').toLowerCase();
+                return {
+                  index,
+                  tag: String(control.tagName || '').toLowerCase(),
+                  id: control.id || null,
+                  name: control.getAttribute?.('name') || null,
+                  type: type || null,
+                  disabled: Boolean(control.disabled),
+                  readOnly: 'readOnly' in control ? Boolean(control.readOnly) : null,
+                  formAssociation: control.getAttribute?.('form') || null,
+                  associatedWithRoot: control.form === root,
+                  value: isInput && type === 'file' ? null : ('value' in control ? String(control.value || '') : null),
+                  checked: isInput && (type === 'checkbox' || type === 'radio') ? Boolean(control.checked) : null,
+                  selected: isSelect ? [...control.selectedOptions].map((option) => ({
+                    index: option.index,
+                    value: String(option.value || ''),
+                    label: String(option.label || option.textContent || ''),
+                    disabled: Boolean(option.disabled)
+                  })) : null,
+                  files: isInput && type === 'file' ? [...(control.files || [])].map((file) => ({
+                    name: file.name,
+                    size: file.size,
+                    type: file.type,
+                    lastModified: file.lastModified
+                  })) : null
+                };
+              });
+              const submittedControlsJson = JSON.stringify(submittedControls);
+              const submittedControlsWithinBound = submittedControls.length <= 256
+                && submittedControlsJson.length <= 2_000_000
+                && submittedControls.every((control) => (
+                  String(control.id || '').length <= 256
+                  && String(control.name || '').length <= 256
+                  && String(control.type || '').length <= 64
+                  && String(control.formAssociation || '').length <= 256
+                  && String(control.value || '').length <= 16_384
+                  && (!control.selected || (control.selected.length <= 128 && control.selected.every((option) => (
+                    String(option.value || '').length <= 16_384 && String(option.label || '').length <= 16_384
+                  ))))
+                  && (!control.files || (control.files.length <= 16 && control.files.every((file) => (
+                    String(file.name || '').length <= 512 && String(file.type || '').length <= 256
+                  ))))
+                ));
+              const rawMethod = String(root.getAttribute('method') || '').toLowerCase();
+              const effectiveMethod = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
+              const rawEnctype = String(root.getAttribute('enctype') || '').toLowerCase();
+              const effectiveEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
+                .test(rawEnctype) ? rawEnctype : 'application/x-www-form-urlencoded';
+              const formShape = {
+                scopeKind: input.scopeKind,
+                id: root.id || null,
+                action: root.getAttribute('action') || null,
+                method: root.getAttribute('method') || null,
+                resolvedAction: new URL(root.getAttribute('action') || location.href, document.baseURI).href,
+                effectiveMethod,
+                effectiveTarget: root.getAttribute('target')
+                  || document.querySelector('base[target]')?.getAttribute('target') || '',
+                effectiveEnctype,
+                noValidate: root.hasAttribute('novalidate'),
+                acceptCharset: root.getAttribute('accept-charset') || '',
+                submittedControlCount: submittedControls.length,
+                submittedControlsWithinBound,
+                submittedControls: submittedControlsWithinBound ? submittedControls : [],
+                controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')]
+                  .map((control) => ({
+                    tag: control.tagName.toLowerCase(),
+                    id: control.id || null,
+                    name: control.getAttribute('name') || null,
+                    type: control.getAttribute('type') || null,
+                    label: control.getAttribute('aria-label') || null
+                  }))
+              };
+              const submitShape = {
+                tag: element.tagName.toLowerCase(),
+                id: element.id || null,
+                name: element.getAttribute('name') || null,
+                type: element.getAttribute('type') || null,
+                text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
+                value: element.getAttribute('value') || null,
+                formAction: element.getAttribute('formaction') || null,
+                formMethod: element.getAttribute('formmethod') || null,
+                formTarget: element.getAttribute('formtarget') || null,
+                formEnctype: element.getAttribute('formenctype') || null,
+                formNoValidate: element.hasAttribute('formnovalidate'),
+                formAssociation: element.getAttribute('form') || null
+              };
+              return { url: canonicalUrl(), formShape, submitShape };
+            };
+            const expected = JSON.stringify(input.approvedSnapshot);
+            if (JSON.stringify(snapshot()) !== expected) return false;
+            const guards = globalThis.__litosSubmitActivationGuards instanceof Map
+              ? globalThis.__litosSubmitActivationGuards
+              : new Map();
+            if (!(globalThis.__litosSubmitActivationGuards instanceof Map)) {
+              Object.defineProperty(globalThis, '__litosSubmitActivationGuards', {
+                value: guards,
+                configurable: true
+              });
+            }
+            const state = {
+              status: 'armed', reason: null, submitEvent: null, formData: null,
+              captureSeen: false, documentBubbleSeen: false, windowBubbleSeen: false,
+              mutated: false, cleanup: null, finalize: null
+            };
+            const protectedNodes = new Set([root, element, ...document.querySelectorAll('base')]);
+            for (const control of root.elements) {
+              protectedNodes.add(control);
+              if (control instanceof HTMLSelectElement) {
+                for (const option of control.options) protectedNodes.add(option);
+              }
+              for (let ancestor = control.parentElement; ancestor && ancestor !== document.body;
+                ancestor = ancestor.parentElement) {
+                if (ancestor instanceof HTMLFieldSetElement || ancestor instanceof HTMLLegendElement) {
+                  protectedNodes.add(ancestor);
+                }
+                if (ancestor === root) break;
+              }
+            }
+            const protectedChild = (node, target) => {
+              if (protectedNodes.has(node)) return true;
+              if (!(node instanceof Element)) return false;
+              if (node.matches('base') || node.querySelector('base')) return true;
+              if ([...protectedNodes].some((protectedNode) => node.contains(protectedNode))) return true;
+              const associated = [node, ...node.querySelectorAll('input, textarea, select, button, option')];
+              return associated.some((candidate) => (
+                candidate instanceof HTMLOptionElement
+                  ? protectedNodes.has(target)
+                  : candidate.form === root
+              )) || (root.contains(target) && associated.some((candidate) => (
+                candidate.matches?.('input, textarea, select, button, option')
+              )));
+            };
+            const protectedMutation = (record) => {
+              if (record.type === 'attributes') return protectedNodes.has(record.target);
+              return [...record.addedNodes, ...record.removedNodes]
+                .some((node) => protectedChild(node, record.target));
+            };
+            const block = (reason, event = null) => {
+              state.status = 'blocked';
+              state.reason = state.reason || reason;
+              if (event instanceof SubmitEvent) event.preventDefault();
+              return false;
+            };
+            const bindingCurrent = () => JSON.stringify(snapshot()) === expected;
+            const observer = new MutationObserver((records) => {
+              if (records.some(protectedMutation)) {
+                state.mutated = true;
+                block('protected_surface_mutated');
+              }
+            });
+            const drainMutations = () => {
+              if (observer.takeRecords().some(protectedMutation)) {
+                state.mutated = true;
+                block('protected_surface_mutated');
+              }
+            };
+            const unchanged = (reason, event = null) => {
+              drainMutations();
+              if (state.status === 'blocked' || state.mutated) return block(state.reason || reason, event);
+              if (!bindingCurrent()) return block(reason, event);
+              return true;
+            };
+            const activationListener = (event) => { unchanged(event.type + '_binding_changed', event); };
+            const submitCapture = (event) => {
+              if (!unchanged('submit_capture_binding_changed', event)) return;
+              if (!event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
+                block('submit_identity_changed', event);
+                return;
+              }
+              state.submitEvent = event;
+              state.captureSeen = true;
+              state.status = 'capture_only';
+            };
+            const submitDocumentBubble = (event) => {
+              if (!unchanged('submit_document_bubble_binding_changed', event)) return;
+              if (!state.captureSeen || event !== state.submitEvent
+                || !event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
+                block('submit_document_bubble_missing', event);
+                return;
+              }
+              state.documentBubbleSeen = true;
+              state.status = 'document_bubble';
+            };
+            const submitWindowBubble = (event) => {
+              if (!unchanged('submit_window_bubble_binding_changed', event)) return;
+              if (!state.captureSeen || !state.documentBubbleSeen || event !== state.submitEvent
+                || !event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
+                block('submit_window_bubble_missing', event);
+                return;
+              }
+              state.windowBubbleSeen = true;
+              state.status = 'bubble_complete';
+              queueMicrotask(() => {
+                if (unchanged('post_dispatch_binding_changed', event)
+                  && state.captureSeen && state.documentBubbleSeen && state.windowBubbleSeen) {
+                  state.status = 'allowed';
+                }
+              });
+            };
+            const formDataListener = (event) => {
+              if (!event.isTrusted || event.target !== root || !(event.formData instanceof FormData)) {
+                block('submit_formdata_unobserved');
+                return;
+              }
+              // Keep the actual object, not a copied entry list. A later formdata listener can
+              // mutate this same object, and the held native request remains the final authority.
+              state.formData = event.formData;
+            };
+            const ordinaryEvents = ['pointerdown', 'mousedown', 'focus', 'click'];
+            observer.observe(root, {
+              subtree: true,
+              childList: true,
+              attributes: true,
+              attributeFilter: [
+                'id', 'action', 'method', 'target', 'enctype', 'novalidate', 'accept-charset',
+                'form', 'type', 'name', 'value', 'disabled', 'readonly',
+                'formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate',
+                'href', 'selected'
+              ]
+            });
+            if (document.head) observer.observe(document.head, {
+              subtree: true,
+              childList: true,
+              attributes: true,
+              attributeFilter: ['href', 'target']
+            });
+            state.cleanup = () => {
+              for (const type of ordinaryEvents) {
+                document.removeEventListener(type, activationListener, true);
+                document.removeEventListener(type, activationListener, false);
+                window.removeEventListener(type, activationListener, false);
+              }
+              document.removeEventListener('submit', submitCapture, true);
+              document.removeEventListener('submit', submitDocumentBubble, false);
+              window.removeEventListener('submit', submitWindowBubble, false);
+              root.removeEventListener('formdata', formDataListener, false);
+              observer.disconnect();
+              globalThis.__litosV4SubmissionContainment?.relock(input.containmentToken);
+            };
+            state.finalize = () => {
+              unchanged('post_click_binding_changed');
+              if (state.status === 'allowed' && !state.formData) block('submit_formdata_unobserved');
+              if (state.status !== 'allowed' && state.status !== 'blocked') {
+                block(state.captureSeen ? 'submit_bubble_witness_missing' : 'submit_event_unobserved');
+              }
+              state.cleanup();
+              return { status: state.status, reason: state.reason };
+            };
+            guards.set(input.token, state);
+            for (const type of ordinaryEvents) {
+              document.addEventListener(type, activationListener, true);
+              document.addEventListener(type, activationListener, false);
+              window.addEventListener(type, activationListener, false);
+            }
+            document.addEventListener('submit', submitCapture, true);
+            document.addEventListener('submit', submitDocumentBubble, false);
+            window.addEventListener('submit', submitWindowBubble, false);
+            root.addEventListener('formdata', formDataListener, false);
+            const containmentAuthorized = globalThis.__litosV4SubmissionContainment?.authorize(
+              input.containmentToken, root, element, input.usesAssociatedForm
+            );
+            if (!containmentAuthorized) {
+              state.cleanup();
+              guards.delete(input.token);
+              return false;
+            }
+            return true;
+          }, {
+            scope: scopeHandle,
+            token: activationGuardToken,
+            containmentToken: v4ContainmentToken,
+            usesAssociatedForm,
+            applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
+            scopeKind,
+            approvedSnapshot: approvedActivationSnapshot
+          }).catch(() => false);
+          if (!guardArmed) {
+            blockerReason = 'submit_activation_guard_unavailable';
+            unresolved.push('The exact submit-time binding guard could not be armed');
+            blocked = true;
+            await finishSubmitTransportGate();
+            activationGate = null;
+          }
+          }
+          }
+        }
+        if (!blocked) {
+          armSubmitNetworkWatch();
+          let guardResult = null;
+          let activationError = null;
+          try {
+            await submitHandle.click({ timeout: action.timeout || 10_000, noWaitAfter: true });
+          } catch (error) {
+            activationError = error;
+          } finally {
+            if (activationGuardToken) {
+              guardResult = await page.evaluate(async (token) => {
+                await Promise.resolve();
+                await Promise.resolve();
+                const guards = globalThis.__litosSubmitActivationGuards;
+                const state = guards instanceof Map ? guards.get(token) : null;
+                if (!state) return null;
+                const result = state.finalize?.() || null;
+                guards.delete(token);
+                return result;
+              }, activationGuardToken).catch(() => null);
+            }
+          }
+          const gateResult = activationGate
+            ? await decideSubmitTransportGate(
+                activationGate,
+                activationError ? { status: 'blocked', reason: 'submit_click_failed' } : guardResult
+              )
+            : { status: activationError ? 'blocked' : 'allowed', reason: activationError ? 'submit_click_failed' : null };
+          if (gateResult.status !== 'allowed') {
+            blockerReason = gateResult.reason || 'submit_binding_changed_during_activation';
+            unresolved.push('The final activation or native request no longer matched the caller-bound application');
+            if (chooserVersion === 4) {
+              finalSubmitChooser = {
+                ...finalSubmitChooser,
+                outcome: /(?:changed|mutated|identity|witness|bubble)/.test(blockerReason)
+                  || blockerReason === 'submit_event_unobserved'
+                  ? 'binding_changed'
+                  : 'activation_blocked'
+              };
+            }
+            blocked = true;
+            finalSubmitPressed = false;
+            await finishSubmitTransportGate();
+            activationGate = null;
+          } else {
+            finalSubmitPressed = true;
+          }
+        }
       }
-      return {
+      const passResult = {
         pass: {
           submitKind: action.submitKind,
           scope: {
@@ -6124,6 +9231,11 @@ const { chromium } = require('playwright');
           submissionOutcome: blocked ? 'blocked' : 'clicked'
         }
       };
+      await submitHandle.dispose().catch(() => undefined);
+      await scopeHandle?.dispose().catch(() => undefined);
+      for (const handle of requiredTargetHandles) await handle.dispose().catch(() => undefined);
+      for (const handle of requiredOpenerHandles) await handle?.dispose().catch(() => undefined);
+      return passResult;
     };
     // A click is the final submit when the caller says so, or when it targets a submit control.
     // Both, rather than either, because the label is the caller's declared intent and the selector
@@ -6159,13 +9271,64 @@ const { chromium } = require('playwright');
     // declare with waitForSelector, which now works.
     let phase = 0;
     let currentInput = input;
+    try {
     while (true) {
     assertRequiredCapabilities(currentInput.actions);
+    retainedV4SecurityCodeContinuation = false;
+    const phaseRequestsAtomicV4 = (currentInput.actions || []).some((action) => (
+      action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+    ));
+    if (phase > 0 && phaseRequestsAtomicV4 && !retainedAtomicV4Run) {
+      throw new Error('A retained session cannot upgrade to atomic submit v4 after launch');
+    }
+    if (phase > 0 && retainedAtomicV4Run) {
+      const continuationMutations = (currentInput.actions || []).filter((action) => ![
+        'requireCapability', 'extract', 'waitForSelector'
+      ].includes(action.type));
+      const exactCapabilities = (currentInput.actions || []).filter((action) => (
+        action.type === 'requireCapability' && action.value === exactPageUrlCapability
+      ));
+      const securityCodeAction = continuationMutations[0];
+      const oneSecurityCode = continuationMutations.length === 1
+        && securityCodeAction.type === 'confirmAndSubmit'
+        && [3, 4].includes(securityCodeAction.chooserPolicy?.version)
+        && securityCodeAction.submitKind === 'verification'
+        && typeof securityCodeAction.securityCode === 'string'
+        && exactCapabilities.length === 1
+        && exactCapabilities[0].optional === false
+        && typeof exactCapabilities[0].expectedPageUrl === 'string'
+        && securityCodeAction.expectedPageUrl === exactCapabilities[0].expectedPageUrl;
+      if (continuationMutations.length > 0 && !oneSecurityCode) {
+        throw new Error('Retained atomic submit continuation attempted a second mutation path');
+      }
+      retainedV4SecurityCodeContinuation = oneSecurityCode;
+    }
     const exactPageUrlAction = (currentInput.actions || []).find((action) => typeof action.expectedPageUrl === 'string');
     requiresExactPageUrl = (currentInput.actions || []).some((action) => action.type === 'requireCapability'
       && action.value === exactPageUrlCapability);
+    const recordsSuccessfulAddresses = (currentInput.actions || []).some((action) => (
+      action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+    ));
+    if (retainedAtomicV4Run) {
+      await armV4PreSubmitTransportContainment();
+      relockV4SubmitTransport();
+    }
+    const negotiatedSubmitVersions = (currentInput.actions || [])
+      .filter((action) => action.type === 'confirmAndSubmit')
+      .map((action) => action.chooserPolicy?.version);
+    tracksChoiceFailures = negotiatedSubmitVersions.some((version) => version === 3 || version === 4);
+    mirrorsLegacyChoiceMarkers = negotiatedSubmitVersions.includes(3);
+    chooserBindingHmacKey = recordsSuccessfulAddresses || retainedV4SecurityCodeContinuation
+      ? crypto.randomBytes(32)
+      : null;
     exactPageUrlProof = requiresExactPageUrl
-      ? { expected: canonicalPageUrl(exactPageUrlAction?.expectedPageUrl || ''), beforeActions: null, beforeApplicantData: null, beforeSubmit: null }
+      ? {
+          expected: canonicalPageUrl(exactPageUrlAction?.expectedPageUrl || ''),
+          beforeActions: null,
+          beforeApplicantData: null,
+          ...(recordsSuccessfulAddresses ? { beforeFinalChooser: null } : {}),
+          beforeSubmit: null
+        }
       : null;
     if (requiresExactPageUrl) {
       const observed = canonicalPageUrl(page.url());
@@ -6174,6 +9337,96 @@ const { chromium } = require('playwright');
       }
       exactPageUrlProof.beforeActions = observed;
     }
+    applicationScopeFailureReason = null;
+    const atomicV4CapabilityAction = (currentInput.actions || []).find((action) => (
+      action.type === 'requireCapability' && action.value === atomicSubmitV4Capability
+    ));
+    if (phase > 0 && retainedAtomicV4Run) {
+      const retainedScopeState = applicationScopeProofHandle
+        ? await applicationScopeProofHandle.evaluate((element) => {
+            const isForm = element instanceof HTMLFormElement;
+            const rawMethod = isForm ? String(element.getAttribute('method') || '').toLowerCase() : '';
+            const rawEnctype = isForm ? String(element.getAttribute('enctype') || '').toLowerCase() : '';
+            return {
+              isForm,
+              connected: element.isConnected,
+              resolvedAction: isForm
+                ? new URL(element.getAttribute('action') || location.href, document.baseURI).href
+                : '',
+              method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
+              target: isForm
+                ? String(element.getAttribute('target')
+                  || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
+                : '',
+              enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+                ? rawEnctype
+                : 'application/x-www-form-urlencoded',
+              noValidate: isForm ? element.hasAttribute('novalidate') : false,
+              acceptCharset: isForm ? String(element.getAttribute('accept-charset') || '') : ''
+            };
+          }).catch(() => null)
+        : null;
+      if (!retainedScopeState) applicationScopeFailureReason = 'application_scope_missing';
+      else if (!retainedScopeState.isForm) applicationScopeFailureReason = 'application_scope_not_form';
+      else if (!retainedScopeState.connected) applicationScopeFailureReason = 'application_scope_detached';
+      else if (!applicationScopeProofState
+        || retainedScopeState.resolvedAction !== applicationScopeProofState.resolvedAction
+        || retainedScopeState.method !== applicationScopeProofState.method
+        || retainedScopeState.target !== applicationScopeProofState.target
+        || retainedScopeState.enctype !== applicationScopeProofState.enctype
+        || retainedScopeState.noValidate !== applicationScopeProofState.noValidate
+        || retainedScopeState.acceptCharset !== applicationScopeProofState.acceptCharset) {
+        applicationScopeFailureReason = 'application_scope_semantics_changed';
+      }
+    } else {
+      await applicationScopeProofHandle?.dispose().catch(() => undefined);
+      applicationScopeProofHandle = null;
+      applicationScopeProofState = null;
+    }
+    if (!(phase > 0 && retainedAtomicV4Run) && atomicV4CapabilityAction?.applicationScopeSelector) {
+      const scopeCandidates = await page.locator(atomicV4CapabilityAction.applicationScopeSelector)
+        .elementHandles().catch(() => []);
+      if (scopeCandidates.length === 0) {
+        applicationScopeFailureReason = 'application_scope_missing';
+      } else if (scopeCandidates.length > 1) {
+        applicationScopeFailureReason = 'application_scope_ambiguous';
+      }
+      if (scopeCandidates.length !== 1) {
+        for (const candidate of scopeCandidates) await candidate.dispose().catch(() => undefined);
+      } else {
+        const candidate = scopeCandidates[0];
+        const scopeState = await candidate.evaluate((element) => {
+          const isForm = element instanceof HTMLFormElement;
+          const rawMethod = isForm ? String(element.getAttribute('method') || '').toLowerCase() : '';
+          const rawEnctype = isForm ? String(element.getAttribute('enctype') || '').toLowerCase() : '';
+          return {
+            isForm,
+            connected: element.isConnected,
+            resolvedAction: isForm
+              ? new URL(element.getAttribute('action') || location.href, document.baseURI).href
+              : '',
+            method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
+            target: isForm
+              ? String(element.getAttribute('target')
+                || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
+              : '',
+            enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
+              ? rawEnctype
+              : 'application/x-www-form-urlencoded',
+            noValidate: isForm ? element.hasAttribute('novalidate') : false,
+            acceptCharset: isForm ? String(element.getAttribute('accept-charset') || '') : ''
+          };
+        }).catch(() => null);
+        if (!scopeState?.isForm) applicationScopeFailureReason = 'application_scope_not_form';
+        else if (!scopeState.connected) applicationScopeFailureReason = 'application_scope_detached';
+        if (applicationScopeFailureReason) {
+          await candidate.dispose().catch(() => undefined);
+        } else {
+          applicationScopeProofHandle = candidate;
+          applicationScopeProofState = scopeState;
+        }
+      }
+    }
     extracted.length = 0;
     filledFields.length = 0;
     actionDiagnostics.length = 0;
@@ -6181,21 +9434,74 @@ const { chromium } = require('playwright');
     discovered.length = 0;
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
+    finalSubmitChooser = null;
     let exactPageUrlCheckedBeforeApplicantData = false;
+    let submitDecisionTerminal = false;
     for (const action of currentInput.actions || []) {
+     let successfulMutation = false;
+     const exactActionContext = recordsSuccessfulAddresses
+       && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
+       ? exactLocatorContext(
+           exactPageUrlProof?.expected || null,
+           applicationScopeProofHandle,
+           applicationScopeProofState
+         )
+       : null;
+     let successfulAddressWitness = null;
+     const pinSuccessfulAddressWitness = async (target, requiredForm = null) => {
+       await disposeSuccessfulAddressWitness(successfulAddressWitness);
+       successfulAddressWitness = await captureSuccessfulAddressWitness(target, requiredForm).catch(() => null);
+     };
      // Cleared once per ACTION rather than once per chooser, so a question that goes through two of
      // them keeps the refusal whichever one produced it, and no answer inherits a sentence from the
      // field before it. A chooser that succeeds never has its reason read.
      lastChoiceRefusal = '';
      try {
+      if (finalSubmitPressed && submitTransportDisposition === 'write_redirect_blocked') {
+        markPostSubmitObservationFailed();
+      }
+      if (postSubmitObservationDisposition) {
+        skipped.push((action.label || action.type) + ': skipped after post-submit observation failed');
+        continue;
+      }
+      if (submitDecisionTerminal && !['extract', 'requireCapability'].includes(action.type)) {
+        skipped.push((action.label || action.type) + ': skipped after the atomic submit decision became terminal');
+        continue;
+      }
+      if (applicationScopeFailureReason
+        && !['requireCapability', 'extract', 'discover', 'waitForSelector', 'confirmAndSubmit'].includes(action.type)) {
+        skipped.push((action.label || action.type) + ': skipped because the caller-bound application form was unavailable');
+        continue;
+      }
+      if (requiresExactPageUrl && recordsSuccessfulAddresses
+        && ['click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'confirmAndSubmit'].includes(action.type)) {
+        const observed = canonicalPageUrl(page.url());
+        const documentObserved = await page.evaluate(() => {
+          const current = new URL(location.href);
+          current.hash = '';
+          return current.href;
+        }).catch(() => null);
+        if (observed !== exactPageUrlProof.expected || documentObserved !== exactPageUrlProof.expected) {
+          throw new Error('Employer page URL changed before an exact applicant action was bound');
+        }
+      }
       const matches = action.selector ? page.locator(action.selector) : null;
-      const matchCount = action.requireUnique && matches ? await matches.count() : null;
+      let exactActionRootHandle = null;
+      let exactActionRootBinding = null;
+      await exactActionContext?.assertAuthority?.();
+      if (exactActionContext && matches && ['fill', 'upload', 'select'].includes(action.type)) {
+        exactActionRootBinding = await exactBoundRootFromLocator(matches.first(), exactActionContext);
+        exactActionRootHandle = exactActionRootBinding?.handle || null;
+      }
+      const matchCount = action.requireUnique && matches
+        ? await matches.count()
+        : null;
       if (action.requireUnique && matchCount !== 1) {
         throw new Error((action.label || action.type) + ': expected exactly one match for '
           + action.selector + ', found ' + String(matchCount ?? 0));
       }
       if (action.type === 'requireCapability') continue;
-      if (requiresExactPageUrl && !exactPageUrlCheckedBeforeApplicantData
+      if (requiresExactPageUrl && (!exactPageUrlCheckedBeforeApplicantData || recordsSuccessfulAddresses)
         && ['click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'confirmAndSubmit'].includes(action.type)) {
         const observed = canonicalPageUrl(page.url());
         if (observed !== exactPageUrlProof.expected) {
@@ -6216,7 +9522,8 @@ const { chromium } = require('playwright');
       // intent (normalizeManagedActions clamps it to 100-20000ms), and a pre-check that can answer
       // 'not there' before that timeout starts is the bug itself. An optional one that times out
       // lands in the catch below and is reported in 'skipped'.
-      if (locator && action.optional && action.type !== 'waitForSelector' && await locator.count() === 0) {
+      if (locator && action.optional && action.type !== 'waitForSelector'
+        && (exactActionContext ? !exactActionRootHandle : await locator.count() === 0)) {
         // Reported, not silent. The pre-check used to skip in complete silence, which is how several
         // deploys went by with fields quietly left empty and nothing in the run saying so. On a real
         // 70-action Greenhouse run this turns 19 reported skips into 63.
@@ -6991,6 +10298,60 @@ const { chromium } = require('playwright');
         discovered.push(...found);
       }
       if (action.type === 'confirmAndSubmit') {
+        submitDecisionTerminal = action.chooserPolicy?.version === 4 || retainedV4SecurityCodeContinuation;
+        if (retainedV4SecurityCodeContinuation && applicationScopeFailureReason) {
+          const scopeMessage = 'The retained caller-bound application form was unavailable for verification';
+          securityCodeAttempt = { supplied: true, entered: false, outcome: 'no_control', resubmitted: false };
+          submitGateBlockers.push(scopeMessage);
+          skipped.push('confirm_and_submit: retained application form was unavailable for verification');
+          continue;
+        }
+        if (action.chooserPolicy?.version === 4 && applicationScopeFailureReason) {
+          if (requiresExactPageUrl) {
+            const observed = canonicalPageUrl(page.url());
+            if (observed !== exactPageUrlProof.expected) {
+              throw new Error('Employer page URL changed before the final submit chooser');
+            }
+            exactPageUrlProof.beforeFinalChooser = observed;
+          }
+          const scopeMessage = 'The caller-bound application form was unavailable at submit time';
+          const blockedPass = {
+            submitKind: action.submitKind,
+            scope: {
+              scopeKind: null,
+              formFingerprint: null,
+              submitFingerprint: null,
+              formMatchCount: 0,
+              submitMatchCount: 0,
+              requiredControlCount: 0,
+              sameNode: false
+            },
+            requiredControls: [],
+            attempts: [],
+            retries: 0,
+            unresolved: [scopeMessage],
+            blockerReason: applicationScopeFailureReason,
+            submissionOutcome: 'blocked'
+          };
+          finalSubmitChooser = {
+            version: 1,
+            policyName: action.chooserPolicy.name,
+            policyVersion: action.chooserPolicy.version,
+            grammarHash: action.chooserPolicy.grammarHash,
+            submitKind: action.submitKind,
+            outcome: 'application_scope_invalid',
+            candidateCount: 0,
+            viableCandidateCount: 0,
+            topScore: null,
+            topScoreCount: 0,
+            addressedScopeCount: 0,
+            bareSendCandidateCount: 0
+          };
+          requiredFieldConfirmation = { version: 2, status: 'blocked', passes: [blockedPass] };
+          submitGateBlockers.push(scopeMessage);
+          skipped.push('confirm_and_submit: caller-bound application form was unavailable');
+          continue;
+        }
         /* A CODE WALL IS ALREADY THE APPLICATION SUBMIT'S RESULT.
          *
          * A retained Greenhouse page can begin this phase with the eight-box verification control
@@ -7007,15 +10368,27 @@ const { chromium } = require('playwright');
         }
         const passes = [];
         if (action.securityCode) {
-          const entry = await enterSecurityCode(action.securityCode);
+          const entry = await enterSecurityCode(
+            action.securityCode,
+            retainedV4SecurityCodeContinuation ? applicationScopeProofHandle : null
+          );
           if (entry !== 'entered') {
             securityCodeAttempt = { supplied: true, entered: false, outcome: entry, resubmitted: false };
+            if (retainedV4SecurityCodeContinuation) {
+              skipped.push('confirm_and_submit: retained verification code control was unavailable or ambiguous');
+              continue;
+            }
             throw new Error('Security code was not entered before atomic verification');
           } else {
             // A continuation already sits on the changed verification DOM. Enter first, bind the
             // current verification submit second, and click exactly once. Clicking before entry can
             // reject or rotate the code and must remain structurally impossible.
             const verification = await confirmAndSubmitPass({ ...action, securityCode: undefined });
+            if (verification.noClick) {
+              securityCodeAttempt = { supplied: true, entered: true, outcome: 'no_control', resubmitted: false };
+              skipped.push('confirm_and_submit: no unambiguous verification submit control was selected');
+              continue;
+            }
             passes.push(verification.pass);
             /* THE VERDICT IS THE RECEIPT, NOT THE CONTROL, and the difference cost a filed
              * application.
@@ -7037,14 +10410,18 @@ const { chromium } = require('playwright');
              * no receipt at all and the challenge is all there is to read. An explicitly REJECTED
              * receipt is honoured too, which the old shape could not do: it read a cleared control
              * over a failure panel as acceptance. What may outrank the control, and why it has to be
-             * that narrow, is argued at securityCodeVerdict. */
+            * that narrow, is argued at securityCodeVerdict. */
             let codeOutcome = 'not_entered';
-            if (verification.pass.submissionOutcome === 'clicked') {
-              await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-              await waitForPostSubmitApplicationState({ securityCodeSettles: false });
-              const receipt = await readSubmitOutcome();
-              const still = await readSecurityCodeChallenge();
-              codeOutcome = securityCodeVerdict(receipt, still);
+            try {
+              if (verification.pass.submissionOutcome === 'clicked') {
+                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+                await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+                const receipt = await readSubmitOutcome();
+                const still = await readSecurityCodeChallenge();
+                codeOutcome = securityCodeVerdict(receipt, still);
+              }
+            } finally {
+              await finishSubmitTransportGate();
             }
             securityCodeAttempt = {
               supplied: true,
@@ -7055,10 +10432,18 @@ const { chromium } = require('playwright');
           }
         } else {
           const application = await confirmAndSubmitPass(action);
+          if (application.noClick) {
+            skipped.push('confirm_and_submit: no unambiguous application submit control was selected');
+            continue;
+          }
           passes.push(application.pass);
-          if (application.pass.submissionOutcome === 'clicked') {
-            await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-            await waitForPostSubmitApplicationState();
+          try {
+            if (application.pass.submissionOutcome === 'clicked') {
+              await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+              await waitForPostSubmitApplicationState();
+            }
+          } finally {
+            await finishSubmitTransportGate();
           }
         }
         const confirmed = passes.length === 1 && passes.every((pass) => pass.submissionOutcome === 'clicked' && pass.unresolved.length === 0 && pass.scope.sameNode === true);
@@ -7187,7 +10572,13 @@ const { chromium } = require('playwright');
         if (actionDiagnostic) actionDiagnostics.push(actionDiagnostic);
         // See fillTargetWithin. The selector is allowed to name the question rather than the
         // control, because for one shape of control that is the only name it has.
-        const target = await fillTargetWithin(locator);
+        const exactBinding = exactActionContext
+          ? await exactFillBinding(locator, exactActionContext, exactActionRootBinding)
+          : null;
+        const target = exactActionContext
+          ? exactBinding?.target || null
+          : await fillTargetWithin(locator);
+        const fillScope = exactActionContext ? exactBinding?.root || null : locator;
         if (!target) {
           if (actionDiagnostic) actionDiagnostic.outcome = 'target_unresolved';
           const message = 'the selector ' + action.selector
@@ -7195,10 +10586,15 @@ const { chromium } = require('playwright');
           if (action.label) skipped.push(action.label + ': ' + message);
           continue;
         }
+        await pinSuccessfulAddressWitness(
+          exactActionContext ? exactBinding.targetHandle : target,
+          exactBinding?.rootBinding?.formHandle || null
+        );
         const datePrecision = await dateControlPrecisionOf(target);
         if (datePrecision) {
           const result = await fillDateControl(target, action.value || '', datePrecision);
           recordDateFill(result, action.label, action.value || '');
+          successfulMutation = result.outcome === 'filled';
           await dismissOverlayAfterFill(target, action.label);
           continue;
         }
@@ -7243,7 +10639,7 @@ const { chromium } = require('playwright');
           ? await greenhouseLabelledQuestion.count().catch(() => 0)
           : 0;
         const locatorChoicePlaceholderCount = greenhouseQuestionId
-          ? await locator.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)
+          ? await fillScope.getByText(/^\s*(?:select|choose)(?:\.\.\.|\u2026)?\s*$/i).count().catch(() => 0)
           : 0;
         const labelChoicePlaceholderCount = greenhouseLabelledQuestionCount > 0
           ? await greenhouseLabelledQuestion.getByText(
@@ -7351,9 +10747,11 @@ const { chromium } = require('playwright');
           // See settleVerified: a native select's own DOM value is set synchronously by the click,
           // but a board that mirrors it into a controlled React value prop can still repaint the
           // rendered selectedIndex on a later tick, and this used to read verifyFilled exactly once.
-          if (action.label && await settleVerified(() => verifyFilled(target, action.value || ''))) filledFields.push(action.label);
+          const persisted = await settleVerified(() => verifyFilled(target, action.value || ''));
+          successfulMutation = persisted;
+          if (action.label && persisted) filledFields.push(action.label);
           else if (action.label) skipped.push(action.label + ': choice value did not persist after fill');
-          if (actionDiagnostic) actionDiagnostic.outcome = filledFields.includes(action.label)
+          if (actionDiagnostic) actionDiagnostic.outcome = persisted
             ? 'native_committed'
             : 'native_uncommitted';
           continue;
@@ -7366,7 +10764,9 @@ const { chromium } = require('playwright');
           if (targetInChoiceShell) {
             container = target.locator('xpath=ancestor::*[' + CHOICE_SHELL_CLASSES + '][1]');
           } else if (targetInGreenhouseQuestionChoice) {
-            container = greenhouseLabelledQuestionCount > 0 ? greenhouseLabelledQuestion : locator;
+            container = exactActionContext
+              ? fillScope
+              : (greenhouseLabelledQuestionCount > 0 ? greenhouseLabelledQuestion : fillScope);
           } else {
             container = target.locator(
               'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
@@ -7386,6 +10786,7 @@ const { chromium } = require('playwright');
             container,
             action.value || '',
             driveTarget,
+            exactActionContext,
           );
           if (actionDiagnostic) {
             actionDiagnostic.choiceFilled = choiceFilled;
@@ -7404,6 +10805,7 @@ const { chromium } = require('playwright');
               actionDiagnostic.choiceUnreadable = lastChoiceUnreadable;
               actionDiagnostic.outcome = landed ? 'choice_committed' : 'choice_uncommitted';
             }
+            successfulMutation = landed;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -7564,12 +10966,13 @@ const { chromium } = require('playwright');
           }
         }
         if (textPersisted) {
+          successfulMutation = true;
           if (action.label) filledFields.push(action.label);
           if (actionDiagnostic) actionDiagnostic.outcome = 'text_committed';
         } else if (greenhouseQuestionId && fillShape.tag === 'input') {
           const rescueContainer = greenhouseLabelledQuestionCount > 0
             ? greenhouseLabelledQuestion
-            : locator;
+            : fillScope;
           if (actionDiagnostic) {
             actionDiagnostic.route = 'text_then_choice';
             actionDiagnostic.choiceAttempted = true;
@@ -7592,7 +10995,7 @@ const { chromium } = require('playwright');
           nextChoiceControlAlreadyOpen = questionMenuProbe === 'menu';
           const choiceFilled = questionMenuProbe === 'ambiguous'
             ? false
-            : await fillCustomChoice(rescueContainer, action.value || '', target);
+            : await fillCustomChoice(rescueContainer, action.value || '', target, exactActionContext);
           const landed = choiceFilled
             ? await choiceLanded(rescueContainer, action.value || '', target)
             : false;
@@ -7617,6 +11020,7 @@ const { chromium } = require('playwright');
               || Boolean(lastChoiceRefusal);
             actionDiagnostic.outcome = landed ? 'choice_committed' : 'choice_uncommitted';
           }
+          successfulMutation = landed;
           if (action.label && landed) filledFields.push(action.label);
           else if (action.label) {
             skipped.push(action.label + ': '
@@ -7688,11 +11092,13 @@ const { chromium } = require('playwright');
         const wholeLabel = wantedLabel
           ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2733]?\\s*$', 'i')
           : null;
-        const exactLabel = wholeLabel ? page.getByText(wholeLabel).first() : null;
-        const label = exactLabel && (await exactLabel.count()) > 0
-          ? exactLabel
-          : page.getByText(wantedLabel || action.text, { exact: false }).first();
-        if (await label.count() === 0) {
+        const exactLabel = !exactActionContext && wholeLabel ? page.getByText(wholeLabel).first() : null;
+        const label = exactActionContext
+          ? null
+          : (exactLabel && (await exactLabel.count()) > 0
+            ? exactLabel
+            : page.getByText(wantedLabel || action.text, { exact: false }).first());
+        if (!exactActionContext && await label.count() === 0) {
           const message = 'fillByLabelText: label not found';
           if (action.optional) {
             skipped.push((action.label || action.type) + ': ' + message);
@@ -7700,11 +11106,23 @@ const { chromium } = require('playwright');
           }
           throw new Error(message);
         }
-        const container = label.locator(
-          'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select or .//*[@role="combobox"] or .//*[@aria-haspopup="listbox"])][1]'
-        );
-        const questionBlock = await questionOptionBlock(label, container);
-        const field = questionBlock.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
+        const exactBinding = exactActionContext
+          ? await exactFillByBinding(action, exactActionContext)
+          : null;
+        if (exactActionContext && !exactBinding) {
+          throw new Error('fillByLabelText: exact question scope could not be bound');
+        }
+        const container = exactActionContext
+          ? exactBinding.container
+          : label.locator(
+            'xpath=ancestor::*[(self::div or self::fieldset) and (.//textarea or .//input[not(@type="file") and not(@type="hidden")] or .//select or .//*[@role="combobox"] or .//*[@aria-haspopup="listbox"])][1]'
+          );
+        const questionBlock = exactActionContext
+          ? exactBinding.scope
+          : await questionOptionBlock(label, container);
+        const field = exactActionContext
+          ? exactBinding.field
+          : questionBlock.locator('textarea, input:not([type=file]):not([type=hidden]), select').first();
         if (await field.count() === 0) {
           /* THE FOURTH CALL SITE, AND IT WAS THE ONE WITHOUT A VERIFIER.
            *
@@ -7725,8 +11143,15 @@ const { chromium } = require('playwright');
            * clicked and was then refused by its verifier, and this branch clicked the same row and
            * reported the field filled.
            */
-          if (await fillCustomChoice(questionBlock, action.value || '')) {
+          const intendedPill = exactActionContext
+            ? await intendedFillByChoiceTarget(questionBlock, action.value || '', 'pill')
+            : null;
+          if (intendedPill) {
+            await pinSuccessfulAddressWitness(intendedPill, exactBinding.formHandle || null);
+          }
+          if (await fillCustomChoice(questionBlock, action.value || '', null, exactActionContext)) {
             const landed = await choiceLanded(questionBlock, action.value || '');
+            successfulMutation = landed;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -7738,6 +11163,7 @@ const { chromium } = require('playwright');
           // Asked here as well as in the checkbox arm below because a board that omits the mirror
           // input entirely never reaches that arm.
           if (await pickOptionPill(questionBlock, action.value || '')) {
+            successfulMutation = true;
             if (action.label) filledFields.push(action.label);
             continue;
           }
@@ -7802,6 +11228,21 @@ const { chromium } = require('playwright');
         const fieldInChoiceShell = shape.tag === 'input' && await field.evaluate((element) => Boolean(
           element.closest('[class*="select__control"], [class*="select__value-container"], [class*="select__input"], [class*="select2-search"]')
         )).catch(() => false);
+        if (exactActionContext) {
+          if (shape.type === 'checkbox' || shape.type === 'radio') {
+            const intendedChoice = await intendedFillByChoiceTarget(
+              questionBlock,
+              action.value || '',
+              'native'
+            );
+            if (intendedChoice) {
+              await pinSuccessfulAddressWitness(intendedChoice, exactBinding.formHandle || null);
+            }
+          } else if (!(shape.role === 'combobox' || shape.ariaHaspopup === 'true'
+            || shape.ariaAutocomplete === 'list' || fieldInChoiceShell)) {
+            await pinSuccessfulAddressWitness(exactBinding.fieldHandle, exactBinding.formHandle || null);
+          }
+        }
         // Read off the control, ahead of every other arm. A date picker is not a select, not a
         // combobox and not free text, and the old test for one - an answer already shaped
         // YYYY-MM-DD next to a placeholder mentioning a date - could only ever fire on a run that
@@ -7810,11 +11251,17 @@ const { chromium } = require('playwright');
         if (labelDatePrecision) {
           const result = await fillDateControl(field, action.value || '', labelDatePrecision);
           recordDateFill(result, action.label, action.value || '');
+          successfulMutation = result.outcome === 'filled';
           await dismissOverlayAfterFill(field, action.label);
           continue;
         }
         if (shape.tag === 'select') {
-          const customSelected = await fillCustomChoice(questionBlock, action.value || '');
+          const customSelected = await fillCustomChoice(
+            questionBlock,
+            action.value || '',
+            null,
+            exactActionContext
+          );
           const selected = customSelected || await selectNativeOption(field, action.value || '');
           // SAID OUT LOUD, because a silent 'continue' is a dropped answer. This branch left an
           // unmatched select with nothing in filledFields and nothing in skipped, so the run
@@ -7834,8 +11281,9 @@ const { chromium } = require('playwright');
            * not narrow blurDrivenChoiceControl's target, it would redirect fillCustomChoice itself
            * onto the wrong element. blurDrivenChoiceControl's own document.activeElement fallback is
            * what covers this call site instead, without needing to guess which element is real. */
-          if (await fillCustomChoice(questionBlock, action.value || '')) {
+          if (await fillCustomChoice(questionBlock, action.value || '', null, exactActionContext)) {
             const landed = await choiceLanded(questionBlock, action.value || '');
+            successfulMutation = landed;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
@@ -7886,6 +11334,7 @@ const { chromium } = require('playwright');
           }
           const outcome = await pickRadioOption(scope, wanted);
           if (outcome === 'checked') {
+            successfulMutation = true;
             if (action.label) filledFields.push(action.label);
             continue;
           }
@@ -7907,6 +11356,7 @@ const { chromium } = require('playwright');
           // the wrong move: the one checkbox in the block is the display:none mirror of a pill pair,
           // so checking it neither drives React nor distinguishes Yes from No. See pickOptionPill.
           if (await pickOptionPill(scope, wanted)) {
+            successfulMutation = true;
             if (action.label) filledFields.push(action.label);
             continue;
           }
@@ -7918,6 +11368,7 @@ const { chromium } = require('playwright');
             // case - is exactly the shape pickRadioOption's own settleVerified call now covers, and
             // this arm had none of it: one check() and one immediate read, no retry at all.
             if (await settleVerified(() => lone.first().evaluate((element) => element.checked === true).catch(() => false))) {
+              successfulMutation = true;
               if (action.label) filledFields.push(action.label);
               continue;
             }
@@ -7959,7 +11410,7 @@ const { chromium } = require('playwright');
         let persisted = await settleVerified(() => verifyFilled(field, action.value || ''));
         if (!persisted) {
           if (await pickOptionPill(questionBlock, action.value || '')) persisted = true;
-          else if (await fillCustomChoice(questionBlock, action.value || '')) {
+          else if (await fillCustomChoice(questionBlock, action.value || '', null, exactActionContext)) {
             // Same row hint as the two branches above, for the same reason: the fill that just
             // succeeded is the one whose row this is, and a widget on this path abbreviates its
             // chosen value exactly as readily as one on the others. 'field' is deliberately not
@@ -7968,6 +11419,7 @@ const { chromium } = require('playwright');
             if (!persisted && lastChoiceUnreadable) lastChoiceRefusal = unreadableChoiceReason;
           }
         }
+        successfulMutation = persisted;
         if (action.label && persisted) filledFields.push(action.label);
         // A refusal from either of the two choice fills above outranks the generic sentence: it says
         // what was actually wrong, and this arm is reached precisely when the plain text fill was the
@@ -7975,11 +11427,21 @@ const { chromium } = require('playwright');
         else if (action.label) skipped.push(action.label + ': ' + (lastChoiceRefusal || 'value did not persist after fillByLabelText'));
       }
       if (action.type === 'upload') {
-        await locator.setInputFiles({
+        const exactBinding = exactActionContext
+          ? await exactUploadBinding(locator, exactActionContext, exactActionRootBinding)
+          : null;
+        const uploadTarget = exactActionContext ? exactBinding?.target || null : locator;
+        if (!uploadTarget) throw new Error('upload: exact file control could not be bound');
+        await pinSuccessfulAddressWitness(
+          exactActionContext ? exactBinding.targetHandle : uploadTarget,
+          exactBinding?.rootBinding?.formHandle || null
+        );
+        await uploadTarget.setInputFiles({
           name: action.file.name,
           mimeType: action.file.mimeType,
           buffer: Buffer.from(action.file.base64, 'base64')
         });
+        successfulMutation = true;
         if (action.label) filledFields.push(action.label);
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
@@ -8011,10 +11473,30 @@ const { chromium } = require('playwright');
         }
       }
       if (action.type === 'select') {
-        await locator.selectOption(action.value);
+        const exactHandle = exactActionContext
+          ? exactActionRootHandle
+          : null;
+        const selectTarget = exactActionContext
+          ? (exactHandle ? exactActionContext.fromHandle(exactHandle, exactActionRootBinding) : null)
+          : locator;
+        if (!selectTarget) throw new Error('select: exact native control could not be bound');
+        await pinSuccessfulAddressWitness(
+          exactActionContext ? exactHandle : selectTarget,
+          exactActionRootBinding?.formHandle || null
+        );
+        await selectTarget.selectOption(action.value);
+        successfulMutation = recordsSuccessfulAddresses
+          ? await settleVerified(() => verifyFilled(selectTarget, action.value || ''))
+          : false;
         if (action.label) filledFields.push(action.label);
       }
       if (action.type === 'extract') {
+        if (submitDecisionTerminal && !finalSubmitPressed
+          && finalSubmitChooser?.outcome === 'activation_blocked') {
+          skipped.push((action.label || action.type)
+            + ': skipped because the denied native activation may have replaced the employer document');
+          continue;
+        }
         /* 'requireVisible' answers a different question from the plain read above, and the caller
          * has to say which one it wants because the two disagree on real employer pages.
          *
@@ -8103,17 +11585,52 @@ const { chromium } = require('playwright');
       // returned the caller a raw Playwright stack trace instead of a filled form.
       // An optional action that fails is now recorded and stepped over; a required one still stops
       // the run, because the caller marked it as something the run cannot proceed without.
-      if (!action.optional) throw actionError;
-      skipped.push((action.label || action.type) + ': ' + String(actionError?.message || actionError).split('\n')[0].slice(0, 200));
+      const actionFailure = String(actionError?.message || actionError).split('\n')[0].slice(0, 200);
+      if (recordsSuccessfulAddresses
+        && /(?:Caller-bound application form semantics|Employer page URL changed across an exact applicant action)/
+          .test(actionFailure)) {
+        applicationScopeFailureReason = 'application_scope_semantics_changed';
+      }
+      if (submitDecisionTerminal && action.type === 'extract' && !finalSubmitPressed) {
+        // A denied native navigation can leave Chromium between the employer document and its
+        // aborted replacement. Result observation is best-effort after the atomic decision, and
+        // must not erase the already established structured no-click outcome.
+        skipped.push((action.label || action.type) + ': post-decision observation unavailable: ' + actionFailure);
+      } else if (!action.optional) {
+        if (!finalSubmitPressed) throw actionError;
+        markPostSubmitObservationFailed();
+        skipped.push((action.label || action.type) + ': post-submit observation failed: ' + actionFailure);
+      } else {
+        skipped.push((action.label || action.type) + ': ' + actionFailure);
+      }
+     } finally {
+      if (recordsSuccessfulAddresses && successfulMutation
+        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)) {
+        await rememberSuccessfulAddress(action, successfulAddressWitness).catch(async () => {
+          await disposeSuccessfulAddressWitness(successfulAddressWitness);
+        });
+        successfulAddressWitness = null;
+      }
+      await disposeSuccessfulAddressWitness(successfulAddressWitness);
+      await exactActionContext?.dispose?.();
      }
     }
+    const observeForResult = async (reader, fallback) => {
+      try {
+        return await reader();
+      } catch (error) {
+        if (!finalSubmitPressed) throw error;
+        markPostSubmitObservationFailed();
+        return fallback;
+      }
+    };
     // The gate's findings lead, because "we did not send this" is the first thing the caller needs
     // to know and the reason has to travel with it.
     const blockers = [...submitGateBlockers];
     // The literal is a contract with the backend, which matches on it to decide whether an attention
     // state is a human-verification stall. See readUnresolvedCaptcha for what now has to be true
     // before it is said.
-    if (await readUnresolvedCaptcha()) {
+    if (await observeForResult(() => readUnresolvedCaptcha(), false)) {
       blockers.push('CAPTCHA requires your attention');
     }
     /* THE SAME READING OF THE FORM THE PRE-SUBMIT GATE MAKES, made on every run.
@@ -8141,12 +11658,15 @@ const { chromium } = require('playwright');
      */
     const readiness = requiredFieldConfirmation?.version === 2
       ? { blocking: [], stale: [], unmatched: [] }
-      : await readSubmitReadiness();
+      : await observeForResult(
+          () => readSubmitReadiness(),
+          { blocking: [], stale: [], unmatched: [] }
+        );
     blockers.push(...readiness.blocking);
     // Read on EVERY run, at zero action cost, because the caller has no other way to find out. A
     // fill run that has somehow submitted looks exactly like a fill run that has not, right up
     // until the applicant is asked to approve sending an application that is already half sent.
-    const humanVerification = await readSecurityCodeChallenge();
+    const humanVerification = await observeForResult(() => readSecurityCodeChallenge(), null);
     /* THE OUTCOME OF THE CLICK, read from the page rather than inferred by the caller from a body
      * scrape. Zero actions: it is a page.evaluate inside the run, exactly like the two reads above.
      *
@@ -8154,7 +11674,15 @@ const { chromium } = require('playwright');
      * a confirmation-shaped sentence already on an unsubmitted page (an employer's "Thank you for
      * your interest") must not be able to manufacture one. */
     const submitOutcome = finalSubmitPressed
-      ? { pressed: true, ...(await readSubmitOutcome()), ...(submitNetwork ? { network: submitNetwork } : {}) }
+      ? {
+          pressed: true,
+          ...(await observeForResult(
+            () => readSubmitOutcome(),
+            { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }
+          )),
+          ...(submitNetwork ? { network: submitNetwork } : {}),
+          ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
+        }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
     // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
     // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
@@ -8163,11 +11691,32 @@ const { chromium } = require('playwright');
     const blockedSubmits = input.allowSubmit === true
       ? 0
       : await page.evaluate(() => window.__litosBlockedSubmits || 0).catch(() => 0);
-    const title = await page.title();
+    const title = await observeForResult(() => page.title(), '');
     const url = page.url();
-    const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000));
-    const links = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map((link) => ({ text: (link.innerText || link.textContent || '').trim().slice(0, 500), href: link.href })));
-    if (currentInput.screenshot) await page.screenshot({ path: 'stratus-screenshot-' + phase + '.png', fullPage: Boolean(currentInput.fullPage) });
+    const text = await observeForResult(
+      () => page.evaluate(() => (document.body?.innerText || '').slice(0, 50000)),
+      ''
+    );
+    const links = await observeForResult(
+      () => page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).slice(0, 100)
+        .map((link) => ({
+          text: (link.innerText || link.textContent || '').trim().slice(0, 500),
+          href: link.href
+        }))),
+      []
+    );
+    if (currentInput.screenshot) {
+      await observeForResult(
+        () => page.screenshot({
+          path: 'stratus-screenshot-' + phase + '.png',
+          fullPage: Boolean(currentInput.fullPage)
+        }),
+        null
+      );
+    }
+    if (finalSubmitPressed && postSubmitObservationDisposition) {
+      submitOutcome.observationDisposition = postSubmitObservationDisposition;
+    }
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
     // caller should be able to see and act on, and a silent skip is how a half-filled form starts
     // looking like a fully-filled one.
@@ -8220,6 +11769,10 @@ const { chromium } = require('playwright');
       ...(currentInput.actions.some((action) => action.type === 'requireCapability'
         && action.value === exactPageUrlCapability)
         ? [exactPageUrlCapability]
+        : []),
+      ...(currentInput.actions.some((action) => action.type === 'requireCapability'
+        && action.value === atomicSubmitV4Capability)
+        ? [atomicSubmitV4Capability]
         : [])
     ];
     /* THE WINDOW OPENS HERE, on the page that raised the challenge, not back when the sandbox was
@@ -8254,7 +11807,7 @@ const { chromium } = require('playwright');
       }
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, ...(finalSubmitChooser ? { finalSubmitChooser } : {}), blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
@@ -8264,6 +11817,18 @@ const { chromium } = require('playwright');
     currentInput = JSON.parse(fs.readFileSync('stratus-continuation-input.json', 'utf8'));
     fs.unlinkSync('stratus-continuation-input.json');
     phase += 1;
+    }
+    } finally {
+      await finishSubmitTransportGate();
+      await finishV4PreSubmitTransportContainment();
+      await applicationScopeProofHandle?.dispose().catch(() => undefined);
+      applicationScopeProofHandle = null;
+      applicationScopeProofState = null;
+      for (const address of successfulAddresses.splice(0)) {
+        await address.handle?.dispose().catch(() => undefined);
+        await address.formHandle?.dispose().catch(() => undefined);
+      }
+      await Promise.all(unsuccessfulChoices.splice(0).map(disposeUnsuccessfulChoice));
     }
   } finally {
     await browser.close();
@@ -8316,10 +11881,21 @@ export function normalizeManagedActions(actions = []) {
     else if (action.type === 'press' && action.selector != null) normalized.selector = validateSelector(action.selector);
     if (action.optional != null) normalized.optional = Boolean(action.optional);
     if (action.type === 'requireCapability') {
-      if (action.value !== EXTRACT_ASSERTIONS_CAPABILITY && action.value !== EXACT_PAGE_URL_CAPABILITY) {
+      if (action.value !== EXTRACT_ASSERTIONS_CAPABILITY
+        && action.value !== EXACT_PAGE_URL_CAPABILITY
+        && action.value !== ATOMIC_SUBMIT_V4_CAPABILITY) {
         throw inputError('The required runner capability is unsupported', 'UNSUPPORTED_RUNNER_CAPABILITY');
       }
       normalized.value = action.value;
+      if (action.applicationScopeSelector != null) {
+        if (action.value !== ATOMIC_SUBMIT_V4_CAPABILITY) {
+          throw inputError(
+            'applicationScopeSelector requires the atomic submit v4 capability',
+            'INVALID_APPLICATION_SCOPE'
+          );
+        }
+        normalized.applicationScopeSelector = validateSelector(action.applicationScopeSelector);
+      }
     }
     if (action.expectedPageUrl != null) {
       if (action.type !== 'confirmAndSubmit'
@@ -8442,25 +12018,61 @@ export function normalizeManagedActions(actions = []) {
       if (!['application', 'verification'].includes(action.submitKind)) throw inputError('confirmAndSubmit submitKind is invalid', 'INVALID_SUBMIT_KIND');
       if (action.securityCode && action.submitKind !== 'verification') throw inputError('A security code requires a verification atomic submit', 'INVALID_SUBMIT_KIND');
       if (action.selector !== ATOMIC_SUBMIT_SELECTOR) throw inputError('confirmAndSubmit selector must be the version 2 submit candidate set', 'INVALID_CONFIRM_AND_SUBMIT_SELECTOR');
+      const chooserPolicy = action.chooserPolicy && typeof action.chooserPolicy === 'object'
+        ? ATOMIC_SUBMIT_POLICIES[action.chooserPolicy.version]
+        : null;
       if (
         !action.chooserPolicy || typeof action.chooserPolicy !== 'object'
         || Object.keys(action.chooserPolicy).sort().join(',') !== 'exclusionPattern,finalPattern,grammarHash,name,version'
-        || action.chooserPolicy.name !== ATOMIC_SUBMIT_POLICY.name
-        || action.chooserPolicy.version !== ATOMIC_SUBMIT_POLICY.version
-        || action.chooserPolicy.finalPattern !== ATOMIC_SUBMIT_POLICY.finalPattern
-        || action.chooserPolicy.exclusionPattern !== ATOMIC_SUBMIT_POLICY.exclusionPattern
-        || action.chooserPolicy.grammarHash !== ATOMIC_SUBMIT_POLICY.grammarHash
+        || !chooserPolicy
+        || action.chooserPolicy.name !== chooserPolicy.name
+        || action.chooserPolicy.version !== chooserPolicy.version
+        || action.chooserPolicy.finalPattern !== chooserPolicy.finalPattern
+        || action.chooserPolicy.exclusionPattern !== chooserPolicy.exclusionPattern
+        || action.chooserPolicy.grammarHash !== chooserPolicy.grammarHash
       ) throw inputError('confirmAndSubmit chooser policy is invalid', 'INVALID_CONFIRM_AND_SUBMIT_POLICY');
       if (typeof action.label !== 'string' || !action.label.trim()) throw inputError('confirmAndSubmit requires a non-empty label', 'INVALID_CONFIRM_AND_SUBMIT_LABEL');
       if (action.optional !== false) throw inputError('confirmAndSubmit must be non-optional', 'INVALID_CONFIRM_AND_SUBMIT_OPTIONAL');
       normalized.maxRetries = maxRetries;
       normalized.contractVersion = 2;
       normalized.submitKind = action.submitKind;
-      normalized.chooserPolicy = { ...ATOMIC_SUBMIT_POLICY };
+      normalized.chooserPolicy = { ...chooserPolicy };
+      if (chooserPolicy.version === 4 && !normalized.expectedPageUrl) {
+        throw inputError('Atomic submit chooser v4 requires expectedPageUrl', 'INVALID_EXPECTED_PAGE_URL');
+      }
       if (action.timeout != null) normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     }
     return normalized;
   });
+}
+
+function assertV4Contract(actions) {
+  const v4Submit = actions.find((action) => (
+    action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+  ));
+  if (!v4Submit) return;
+  const exactCapabilities = actions.filter((action) => (
+    action.type === 'requireCapability' && action.value === EXACT_PAGE_URL_CAPABILITY
+  ));
+  if (exactCapabilities.length !== 1
+    || exactCapabilities[0].optional !== false
+    || !exactCapabilities[0].expectedPageUrl
+    || exactCapabilities[0].expectedPageUrl !== v4Submit.expectedPageUrl) {
+    throw inputError(
+      'Atomic submit chooser v4 requires one matching non-optional exact page URL capability',
+      'INVALID_EXPECTED_PAGE_URL'
+    );
+  }
+  const atomicV4Capabilities = actions.filter((action) => (
+    action.type === 'requireCapability' && action.value === ATOMIC_SUBMIT_V4_CAPABILITY
+  ));
+  if (atomicV4Capabilities.length !== 1 || atomicV4Capabilities[0].optional !== false
+    || !atomicV4Capabilities[0].applicationScopeSelector) {
+    throw inputError(
+      'Atomic submit chooser v4 requires one non-optional capability with an exact application form selector',
+      'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY'
+    );
+  }
 }
 
 export async function normalizeManagedRun(input = {}, { urlValidator = assertPublicUrl } = {}) {
@@ -8470,6 +12082,7 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
   const canonicalRunUrl = new URL(url.toString());
   canonicalRunUrl.hash = '';
   const actions = normalizeManagedActions(input.actions);
+  assertV4Contract(actions);
   const requiresExactPageUrl = actions.some((action) => action.type === 'requireCapability'
     && action.value === EXACT_PAGE_URL_CAPABILITY);
   const exactPageUrlAction = actions.find((action) => action.expectedPageUrl);
@@ -8513,12 +12126,48 @@ export function normalizeManagedContinuation(input = {}) {
   if (input.requestContinuation || input.continuationCheckpoint || input.continuationTtlSeconds != null) {
     throw inputError('A continuation cannot request another continuation', 'CONTINUATION_LIMIT_REACHED');
   }
+  const actions = normalizeManagedActions(input.actions);
+  assertV4Contract(actions);
+  const v4ContinuationSubmit = actions.find((action) => (
+    action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+  ));
+  if (v4ContinuationSubmit && (
+    v4ContinuationSubmit.submitKind !== 'verification'
+      || typeof v4ContinuationSubmit.securityCode !== 'string'
+  )) {
+    throw inputError(
+      'An atomic v4 continuation permits only one supplied security code',
+      'CONTINUATION_ACTION_FORBIDDEN'
+    );
+  }
   return {
     continuationToken: input.continuationToken,
-    actions: normalizeManagedActions(input.actions),
+    actions,
     screenshot: input.screenshot !== false,
     fullPage: Boolean(input.fullPage)
   };
+}
+
+function managedContinuationActionMode(actions) {
+  const mutations = actions.filter((action) => ![
+    'requireCapability', 'extract', 'waitForSelector'
+  ].includes(action.type));
+  if (mutations.length === 0) return 'observation';
+  if (mutations.length === 1) {
+    const action = mutations[0];
+    const exactCapabilities = actions.filter((candidate) => (
+      candidate.type === 'requireCapability' && candidate.value === EXACT_PAGE_URL_CAPABILITY
+    ));
+    if (action.type === 'confirmAndSubmit'
+      && [3, 4].includes(action.chooserPolicy?.version)
+      && action.submitKind === 'verification'
+      && typeof action.securityCode === 'string'
+      && exactCapabilities.length === 1
+      && exactCapabilities[0].optional === false
+      && typeof exactCapabilities[0].expectedPageUrl === 'string'
+      && action.expectedPageUrl === exactCapabilities[0].expectedPageUrl) return 'security-code';
+  }
+  return 'mutation';
 }
 
 function digest(value) {
@@ -8599,7 +12248,7 @@ async function throwSandboxRunnerError(sandbox) {
   throw Object.assign(new Error(message), { status: 502, code: 'SANDBOX_RUN_FAILED' });
 }
 
-export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const crypto=require('node:crypto');const [tokenHash,projectHash]=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
+export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);const required=JSON.parse(requiredJson);if(required.includes('atomic-submit-v4')){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
@@ -8632,9 +12281,26 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
     let sandbox;
     try {
       sandbox = await sandboxApi.get({ name: sandboxName, resume: true });
+      const requiredCapabilities = continuation.actions
+        .filter((action) => action.type === 'requireCapability')
+        .map((action) => action.value);
+      const continuationActionMode = managedContinuationActionMode(continuation.actions);
       const claim = await sandbox.runCommand('node', [
-        '-e', CLAIM_CONTINUATION_SCRIPT, digest(continuation.continuationToken), digest(projectBinding)
+        '-e', CLAIM_CONTINUATION_SCRIPT, digest(continuation.continuationToken), digest(projectBinding),
+        JSON.stringify(requiredCapabilities), continuationActionMode
       ]);
+      if (claim.exitCode === 8) {
+        throw Object.assign(
+          new Error('The retained browser runner does not support the requested continuation contract'),
+          { status: 409, code: 'CONTINUATION_RUNNER_INCOMPATIBLE' }
+        );
+      }
+      if (claim.exitCode === 9) {
+        throw Object.assign(
+          new Error('The retained atomic submit session only permits receipt observation or one security code'),
+          { status: 409, code: 'CONTINUATION_ACTION_FORBIDDEN' }
+        );
+      }
       if (claim.exitCode !== 0) {
         throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
       }
@@ -8704,7 +12370,10 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
         projectHash: digest(projectBinding),
         host: context.allowedHost,
         expiresAt: continuationExpiresAt,
-        used: false
+        used: false,
+        ...(context.actions.some((action) => (
+          action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
+        )) ? { continuationPolicy: 'v4-observation-or-security-code' } : {})
       }))
     });
     await sandbox.writeFiles(files);

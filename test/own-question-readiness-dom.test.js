@@ -39,13 +39,14 @@ function readinessScanSource() {
 const SCAN_SOURCE = readinessScanSource();
 
 function atomicCandidateSource() {
-  const marker = 'const candidates = await scope.evaluate(';
+  const marker = 'requiredScanHandle = await scopeTarget.evaluateHandle(';
   const start = SANDBOX_RUNNER.indexOf(marker);
   assert.notEqual(start, -1, 'the atomic candidate scan must still be in the runner');
   const bodyStart = start + marker.length;
-  const end = SANDBOX_RUNNER.indexOf('}, formFingerprint).catch', bodyStart);
+  const closing = '\n      }, {\n        formFingerprint,';
+  const end = SANDBOX_RUNNER.indexOf(closing, bodyStart);
   assert.ok(end > bodyStart, 'could not bound the atomic candidate scan');
-  return SANDBOX_RUNNER.slice(bodyStart, end + 1);
+  return SANDBOX_RUNNER.slice(bodyStart, end + '\n      }'.length);
 }
 
 const ATOMIC_CANDIDATE_SOURCE = atomicCandidateSource();
@@ -74,7 +75,11 @@ async function atomicCandidatesOf(html) {
   return page.evaluate(([source, fingerprint]) => {
     // eslint-disable-next-line no-new-func
     const scan = new Function(`return (${source});`)();
-    return scan(document, fingerprint);
+    return scan(document.querySelector('form'), {
+      formFingerprint: fingerprint,
+      directHandles: false,
+      mirrorMarkers: false,
+    }).candidates;
   }, [ATOMIC_CANDIDATE_SOURCE, 'a'.repeat(64)]);
 }
 

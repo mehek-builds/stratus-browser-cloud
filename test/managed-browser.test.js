@@ -7,6 +7,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   ATOMIC_SUBMIT_POLICY,
+  ATOMIC_SUBMIT_POLICY_V3,
+  ATOMIC_SUBMIT_POLICY_V4,
+  ATOMIC_SUBMIT_V4_CAPABILITY,
   CLAIM_CONTINUATION_SCRIPT,
   EXTRACT_ASSERTIONS_CAPABILITY,
   EXACT_PAGE_URL_CAPABILITY,
@@ -253,6 +256,34 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
   );
 });
 
+test('receipt-observation continuation rejects a second application submit', () => {
+  const expectedPageUrl = 'https://jobs.example.com/postings/receipt-observation';
+  const actions = [
+    {
+      type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl,
+    },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#application',
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      label: 'final_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'application',
+      expectedPageUrl,
+    },
+  ];
+  assert.throws(
+    () => normalizeManagedContinuation({ continuationToken: 'r'.repeat(43), actions }),
+    (error) => error.code === 'CONTINUATION_ACTION_FORBIDDEN',
+  );
+});
+
 test('sandbox continuation is project-bound and single-use without exposing a session id', async () => {
   const sandboxes = new Map();
   const template = { name: 'stratus-browser-runtime', currentSnapshotId: 'snapshot' };
@@ -330,6 +361,117 @@ test('sandbox continuation is project-bound and single-use without exposing a se
   );
 });
 
+test('v4 continuation refuses an incompatible retained runner before writing continuation input', async () => {
+  const expectedPageUrl = 'https://jobs.example.com/postings/continuation-v4';
+  const exactCapability = {
+    type: 'requireCapability',
+    value: EXACT_PAGE_URL_CAPABILITY,
+    optional: false,
+    expectedPageUrl,
+  };
+  const v4Capability = {
+    type: 'requireCapability',
+    value: ATOMIC_SUBMIT_V4_CAPABILITY,
+    optional: false,
+    applicationScopeSelector: '#application',
+  };
+  const submit = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+    label: 'final_submit',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'verification',
+    securityCode: 'ABC12345',
+    expectedPageUrl,
+  };
+  const harness = (manifest) => {
+    const files = new Map();
+    let continuationWrites = 0;
+    let claimedCapabilities = null;
+    let claimedActionMode = null;
+    let stopped = false;
+    const sandbox = {
+      async runCommand(command, args) {
+        if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) {
+          claimedCapabilities = JSON.parse(args[4] || '[]');
+          claimedActionMode = args[5] || null;
+          const needsV4 = claimedCapabilities.includes(ATOMIC_SUBMIT_V4_CAPABILITY);
+          const supportsV4 = manifest?.protocolVersion >= 4
+            && Array.isArray(manifest.capabilities)
+            && claimedCapabilities.every((capability) => manifest.capabilities.includes(capability));
+          return { exitCode: needsV4 && !supportsV4 ? 8 : 0 };
+        }
+        const wanted = args.slice(3);
+        const found = wanted.find((filePath) => files.has(filePath));
+        return found ? { exitCode: 0, stdout: async () => found } : { exitCode: 3, stdout: async () => '' };
+      },
+      async writeFiles(batch) {
+        for (const file of batch) {
+          files.set(file.path, Buffer.from(file.content));
+          if (file.path === 'stratus-continuation-input.json') continuationWrites += 1;
+        }
+        if (files.has('stratus-continuation-input.json')) {
+          files.set('stratus-result-1.json', Buffer.from(JSON.stringify({ title: 'Compatible continuation' })));
+        }
+      },
+      async readFileToBuffer({ path: filePath }) { return files.get(filePath) || null; },
+      async stop() { stopped = true; },
+    };
+    return {
+      sandbox,
+      sandboxApi: { async get() { return sandbox; } },
+      state: () => ({ continuationWrites, claimedCapabilities, claimedActionMode, stopped }),
+    };
+  };
+  const v4Input = {
+    continuationToken: 'v'.repeat(43),
+    actions: [exactCapability, v4Capability, submit],
+    screenshot: false,
+  };
+  const incompatibleManifests = [
+    ['missing manifest', null],
+    ['protocol 3 manifest', {
+      protocolVersion: 3,
+      capabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+    }],
+  ];
+  for (const [label, manifest] of incompatibleManifests) {
+    const fake = harness(manifest);
+    await assert.rejects(
+      executeSandboxRun(v4Input, {
+        sandboxApi: fake.sandboxApi,
+        projectBinding: `project-${label}`,
+      }),
+      (error) => error.code === 'CONTINUATION_RUNNER_INCOMPATIBLE' && error.status === 409,
+      label,
+    );
+    assert.deepEqual(
+      fake.state().claimedCapabilities,
+      [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+      `${label} must receive the v4 capability requirement`,
+    );
+    assert.equal(fake.state().continuationWrites, 0, `${label} must fail before continuation input is written`);
+    assert.equal(fake.state().stopped, true);
+  }
+
+  const v3Fake = harness(null);
+  const v3Result = await executeSandboxRun({
+    continuationToken: 'w'.repeat(43),
+    actions: [exactCapability, { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V3 }],
+    screenshot: false,
+  }, {
+    sandboxApi: v3Fake.sandboxApi,
+    projectBinding: 'project-v3',
+  });
+  assert.equal(v3Result.title, 'Compatible continuation');
+  assert.deepEqual(v3Fake.state().claimedCapabilities, [EXACT_PAGE_URL_CAPABILITY]);
+  assert.equal(v3Fake.state().claimedActionMode, 'security-code');
+  assert.equal(v3Fake.state().continuationWrites, 1);
+});
+
 test('the continuation claim script allows one concurrent winner and rejects wrong-project and expired claims', async () => {
   const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-claim-'));
@@ -338,13 +480,19 @@ test('the continuation claim script allows one concurrent winner and rejects wro
   const markerPath = path.join(workDir, 'stratus-continuation.json');
   const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
   const usedPath = path.join(workDir, 'stratus-continuation-used.json');
-  const writeMarker = (expiresAt) => {
+  const manifestPath = path.join(workDir, 'stratus-runner-capabilities.json');
+  const writeMarker = (expiresAt, continuationPolicy = null) => {
     fs.rmSync(usedPath, { force: true });
-    fs.writeFileSync(markerPath, JSON.stringify({ tokenHash, projectHash, expiresAt, used: false }));
+    fs.writeFileSync(markerPath, JSON.stringify({
+      tokenHash, projectHash, expiresAt, used: false,
+      ...(continuationPolicy ? { continuationPolicy } : {}),
+    }));
     fs.writeFileSync(readyPath, '{}');
   };
-  const claim = (claimedProjectHash = projectHash) => new Promise((resolve) => {
-    const child = spawn(process.execPath, ['-e', CLAIM_CONTINUATION_SCRIPT, tokenHash, claimedProjectHash], {
+  const claim = (claimedProjectHash = projectHash, requiredCapabilities = [], actionMode = 'mutation') => new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      '-e', CLAIM_CONTINUATION_SCRIPT, tokenHash, claimedProjectHash, JSON.stringify(requiredCapabilities), actionMode,
+    ], {
       cwd: workDir,
       stdio: 'ignore',
     });
@@ -358,6 +506,46 @@ test('the continuation claim script allows one concurrent winner and rejects wro
   writeMarker(new Date(Date.now() - 1).toISOString());
   assert.equal(await claim(), 6, 'the short receipt token must refuse a claim after expiry');
   assert.equal(fs.existsSync(markerPath), true);
+
+  writeMarker(
+    new Date(Date.now() + 15_000).toISOString(),
+    'v4-observation-or-security-code',
+  );
+  assert.equal(await claim(projectHash, [], 'mutation'), 9,
+    'a retained v4 receipt session must reject another mutation path');
+  assert.equal(fs.existsSync(markerPath), true, 'a refused mutation must not consume the receipt session');
+  assert.equal(await claim(projectHash, [], 'observation'), 0,
+    'read-only receipt observation remains permitted');
+
+  fs.rmSync(manifestPath, { force: true });
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY]), 8);
+  assert.equal(fs.existsSync(markerPath), true, 'a missing runner manifest must not consume the marker');
+  assert.equal(fs.existsSync(usedPath), false);
+
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    protocolVersion: 3,
+    capabilities: [ATOMIC_SUBMIT_V4_CAPABILITY],
+  }));
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY]), 8);
+  assert.equal(fs.existsSync(markerPath), true, 'a protocol 3 manifest must not consume the marker');
+  assert.equal(fs.existsSync(usedPath), false);
+
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    protocolVersion: 4,
+    capabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+  }));
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(projectHash, [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY]), 0);
+  assert.equal(fs.existsSync(markerPath), false);
+  assert.equal(fs.existsSync(usedPath), true);
+
+  fs.rmSync(manifestPath, { force: true });
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(projectHash, [EXACT_PAGE_URL_CAPABILITY]), 0, 'v3 does not require a runner manifest');
+  assert.equal(fs.existsSync(markerPath), false);
+  assert.equal(fs.existsSync(usedPath), true);
 
   writeMarker(new Date(Date.now() + 15_000).toISOString());
   const outcomes = await Promise.all([claim(), claim()]);
@@ -376,7 +564,10 @@ test('an optional action that THROWS is stepped over, not fatal to the run', () 
   // a MISSING element and never applied to fillByLabelText at all (no selector, so locator is null).
   // One unfillable checkbox therefore discarded the name, email, phone and resume already entered.
   assert.match(SANDBOX_RUNNER, /catch \(actionError\)/);
-  assert.match(SANDBOX_RUNNER, /if \(!action\.optional\) throw actionError;/);
+  assert.match(
+    SANDBOX_RUNNER,
+    /if \(!action\.optional\) \{\n\s+if \(!finalSubmitPressed\) throw actionError;/
+  );
   assert.match(SANDBOX_RUNNER, /skipped\.push\(/);
 });
 
@@ -406,10 +597,10 @@ test('fills are reported only after the page keeps the value', () => {
 });
 
 test('fillByLabelText can use scoped custom listbox controls', () => {
-  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null\) =>/);
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null, exactContext = null\) =>/);
   assert.match(SANDBOX_RUNNER, /\[role="combobox"\], \[aria-haspopup="listbox"\]/);
   assert.match(SANDBOX_RUNNER, /getByRole\('option', \{ name: option, exact: false \}\)/);
-  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(questionBlock, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(\n\s+questionBlock,\n\s+action\.value \|\| '',\n\s+null,\n\s+exactActionContext\n\s+\);/);
 });
 
 test('an option is only ever clicked inside an option list, never loose in the page', () => {
@@ -424,7 +615,7 @@ test('an option is only ever clicked inside an option list, never loose in the p
   // A bare li still qualifies, but only inside a listbox or a select2 results panel.
   assert.match(SANDBOX_RUNNER, /\[role="listbox"\] li/);
   assert.match(SANDBOX_RUNNER, /const OPTION_NODES =/);
-  assert.match(SANDBOX_RUNNER, /const optionsRoot = \(\) => \(scopedMenu \?\? page\)\.locator\(OPTION_NODES\)/);
+  assert.match(SANDBOX_RUNNER, /const optionsRoot = \(\) => \(scopedMenu \?\? \(exactContext \? container : page\)\)\.locator\(OPTION_NODES\)/);
   // And the correctly scoped attempt gets a bounded wait, because it used to be made as an instant
   // count() 150ms after the click - before the menu rendered - which is what made the page-wide
   // sweep reachable in the first place. Measured: menus arrived 555-563ms after the control was hit.
@@ -487,7 +678,7 @@ test('a widget that renders its answer shorter than the row that set it is not a
   assert.equal((SANDBOX_RUNNER.match(/lastClickedOptionText = clean\(/g) || []).length, 1, 'one place records the row');
   // Cleared at the top of every fill, so a row left over from an earlier control can never stand in
   // for one this control never showed.
-  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
+  assert.match(SANDBOX_RUNNER, /const fillCustomChoice = async \(container, wanted, directControl = null, exactContext = null\) => \{\n(?:.*\n)*?\s+lastClickedOptionText = '';/);
   // Both halves are required: the row had to carry the answer, and the control has to be showing
   // part of that same row.
   assert.match(SANDBOX_RUNNER, /if \(!row \|\| shown\.length < 2 \|\| !row\.includes\(shown\)\) return false;/);
@@ -548,7 +739,7 @@ test('a choice option that is not on the list names the answer that went looking
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {
   assert.match(SANDBOX_RUNNER, /\.select2-choice, \.select2-container/);
   assert.match(SANDBOX_RUNNER, /\.select2-result, \.select2-results li/);
-  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(questionBlock, action\.value \|\| ''\)/);
+  assert.match(SANDBOX_RUNNER, /const customSelected = await fillCustomChoice\(\n\s+questionBlock,\n\s+action\.value \|\| '',\n\s+null,\n\s+exactActionContext\n\s+\);/);
   assert.match(SANDBOX_RUNNER, /const selectNativeOption = async \(field, wanted\) =>/);
   assert.match(SANDBOX_RUNNER, /const selected = customSelected \|\| await selectNativeOption\(field, action\.value \|\| ''\)/);
 });
@@ -633,7 +824,7 @@ test('a text fill that does not stick is retried as the choice it turned out to 
   // exactly as readily as one reached through the two branches above. Neither call is handed
   // 'field' as a directControl (2026-08-21) - see the landedReadbacks comment above for why that
   // would redirect fillCustomChoice's own discovery rather than merely narrow choiceLanded's blur.
-  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(questionBlock, action\.value \|\| ''\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(questionBlock, action\.value \|\| ''\);/);
+  assert.match(SANDBOX_RUNNER, /else if \(await fillCustomChoice\(questionBlock, action\.value \|\| '', null, exactActionContext\)\) \{\n(?:.*\n)*?\s+persisted = await choiceLanded\(questionBlock, action\.value \|\| ''\);/);
   // Still only ever reported as filled once the page can be read back, and still reported as the
   // applicant's work when it cannot.
   assert.match(SANDBOX_RUNNER, /if \(action\.label && persisted\) filledFields\.push\(action\.label\);/);
@@ -644,7 +835,7 @@ test('choice matching is scoped to the question container, never the page', () =
   // Unscoped, an answer as short as "Yes" could tick a consent or legal acknowledgement elsewhere
   // on the form, which the applicant cannot undo. The scope is now the question's OWN option block
   // rather than whatever container the anchor happened to land in; see D-02 and the test below.
-  assert.match(SANDBOX_RUNNER, /const questionBlock = await questionOptionBlock\(label, container\);/);
+  assert.match(SANDBOX_RUNNER, /const questionBlock = exactActionContext\n\s+\? exactBinding\.scope\n\s+: await questionOptionBlock\(label, container\);/);
   assert.match(SANDBOX_RUNNER, /const scope = questionBlock;/);
   assert.match(SANDBOX_RUNNER, /const choices = scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing - and says
@@ -668,7 +859,7 @@ test('a radio is reported from the radio that was clicked, not from the first on
   // fill path above: a controlled radio's checked state can commit on a render after the click, and
   // this used to read isChecked() back exactly once. See settle-window-covers-radio-select-checkbox.test.js.
   assert.match(SANDBOX_RUNNER, /return await settleVerified\(isChecked\) \? 'checked' : 'not-checked';/);
-  assert.match(SANDBOX_RUNNER, /if \(outcome === 'checked'\) \{\n\s+if \(action\.label\) filledFields\.push\(action\.label\);\n\s+continue;/);
+  assert.match(SANDBOX_RUNNER, /if \(outcome === 'checked'\) \{\n\s+successfulMutation = true;\n\s+if \(action\.label\) filledFields\.push\(action\.label\);\n\s+continue;/);
   // A click that did not take is the applicant's to finish, and is named as such.
   assert.match(SANDBOX_RUNNER, /the option was clicked and did not stay selected/);
 });
@@ -685,8 +876,8 @@ test('a question is anchored on the element that names it, not on prose that men
    * A whole-string match is tried first, so an element whose entire text IS the question wins over
    * prose that merely contains it. Containment stays as the fallback. */
   assert.match(SANDBOX_RUNNER, /const wholeLabel = wantedLabel/);
-  assert.match(SANDBOX_RUNNER, /const exactLabel = wholeLabel \? page\.getByText\(wholeLabel\)\.first\(\) : null;/);
-  assert.match(SANDBOX_RUNNER, /: page\.getByText\(wantedLabel \|\| action\.text, \{ exact: false \}\)\.first\(\);/);
+  assert.match(SANDBOX_RUNNER, /const exactLabel = !exactActionContext && wholeLabel \? page\.getByText\(wholeLabel\)\.first\(\) : null;/);
+  assert.match(SANDBOX_RUNNER, /page\.getByText\(wantedLabel \|\| action\.text, \{ exact: false \}\)\.first\(\)/);
   // And the option block is walked up from that anchor, through the four ways a board says "these
   // options belong together".
   assert.match(SANDBOX_RUNNER, /const questionOptionBlock = async \(anchor, fallback\) =>/);
@@ -728,7 +919,7 @@ test('fillByLabelText climbs to a container that actually owns controls', () => 
   );
   assert.match(
     SANDBOX_RUNNER,
-    /const questionBlock = await questionOptionBlock\(label, container\);\n\s+const field = questionBlock\.locator\('textarea, input:not\(\[type=file\]\):not\(\[type=hidden\]\), select'\)\.first\(\);/,
+    /const questionBlock = exactActionContext\n\s+\? exactBinding\.scope\n\s+: await questionOptionBlock\(label, container\);\n\s+const field = exactActionContext\n\s+\? exactBinding\.field\n\s+: questionBlock\.locator\('textarea, input:not\(\[type=file\]\):not\(\[type=hidden\]\), select'\)\.first\(\);/,
     'the field dispatch must use the question-scoped block, not the first control in a shared parent',
   );
 });
@@ -837,7 +1028,7 @@ test('discover is an allowed action and needs no selector', () => {
   assert.deepEqual(normalizeManagedActions([{ type: 'discover', optional: true }]), [{ type: 'discover', optional: true }]);
 });
 
-test('atomic required confirmation owns the submit with contract v2 and chooser policy v3', () => {
+test('atomic required confirmation accepts exact chooser policies v3 and v4 without cross-normalizing them', () => {
   const actions = normalizeManagedActions([
     { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
   ]);
@@ -856,10 +1047,45 @@ test('atomic required confirmation owns the submit with contract v2 and chooser 
   );
   assert.equal(ATOMIC_SUBMIT_POLICY.name, 'litos-final-submit');
   assert.equal(ATOMIC_SUBMIT_POLICY.version, 3);
+  assert.deepEqual(ATOMIC_SUBMIT_POLICY, ATOMIC_SUBMIT_POLICY_V3);
   assert.equal(ATOMIC_SUBMIT_POLICY.grammarHash, '9bd60803e7a713555132b6740e9765599ba975e75f803f436841dbc6d340091e');
   assert.equal(
     crypto.createHash('sha256').update(`${ATOMIC_SUBMIT_POLICY.finalPattern}\n${ATOMIC_SUBMIT_POLICY.exclusionPattern}`).digest('hex'),
     ATOMIC_SUBMIT_POLICY.grammarHash
+  );
+  assert.equal(ATOMIC_SUBMIT_POLICY_V4.name, 'litos-final-submit');
+  assert.equal(ATOMIC_SUBMIT_POLICY_V4.version, 4);
+  assert.equal(
+    ATOMIC_SUBMIT_POLICY_V4.finalPattern,
+    '(?:\\b(?:submit|send)\\s+(?:your\\s+|my\\s+|the\\s+|this\\s+)?application\\b|\\bsubmit\\s+with\\s+(?:attachments?|resumes?|cvs?|cover\\s+letters?)\\b|^\\s*submit\\s*$|^\\s*send\\s*$|^\\s*apply\\s*$|^\\s*apply\\s+now\\s*$|^\\s*senden\\s*$|\\bfinish\\s+(?:and|&)\\s+apply\\b)'
+  );
+  assert.equal(ATOMIC_SUBMIT_POLICY_V4.exclusionPattern, ATOMIC_SUBMIT_POLICY_V3.exclusionPattern);
+  assert.equal(ATOMIC_SUBMIT_POLICY_V4.grammarHash, 'ee6697971965f0ab360f77da88d935a58b0b7af8ea412ad5d5b3813e9cc11263');
+  assert.equal(
+    crypto.createHash('sha256').update(`${ATOMIC_SUBMIT_POLICY_V4.finalPattern}\n${ATOMIC_SUBMIT_POLICY_V4.exclusionPattern}`).digest('hex'),
+    ATOMIC_SUBMIT_POLICY_V4.grammarHash
+  );
+  const v4ExpectedPageUrl = 'https://jobs.example.com/postings/v4';
+  const v4Actions = normalizeManagedActions([
+    { type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false },
+    {
+      ...actions[0],
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl: v4ExpectedPageUrl
+    }
+  ]);
+  assert.deepEqual(v4Actions[0], {
+    type: 'requireCapability',
+    optional: false,
+    value: ATOMIC_SUBMIT_V4_CAPABILITY,
+  });
+  const v4Action = v4Actions[1];
+  assert.deepEqual(v4Action.chooserPolicy, ATOMIC_SUBMIT_POLICY_V4);
+  assert.equal(v4Action.chooserPolicy.version, 4);
+  assert.equal(v4Action.expectedPageUrl, v4ExpectedPageUrl);
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: ATOMIC_SUBMIT_POLICY_V4 }]),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL'
   );
   const applicationFinal = new RegExp(ATOMIC_SUBMIT_POLICY.finalPattern, 'i');
   const excluded = new RegExp(ATOMIC_SUBMIT_POLICY.exclusionPattern, 'i');
@@ -943,12 +1169,76 @@ test('atomic required confirmation owns the submit with contract v2 and chooser 
     (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
   );
   assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY_V4, finalPattern: ATOMIC_SUBMIT_POLICY_V3.finalPattern } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY_V4, grammarHash: ATOMIC_SUBMIT_POLICY_V3.grammarHash } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY_V4, extra: true } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
+    () => normalizeManagedActions([{ ...actions[0], chooserPolicy: { ...ATOMIC_SUBMIT_POLICY_V4, version: 5 } }]),
+    (error) => error.code === 'INVALID_CONFIRM_AND_SUBMIT_POLICY'
+  );
+  assert.throws(
     () => normalizeManagedActions([actions[0], { ...actions[0], submitKind: 'verification' }]),
     (error) => error.code === 'MULTIPLE_ATOMIC_SUBMITS'
   );
   assert.match(SANDBOX_RUNNER, /requiredFieldConfirmation/);
   assert.match(SANDBOX_RUNNER, /confirmAndSubmitPass/);
   assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
+});
+
+test('v4 chooser proof handles have bounded cleanup without clearing continuation proofs between phases', () => {
+  assert.ok((SANDBOX_RUNNER.match(/await handle\.dispose\(\)\.catch\(\(\) => undefined\);/g) || []).length >= 4);
+  assert.match(SANDBOX_RUNNER, /for \(const address of successfulAddresses\.splice\(0\)\) \{\n\s+await address\.handle\?\.dispose/);
+  assert.match(SANDBOX_RUNNER, /await address\.formHandle\?\.dispose/);
+  assert.match(
+    SANDBOX_RUNNER,
+    /ancestryHandle = await handle\.evaluateHandle\(\(element\) => \{\n\s+const ancestors = \[\];[\s\S]*?return ancestors;\n\s+\}\)\.catch\(\(\) => null\);/,
+  );
+  assert.match(SANDBOX_RUNNER, /const ancestry = Array\.isArray\(failure\.ancestry\) \? failure\.ancestry : \[\];/);
+  assert.match(SANDBOX_RUNNER, /ancestry: failure\.ancestryHandle/);
+  assert.match(SANDBOX_RUNNER, /failure\?\.ancestryHandle[\s\S]*?handle\.dispose\(\)\.catch\(\(\) => undefined\)/);
+  assert.match(SANDBOX_RUNNER, /await finalSubmitHandle\?\.dispose/);
+  assert.match(SANDBOX_RUNNER, /await finalScopeHandle\?\.dispose/);
+  assert.ok(
+    SANDBOX_RUNNER.indexOf('for (const address of successfulAddresses.splice(0))')
+      > SANDBOX_RUNNER.indexOf("fs.unlinkSync('stratus-continuation-input.json')"),
+  );
+});
+
+test('v4 final activation guard verifies trusted dispatch and the exact held native request', () => {
+  assert.match(SANDBOX_RUNNER, /serviceWorkers: 'block'/);
+  assert.match(SANDBOX_RUNNER, /const observer = new MutationObserver/);
+  assert.match(SANDBOX_RUNNER, /document\.addEventListener\('submit', submitCapture, true\)/);
+  assert.match(SANDBOX_RUNNER, /document\.addEventListener\('submit', submitDocumentBubble, false\)/);
+  assert.match(SANDBOX_RUNNER, /window\.addEventListener\('submit', submitWindowBubble, false\)/);
+  assert.match(SANDBOX_RUNNER, /!event\.isTrusted \|\| event\.target !== root \|\| event\.submitter !== element/);
+  assert.match(SANDBOX_RUNNER, /request\.frame\(\) !== page\.mainFrame\(\)/);
+  assert.match(SANDBOX_RUNNER, /await submitHandle\.click\(\{ timeout: action\.timeout \|\| 10_000, noWaitAfter: true \}\)/);
+  assert.match(SANDBOX_RUNNER, /await decideSubmitTransportGate/);
+  assert.match(SANDBOX_RUNNER, /if \(gateResult\.status !== 'allowed'\)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /\.nativeSubmit\s*=/);
+  const routeAt = SANDBOX_RUNNER.indexOf('activationGate = await armSubmitTransportGate');
+  const armedAt = SANDBOX_RUNNER.indexOf('activationGuardToken = crypto.randomBytes', routeAt);
+  const clickedAt = SANDBOX_RUNNER.indexOf('await submitHandle.click', armedAt);
+  const checkedAt = SANDBOX_RUNNER.indexOf("if (gateResult.status !== 'allowed')", clickedAt);
+  assert.ok(routeAt !== -1 && routeAt < armedAt, 'the request gate must be installed before the DOM witness');
+  assert.ok(armedAt < clickedAt, 'the activation witness must be armed before the click');
+  assert.ok(clickedAt < checkedAt, 'the exact terminal gate result must be checked after the click');
+});
+
+test('v4 verification no-click preserves the existing no-control security-code outcome', () => {
+  assert.match(
+    SANDBOX_RUNNER,
+    /if \(verification\.noClick\) \{\n\s+securityCodeAttempt = \{ supplied: true, entered: true, outcome: 'no_control', resubmitted: false \};/,
+  );
+  assert.doesNotMatch(SANDBOX_RUNNER, /submit_control_unavailable/);
 });
 
 test('exact employer page URL capability is required before actions and at the atomic click', async () => {
@@ -1006,6 +1296,130 @@ test('exact employer page URL capability is required before actions and at the a
   });
   assert.equal(verification.actions[0].expectedPageUrl, expectedPageUrl);
   assert.doesNotMatch(SANDBOX_RUNNER, /requiresExactPageUrl && action\.submitKind === 'application'/);
+
+  const v4Submit = { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V4 };
+  const exactV4Capability = {
+    type: 'requireCapability',
+    value: EXACT_PAGE_URL_CAPABILITY,
+    optional: false,
+    expectedPageUrl,
+  };
+  const atomicV4Capability = {
+    type: 'requireCapability',
+    value: ATOMIC_SUBMIT_V4_CAPABILITY,
+    optional: false,
+    applicationScopeSelector: '#application',
+  };
+  await assert.rejects(
+    normalizeManagedRun({ url: expectedPageUrl, actions: [v4Submit] }, {
+      urlValidator: async (value) => new URL(value),
+    }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [
+        { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
+        v4Submit,
+      ],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [exactV4Capability, v4Submit],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [exactV4Capability, { ...atomicV4Capability, optional: true }, v4Submit],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [
+        exactV4Capability,
+        { type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false },
+        v4Submit,
+      ],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [exactV4Capability, atomicV4Capability, atomicV4Capability, v4Submit],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
+  );
+  const v4Run = await normalizeManagedRun({
+    url: expectedPageUrl,
+    actions: [exactV4Capability, atomicV4Capability, v4Submit],
+  }, { urlValidator: async (value) => new URL(value) });
+  assert.equal(v4Run.actions[1].value, ATOMIC_SUBMIT_V4_CAPABILITY);
+  assert.equal(v4Run.actions[1].optional, false);
+  assert.equal(v4Run.actions[2].chooserPolicy.version, 4);
+  const v4Continuation = normalizeManagedContinuation({
+    continuationToken: 'c'.repeat(43),
+    actions: [
+      exactV4Capability,
+      atomicV4Capability,
+      { ...v4Submit, submitKind: 'verification', securityCode: 'ABC12345' },
+    ],
+  });
+  assert.equal(v4Continuation.actions[1].value, ATOMIC_SUBMIT_V4_CAPABILITY);
+  assert.equal(v4Continuation.actions[1].optional, false);
+  assert.equal(v4Continuation.actions[2].chooserPolicy.version, 4);
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [
+        { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+        { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+        atomicV4Capability,
+        v4Submit,
+      ],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [
+        { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: true, expectedPageUrl },
+        atomicV4Capability,
+        v4Submit,
+      ],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: expectedPageUrl,
+      actions: [
+        {
+          type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+          expectedPageUrl: 'https://jobs.example.com/postings/other',
+        },
+        atomicV4Capability,
+        v4Submit,
+      ],
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
+  assert.throws(
+    () => normalizeManagedContinuation({
+      continuationToken: 'b'.repeat(43),
+      actions: [v4Submit],
+    }),
+    (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
+  );
 });
 
 test('discover scans choice controls as well as text-shaped ones', () => {
@@ -1071,7 +1485,7 @@ test('required date blockers can use the enclosing question instead of Pick date
 test('an optional waitForSelector is exempt from the pre-check entirely', () => {
   // It is the one action whose whole job is to wait, and its timeout is already clamped to
   // 100-20000ms by normalizeManagedActions, so a pre-check can only ever cancel it.
-  assert.match(SANDBOX_RUNNER, /action\.optional && action\.type !== 'waitForSelector' && await locator\.count\(\) === 0/);
+  assert.match(SANDBOX_RUNNER, /action\.optional && action\.type !== 'waitForSelector'\n\s+&& \(exactActionContext \? !exactActionRootHandle : await locator\.count\(\) === 0\)/);
   assert.match(SANDBOX_RUNNER, /if \(action\.type === 'waitForSelector'\) await page\.waitForSelector\(/);
 });
 
@@ -1840,8 +2254,8 @@ test('a plain final submit stays and watches the page the way the atomic path do
   // And the snapshot the caller stores is taken after the action loop, which is what makes the
   // watch above sufficient: the first readable state is what the text and screenshot capture.
   assert.ok(
-    SANDBOX_RUNNER.indexOf('await waitForPostSubmitApplicationState();') <
-    SANDBOX_RUNNER.indexOf("const text = await page.evaluate(() => (document.body?.innerText || '').slice(0, 50000))"),
+    SANDBOX_RUNNER.lastIndexOf('await waitForPostSubmitApplicationState();') <
+    SANDBOX_RUNNER.indexOf('const text = await observeForResult('),
     'the post-submit watch runs before the final page-text snapshot'
   );
 });

@@ -93,7 +93,17 @@ test('the record is bounded at twenty entries', async () => {
 /* The wiring, pinned in source: armed before BOTH press paths (the atomic pass and the plain
  * final-submit click), and reported on the pressed outcome only. */
 test('the watch is armed at both press sites and travels in submitOutcome', () => {
-  assert.match(SANDBOX_RUNNER, /armSubmitNetworkWatch\(\);\n\s*await submitHandle\.click/);
-  assert.match(SANDBOX_RUNNER, /if \(isFinalSubmitAction\(action\)\) armSubmitNetworkWatch\(\);\n\s*await locator\.click\(\);/);
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(await readSubmitOutcome\(\)\), \.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  const atomicArm = SANDBOX_RUNNER.indexOf('armSubmitNetworkWatch();');
+  const atomicClick = SANDBOX_RUNNER.indexOf('await submitHandle.click', atomicArm);
+  assert.ok(atomicArm >= 0 && atomicClick > atomicArm, 'the atomic press must arm the watch first');
+
+  const genericArm = SANDBOX_RUNNER.indexOf(
+    'if (isFinalSubmitAction(action)) armSubmitNetworkWatch();',
+    atomicClick,
+  );
+  const genericClick = SANDBOX_RUNNER.indexOf('await locator.click();', genericArm);
+  assert.ok(genericArm > atomicClick && genericClick > genericArm, 'the plain final press must arm the watch first');
+
+  assert.match(SANDBOX_RUNNER, /\(\) => readSubmitOutcome\(\)/);
+  assert.match(SANDBOX_RUNNER, /\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
 });
