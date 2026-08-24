@@ -946,3 +946,71 @@ test('a placeholder control sharing its question block with another control keep
   assert.match(label, /^type your response cards\[/);
   assert.doesNotMatch(label, /high school/, 'an ambiguous heading must never be borrowed');
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * ASHBY'S LOCATION COMBOBOX, RE-CHARACTERISED. Live production packet still reported "1 required
+ * field has no question you can answer in Litos: 'Current Location'" on a real Deepgram (Ashby)
+ * application on 2026-08-21, with every fix through PR #96 deployed. The attributes below are
+ * transcribed verbatim from that live capture, not sketched:
+ *   <input class="_input_d7ago_28 ashby-application-form-input-autocomplete" placeholder="Start
+ *     typing..." aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox"
+ *     role="combobox" value="">
+ * no id, no name, no aria-label, no `type` attribute (so it matches `input:not([type])`), sitting
+ * inside a `[class*="_fieldEntry_"]`/`[data-field-path]` container whose only other content is a
+ * sibling `<label>Current Location</label>`.
+ *
+ * THIS TEST PASSES, and that is the finding, not a bug this file fixes. The WIDGET_FURNITURE arm
+ * added in 5ad43bd for the SAME packet (245c827a) already recovers "current location" here at
+ * every nesting depth a real Ashby CSS-module wrapper could plausibly use - shallow (label and
+ * field as direct siblings), and deep (an icon wrapper and an extra input-shell div between the
+ * field container and the input, the shape `_input_d7ago_28` implies a scoped wrapper component
+ * would produce). Confirmed by RUNNING questionLabel against both, not by re-reading the arm's
+ * regex.
+ *
+ * So the live defect is not in this repo. Traced end to end against student-outreach-backend at
+ * the same commit: the managed discovery action (this file's 'discover') hands the backend a
+ * question labelled "Current Location", classifyField('current location') correctly returns
+ * 'address_city' (also already confirmed fine), and then
+ * questionDiscovery.ts's isFixedPortalProfileField(portal, label) returns true for portal
+ * 'ashby' because 'address_city' is listed there as a field the portal's FIXED selector pass
+ * already fills - a claim that is false for Ashby's location combobox: there is no 'address_city'
+ * selector anywhere in portalSubmission.ts, only a resolved value that reaches the control by the
+ * ordinary discovered-question fill path this repo's generic combobox machinery drives. Verified
+ * directly: `normalizeStoredPortalQuestions([{question: 'Current Location', answer: ''}],
+ * 'ashby')` returns `[]` (the same call for portal 'lever' returns the row untouched), and that
+ * empty result is exactly what submissionRunner.ts:1819's
+ * `if (!label || !reviewLabel || normalizeStoredPortalQuestions(...).length === 0) continue;`
+ * reads to skip the field before a question record is ever created - so the control is discovered
+ * correctly, named correctly, and then silently thrown away one repo over, before anything Litos
+ * runs ever tries to type into it. This is the same predicate and the same failure shape
+ * questionDiscovery.ts's own isCoreIdentityField comment documents for university email
+ * (2026-08-12): a question suppressed on the strength of a fixed fill that structurally cannot
+ * happen. The fix belongs in that predicate, not here.
+ * ------------------------------------------------------------------------------------------- */
+const ashbyLocationField = (depth) => {
+  const fieldContainer = depth === 'deep'
+    ? `<div class="_fieldWrap_d7ago_1"><div class="_inputContainer_d7ago_5"><div class="_iconAndInput_d7ago_9">
+         <svg class="_icon_d7ago_20" aria-hidden="true"></svg>
+         <input class="_input_d7ago_28 ashby-application-form-input-autocomplete" placeholder="Start typing..."
+           aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox" role="combobox" value="" />
+       </div></div></div>`
+    : `<div class="_inputWrap_d7ago_1">
+         <input class="_input_d7ago_28 ashby-application-form-input-autocomplete" placeholder="Start typing..."
+           aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox" role="combobox" value="" />
+       </div>`;
+  return `
+    <div data-field-path="_systemfield_location" class="_fieldEntry_hkyf8_45">
+      <div class="_labelContainer_hkyf8_1"><label class="_label_hkyf8_1 _required_f7cvd_91">Current Location</label></div>
+      <div class="_fieldContainer_hkyf8_10">${fieldContainer}</div>
+    </div>`;
+};
+
+test('an Ashby location combobox at shallow nesting is named by its sibling label', async () => {
+  const [label] = await labelsFor(ashbyLocationField('shallow'), 'input[role="combobox"]');
+  assert.equal(label, 'current location');
+});
+
+test('an Ashby location combobox behind an icon-and-input wrapper is still named by its sibling label', async () => {
+  const [label] = await labelsFor(ashbyLocationField('deep'), 'input[role="combobox"]');
+  assert.equal(label, 'current location');
+});
