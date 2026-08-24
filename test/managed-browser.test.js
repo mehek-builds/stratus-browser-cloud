@@ -21,10 +21,37 @@ import {
   normalizeManagedContinuation,
   normalizeManagedRun,
   PUBLIC_EGRESS_NETWORK_POLICY,
+  resolvedManagedExactPageUrl,
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
 const CURRENT_SANDBOX_TEMPLATE = 'stratus-browser-runtime-pw-1-61-1-v4';
+
+test('exact URL proof allows only Workable short-link canonicalization', () => {
+  const expected = 'https://apply.workable.com/j/20e78cba92/apply?source=litos#apply';
+  const resolved = 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos';
+  assert.equal(resolvedManagedExactPageUrl(expected, resolved), resolved);
+  assert.equal(resolvedManagedExactPageUrl(resolved, `${resolved}#receipt`), resolved);
+  for (const rejected of [
+    'https://apply.workable.com/max-borges-agency/j/AAAAAAAAAA/apply?source=litos',
+    'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=other',
+    'https://apply.workable.com/another/j/20E78CBA92/apply/extra?source=litos',
+    'https://user:pass@apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'https://apply.workable.com:444/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'http://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'https://careers.example.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'https://apply.workable.com/j/20E78CBA92/apply?source=litos',
+  ]) {
+    assert.equal(resolvedManagedExactPageUrl(expected, rejected), null, rejected);
+  }
+  assert.equal(
+    resolvedManagedExactPageUrl(
+      resolved,
+      'https://apply.workable.com/another-tenant/j/20E78CBA92/apply?source=litos',
+    ),
+    null,
+  );
+});
 
 function extractFunctionSource(name) {
   const start = SANDBOX_RUNNER.indexOf(`function ${name}`);
@@ -1569,7 +1596,7 @@ test('exact employer page URL capability is required before actions and at the a
   assert.match(SANDBOX_RUNNER, /Employer page URL changed before the first application action/);
   assert.match(SANDBOX_RUNNER, /Employer page URL changed before applicant data could be applied/);
   assert.match(SANDBOX_RUNNER, /Employer page URL changed before the final submit click/);
-  assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeActions = observed') < SANDBOX_RUNNER.indexOf('for (const action of currentInput.actions'));
+  assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeActions = resolved') < SANDBOX_RUNNER.indexOf('for (const action of currentInput.actions'));
   assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeApplicantData = observed') < SANDBOX_RUNNER.indexOf('addressedSelectors.push'));
   assert.ok(SANDBOX_RUNNER.indexOf('exactPageUrlProof.beforeSubmit = observed') < SANDBOX_RUNNER.indexOf('await submitHandle.click'));
   const fillOnly = normalizeManagedActions([

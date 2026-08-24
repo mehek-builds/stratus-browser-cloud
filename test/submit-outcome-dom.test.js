@@ -56,8 +56,24 @@ test.before(async () => {
 test.after(async () => { await browser?.close(); });
 
 async function read(html) {
+  await page.goto('about:blank');
   await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
   return page.evaluate(`(${READER})()`);
+}
+
+async function readAt(url, html) {
+  const handler = (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: `<!doctype html><html><body>${html}</body></html>`,
+  });
+  await page.route(url, handler);
+  try {
+    await page.goto(url);
+    return await page.evaluate(`(${READER})()`);
+  } finally {
+    await page.unroute(url, handler);
+  }
 }
 
 test('an empty success container over a live form is NOT a submitted application', async () => {
@@ -152,6 +168,106 @@ test('body text alone confirms only once the form is genuinely gone', async () =
   assert.equal(outcome.state, 'confirmed');
   assert.equal(outcome.source, 'page_text');
 });
+
+const TEAMTAILOR_RECEIPT = `
+  <main>
+    <h1>Thanks for applying</h1>
+    <p>We have received your application and we will be reviewing it shortly.</p>
+    <form action="/connect"><input type="hidden" name="authenticity_token" value="signed"><button type="submit">Connect</button></form>
+  </main>`;
+
+test('a measured Teamtailor receipt is not vetoed by its separate post-submit Connect form', async () => {
+  // Transcribed from Fully run 885b0ae5 on 2026-08-24. The page showed this receipt and confetti,
+  // then offered an unrelated talent-network action whose button happened to use type=submit.
+  const outcome = await readAt(
+    'https://fully.teamtailor.com/jobs/6360832-internship/applications/new',
+    TEAMTAILOR_RECEIPT,
+  );
+  assert.equal(outcome.formStillPresent, false);
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.source, 'page_text');
+  assert.match(outcome.message, /We have received your application/);
+});
+
+test('the same Teamtailor-looking HTML off the measured ATS host stays unknown', async () => {
+  const outcome = await read(TEAMTAILOR_RECEIPT);
+  assert.equal(outcome.formStillPresent, true);
+  assert.equal(outcome.state, 'unknown');
+});
+
+test('Teamtailor receipt prose over any remaining application field stays unknown', async () => {
+  const outcome = await readAt(
+    'https://fully.teamtailor.com/jobs/6360832-internship/applications/new',
+    TEAMTAILOR_RECEIPT.replace('</main>', '<input name="candidate[first_name]" type="text"></main>'),
+  );
+  assert.equal(outcome.formStillPresent, true);
+  assert.equal(outcome.state, 'unknown');
+});
+
+const WORKABLE_RECEIPT = `
+  <main data-ui="successful-submit">
+    <h1>Thank you!</h1>
+    <p role="status">Your application has been submitted successfully.</p>
+  </main>`;
+
+test('the published Workable success state confirms on the exact tenant job success URL', async () => {
+  const outcome = await readAt(
+    'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success',
+    WORKABLE_RECEIPT,
+  );
+  assert.equal(outcome.formStillPresent, false);
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.source, 'ats_state');
+  assert.equal(outcome.evidence, '[data-ui="successful-submit"]');
+  assert.match(outcome.message, /submitted successfully/i);
+});
+
+test('the provider-preserved lowercase Workable token confirms the same published success state', async () => {
+  const outcome = await readAt(
+    'https://apply.workable.com/max-borges-agency/j/20e78cba92/apply/?success',
+    WORKABLE_RECEIPT,
+  );
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.source, 'ats_state');
+});
+
+test('a separate Workable follow-up survey form does not veto its published success state', async () => {
+  const outcome = await readAt(
+    'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success',
+    `${WORKABLE_RECEIPT}<form data-ui="candidate-survey"><textarea></textarea><button type="submit">Submit survey</button></form>`,
+  );
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.source, 'ats_state');
+  assert.equal(outcome.formStillPresent, false);
+});
+
+for (const [name, url, html] of [
+  ['off the Workable host', 'https://careers.example.test/max-borges-agency/j/20E78CBA92/apply/?success', WORKABLE_RECEIPT],
+  ['without its success URL state', 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/', WORKABLE_RECEIPT],
+  ['with extra success query state', 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success&source=retry', WORKABLE_RECEIPT],
+  ['over a live application form', 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success', `${WORKABLE_RECEIPT}<form data-ui="application-form"><button type="submit">Apply</button></form>`],
+  ['without a status message inside the success state', 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success', '<main data-ui="successful-submit"><h1>Thank you!</h1></main><p role="status">Your application has been submitted successfully.</p>'],
+]) {
+  test(`a Workable-looking success hook ${name} stays unknown`, async () => {
+    const outcome = await readAt(url, html);
+    assert.equal(outcome.state, 'unknown');
+    assert.equal(outcome.source, 'ats_state_unconfirmed');
+  });
+}
+
+for (const label of ['Continue', 'Next', 'Finish', 'Complete application', 'Retry', 'Please wait']) {
+  test(`receipt-shaped prose over a live ${label} form stays unknown`, async () => {
+    const outcome = await read(`
+      <p>Thank you for applying. We have received your application.</p>
+      <form>
+        <label>Email<input type="text" name="email"></label>
+        <label>Phone<input type="text" name="phone"></label>
+        <button type="submit">${label}</button>
+      </form>`);
+    assert.equal(outcome.formStillPresent, true);
+    assert.equal(outcome.state, 'unknown');
+  });
+}
 
 test('an ordinary unsubmitted application page is unknown, not confirmed', async () => {
   // Application pages are full of encouraging prose. None of it is a receipt.
