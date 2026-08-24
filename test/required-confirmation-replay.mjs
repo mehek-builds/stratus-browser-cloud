@@ -465,6 +465,33 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   if (location.search.includes('v4-native-submit')) {
     applicationForm.action = '/native-select2-receipt';
     applicationForm.method = 'post';
+    applicationForm.enctype = 'multipart/form-data';
+    applicationForm.noValidate = false;
+    var nativeNames = {
+      text: 'full_name',
+      'email-field': 'email',
+      'phone-field': 'phone',
+      essay: 'why_role',
+      resume: 'resume',
+      date: 'start_date',
+      'question_123[]': 'question_123[]',
+      react: 'privacy_statement',
+      select: 'country',
+      checkbox: 'terms',
+      'legacy-source': 'legacy_choice'
+    };
+    Object.entries(nativeNames).forEach(function (entry) {
+      document.getElementById(entry[0]).name = entry[1];
+    });
+    document.getElementById('react').value = 'I Agree';
+    document.getElementById('react-hidden').removeAttribute('aria-required');
+    document.getElementById('radio').value = 'yes';
+    document.getElementById('checkbox').value = 'accepted';
+    var customBacking = document.createElement('input');
+    customBacking.type = 'hidden';
+    customBacking.name = 'schedule';
+    customBacking.value = 'weekdays';
+    document.getElementById('custom').appendChild(customBacking);
   }
   applicationForm.addEventListener('submit', function (event) {
     if (location.search.includes('v4-native-submit')) return;

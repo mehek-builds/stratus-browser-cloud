@@ -12,7 +12,7 @@ import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 function watchSource() {
   const start = SANDBOX_RUNNER.indexOf('let submitNetwork = null;');
-  const end = SANDBOX_RUNNER.indexOf('let requiredFieldConfirmation', start);
+  const end = SANDBOX_RUNNER.indexOf("/* V4'S LAST MUTATION BOUNDARY", start);
   assert.ok(start > 0 && end > start, 'the submit network watch must exist in the sandbox runner');
   return SANDBOX_RUNNER.slice(start, end);
 }
@@ -93,17 +93,14 @@ test('the record is bounded at twenty entries', async () => {
 /* The wiring, pinned in source: armed before BOTH press paths (the atomic pass and the plain
  * final-submit click), and reported on the pressed outcome only. */
 test('the watch is armed at both press sites and travels in submitOutcome', () => {
-  const atomicArm = SANDBOX_RUNNER.indexOf('armSubmitNetworkWatch();');
-  const atomicClick = SANDBOX_RUNNER.indexOf('await submitHandle.click', atomicArm);
-  assert.ok(atomicArm >= 0 && atomicClick > atomicArm, 'the atomic press must arm the watch first');
-
-  const genericArm = SANDBOX_RUNNER.indexOf(
-    'if (isFinalSubmitAction(action)) armSubmitNetworkWatch();',
-    atomicClick,
-  );
-  const genericClick = SANDBOX_RUNNER.indexOf('await locator.click();', genericArm);
-  assert.ok(genericArm > atomicClick && genericClick > genericArm, 'the plain final press must arm the watch first');
-
-  assert.match(SANDBOX_RUNNER, /\(\) => readSubmitOutcome\(\)/);
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  const armSites = [...SANDBOX_RUNNER.matchAll(/armSubmitNetworkWatch\(\);/g)]
+    .map((match) => match.index);
+  assert.equal(armSites.length, 2, 'the watch is armed once for each final press path');
+  const atomicClick = SANDBOX_RUNNER.indexOf('await submitHandle.click', armSites[0]);
+  assert.ok(atomicClick > armSites[0] && atomicClick < armSites[1],
+    'the atomic watch is armed before the retained submit handle is clicked');
+  const legacyClick = SANDBOX_RUNNER.indexOf('await locator.click();', armSites[1]);
+  assert.ok(legacyClick > armSites[1],
+    'the legacy watch is armed before the final locator is clicked');
+  assert.match(SANDBOX_RUNNER, /\.\.\.\(await observeForResult\([\s\S]*?readSubmitOutcome\(\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
 });

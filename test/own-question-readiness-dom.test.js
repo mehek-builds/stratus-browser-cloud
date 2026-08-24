@@ -43,10 +43,9 @@ function atomicCandidateSource() {
   const start = SANDBOX_RUNNER.indexOf(marker);
   assert.notEqual(start, -1, 'the atomic candidate scan must still be in the runner');
   const bodyStart = start + marker.length;
-  const closing = '\n      }, {\n        formFingerprint,';
-  const end = SANDBOX_RUNNER.indexOf(closing, bodyStart);
+  const end = SANDBOX_RUNNER.indexOf('}, {\n        formFingerprint,', bodyStart);
   assert.ok(end > bodyStart, 'could not bound the atomic candidate scan');
-  return SANDBOX_RUNNER.slice(bodyStart, end + '\n      }'.length);
+  return SANDBOX_RUNNER.slice(bodyStart, end + 1);
 }
 
 const ATOMIC_CANDIDATE_SOURCE = atomicCandidateSource();
@@ -75,10 +74,10 @@ async function atomicCandidatesOf(html) {
   return page.evaluate(([source, fingerprint]) => {
     // eslint-disable-next-line no-new-func
     const scan = new Function(`return (${source});`)();
-    return scan(document.querySelector('form'), {
+    return scan(document, {
       formFingerprint: fingerprint,
       directHandles: false,
-      mirrorMarkers: false,
+      mirrorMarkers: false
     }).candidates;
   }, [ATOMIC_CANDIDATE_SOURCE, 'a'.repeat(64)]);
 }
@@ -378,25 +377,95 @@ test('a starred wrapping label cannot borrow an unrelated required field from it
   assert.deepEqual(readiness.blocking, ['"* Marker only" is required and is still empty']);
 });
 
-test('unique option names still form one Workable checkbox question', async () => {
-  const empty = await readinessOf(`
+const workableExperienceGroup = (checked = false) => `
     <span id="experience_label">* Which development experience applies?</span>
     <div role="group" aria-labelledby="experience_label">
       <label><input type="checkbox" name="5854742" required>Internship</label>
-      <label><input type="checkbox" name="5854743" required>Hackathon</label>
+      <label><input type="checkbox" name="5854743" required ${checked ? 'checked' : ''}>Hackathon</label>
       <label><input type="checkbox" name="5854744" required>Individual Development</label>
-    </div>`);
-  assert.deepEqual(empty.blocking, ['"* Which development experience applies?" is required and is still empty']);
+    </div>`;
 
-  const answered = await readinessOf(`
-    <span id="experience_label">* Which development experience applies?</span>
-    <div role="group" aria-labelledby="experience_label">
-      <label><input type="checkbox" name="5854742" required>Internship</label>
-      <label><input type="checkbox" name="5854743" required checked>Hackathon</label>
-      <label><input type="checkbox" name="5854744" required>Individual Development</label>
-    </div>`);
+test('unique option names still form one Workable checkbox question', async () => {
+  const emptyMarkup = workableExperienceGroup();
+  const empty = await readinessOf(emptyMarkup);
+  assert.deepEqual(empty.blocking, ['"* Which development experience applies?" is required and is still empty']);
+  const emptyCandidates = await atomicCandidatesOf(emptyMarkup);
+  assert.deepEqual(
+    emptyCandidates
+      .filter((candidate) => candidate.fieldType === 'checkbox')
+      .map(({ label, answered }) => ({ label, answered })),
+    [{ label: '* Which development experience applies?', answered: false }],
+  );
+
+  const answeredMarkup = workableExperienceGroup(true);
+  const answered = await readinessOf(answeredMarkup);
   assert.deepEqual(answered.blocking, []);
+  const answeredCandidates = await atomicCandidatesOf(answeredMarkup);
+  assert.deepEqual(
+    answeredCandidates
+      .filter((candidate) => candidate.fieldType === 'checkbox')
+      .map(({ label, answered: candidateAnswered }) => ({ label, answered: candidateAnswered })),
+    [{ label: '* Which development experience applies?', answered: true }],
+  );
 });
+
+for (const adversary of [
+  {
+    name: 'an opposite-type checked peer',
+    markup: `
+      <span id="mixed_group_label">* Mixed group</span>
+      <div role="group" aria-labelledby="mixed_group_label">
+        <label><input type="checkbox" name="mixed" required>Engineering</label>
+        <label><input type="radio" name="mixed" checked>Sales</label>
+      </div>`,
+    label: '* Mixed group',
+  },
+  {
+    name: 'a disabled checked peer',
+    markup: `
+      <span id="disabled_group_label">* Disabled group</span>
+      <div role="group" aria-labelledby="disabled_group_label">
+        <label><input type="checkbox" name="enabled-option" required>Engineering</label>
+        <label><input type="checkbox" name="disabled-option" checked disabled>Sales</label>
+      </div>`,
+    label: '* Disabled group',
+  },
+  {
+    name: 'a same-name checked peer outside the labelled group',
+    markup: `
+      <span id="bounded_group_label">* Bounded group</span>
+      <div role="group" aria-labelledby="bounded_group_label">
+        <label><input type="checkbox" name="bounded" required>Engineering</label>
+        <label><input type="checkbox" name="bounded" required>Product</label>
+      </div>
+      <label><input type="checkbox" name="bounded" checked>Unrelated answer</label>`,
+    label: '* Bounded group',
+  },
+  {
+    name: 'a checked peer in a nested labelled group',
+    markup: `
+      <span id="outer_group_label">* Outer group</span>
+      <div role="group" aria-labelledby="outer_group_label">
+        <label><input type="checkbox" name="outer" required>Engineering</label>
+        <span id="inner_group_label">Inner group</span>
+        <div role="group" aria-labelledby="inner_group_label">
+          <label><input type="checkbox" name="inner" checked>Sales</label>
+        </div>
+      </div>`,
+    label: '* Outer group',
+  },
+]) {
+  test('a labelled checkbox group rejects ' + adversary.name, async () => {
+    const readiness = await readinessOf(adversary.markup);
+    assert.deepEqual(readiness.blocking, [`"${adversary.label}" is required and is still empty`]);
+
+    const candidates = await atomicCandidatesOf(adversary.markup);
+    const candidate = candidates.find(({ label }) => label === adversary.label);
+    assert.ok(candidate, 'the required question must remain in the atomic scan');
+    assert.equal(candidate.fieldType, 'checkbox');
+    assert.equal(candidate.answered, false);
+  });
+}
 
 test('an outer fieldset cannot let one named choice group answer another', async () => {
   const markup = `
