@@ -40,6 +40,7 @@ async function declaredMenuFor(markup, controlSelector) {
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
   const run = new AsyncFunction('page', 'control', `
     let declaredMenu = null;
+    let exactContext = null;
     ${READ_DECLARED_MENU}
     await readDeclaredMenu(control);
     return declaredMenu;

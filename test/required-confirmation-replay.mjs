@@ -5,7 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
+import {
+  ATOMIC_SUBMIT_V4_CAPABILITY,
+  ATOMIC_SUBMIT_POLICY,
+  ATOMIC_SUBMIT_POLICY_V4,
+  EXACT_PAGE_URL_CAPABILITY,
+  SANDBOX_RUNNER
+} from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmation replay</title>
@@ -327,6 +333,26 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     decoyField.querySelector('.select2-choice').addEventListener('click', function () {
       decoyClicks.textContent = String(Number(decoyClicks.textContent) + 1);
     });
+    if (location.search.includes('select2-marker-copy')) {
+      var copyingMarkers = false;
+      new MutationObserver(function (mutations) {
+        if (copyingMarkers) return;
+        copyingMarkers = true;
+        mutations.forEach(function (mutation) {
+          if (decoyField.contains(mutation.target)) return;
+          var attribute = mutation.attributeName;
+          var value = mutation.target.getAttribute(attribute);
+          if (!value || !/^data-litos-(?:required-confirm|select2-confirm)$/.test(attribute)) return;
+          mutation.target.removeAttribute(attribute);
+          decoyField.querySelector('.select2-choice').setAttribute(attribute, value);
+        });
+        copyingMarkers = false;
+      }).observe(document.getElementById('application'), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-litos-required-confirm', 'data-litos-select2-confirm']
+      });
+    }
     if (location.search.includes('select2-foreign-dropdown')) {
       select2Field.querySelector('.select2-container').classList.add('select2-dropdown-open');
       var foreignDropdown = document.createElement('div');
@@ -435,7 +461,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     replacement.id = 'application-submit';
     original.replaceWith(replacement);
   }
-  document.getElementById('application').addEventListener('submit', function (event) {
+  var applicationForm = document.getElementById('application');
+  if (location.search.includes('v4-native-submit')) {
+    applicationForm.action = '/native-select2-receipt';
+    applicationForm.method = 'post';
+  }
+  applicationForm.addEventListener('submit', function (event) {
+    if (location.search.includes('v4-native-submit')) return;
     event.preventDefault();
     document.getElementById('submitted').textContent = 'yes';
     fetch('/record-submit', { method: 'POST' });
@@ -444,6 +476,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
 
 let submissionCount = 0;
 const server = http.createServer((request, response) => {
+  if (request.url === '/native-select2-receipt') {
+    submissionCount += 1;
+    request.resume();
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+    response.end('<!doctype html><title>Application received</title><div id="submitted">yes</div><p>Thank you for applying.</p>');
+    return;
+  }
   if (request.url === '/record-submit') {
     submissionCount += 1;
     response.writeHead(204, { connection: 'close' });
@@ -495,6 +534,36 @@ async function replay(suffix = '', actions = confirmedSubmitActions) {
   });
   assert.equal(status, 0, `runner exited ${status}: ${stderr.split('\n').slice(0, 3).join(' ')}`);
   return JSON.parse(fs.readFileSync(path.join(workDir, 'stratus-result-0.json'), 'utf8'));
+}
+
+async function replayV4(suffix = '') {
+  const expectedPageUrl = `http://127.0.0.1:${server.address().port}/${suffix}`;
+  const actions = [
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#application'
+    },
+    { type: 'fill', selector: '#email-field', value: 'mehek@example.com', label: 'email' },
+    {
+      type: 'upload',
+      selector: '#resume',
+      label: 'resume',
+      file: { name: 'resume.pdf', mimeType: 'application/pdf', base64: Buffer.from('resume').toString('base64') }
+    },
+    {
+      ...confirmedSubmitActions[0],
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl
+    },
+    { type: 'extract', selector: '#submitted' },
+    { type: 'extract', selector: '#select2-clicks' },
+    { type: 'extract', selector: '#select2-option-clicks' },
+    { type: 'extract', selector: '#select2-decoy-clicks' },
+    { type: 'extract', selector: '#legacy-source', attribute: 'data-litos-required-confirm' },
+    { type: 'extract', selector: '.select2-choice', attribute: 'data-litos-select2-confirm' }
+  ];
+  return replay(suffix, actions);
 }
 
 async function replayFailure(suffix) {
@@ -756,6 +825,26 @@ assert.equal(select2Confirmed.requiredFieldConfirmation.passes[0].attempts.find(
 assert.equal(select2Confirmed.requiredFieldConfirmation.passes[0].attempts.filter(
   (attempt) => attempt.fieldType === 'select2'
 ).length, 1);
+
+const v3DirectSelect2 = await replay('?select2-case&select2-marker-copy', select2Actions);
+assert.equal(v3DirectSelect2.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(v3DirectSelect2.extracted.find((entry) => entry.selector === '#select2-clicks')?.value, '1');
+assert.equal(v3DirectSelect2.extracted.find((entry) => entry.selector === '#select2-option-clicks')?.value, '1');
+assert.equal(v3DirectSelect2.extracted.find((entry) => entry.selector === '#select2-decoy-clicks')?.value, '0');
+assert.equal(v3DirectSelect2.requiredFieldConfirmation.status, 'confirmed');
+
+const v4SubmissionCountBefore = submissionCount;
+const v4DirectSelect2 = await replayV4('?select2-case&select2-marker-copy&v4-native-submit');
+assert.equal(v4DirectSelect2.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+assert.equal(submissionCount - v4SubmissionCountBefore, 1, 'v4 Select2 confirmation permits one exact native form request');
+assert.equal(v4DirectSelect2.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(v4DirectSelect2.requiredFieldConfirmation.passes[0].attempts.find(
+  (attempt) => attempt.label === 'Legacy choice *'
+)?.outcome, 'confirmed');
+assert.equal(v4DirectSelect2.finalSubmitChooser.outcome, 'selected');
+assert.ok(v4DirectSelect2.extracted.filter((entry) => (
+  entry.selector === '#legacy-source' || entry.selector === '.select2-choice'
+)).every((entry) => entry.value === null));
 
 const hiddenInputSelect2 = await replay(
   '?select2-case&select2-hidden-input',

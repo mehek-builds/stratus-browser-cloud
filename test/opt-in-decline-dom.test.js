@@ -32,7 +32,13 @@ test.after(async () => { if (browser) await browser.close(); });
 async function runDecline(markup) {
   await page.setContent('<!doctype html><html><body>' + markup + '</body></html>');
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-  return page.evaluate(new AsyncFunction(declineSource()));
+  return page.evaluate(new AsyncFunction('input', declineSource()), {
+    requiresBoundForm: false,
+    form: null,
+    candidates: [],
+    finalPattern: '',
+    exclusionPattern: ''
+  });
 }
 
 /* Byte-for-byte the live Rippling shape: value-carrying radios, no label element, no
@@ -135,8 +141,8 @@ test('the pass is gated on a disabled final control and runs once', () => {
   const end = SANDBOX_RUNNER.indexOf('const submitLocator =', start);
   assert.ok(start > 0 && end > start);
   const body = SANDBOX_RUNNER.slice(start, end);
-  assert.match(body, /viable\.length === 0 && Array\.isArray\(choices\)/);
+  assert.match(body, /viable\.length === 0 && Array\.isArray\(choices\?\.choices\)/);
   assert.match(body, /choice\.visible && choice\.finalIntent && choice\.disabled/);
-  assert.equal((body.match(/readSubmitChoices\(\)/g) || []).length, 2, 'one read, one re-read, never a loop');
+  assert.equal((body.match(/readSubmitChoices\(chooserSuccessfulControls\)/g) || []).length, 2, 'one read, one re-read, never a loop');
   assert.match(body, /filledFields\.push\('question:' \+ name/);
 });

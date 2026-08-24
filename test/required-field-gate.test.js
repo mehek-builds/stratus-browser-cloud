@@ -38,7 +38,7 @@ function extractFunctionSource(name) {
 function endOfRunSection() {
   const start = SANDBOX_RUNNER.indexOf('const blockers = [...submitGateBlockers]');
   assert.notEqual(start, -1, 'the end-of-run blocker section must exist');
-  const end = SANDBOX_RUNNER.indexOf('const title = await page.title()', start);
+  const end = SANDBOX_RUNNER.indexOf('const title = await observeForResult', start);
   assert.ok(end > start, 'could not bound the end-of-run blocker section');
   return SANDBOX_RUNNER.slice(start, end);
 }
@@ -50,7 +50,8 @@ test('the run reports the same required fields the pre-submit gate would withhol
      on the call that decides whether a packet is offered to a person as ready to send. */
   const section = endOfRunSection();
   assert.match(section, /const readiness = requiredFieldConfirmation\?\.version === 2/);
-  assert.match(section, /: await readSubmitReadiness\(\)/);
+  assert.match(section, /: await observeForResult\(/);
+  assert.match(section, /\(\) => readSubmitReadiness\(\)/);
   assert.match(section, /blockers\.push\(\.\.\.readiness\.blocking\)/);
   // The weaker readers are gone rather than left beside the better one, so the two cannot drift.
   assert.doesNotMatch(section, /page\.locator\('input\[required\], textarea\[required\], select\[required\]'\)/);
@@ -179,9 +180,10 @@ function submitReadinessLabelOf(root = { querySelector: () => null }) {
   const sources = ['clean', 'renderedText', 'wrappingLabelTextOf', 'genericControlText', 'nearestQuestionText', 'labelOf']
     .map(readinessConst)
     .join('\n');
-  return Function('root', 'CSS', `${sources}\nreturn labelOf;`)(
+  return Function('root', 'CSS', 'HTMLFormElement', `${sources}\nreturn labelOf;`)(
     root,
     { escape: (value) => String(value) },
+    class HTMLFormElement {},
   );
 }
 
@@ -273,8 +275,8 @@ test('an implemented empty innerText does not fall back to hidden SVG copy', () 
 
 test('atomic confirmation uses the same Workable label and group boundaries', () => {
   const confirmation = SANDBOX_RUNNER.slice(
-    SANDBOX_RUNNER.indexOf('const candidates = await scope.evaluate'),
-    SANDBOX_RUNNER.indexOf('const scopedReadiness = await readSubmitReadiness(scope)'),
+    SANDBOX_RUNNER.indexOf('requiredScanHandle = await scopeTarget.evaluateHandle'),
+    SANDBOX_RUNNER.indexOf('const scopedReadiness = await readSubmitReadiness(scopeTarget)'),
   );
   assert.match(confirmation, /\[data-input-type\]/);
   assert.match(confirmation, /const renderedText = /);
