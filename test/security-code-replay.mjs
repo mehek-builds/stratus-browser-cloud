@@ -91,7 +91,6 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
 <div id="box-values">-</div>
 <div id="disabled-at-challenge">-</div>
 <div id="disabled-at-code-submit">-</div>
-<div id="otp-decoy-root"></div>
 <script>
   var attempts = 0;
   var CODE_LENGTH = 8;
@@ -104,10 +103,59 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
   var AMBIGUOUS_VERIFICATION = location.search.indexOf('ambiguous-verification=1') !== -1;
   var SECURITY_MARKER_COPY = location.search.indexOf('security-marker-copy=1') !== -1;
   var OTP_AUTO_SUBMIT = location.search.indexOf('otp-auto-submit=1') !== -1;
-  var NATIVE_OTP = location.search.indexOf('native-otp=1') !== -1;
-  var OTP_DECOY_FORM = location.search.indexOf('otp-decoy-form=1') !== -1;
-  var OTP_FOCUS_STEAL = location.search.indexOf('otp-focus-steal=1') !== -1;
+  var OTP_VALUE_SPOOF = location.search.indexOf('otp-value-spoof=1') !== -1;
+  var OTP_TYPE_SPOOF = location.search.indexOf('otp-type-spoof=1') !== -1;
+  var OTP_ROLE_SPOOF = location.search.indexOf('otp-role-spoof=1') !== -1;
+  var OTP_ORDER_REVERSE = location.search.indexOf('otp-order-reverse=1') !== -1;
+  var OTP_POST_ENTRY_REORDER = location.search.indexOf('otp-post-entry-reorder=1') !== -1;
+  var OTP_UNNAMED = location.search.indexOf('otp-unnamed=1') !== -1;
+  var V4_SAME_URL_CHALLENGE = globalThis.__v4SameUrlChallenge === true;
+  var V4_NATIVE = location.search.indexOf('v4-native=1') !== -1 || V4_SAME_URL_CHALLENGE;
+  var V4_APPLICATION = location.search.indexOf('v4-application=1') !== -1;
+  var V4_APPLICATION_SAME_URL = location.search.indexOf('v4-application-same-url=1') !== -1
+    && !V4_SAME_URL_CHALLENGE;
+  var nativeInputValueDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  var nativeInputValueGetter = nativeInputValueDescriptor.get;
+  var nativeInputValueSetter = nativeInputValueDescriptor.set;
+  var nativeInputFormGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form').get;
+  var nativeAppendChild = Node.prototype.appendChild;
+  if (OTP_ROLE_SPOOF) {
+    document.getElementById('first_name').name = 'first_name';
+    var nativeGetAttribute = Element.prototype.getAttribute;
+    Element.prototype.getAttribute = function (name) {
+      if (this.id === 'first_name' && String(name).toLowerCase() === 'autocomplete') {
+        return 'one-time-code';
+      }
+      return nativeGetAttribute.call(this, name);
+    };
+  }
+  if (OTP_ORDER_REVERSE) {
+    var nativeDocumentQuerySelectorAll = Document.prototype.querySelectorAll;
+    Document.prototype.querySelectorAll = function (selector) {
+      if (String(selector).trim() === 'input') {
+        return Array.from(nativeDocumentQuerySelectorAll.call(
+          this,
+          '#email-verification input[name="security_code"]'
+        )).reverse();
+      }
+      return nativeDocumentQuerySelectorAll.call(this, selector);
+    };
+  }
   var otpAutoSubmitTriggered = false;
+  if (V4_NATIVE || V4_APPLICATION || V4_APPLICATION_SAME_URL) {
+    var nativeForm = document.getElementById('app-form');
+    nativeForm.noValidate = false;
+    nativeForm.method = 'post';
+    nativeForm.action = V4_APPLICATION_SAME_URL
+      ? location.href
+      : V4_APPLICATION
+        ? '/v4-native-application?challenge=1&v4-native=1'
+        : '/v4-native-verification';
+    if (V4_APPLICATION || V4_APPLICATION_SAME_URL) {
+      document.getElementById('first_name').name = 'first_name';
+      document.getElementById('email').name = 'email';
+    }
+  }
   function boxRefs() { return [].slice.call(document.querySelectorAll('#email-verification input')); }
   // Null-guarded because the prose case below removes the control mid-run, and the re-enable is
   // scheduled on a timer that can outlive it.
@@ -131,6 +179,16 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     var g = a[index + 1];
     var y = a.map(function (k) { return k.value; });
     a[index].value = f;
+    if (OTP_VALUE_SPOOF) {
+      delete a[index].value;
+      nativeInputValueSetter.call(a[index], 'X');
+      var reported = f;
+      Object.defineProperty(a[index], 'value', {
+        configurable: true,
+        get: function () { return reported; },
+        set: function (next) { reported = String(next); }
+      });
+    }
     y[index] = f;
     var b = y.join('');
     securityCode = b;
@@ -157,26 +215,34 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     event.preventDefault();
   }
   function renderChallenge() {
-    if (OTP_DECOY_FORM && !document.getElementById('otp-decoy-form')) {
-      var decoyHtml = '<form id="otp-decoy-form" action="/native-otp-decoy" method="post">'
-        + '<div id="otp-decoy-fields">';
-      for (var x = 0; x < CODE_LENGTH; x += 1) {
-        decoyHtml += '<input id="otp-decoy-' + x + '" name="security_code" maxlength="1">';
-      }
-      decoyHtml += '</div><button id="otp-decoy-submit" type="submit">Verify code</button></form>';
-      document.getElementById('otp-decoy-root').innerHTML = decoyHtml;
-    }
     var html = '<div class="divider" role="separator"></div><fieldset id="email-verification">'
       + '<legend>A verification code was sent to mehekmandal05@gmail.com. To submit your'
       + ' application, enter the 8-character code to confirm you\\'re a human.</legend>'
       + '<label aria-hidden="true" id="email-verification-label" for="security-input-0">Security code</label>'
       + '<div class="email-verification__wrapper">';
-    for (var b = 0; b < CODE_LENGTH; b += 1) {
-      html += '<input id="security-input-' + b + '" type="text" aria-invalid="false"'
-        + (NATIVE_OTP ? ' name="security_code"' : '')
-        + ' aria-errormessage="email-verification-error" aria-required="true" maxlength="1">';
+    for (var b = 0; b < (OTP_TYPE_SPOOF ? 1 : CODE_LENGTH); b += 1) {
+      html += '<input id="security-input-' + b + '" type="' + (OTP_TYPE_SPOOF ? 'submit' : 'text')
+        + '" aria-invalid="false"'
+        + ' aria-errormessage="email-verification-error" aria-required="true" maxlength="1"'
+        + (OTP_TYPE_SPOOF ? ' autocomplete="one-time-code"' : '')
+        + (V4_NATIVE && !OTP_UNNAMED ? ' name="security_code"' : '') + '>';
     }
     document.getElementById('challenge').innerHTML = html + '</div></fieldset>';
+    if (OTP_TYPE_SPOOF) {
+      var hostileCodeBox = document.getElementById('security-input-0');
+      var hostileCode = '';
+      Object.defineProperty(hostileCodeBox, 'type', {
+        configurable: true,
+        get: function () { return 'text'; }
+      });
+      hostileCodeBox.addEventListener('keydown', function (event) {
+        if (event.key.length !== 1 || hostileCode.length >= CODE_LENGTH) return;
+        hostileCode += event.key;
+        nativeInputValueSetter.call(hostileCodeBox, hostileCode);
+        securityCode = hostileCode;
+        onCodeLength(hostileCode);
+      });
+    }
     if (SECURITY_MARKER_COPY && !document.getElementById('security-decoys')) {
       var decoys = document.createElement('div');
       decoys.id = 'security-decoys';
@@ -214,24 +280,33 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     boxRefs().forEach(function (box, index) {
       box.addEventListener('input', function (event) { onCodeChange(event, index); });
       box.addEventListener('paste', function (event) { onCodePaste(event, index); });
-      if (OTP_FOCUS_STEAL) {
-        box.addEventListener('focus', function () {
-          document.getElementById('otp-decoy-0')?.focus();
-        });
-      }
     });
-    securityCode = '';
-    if (NATIVE_OTP) {
-      document.getElementById('app-form').action = '/native-otp-receipt';
-      document.getElementById('app-form').method = 'post';
-      document.getElementById('submit-btn').textContent = 'Verify code';
+    if (OTP_POST_ENTRY_REORDER) {
+      var postEntryBoxes = boxRefs();
+      var postEntryParent = postEntryBoxes[0].parentElement;
+      var postEntryReordered = false;
+      Object.defineProperty(postEntryBoxes[0], 'form', {
+        configurable: true,
+        get: function () {
+          var joined = postEntryBoxes.map(function (box) {
+            return nativeInputValueGetter.call(box);
+          }).join('');
+          if (!postEntryReordered && joined === '${CODE}') {
+            postEntryReordered = true;
+            postEntryBoxes.slice().reverse().forEach(function (box) {
+              nativeAppendChild.call(postEntryParent, box);
+            });
+          }
+          return nativeInputFormGetter.call(this);
+        }
+      });
     }
+    securityCode = '';
     setFormDisabled(true);
     document.getElementById('disabled-at-challenge').textContent = String(document.getElementById('submit-btn').disabled);
   }
   document.getElementById('app-form').addEventListener('submit', function (event) {
-    if (NATIVE_OTP) return;
-    event.preventDefault();
+    if (!V4_NATIVE && !V4_APPLICATION && !V4_APPLICATION_SAME_URL) event.preventDefault();
     attempts += 1;
     document.getElementById('submitted').textContent = String(attempts);
     var boxes = boxRefs();
@@ -243,6 +318,10 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
         document.getElementById('empty-code-submits').textContent = String(Number(document.getElementById('empty-code-submits').textContent) + 1);
       }
       if (typed === '${CODE}') {
+        // The v4 fixture deliberately exercises a real browser-native POST. The listener still
+        // records the exact code and button state, but it must not synthesize the receipt or cancel
+        // the one legitimate native navigation.
+        if (V4_NATIVE) return;
         var done = document.createElement('div');
         done.id = 'confirmation';
         done.textContent = 'Thank you for applying. Your application has been received.';
@@ -307,8 +386,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
           document.body.appendChild(prose);
         }
       }
+      if (V4_NATIVE) event.preventDefault();
       return;
     }
+    // The application POST itself returns the retained code wall. Rendering that wall in the old
+    // document would mutate the activation-bound form before the browser could send the native
+    // request, and canceling here would make the server response structurally unreachable.
+    if (V4_APPLICATION || V4_APPLICATION_SAME_URL) return;
     // A client-rendered ATS can commit the verification step on a later task. The submit click is
     // already real at this point, but there is briefly no navigation, receipt, or code control to
     // observe. The delayed query pins that production shape without slowing the other replay cases.
@@ -316,35 +400,78 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Security Code Fixtu
     else if (location.search.includes('delayed=1')) setTimeout(renderChallenge, 250);
     else renderChallenge();
   });
-  if (location.search.includes('challenge=1')) renderChallenge();
+  if (location.search.includes('challenge=1') || V4_SAME_URL_CHALLENGE) renderChallenge();
 </script>`;
 
 const otpTransmissions = [];
-const nativeOtpTransmissions = [];
+const v4ApplicationSubmissions = [];
+const v4NativeSubmissions = [];
+const v4ReceiptLeaks = [];
+const v4NativeReceipt = `<!doctype html><meta charset="utf-8"><title>Application submitted</title>
+<main id="v4-receipt">Thank you for applying. Your application has been received.</main>
+<script>
+  setTimeout(function () {
+    document.getElementById('v4-receipt').setAttribute('data-leak-attempted', 'true');
+    fetch('/v4-receipt-leak', { method: 'POST', body: 'must=stay-blocked' }).catch(function () {});
+  }, 50);
+</script>`;
 const server = http.createServer((request, response) => {
   const requestUrl = new URL(request.url, 'http://127.0.0.1');
-  if (requestUrl.pathname === '/native-otp-receipt') {
+  if (requestUrl.pathname === '/' && request.method === 'POST'
+    && requestUrl.searchParams.get('v4-application-same-url') === '1') {
     const chunks = [];
-    request.on('data', (chunk) => { chunks.push(chunk); });
+    request.on('data', (chunk) => chunks.push(chunk));
     request.on('end', () => {
-      const body = Buffer.concat(chunks).toString('utf8');
-      const code = new URLSearchParams(body).getAll('security_code').join('');
-      nativeOtpTransmissions.push(code);
+      v4ApplicationSubmissions.push({
+        method: request.method,
+        path: requestUrl.pathname,
+        body: Buffer.concat(chunks).toString('utf8')
+      });
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
-      response.end(code === CODE
-        ? '<!doctype html><title>Application received</title><div id="submitted">1</div><div id="filed">yes</div><p>Thank you for applying. Your application has been received.</p>'
-        : '<!doctype html><title>Verification rejected</title><div id="submitted">1</div><div id="filed">no</div><p>The verification code was rejected.</p>');
+      response.end(fixture.replace(
+        '<form id="app-form"',
+        '<script>globalThis.__v4SameUrlChallenge = true;</script><form id="app-form"'
+      ));
     });
-    return;
-  }
-  if (requestUrl.pathname === '/native-otp-decoy') {
-    nativeOtpTransmissions.push('decoy');
-    response.writeHead(204, { connection: 'close' });
-    response.end();
     return;
   }
   if (requestUrl.pathname === '/otp-auto') {
     otpTransmissions.push(requestUrl.searchParams.get('kind'));
+    response.writeHead(204, { connection: 'close' });
+    response.end();
+    return;
+  }
+  if (requestUrl.pathname === '/v4-native-application' && request.method === 'POST') {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      v4ApplicationSubmissions.push({
+        method: request.method,
+        path: requestUrl.pathname,
+        body: Buffer.concat(chunks).toString('utf8')
+      });
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+      response.end(fixture);
+    });
+    return;
+  }
+  if (requestUrl.pathname === '/v4-native-verification' && request.method === 'POST') {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      v4NativeSubmissions.push({
+        method: request.method,
+        path: requestUrl.pathname,
+        body: Buffer.concat(chunks).toString('utf8')
+      });
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
+      response.end(v4NativeReceipt);
+    });
+    return;
+  }
+  if (requestUrl.pathname === '/v4-receipt-leak' && request.method === 'POST') {
+    v4ReceiptLeaks.push(requestUrl.pathname);
+    request.resume();
     response.writeHead(204, { connection: 'close' });
     response.end();
     return;
@@ -594,107 +721,6 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(exitCode, 0, `verification continuation runner exited ${exitCode}: ${stderr}`);
 }
 
-/* 3c-native. A RETAINED V4 WORKABLE SESSION ACCEPTS THE BACKEND'S V3 CODE ACTION.
- *
- * The first phase negotiates v4 and holds a native form that is already showing the code wall. The
- * backend deliberately keeps the one code continuation on chooser v3, with one matching exact URL
- * capability and no atomic-v4 capability. The retained runner must classify that exact shape as the
- * sole permitted mutation, bind its native form and request, and still reject every application
- * replay through the surrounding continuation policy. */
-{
-  const result0 = path.join(workDir, 'stratus-result-0.json');
-  const result1 = path.join(workDir, 'stratus-result-1.json');
-  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
-  const expectedPageUrl = `${base}?challenge=1&native-otp=1&otp-decoy-form=1&otp-focus-steal=1`;
-  nativeOtpTransmissions.length = 0;
-  fs.rmSync(result0, { force: true });
-  fs.rmSync(result1, { force: true });
-  fs.rmSync(continuationInput, { force: true });
-  fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
-  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
-    url: expectedPageUrl,
-    actions: [
-      { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
-      {
-        type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
-        applicationScopeSelector: '#app-form'
-      },
-      {
-        type: 'confirmAndSubmit',
-        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-        chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
-        expectedPageUrl,
-        label: 'final_submit',
-        optional: false,
-        maxRetries: 1,
-        contractVersion: 2,
-        submitKind: 'application'
-      },
-      { type: 'extract', selector: '#submitted' }
-    ],
-    screenshot: false,
-    waitUntil: 'networkidle',
-    viewport: { width: 1440, height: 900 },
-    allowSubmit: true,
-    requestContinuation: true,
-    continuationTtlSeconds: 20,
-    continuationExpiresAt: new Date(Date.now() + 20_000).toISOString(),
-    allowedHost: new URL(base).hostname
-  }));
-  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
-    cwd: workDir,
-    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
-  });
-  let stderr = '';
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.stdout.resume();
-  const waitForFile = async (file, timeoutMs = 15_000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (!fs.existsSync(file) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
-  };
-  await waitForFile(result0);
-  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
-  assert.equal(first.continuationOffered, true);
-  assert.equal(first.submitOutcome?.pressed, false);
-  assert.equal(valueOf(first, '#submitted'), 'no');
-  fs.writeFileSync(continuationInput, JSON.stringify({
-    actions: [
-      { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
-      {
-        type: 'confirmAndSubmit',
-        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
-        chooserPolicy: ATOMIC_SUBMIT_POLICY,
-        expectedPageUrl,
-        label: 'verification_submit',
-        optional: false,
-        maxRetries: 1,
-        contractVersion: 2,
-        submitKind: 'verification',
-        securityCode: CODE
-      },
-      { type: 'extract', selector: '#submitted' },
-      { type: 'extract', selector: '#filed' }
-    ],
-    screenshot: false,
-    fullPage: false
-  }));
-  await waitForFile(result1, 30_000);
-  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
-  assert.deepEqual(nativeOtpTransmissions, [CODE]);
-  assert.equal(valueOf(second, '#submitted'), '1');
-  assert.equal(valueOf(second, '#filed'), 'yes');
-  assert.deepEqual(second.securityCodeAttempt, {
-    supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
-  });
-  assert.equal(second.submitOutcome?.pressed, true);
-  assert.equal(second.submitOutcome?.state, 'confirmed');
-  const exitCode = await new Promise((resolve) => child.on('close', resolve));
-  assert.equal(exitCode, 0, `retained v4 plus v3 verification runner exited ${exitCode}: ${stderr}`);
-}
-
 /* 3d. THE WINDOW OPENS ON THE CHALLENGE, NOT ON THE FORK.
  *
  * This is the case that decides whether a held session is usable at all. The window used to be
@@ -791,6 +817,521 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(result.finalSubmitChooser?.outcome, 'ambiguous_submit');
   assert.ok(result.skipped.includes('later_click: skipped after the atomic submit decision became terminal'));
   assert.ok(result.skipped.includes('later_enter: skipped after the atomic submit decision became terminal'));
+}
+
+/* 3e.1. UNNAMED CODE BOXES MAY BE VERIFIED BUT CANNOT AUTHORIZE A NATIVE POST.
+ *
+ * The isolated group proof can safely establish that the exact caller code reached the exact eight
+ * controls even when those controls have no successful form names. That is enough to proceed to a
+ * chooser that may refuse to click, but it is not payload authority: a native POST would omit every
+ * code byte. One unambiguous Verify control makes that distinction observable. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-unnamed=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    },
+    { type: 'extract', selector: '#submitted' },
+    { type: 'extract', selector: '#box-values' }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [],
+    'unnamed OTP controls must never authorize a native verification POST that omits the code');
+  assert.equal(valueOf(result, '#submitted'), 'no');
+  assert.equal(valueOf(result, '#box-values'), '-');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: true, outcome: 'no_control', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'activation_blocked');
+  assert.ok(result.skipped.includes(
+    'confirm_and_submit: exact security code had no successful native payload control'
+  ));
+}
+
+/* 3f. A RETAINED V4 APPLICATION NAVIGATES TO A CODE WALL, THEN COMPLETES.
+ *
+ * Phase zero releases one exact native application POST whose same-URL response is the code-wall
+ * document. That navigation destroys the old utility execution context while the retained Page stays alive.
+ * Phase one must reacquire the new isolated context, enter the eight exact code controls, and
+ * release one verification POST. The receipt then tries one delayed background write. */
+{
+  v4ApplicationSubmissions.length = 0;
+  v4NativeSubmissions.length = 0;
+  v4ReceiptLeaks.length = 0;
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
+  const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
+  const errorPath = path.join(workDir, 'stratus-error.json');
+  const applicationPathSuffix = '?v4-application-same-url=1';
+  const applicationPageUrl = base + applicationPathSuffix;
+  const challengePageUrl = applicationPageUrl;
+  const applicationCapabilityActions = [
+    {
+      type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+      expectedPageUrl: applicationPageUrl
+    },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    }
+  ];
+  const challengeCapabilityActions = [
+    {
+      type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+      expectedPageUrl: challengePageUrl
+    },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    }
+  ];
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(continuationInput, { force: true });
+  fs.rmSync(readyPath, { force: true });
+  fs.rmSync(errorPath, { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: applicationPageUrl,
+    actions: [
+      ...applicationCapabilityActions,
+      { type: 'fill', selector: '#first_name', value: 'Mehek', label: 'first_name' },
+      { type: 'fill', selector: '#email', value: 'mehek@example.com', label: 'email' },
+      {
+        type: 'confirmAndSubmit',
+        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+        chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+        expectedPageUrl: applicationPageUrl,
+        label: 'final_submit',
+        optional: false,
+        maxRetries: 1,
+        contractVersion: 2,
+        submitKind: 'application'
+      }
+    ],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 15,
+    continuationExpiresAt: new Date(Date.now() + 15_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const childExit = new Promise((resolve) => child.on('close', resolve));
+  const waitForFile = async (file, timeoutMs = 30_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && !fs.existsSync(errorPath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(fs.existsSync(errorPath), false,
+      `runner failed before creating ${path.basename(file)}: ${fs.existsSync(errorPath) ? fs.readFileSync(errorPath, 'utf8') : stderr}`);
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(first.humanVerification?.kind, 'security_code');
+  assert.equal(first.humanVerification?.fieldCount, 8);
+  assert.equal(first.continuationOffered, true, 'the v4 challenge must retain one continuation');
+  assert.equal(first.submitOutcome?.pressed, true, 'phase zero must release the one bound application POST');
+  assert.notEqual(first.submitOutcome?.state, 'confirmed', 'the code wall is not a final receipt');
+  assert.equal(first.url, challengePageUrl, 'the retained page must be the newly committed challenge document');
+  assert.deepEqual(v4ApplicationSubmissions.map((submission) => ({
+    method: submission.method,
+    path: submission.path,
+    fields: [...new URLSearchParams(submission.body).entries()]
+  })), [{
+    method: 'POST',
+    path: '/',
+    fields: [['first_name', 'Mehek'], ['email', 'mehek@example.com']]
+  }], 'phase zero must release exactly one application POST with the caller values');
+  assert.deepEqual(v4NativeSubmissions, [], 'phase zero must not reach the verification endpoint');
+
+  fs.writeFileSync(continuationInput, JSON.stringify({
+    actions: [
+      ...challengeCapabilityActions,
+      {
+        type: 'confirmAndSubmit',
+        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+        chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+        expectedPageUrl: challengePageUrl,
+        label: 'verification_submit',
+        optional: false,
+        maxRetries: 1,
+        contractVersion: 2,
+        submitKind: 'verification',
+        securityCode: CODE
+      },
+      { type: 'waitForSelector', selector: '#v4-receipt[data-leak-attempted="true"]', optional: false },
+      { type: 'extract', selector: '#v4-receipt' },
+      { type: 'extract', selector: '#v4-receipt', attribute: 'data-leak-attempted' }
+    ],
+    screenshot: false,
+    fullPage: false
+  }));
+  await waitForFile(result1);
+  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  const exitCode = await childExit;
+  assert.equal(exitCode, 0, `v4 verification continuation runner exited ${exitCode}: ${stderr}`);
+
+  assert.deepEqual(v4NativeSubmissions.map((submission) => ({
+    method: submission.method,
+    path: submission.path,
+    fields: [...new URLSearchParams(submission.body).entries()]
+  })), [{
+    method: 'POST',
+    path: '/v4-native-verification',
+    fields: CODE.split('').map((character) => ['security_code', character])
+  }], 'the continuation must release exactly one ordered duplicate-field verification POST');
+  assert.deepEqual(second.securityCodeAttempt, {
+    supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
+  });
+  assert.equal(second.submitOutcome?.pressed, true);
+  assert.equal(second.submitOutcome?.state, 'confirmed');
+  assert.equal(second.submitOutcome?.formStillPresent, false, 'the native response must be a form-free receipt');
+  assert.equal(second.requiredFieldConfirmation?.status, 'confirmed');
+  assert.equal(second.requiredFieldConfirmation?.passes.length, 1);
+  assert.equal(second.requiredFieldConfirmation?.passes[0]?.submitKind, 'verification');
+  assert.equal(second.finalSubmitChooser?.outcome, 'selected');
+  assert.match(valueOf(second, '#v4-receipt') || '', /application has been received/i);
+  assert.equal(second.extracted.filter((entry) => entry.selector === '#v4-receipt').at(-1)?.value,
+    'true', 'the receipt page must actually attempt its delayed background write');
+  assert.deepEqual(v4ReceiptLeaks, [], 'post-receipt writes must stay blocked until the browser closes');
+}
+
+/* 3f.1. THE EXPORTED V3 CHOOSER CAN FINISH ONE RETAINED V4 CODE WALL.
+ *
+ * The backend still emits the exported v3 chooser for verification. A v4 phase-zero run must keep
+ * that one exact, URL-bound security-code continuation compatible, while internally applying the
+ * full v4 isolated proof, native payload binding, and transport gate. */
+{
+  v4NativeSubmissions.length = 0;
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
+  const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
+  const errorPath = path.join(workDir, 'stratus-error.json');
+  const expectedPageUrl = base + '?challenge=1&v4-native=1';
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(continuationInput, { force: true });
+  fs.rmSync(readyPath, { force: true });
+  fs.rmSync(errorPath, { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    url: expectedPageUrl,
+    actions: [
+      {
+        type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+        expectedPageUrl
+      },
+      {
+        type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+        applicationScopeSelector: '#app-form'
+      },
+      {
+        type: 'confirmAndSubmit',
+        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+        chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+        expectedPageUrl,
+        label: 'final_submit',
+        optional: false,
+        maxRetries: 1,
+        contractVersion: 2,
+        submitKind: 'application'
+      }
+    ],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 20,
+    continuationExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const childExit = new Promise((resolve) => child.on('close', resolve));
+  const waitForFile = async (file, timeoutMs = 30_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && !fs.existsSync(errorPath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(fs.existsSync(errorPath), false,
+      `runner failed before creating ${path.basename(file)}: ${fs.existsSync(errorPath) ? fs.readFileSync(errorPath, 'utf8') : stderr}`);
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(first.continuationOffered, true);
+  assert.equal(first.submitOutcome?.pressed, false,
+    'phase zero must not submit an application against an already-standing code wall');
+  assert.deepEqual(v4NativeSubmissions, []);
+
+  fs.writeFileSync(continuationInput, JSON.stringify({
+    actions: [
+      {
+        type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+        expectedPageUrl
+      },
+      {
+        type: 'confirmAndSubmit',
+        selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+        chooserPolicy: ATOMIC_SUBMIT_POLICY,
+        expectedPageUrl,
+        label: 'verification_submit',
+        optional: false,
+        maxRetries: 1,
+        contractVersion: 2,
+        submitKind: 'verification',
+        securityCode: CODE
+      }
+    ],
+    screenshot: false,
+    fullPage: false
+  }));
+  await waitForFile(result1);
+  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  const exitCode = await childExit;
+  assert.equal(exitCode, 0, `retained v4 plus v3 verification runner exited ${exitCode}: ${stderr}`);
+  assert.deepEqual(v4NativeSubmissions.map((submission) => ({
+    method: submission.method,
+    path: submission.path,
+    fields: [...new URLSearchParams(submission.body).entries()]
+  })), [{
+    method: 'POST',
+    path: '/v4-native-verification',
+    fields: CODE.split('').map((character) => ['security_code', character])
+  }], 'the v3 compatibility action must still release only the v4-bound ordered code payload');
+  assert.deepEqual(second.securityCodeAttempt, {
+    supplied: true, entered: true, resubmitted: true, outcome: 'accepted'
+  });
+  assert.equal(second.submitOutcome?.pressed, true);
+  assert.equal(second.submitOutcome?.state, 'confirmed');
+  assert.equal(second.requiredFieldConfirmation?.status, 'confirmed');
+  assert.equal(second.finalSubmitChooser?.policyVersion, 3,
+    'the result must preserve the caller contract while the retained runner hardens it internally');
+  assert.equal(second.finalSubmitChooser?.outcome, 'selected');
+}
+
+/* 3g. PAGE-WORLD VALUE GETTERS CANNOT LAUNDER DIFFERENT NATIVE CODE BYTES.
+ *
+ * Each input handler keeps an attacker character in the native value slot while an own getter
+ * reports the caller-supplied character to ordinary page JavaScript. The v4 proof reads the native
+ * slots from its isolated world and either safely repairs them or refuses the submit. This fixture
+ * deliberately reapplies the split after every repair attempt, so the only safe outcome is a typed
+ * no-click result with no verification request. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-value-spoof=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [], 'spoofed native code bytes must never reach the endpoint');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: false, outcome: 'not_entered', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'binding_changed');
+  assert.equal(result.requiredFieldConfirmation?.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation?.passes[0]?.blockerReason, 'successful_address_changed');
+}
+
+/* 3h. A NATIVE SUBMIT INPUT CANNOT MASQUERADE AS A CODE BOX.
+ *
+ * Main-world type inspection sees a text input and keydown handlers retain the supplied code in its
+ * native value slot. The isolated proof still sees that the control's native type is submit. Such a
+ * control would be omitted from the eventual form payload when a different submitter is chosen, so
+ * v4 must reject it before any verification request is released. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-type-spoof=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [], 'a submit-shaped code decoy must never reach the endpoint');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: false, outcome: 'not_entered', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'binding_changed');
+  assert.equal(result.requiredFieldConfirmation?.passes[0]?.blockerReason, 'successful_address_changed');
+}
+
+/* 3i. PAGE-WORLD OTP ROLE SPOOFING CANNOT TURN AN APPLICATION FIELD INTO THE CODE CONTROL.
+ *
+ * The hostile page makes its ordinary first-name input report autocomplete=one-time-code only to
+ * main-world JavaScript. The isolated capability reads the native attribute and group shape before
+ * typing, so the caller's code never overwrites or submits that application field. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-role-spoof=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [], 'a page-forged OTP role must never reach the endpoint');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: false, outcome: 'not_entered', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'binding_changed');
+  assert.equal(result.requiredFieldConfirmation?.passes[0]?.blockerReason, 'successful_address_changed');
+}
+
+/* 3j. PAGE-WORLD OTP ORDER SPOOFING CANNOT REVERSE DUPLICATE-NAME CODE BYTES.
+ *
+ * The hostile page replaces Document.prototype.querySelectorAll so main-world discovery receives
+ * the genuine security_code controls in reverse document order. The isolated group proof compares
+ * the supplied handles in sequence and must refuse them before typing or releasing the native POST. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-order-reverse=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [], 'reverse-ordered code controls must never reach the endpoint');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: false, outcome: 'not_entered', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'binding_changed');
+  assert.equal(result.requiredFieldConfirmation?.passes[0]?.blockerReason, 'successful_address_changed');
+}
+
+/* 3k. A POST-READBACK OTP REORDER CANNOT CHANGE THE NATIVE CODE BYTE ORDER.
+ *
+ * Each named one-character box still has its proved value and identity after this mutation. The
+ * hostile form getter waits until all eight native values exactly equal the supplied code, then
+ * reverses the real nodes after final readback but before submit selection. Native form encoding
+ * would emit the shared security_code name in that new order unless transport binding carries and
+ * checks the actual form.elements proof order. The guard must stop before any request is released. */
+{
+  v4NativeSubmissions.length = 0;
+  const pathSuffix = '?challenge=1&v4-native=1&otp-post-entry-reorder=1';
+  const expectedPageUrl = base + pathSuffix;
+  const result = await replay([
+    { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
+    {
+      type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false,
+      applicationScopeSelector: '#app-form'
+    },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY_V4,
+      expectedPageUrl,
+      label: 'verification_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'verification',
+      securityCode: CODE
+    }
+  ], { allowSubmit: true, pathSuffix });
+  assert.deepEqual(v4NativeSubmissions, [], 'post-readback reordered code controls must release zero requests');
+  assert.deepEqual(result.securityCodeAttempt, {
+    supplied: true, entered: true, outcome: 'not_entered', resubmitted: false
+  });
+  assert.equal(result.submitOutcome?.pressed, false);
+  assert.equal(result.finalSubmitChooser?.outcome, 'binding_changed');
+  assert.equal(result.requiredFieldConfirmation?.status, 'blocked');
+  assert.equal(result.requiredFieldConfirmation?.passes[0]?.blockerReason, 'security_code_binding_changed');
 }
 
 // 4. THE CODE FINISHES THE APPLICATION in its own continuation run. That run begins on the changed
@@ -998,4 +1539,4 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
 
 server.close();
 fs.rmSync(workDir, { recursive: true, force: true });
-console.log('security-code replay: 15 cases passed');
+console.log('security-code replay: 21 cases passed');
