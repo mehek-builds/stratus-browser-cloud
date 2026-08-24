@@ -229,6 +229,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
 <div class="duplicate-uae-option" role="option">United Arab Emirates +971</div>
 <div class="duplicate-uae-option" role="option">United Arab Emirates +971</div>
 <input id="workable-phone" name="phone" type="tel">
+<input id="workable-phone-delayed-country" name="phone-delayed-country" type="tel">
+<div id="workable-delayed-country-root"></div>
 <input id="workable-phone-racy" name="phone-racy" type="tel">
 <input id="workable-phone-wrong" name="phone-wrong" type="tel">
 <!-- A job description, copied in shape from the live DRW and Virtu Greenhouse postings. The bullet
@@ -370,6 +372,13 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
       event.target.value = '';
       event.target.dispatchEvent(new Event('input', { bubbles: true }));
     }, 850);
+  });
+  document.getElementById('workable-phone-delayed-country').addEventListener('input', function (event) {
+    if (!event.target.value) return;
+    setTimeout(function () {
+      document.getElementById('workable-delayed-country-root').innerHTML =
+        '<div role="option" data-country-code="us" data-dial-code="1" aria-selected="true" style="display:none">United States +1</div>';
+    }, 350);
   });
   var wrongPhoneTimer = null;
   document.getElementById('workable-phone-wrong').addEventListener('input', function (event) {
@@ -849,6 +858,26 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     '0567417451'
   );
   assert.deepEqual(result.filledFields, ['phone']);
+
+  const delayedHiddenCountry = await replay([
+    { type: 'requireCapability', value: 'extract-assertions-v1', optional: false },
+    {
+      type: 'fill', selector: '#workable-phone-delayed-country', value: '2135746270', label: 'phone',
+      optional: false, requireUnique: true
+    },
+    {
+      type: 'extract',
+      selector: '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+      attribute: 'data-dial-code', label: 'filled_field:phone_country', optional: false,
+      requireUnique: true, requireNonEmpty: true, expectedValueDigits: '1',
+      timeout: 1500, stabilityWindowMs: 600
+    }
+  ]);
+  assert.equal(
+    valueOf(delayedHiddenCountry, '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]'),
+    '1',
+    'an asserted extract must wait for the exact hidden selected state to attach'
+  );
 
   const duplicate = await replay([
     { type: 'click', selector: '.duplicate-uae-option', optional: false, requireUnique: true }

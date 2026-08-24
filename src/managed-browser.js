@@ -12694,9 +12694,21 @@ const { chromium } = require('playwright');
         exactActionRootHandle = exactActionRootBinding?.handle || null;
         successfulAddressMutationArmed = Boolean(exactActionRootBinding);
       }
-      const matchCount = action.requireUnique && matches
+      let matchCount = action.requireUnique && matches
         ? await matches.count()
         : null;
+      /* A closed employer widget can commit its exact selected state on a later render while keeping
+       * that state hidden. waitForSelector cannot prove it because Playwright waits for visibility
+       * by default. An asserted extract already names the exact node and value it needs, so let only
+       * a zero-match extract wait for that exact node to attach. Ambiguity still fails immediately,
+       * and every stability sample below still requires exactly one match. */
+      if (action.type === 'extract' && action.requireUnique && matchCount === 0 && action.timeout) {
+        const deadline = Date.now() + action.timeout;
+        while (matchCount === 0 && Date.now() < deadline) {
+          await page.waitForTimeout(Math.min(100, Math.max(1, deadline - Date.now())));
+          matchCount = await matches.count();
+        }
+      }
       if (action.requireUnique && matchCount !== 1) {
         throw new Error((action.label || action.type) + ': expected exactly one match for '
           + action.selector + ', found ' + String(matchCount ?? 0));
@@ -15219,7 +15231,9 @@ export function normalizeManagedActions(actions = []) {
         base64: file.base64
       };
     }
-    if (action.type === 'waitForSelector') normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
+    if (action.type === 'waitForSelector' || (action.type === 'extract' && action.timeout != null)) {
+      normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
+    }
     // The emailed code that finishes a Greenhouse submit, carried on the submit click itself. Kept
     // to the shape of a code and nothing else: it is typed into a live employer's form, so a value
     // that is not plausibly a code is a caller bug and must not reach the page. Greenhouse issues 8

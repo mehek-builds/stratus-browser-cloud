@@ -141,6 +141,7 @@ test('managed actions preserve unique-match and live extract assertions', () => 
       requireNonEmpty: true,
       expectedValueIncludes: '+971',
       expectedValueDigits: '971',
+      timeout: 10000,
       stabilityWindowMs: 1200
     },
     {
@@ -164,6 +165,7 @@ test('managed actions preserve unique-match and live extract assertions', () => 
       requireNonEmpty: true,
       expectedValueIncludes: '+971',
       expectedValueDigits: '971',
+      timeout: 10000,
       stabilityWindowMs: 1200
     },
     {
@@ -213,6 +215,8 @@ test('required unique actions and extract assertions fail closed in the shipped 
   assert.match(SANDBOX_RUNNER, /values\.length === 0[\s\S]*action\.expectedValueDigits != null/);
   assert.match(SANDBOX_RUNNER, /const sampleCount = action\.stabilityWindowMs \? 3 : 1;/);
   assert.match(SANDBOX_RUNNER, /Math\.ceil\(action\.stabilityWindowMs \/ \(sampleCount - 1\)\)/);
+  assert.match(SANDBOX_RUNNER, /action\.type === 'extract' && action\.requireUnique && matchCount === 0 && action\.timeout/);
+  assert.match(SANDBOX_RUNNER, /while \(matchCount === 0 && Date\.now\(\) < deadline\)/);
   assert.match(SANDBOX_RUNNER, /assertRequiredCapabilities\(input\.actions\);/);
   assert.match(SANDBOX_RUNNER, /extractAssertionsCapability/);
 });
