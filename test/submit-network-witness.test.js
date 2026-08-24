@@ -97,12 +97,13 @@ test('the watch is armed at both press sites and travels in submitOutcome', () =
   const atomicClick = SANDBOX_RUNNER.indexOf('await submitHandle.click', atomicArm);
   assert.ok(atomicArm >= 0 && atomicClick > atomicArm, 'the atomic press must arm the watch first');
 
-  const genericArm = SANDBOX_RUNNER.indexOf(
-    'if (isFinalSubmitAction(action)) armSubmitNetworkWatch();',
-    atomicClick,
-  );
+  const genericGuard = SANDBOX_RUNNER.indexOf('if (isFinalSubmitAction(action)) {', atomicClick);
+  const genericArm = SANDBOX_RUNNER.indexOf('armSubmitNetworkWatch();', genericGuard);
   const genericClick = SANDBOX_RUNNER.indexOf('await locator.click();', genericArm);
-  assert.ok(genericArm > atomicClick && genericClick > genericArm, 'the plain final press must arm the watch first');
+  assert.ok(
+    genericGuard > atomicClick && genericArm > genericGuard && genericClick > genericArm,
+    'the plain final press must arm the watch first',
+  );
 
   assert.match(SANDBOX_RUNNER, /\(\) => readSubmitOutcome\(\)/);
   assert.match(SANDBOX_RUNNER, /\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);

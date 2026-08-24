@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { authorize, sendError } from '../api/_http.js';
+import { authorize, privateErrorDiagnostic, sendError } from '../api/_http.js';
 
 function responseRecorder() {
   const output = { statusCode: 200, body: null };
@@ -101,4 +101,14 @@ test('managed crash responses expose only the validated bounded run progress', (
     message: 'Sandbox browser run failed',
     runProgress,
   });
+});
+
+test('private crash diagnostics redact applicant contact data and opaque tokens', () => {
+  const diagnostic = privateErrorDiagnostic(Object.assign(
+    new TypeError('Failed for mehek@example.com at https://apply.example/job?token=secret with +1 (213) 574-6270 and abcdefghijklmnopqrstuvwxyz012345'),
+    { code: 'SANDBOX_RUN_FAILED' },
+  ));
+  assert.equal(diagnostic.name, 'TypeError');
+  assert.equal(diagnostic.message, 'Failed for [email] at [url] with [phone] and [token]');
+  assert.match(diagnostic.fingerprint, /^[a-f0-9]{16}$/);
 });

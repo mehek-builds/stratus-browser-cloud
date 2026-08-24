@@ -46,7 +46,27 @@ export function sendError(response, error) {
     }
   });
 }
+import { createHash } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+
+/** Private operator diagnostics, redacted before they reach the hosting logs. */
+export function privateErrorDiagnostic(error) {
+  const raw = error?.message ? String(error.message) : 'Unknown managed browser failure';
+  const message = raw
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[url]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+    .replace(/\+?\d(?:[\s().-]*\d){7,}/g, '[phone]')
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[token]')
+    .slice(0, 300);
+  const name = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9_$]{0,79}$/.test(error.name)
+    ? error.name
+    : 'Error';
+  return {
+    name,
+    message,
+    fingerprint: createHash('sha256').update(raw).digest('hex').slice(0, 16),
+  };
+}
 
 const VERCEL_ISSUER = 'https://oidc.vercel.com/mehek-builds-projects';
 const VERCEL_AUDIENCE = 'https://vercel.com/mehek-builds-projects';
