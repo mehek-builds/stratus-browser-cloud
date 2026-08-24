@@ -38,7 +38,7 @@ function extractFunctionSource(name) {
 function endOfRunSection() {
   const start = SANDBOX_RUNNER.indexOf('const blockers = [...submitGateBlockers]');
   assert.notEqual(start, -1, 'the end-of-run blocker section must exist');
-  const end = SANDBOX_RUNNER.indexOf('const title = await observeForResult', start);
+  const end = SANDBOX_RUNNER.indexOf("const title = await observeForResult(() => page.title(), '')", start);
   assert.ok(end > start, 'could not bound the end-of-run blocker section');
   return SANDBOX_RUNNER.slice(start, end);
 }
@@ -50,8 +50,7 @@ test('the run reports the same required fields the pre-submit gate would withhol
      on the call that decides whether a packet is offered to a person as ready to send. */
   const section = endOfRunSection();
   assert.match(section, /const readiness = requiredFieldConfirmation\?\.version === 2/);
-  assert.match(section, /: await observeForResult\(/);
-  assert.match(section, /\(\) => readSubmitReadiness\(\)/);
+  assert.match(section, /: await observeForResult\([\s\S]*?\(\) => readSubmitReadiness\(\)/);
   assert.match(section, /blockers\.push\(\.\.\.readiness\.blocking\)/);
   // The weaker readers are gone rather than left beside the better one, so the two cannot drift.
   assert.doesNotMatch(section, /page\.locator\('input\[required\], textarea\[required\], select\[required\]'\)/);
@@ -180,10 +179,11 @@ function submitReadinessLabelOf(root = { querySelector: () => null }) {
   const sources = ['clean', 'renderedText', 'wrappingLabelTextOf', 'genericControlText', 'nearestQuestionText', 'labelOf']
     .map(readinessConst)
     .join('\n');
+  class HarnessHTMLFormElement {}
   return Function('root', 'CSS', 'HTMLFormElement', `${sources}\nreturn labelOf;`)(
     root,
     { escape: (value) => String(value) },
-    class HTMLFormElement {},
+    HarnessHTMLFormElement,
   );
 }
 
@@ -274,10 +274,11 @@ test('an implemented empty innerText does not fall back to hidden SVG copy', () 
 });
 
 test('atomic confirmation uses the same Workable label and group boundaries', () => {
-  const confirmation = SANDBOX_RUNNER.slice(
-    SANDBOX_RUNNER.indexOf('requiredScanHandle = await scopeTarget.evaluateHandle'),
-    SANDBOX_RUNNER.indexOf('const scopedReadiness = await readSubmitReadiness(scopeTarget)'),
-  );
+  const start = SANDBOX_RUNNER.indexOf('requiredScanHandle = await scopeTarget.evaluateHandle');
+  assert.notEqual(start, -1, 'the atomic required-field scan must exist');
+  const end = SANDBOX_RUNNER.indexOf('const candidates = await requiredRowsHandle?.jsonValue', start);
+  assert.ok(end > start, 'could not bound the atomic required-field scan');
+  const confirmation = SANDBOX_RUNNER.slice(start, end);
   assert.match(confirmation, /\[data-input-type\]/);
   assert.match(confirmation, /const renderedText = /);
   assert.match(confirmation, /\[role="combobox"\]\[aria-labelledby\]/);
@@ -306,7 +307,7 @@ test('an Ashby yes/no is read from its pills, because its checkbox cannot tell N
   // Consulted for a checkbox or radio BEFORE the peer-group walk, which reads the same unchecked
   // inputs and would answer "empty" for every Ashby yes/no on the form.
   const pill = gate.indexOf('const pill = chosenAshbyYesNoOf(element)');
-  const peers = gate.indexOf('One answered radio answers its whole group');
+  const peers = gate.indexOf('return enabledNativeChoiceAnswered(element)', pill);
   assert.ok(pill >= 0 && peers > pill, 'the pill state must be read before the radio-group walk');
   // And the block that owns an Ashby question has to be reachable at all, or its <label> is never
   // found and the field is reported as unlabelled.

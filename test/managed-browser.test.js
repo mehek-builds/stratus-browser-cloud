@@ -20,8 +20,11 @@ import {
   normalizeManagedActions,
   normalizeManagedContinuation,
   normalizeManagedRun,
+  PUBLIC_EGRESS_NETWORK_POLICY,
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
+
+const CURRENT_SANDBOX_TEMPLATE = 'stratus-browser-runtime-pw-1-61-1-v4';
 
 function extractFunctionSource(name) {
   const start = SANDBOX_RUNNER.indexOf(`function ${name}`);
@@ -78,6 +81,38 @@ function mockElement({ attrs = {}, textContent = '', parentElement = null, query
 
 test('managed free limits are explicit and do not claim paid capacity', () => {
   assert.deepEqual(FREE_MANAGED_LIMITS, { concurrentBrowsers: 10, monthlyCpuHours: 5, maxRunSeconds: 60, persistedDays: 30 });
+});
+
+test('managed sandboxes install every enforceable non-global IPv4 range at the connection boundary', () => {
+  assert.deepEqual(PUBLIC_EGRESS_NETWORK_POLICY, {
+    subnets: {
+      allow: ['0.0.0.0/1', '128.0.0.0/2', '192.0.0.0/3'],
+      deny: [
+        '0.0.0.0/8',
+        '10.0.0.0/8',
+        '100.64.0.0/10',
+        '127.0.0.0/8',
+        '169.254.0.0/16',
+        '172.16.0.0/12',
+        '192.0.0.0/24',
+        '192.0.2.0/24',
+        '192.88.99.0/24',
+        '192.168.0.0/16',
+        '198.18.0.0/15',
+        '198.51.100.0/24',
+        '203.0.113.0/24'
+      ]
+    }
+  });
+  assert.equal(Object.isFrozen(PUBLIC_EGRESS_NETWORK_POLICY), true);
+  assert.equal(Object.isFrozen(PUBLIC_EGRESS_NETWORK_POLICY.subnets), true);
+  assert.equal(Object.isFrozen(PUBLIC_EGRESS_NETWORK_POLICY.subnets.allow), true);
+  assert.equal(Object.isFrozen(PUBLIC_EGRESS_NETWORK_POLICY.subnets.deny), true);
+});
+
+test('the shipped runner cannot enable private replay through its environment', () => {
+  assert.match(SANDBOX_RUNNER, /const allowPrivateForTests = false;/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /STRATUS_TEST_ALLOW_PRIVATE_REPLAY/);
 });
 
 test('managed actions accept bounded declarative operations', () => {
@@ -208,11 +243,95 @@ test('managed actions accept reviewed questions and bounded resume uploads', () 
     () => normalizeManagedActions([{ type: 'upload', selector: '#resume', file: { name: '../resume.pdf', mimeType: 'application/pdf', base64: 'cGRm' } }]),
     (error) => error.code === 'INVALID_UPLOAD'
   );
+  assert.deepEqual(
+    normalizeManagedActions([{
+      type: 'upload',
+      selector: '#resume',
+      file: { name: 'resume.pdf', mimeType: 'Application/PDF', base64: 'cGRm' }
+    }])[0].file,
+    { name: 'resume.pdf', mimeType: 'application/pdf', base64: 'cGRm' }
+  );
 });
 
 test('sandbox runner is syntactically valid and returns labelled extracts', () => {
   assert.doesNotThrow(() => new Function(SANDBOX_RUNNER));
   assert.match(SANDBOX_RUNNER, /extracted\.push\(\{[\s\S]*selector: action\.selector,[\s\S]*expectedValueDigits/);
+});
+
+test('atomic v4 source retains its final native containment boundaries', () => {
+  assert.match(SANDBOX_RUNNER, /ready = blockDocumentOpenPopup\(\) && ready;/);
+  assert.match(SANDBOX_RUNNER, /capability\.disableDnsPrefetch = \(\) =>/);
+  assert.match(SANDBOX_RUNNER, /if \(type === 'image'\) \{\s*if \(control === element\) return null;\s*continue;/);
+  assert.match(SANDBOX_RUNNER, /actionUrl\.username[\s\S]*actionUrl\.password/);
+  assert.match(SANDBOX_RUNNER, /!redirected\.username[\s\S]*!redirected\.password/);
+  assert.match(SANDBOX_RUNNER, /\(firstHextet & 0xe000\) !== 0x2000/);
+  assert.match(SANDBOX_RUNNER, /submitTransportDisposition[\s\S]*ancillary_transport_blocked_after_release/);
+  assert.match(SANDBOX_RUNNER, /dns\.lookup\(destination\.hostname, \{ all: true, family: 4 \}\)/);
+  assert.match(SANDBOX_RUNNER, /const visibleRenderedText = \(node, depth = 0\) =>/);
+  assert.match(SANDBOX_RUNNER, /const unambiguousRequiredOwnerControl = \(associated\) =>/);
+});
+
+test('v4 fingerprints validation bypass state before rejecting unsupported native transport', () => {
+  const fingerprintStart = SANDBOX_RUNNER.indexOf('const pristineActivationFingerprint =');
+  const candidateStart = SANDBOX_RUNNER.indexOf(
+    'const pristineV4SubmitCandidateSnapshot =',
+    fingerprintStart,
+  );
+  const bindingStart = SANDBOX_RUNNER.indexOf('const pristineNativePostBinding =', candidateStart);
+  const bindingEnd = SANDBOX_RUNNER.indexOf('const pristineRequiredControlBlockers =', bindingStart);
+  assert.ok(
+    fingerprintStart !== -1 && candidateStart > fingerprintStart
+      && bindingStart > candidateStart && bindingEnd > bindingStart,
+    'the v4 fingerprint, candidate, and native binding must be extractable in order',
+  );
+
+  const fingerprint = SANDBOX_RUNNER.slice(fingerprintStart, candidateStart);
+  assert.match(fingerprint, /formState\.noValidateAttribute = attribute\(root, 'novalidate'\)/);
+  assert.match(fingerprint, /formState\.noValidate = NativeBoolean\(read\(formNoValidateGetter, root\)\)/);
+  assert.match(fingerprint, /submitterFingerprint\.formNoValidate = attribute\(element, 'formnovalidate'\)/);
+  assert.doesNotMatch(
+    fingerprint,
+    /if \(NativeBoolean\(read\(formNoValidateGetter, root\)\)\s*\|\|\s*NativeBoolean\(read\(submitter\.noValidateGetter, element\)\)\) return null/,
+    'novalidate is binding state, so it must not erase the submit candidate',
+  );
+
+  const candidate = SANDBOX_RUNNER.slice(candidateStart, bindingStart);
+  assert.match(
+    candidate,
+    /const fingerprint = pristineActivationFingerprint\(root, element, true\)/,
+  );
+
+  const nativeBinding = SANDBOX_RUNNER.slice(bindingStart, bindingEnd);
+  assert.match(
+    nativeBinding,
+    /validationDisabled = NativeBoolean\(read\(formNoValidateGetter, root\)\)\s*\|\|\s*NativeBoolean\(read\(submitter\.noValidateGetter, element\)\)/,
+  );
+  assert.match(
+    nativeBinding,
+    /if \(validationDisabled \|\| target !== '_self'[\s\S]*unsupportedReason: 'submit_transport_unsupported'/,
+    'the native binding must report validation bypass as an unsupported transport',
+  );
+});
+
+test('v3 detached failed choices stay scoped while v4 keeps its global refusal', () => {
+  const start = SANDBOX_RUNNER.indexOf('const unsuccessfulChoiceFailuresForScope = async');
+  const end = SANDBOX_RUNNER.indexOf('const protectChooserBinding =', start);
+  assert.ok(start !== -1 && end > start, 'the failed-choice scope guard must be extractable');
+  const guard = SANDBOX_RUNNER.slice(start, end);
+  assert.match(
+    guard,
+    /const scopeRelevantFailures = retainedAtomicV4Run\s*\? currentPageFailures\s*:\s*\[\]/,
+    'v4 must retain every same-document failed choice before disconnected-node checks'
+  );
+  assert.match(guard, /\(scope, originalForm\) => scope === originalForm/);
+  assert.match(guard, /ancestry\[index\] === scope/);
+  assert.match(guard, /failures: scopeRelevantFailures\.map/);
+  assert.match(guard, /\.catch\(\(\) => scopeRelevantFailures\.map/);
+  assert.match(
+    guard,
+    /if \(!controlConnected \|\| !boundScopeConnected\) \{\s*failures\.push\(failure\.kind\)/,
+    'v4 must still fail closed when the original failed control or form detaches'
+  );
 });
 
 test('managed run always uses the Stratus Sandbox execution system', async () => {
@@ -286,7 +405,7 @@ test('receipt-observation continuation rejects a second application submit', () 
 
 test('sandbox continuation is project-bound and single-use without exposing a session id', async () => {
   const sandboxes = new Map();
-  const template = { name: 'stratus-browser-runtime', currentSnapshotId: 'snapshot' };
+  const template = { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
   class FakeSandbox {
     constructor(name) {
       this.name = name;
@@ -453,6 +572,7 @@ test('v4 continuation refuses an incompatible retained runner before writing con
       [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
       `${label} must receive the v4 capability requirement`,
     );
+    assert.equal(fake.state().claimedActionMode, 'security-code');
     assert.equal(fake.state().continuationWrites, 0, `${label} must fail before continuation input is written`);
     assert.equal(fake.state().stopped, true);
   }
@@ -468,8 +588,20 @@ test('v4 continuation refuses an incompatible retained runner before writing con
   });
   assert.equal(v3Result.title, 'Compatible continuation');
   assert.deepEqual(v3Fake.state().claimedCapabilities, [EXACT_PAGE_URL_CAPABILITY]);
-  assert.equal(v3Fake.state().claimedActionMode, 'security-code');
+  assert.equal(v3Fake.state().claimedActionMode, 'security-code',
+    'the exported v3 chooser must retain the one-shot v4 security-code continuation path');
   assert.equal(v3Fake.state().continuationWrites, 1);
+});
+
+test('retained v4 adapts the exported v3 code action only on its original bound document', () => {
+  assert.match(SANDBOX_RUNNER, /let retainedV4SecurityCodeContinuation = false;/);
+  assert.match(SANDBOX_RUNNER, /\[3, 4\]\.includes\(securityCodeAction\.chooserPolicy\?\.version\)/);
+  assert.match(SANDBOX_RUNNER, /exactCapabilities\.length === 1[\s\S]*securityCodeAction\.expectedPageUrl === exactCapabilities\[0\]\.expectedPageUrl/);
+  assert.match(SANDBOX_RUNNER, /const recordsSuccessfulAddresses = retainedV4SecurityCodeContinuation/);
+  assert.match(SANDBOX_RUNNER, /const chooserVersion = retainedV4SecurityCodeContinuation[\s\S]*\? 4\n\s*: action\.chooserPolicy\.version;/);
+  assert.match(SANDBOX_RUNNER, /if \(applicationScopeProofGeneration !== v4DocumentGeneration\) return 'not_entered';/);
+  assert.match(SANDBOX_RUNNER, /'bindApplicationRoot',\n\s*formHandle[\s\S]*if \(scopeState !== 'bound'\) return 'not_entered';/);
+  assert.match(SANDBOX_RUNNER, /applicationScopeProofHandle = retainedScopeHandle;/);
 });
 
 test('the continuation claim script allows one concurrent winner and rejects wrong-project and expired claims', async () => {
@@ -518,8 +650,11 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     'read-only receipt observation remains permitted');
 
   fs.rmSync(manifestPath, { force: true });
-  writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY]), 8);
+  writeMarker(
+    new Date(Date.now() + 15_000).toISOString(),
+    'v4-observation-or-security-code',
+  );
+  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY], 'observation'), 8);
   assert.equal(fs.existsSync(markerPath), true, 'a missing runner manifest must not consume the marker');
   assert.equal(fs.existsSync(usedPath), false);
 
@@ -527,8 +662,11 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     protocolVersion: 3,
     capabilities: [ATOMIC_SUBMIT_V4_CAPABILITY],
   }));
-  writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY]), 8);
+  writeMarker(
+    new Date(Date.now() + 15_000).toISOString(),
+    'v4-observation-or-security-code',
+  );
+  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY], 'observation'), 8);
   assert.equal(fs.existsSync(markerPath), true, 'a protocol 3 manifest must not consume the marker');
   assert.equal(fs.existsSync(usedPath), false);
 
@@ -537,7 +675,28 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     capabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
   }));
   writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(projectHash, [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY]), 0);
+  assert.equal(await claim(
+    projectHash,
+    [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+    'observation',
+  ), 10,
+    'a v3 retained marker must refuse a v4 upgrade before it is consumed');
+  assert.equal(fs.existsSync(markerPath), true, 'a refused v4 upgrade preserves the v3 marker');
+  assert.equal(fs.existsSync(usedPath), false);
+  assert.equal(await claim(projectHash, [], 'mutation'), 0,
+    'the preserved marker remains usable by its original v3 contract');
+  assert.equal(fs.existsSync(markerPath), false);
+  assert.equal(fs.existsSync(usedPath), true);
+
+  writeMarker(
+    new Date(Date.now() + 15_000).toISOString(),
+    'v4-observation-or-security-code',
+  );
+  assert.equal(await claim(
+    projectHash,
+    [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+    'observation',
+  ), 0);
   assert.equal(fs.existsSync(markerPath), false);
   assert.equal(fs.existsSync(usedPath), true);
 
@@ -564,10 +723,9 @@ test('an optional action that THROWS is stepped over, not fatal to the run', () 
   // a MISSING element and never applied to fillByLabelText at all (no selector, so locator is null).
   // One unfillable checkbox therefore discarded the name, email, phone and resume already entered.
   assert.match(SANDBOX_RUNNER, /catch \(actionError\)/);
-  assert.match(
-    SANDBOX_RUNNER,
-    /if \(!action\.optional\) \{\n\s+if \(!finalSubmitPressed\) throw actionError;/
-  );
+  assert.match(SANDBOX_RUNNER, /if \(!action\.optional\) \{/);
+  assert.match(SANDBOX_RUNNER, /if \(!finalSubmitPressed\) throw actionError;/);
+  assert.match(SANDBOX_RUNNER, /markPostSubmitObservationFailed\(\);/);
   assert.match(SANDBOX_RUNNER, /skipped\.push\(/);
 });
 
@@ -967,8 +1125,10 @@ test('an unticked required checkbox is reported as a blocker', () => {
   const { hasAnswer } = gateScope();
   assert.equal(hasAnswer(control({ type: 'checkbox', checked: false })), false);
   assert.equal(hasAnswer(control({ type: 'checkbox', checked: true })), true);
-  // One answered radio answers its whole group, and only the checked member carries it.
-  assert.match(SANDBOX_RUNNER, /for \(const peer of \(element\.form \|\| document\)\.querySelectorAll/);
+  // Only an enabled peer of the same native choice type and form may answer the group.
+  assert.match(SANDBOX_RUNNER, /const enabledNativeChoiceAnswered =/);
+  assert.match(SANDBOX_RUNNER, /peer\.type === element\.type/);
+  assert.match(SANDBOX_RUNNER, /!peer\.matches\?\.\(':disabled'\)/);
 });
 
 test('blockers name a human label and never a machine identifier', () => {
@@ -1193,7 +1353,7 @@ test('atomic required confirmation accepts exact chooser policies v3 and v4 with
   assert.match(SANDBOX_RUNNER, /await submitHandle\.click[\s\S]*finalSubmitPressed = true;/);
 });
 
-test('v4 chooser proof handles have bounded cleanup without clearing continuation proofs between phases', () => {
+test('v4 chooser proof handles persist on one document and clear across document generations', () => {
   assert.ok((SANDBOX_RUNNER.match(/await handle\.dispose\(\)\.catch\(\(\) => undefined\);/g) || []).length >= 4);
   assert.match(SANDBOX_RUNNER, /for \(const address of successfulAddresses\.splice\(0\)\) \{\n\s+await address\.handle\?\.dispose/);
   assert.match(SANDBOX_RUNNER, /await address\.formHandle\?\.dispose/);
@@ -1206,31 +1366,150 @@ test('v4 chooser proof handles have bounded cleanup without clearing continuatio
   assert.match(SANDBOX_RUNNER, /failure\?\.ancestryHandle[\s\S]*?handle\.dispose\(\)\.catch\(\(\) => undefined\)/);
   assert.match(SANDBOX_RUNNER, /await finalSubmitHandle\?\.dispose/);
   assert.match(SANDBOX_RUNNER, /await finalScopeHandle\?\.dispose/);
+  assert.match(SANDBOX_RUNNER, /const documentChanged = Boolean\(v4UtilityContext && nextUtilityContext !== v4UtilityContext\)/);
+  assert.match(SANDBOX_RUNNER, /if \(documentChanged\) \{\n\s+v4DocumentGeneration \+= 1;/);
+  assert.match(SANDBOX_RUNNER, /documentGeneration: witness\.documentGeneration/);
   assert.ok(
-    SANDBOX_RUNNER.indexOf('for (const address of successfulAddresses.splice(0))')
+    SANDBOX_RUNNER.lastIndexOf('for (const address of successfulAddresses.splice(0))')
       > SANDBOX_RUNNER.indexOf("fs.unlinkSync('stratus-continuation-input.json')"),
+    'final cleanup must still run after the retained continuation loop',
   );
 });
 
 test('v4 final activation guard verifies trusted dispatch and the exact held native request', () => {
   assert.match(SANDBOX_RUNNER, /serviceWorkers: 'block'/);
-  assert.match(SANDBOX_RUNNER, /const observer = new MutationObserver/);
-  assert.match(SANDBOX_RUNNER, /document\.addEventListener\('submit', submitCapture, true\)/);
-  assert.match(SANDBOX_RUNNER, /document\.addEventListener\('submit', submitDocumentBubble, false\)/);
-  assert.match(SANDBOX_RUNNER, /window\.addEventListener\('submit', submitWindowBubble, false\)/);
-  assert.match(SANDBOX_RUNNER, /!event\.isTrusted \|\| event\.target !== root \|\| event\.submitter !== element/);
+  assert.match(SANDBOX_RUNNER, /--dns-prefetch-disable/);
+  assert.match(SANDBOX_RUNNER, /--disable-blink-features=WebRTC,WebTransport,LinkPreconnect/);
+  assert.match(SANDBOX_RUNNER, /'WebSocketStream', 'Worker', 'SharedWorker'/);
+  assert.match(SANDBOX_RUNNER, /routeWebSocket\('\*\*\/\*', async \(webSocketRoute\) => \{\n\s+v4OutOfBandTransportAttempted = true/);
+  assert.match(SANDBOX_RUNNER, /v4OutOfBandTransportAttempted = true/);
+  assert.match(SANDBOX_RUNNER, /browserContext\.on\('console', \(message\) =>/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /page\.on\('console', \(message\) =>/);
+  assert.match(SANDBOX_RUNNER, /HTMLLinkElement\.prototype, 'rel'/);
+  assert.match(SANDBOX_RUNNER, /blockTokenMethod\('add', \['all'\]\)/);
+  assert.match(SANDBOX_RUNNER, /const linkRelListOwners = new WeakMap\(\)/);
+  assert.match(SANDBOX_RUNNER, /if \(!linkOwner\) return apply\(original, this, args\)/);
+  assert.match(SANDBOX_RUNNER, /blockMarkupSetter\(ShadowRoot\.prototype, 'innerHTML'\)/);
+  assert.match(SANDBOX_RUNNER, /blockNodeMethod\(parentPrototype, 'replaceChildren', \['all'\]\)/);
+  assert.match(SANDBOX_RUNNER, /blockNodeMethod\(parentPrototype, 'moveBefore', \[0\]\)/);
+  assert.match(SANDBOX_RUNNER, /blockNodeMethod\(Range\.prototype, 'insertNode', \[0\]\)/);
+  assert.match(SANDBOX_RUNNER, /blockMarkupMethod\(DOMParser\.prototype, 'parseFromString', 0\)/);
+  assert.match(SANDBOX_RUNNER, /blockMarkupMethod\(Document\.prototype, 'write', 'allJoined'\)/);
+  assert.match(SANDBOX_RUNNER, /blockExecCommandInsertHtml\(\)/);
+  assert.match(SANDBOX_RUNNER, /blockMarkupMethod\(Element\.prototype, 'setHTML', 0\)/);
+  assert.match(SANDBOX_RUNNER, /blockTransportMethod\(globalThis\.ServiceWorkerContainer\?\.prototype, 'register'\)/);
+  assert.match(SANDBOX_RUNNER, /blockTransportMethod\(globalThis\.navigator\?\.serviceWorker, 'register'\)/);
+  assert.match(SANDBOX_RUNNER, /if \(linkCount > 256\) return true/);
+  assert.match(SANDBOX_RUNNER, /const nodeListLengthGetter = descriptor\(NodeList\.prototype, 'length'\)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /\[1, 9, 11\]\.includes\(nodeType\)/);
+  assert.match(SANDBOX_RUNNER, /const stringToLowerCase = String\.prototype\.toLowerCase/);
+  assert.match(SANDBOX_RUNNER, /const forbiddenMarkup = \/<\(\?:link\|iframe\)\\b\/i/);
+  assert.match(SANDBOX_RUNNER, /defineProperty\(Node\.prototype, 'nodeValue'/);
+  assert.match(SANDBOX_RUNNER, /for \(const name of \['setNamedItem', 'setNamedItemNS'\]\)/);
+  assert.match(SANDBOX_RUNNER, /function litosGuardedLinkUrlComponent\(value\)/);
+  assert.match(SANDBOX_RUNNER, /state\.observer = new NativeMutationObserver/);
+  assert.match(SANDBOX_RUNNER, /call\(addEventListener, nativeDocument, 'submit', state\.submitCapture, true\)/);
+  assert.match(SANDBOX_RUNNER, /call\(addEventListener, nativeDocument, 'submit', state\.submitDocumentBubble, false\)/);
+  assert.match(SANDBOX_RUNNER, /call\(addEventListener, nativeWindow, 'submit', state\.submitWindowBubble, false\)/);
+  assert.match(SANDBOX_RUNNER, /!trustedEvent\(event\)[\s\S]*eventTarget\(event\) !== root/);
   assert.match(SANDBOX_RUNNER, /request\.frame\(\) !== page\.mainFrame\(\)/);
   assert.match(SANDBOX_RUNNER, /await submitHandle\.click\(\{ timeout: action\.timeout \|\| 10_000, noWaitAfter: true \}\)/);
   assert.match(SANDBOX_RUNNER, /await decideSubmitTransportGate/);
   assert.match(SANDBOX_RUNNER, /if \(gateResult\.status !== 'allowed'\)/);
+  assert.match(SANDBOX_RUNNER, /const pristineNativePostBinding = async/);
+  assert.match(SANDBOX_RUNNER, /const pristineConstraintFingerprint = \(provided, root, element\) =>/);
+  assert.match(SANDBOX_RUNNER, /const pristineActivationFingerprint = \(root, element, usesAssociatedForm\) =>/);
+  assert.match(SANDBOX_RUNNER, /state\.requiredBlockers = pristineRequiredControlBlockers\(token, root\)/);
+  assert.match(SANDBOX_RUNNER, /if \(expected !== authorizedFingerprint\) return 'submit_activation_binding_changed'/);
+  assert.match(SANDBOX_RUNNER, /authorizedActivationFingerprint = typeof binding\?\.bindingFingerprint === 'string'/);
+  assert.match(SANDBOX_RUNNER, /'aria-required', 'aria-owns'/);
+  assert.match(SANDBOX_RUNNER, /characterData: true/);
+  assert.match(SANDBOX_RUNNER, /'badInput', 'customError', 'patternMismatch'/);
+  assert.match(SANDBOX_RUNNER, /state\.constraints = pristineConstraintFingerprint\(token, root, element\)/);
+  assert.match(SANDBOX_RUNNER, /'required', 'pattern',[\s\S]*'min', 'max', 'step', 'minlength', 'maxlength', 'multiple'/);
+  assert.match(SANDBOX_RUNNER, /const getAttribute = Element\.prototype\.getAttribute/);
+  assert.match(SANDBOX_RUNNER, /const preventDefault = Event\.prototype\.preventDefault/);
+  assert.match(SANDBOX_RUNNER, /const eventDefaultPreventedGetter = getter\(Event\.prototype, 'defaultPrevented'\)/);
+  assert.match(SANDBOX_RUNNER, /state\.reason = 'submit_event_canceled'/);
+  assert.match(SANDBOX_RUNNER, /call\(preventDefault, event\)/);
+  assert.match(SANDBOX_RUNNER, /const locationHrefGetter = descriptor\(nativeLocation, 'href'\)\?\.get \|\| null/);
+  assert.match(SANDBOX_RUNNER, /const trust = descriptor\(event, 'isTrusted'\)/);
+  assert.match(SANDBOX_RUNNER, /trust\.configurable === false/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /getter\(Event\.prototype, 'isTrusted'\)/);
+  assert.match(SANDBOX_RUNNER, /const blobArrayBuffer = Blob\.prototype\.arrayBuffer/);
+  assert.match(SANDBOX_RUNNER, /delegate\.addInitScript\(\{ source \}, 'utility'\)/);
+  assert.match(SANDBOX_RUNNER, /mainFrame\(\)\.utilityContext\(\)/);
+  assert.match(SANDBOX_RUNNER, /const callV4Utility = async \(method, \.\.\.args\) =>/);
+  assert.match(SANDBOX_RUNNER, /const compareDocumentPosition = Node\.prototype\.compareDocumentPosition/);
+  assert.match(SANDBOX_RUNNER, /position & documentPositionFollowing/);
+  assert.match(SANDBOX_RUNNER, /call\(elementQuerySelectorAll, root, '\[aria-required\]'\)/);
+  assert.match(SANDBOX_RUNNER, /const labelControlGetter = getter\(HTMLLabelElement\.prototype, 'control'\)/);
+  assert.match(SANDBOX_RUNNER, /const rootTree = call\(getRootNode, root\)/);
+  assert.match(SANDBOX_RUNNER, /classMarksRequired = \/_required_\//);
+  assert.match(SANDBOX_RUNNER, /Required application control \"' \+ identity \+ '\" is empty/);
+  assert.match(SANDBOX_RUNNER, /const replayOneNativeHop = async \(request, browserHeaders, onDispatch, options = \{\}\) =>/);
+  assert.match(SANDBOX_RUNNER, /if \(options\?\.all\) \{\n\s+callback\(null, \[\{ address: pinned\.address, family: pinned\.family \}\]\)/);
+  assert.match(SANDBOX_RUNNER, /if \(dispatched\) return/);
+  assert.match(SANDBOX_RUNNER, /const event = destination\.protocol === 'https:' \? 'secureConnect' : 'connect'/);
+  assert.match(SANDBOX_RUNNER, /dns\.lookup\(destination\.hostname, \{ all: true, family: 4 \}\)/);
+  assert.match(SANDBOX_RUNNER, /const released = await native\[0\]\.completed/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /const released = await Promise\.race/);
+  assert.match(SANDBOX_RUNNER, /reusePinned: true/);
+  assert.match(SANDBOX_RUNNER, /record\.gate\.receipt = \{/);
+  assert.match(SANDBOX_RUNNER, /text === v4TransportConsoleToken \+ ':parser-attempt'/);
+  assert.match(SANDBOX_RUNNER, /const readOnly = method === 'GET' \|\| method === 'HEAD'/);
+  assert.match(SANDBOX_RUNNER, /a === 100 && b >= 64 && b <= 127/);
+  assert.match(SANDBOX_RUNNER, /a === 198 && \(b === 18 \|\| b === 19\)/);
+  assert.match(SANDBOX_RUNNER, /\['2001:2::', 48\]/);
+  assert.match(SANDBOX_RUNNER, /\['2001:10::', 28\]/);
+  assert.match(SANDBOX_RUNNER, /\['2001:20::', 28\]/);
+  assert.match(SANDBOX_RUNNER, /\['3fff::', 20\]/);
+  assert.match(SANDBOX_RUNNER, /\(firstHextet & 0xe000\) !== 0x2000/);
+  assert.match(SANDBOX_RUNNER, /actionUrl\.origin !== allowedOrigin/);
+  assert.match(SANDBOX_RUNNER, /blockedTransportObserved: false/);
+  assert.match(SANDBOX_RUNNER, /containment\.blockedTransportObserved = true/);
+  assert.match(SANDBOX_RUNNER, /v4PreSubmitTransportContainment\?\.blockedTransportObserved/);
+  assert.match(SANDBOX_RUNNER, /The page attempted an unbound network transport after applicant actions began/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /const relevant = type === 'document'/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /record\.route\.fetch\(/);
+  assert.match(SANDBOX_RUNNER, /crypto\.createHmac\('sha256', chooserBindingHmacKey\)/);
+  assert.match(SANDBOX_RUNNER, /digest: payloadDigest\([\s\S]*hmacKey: transportHmacKey/);
+  assert.match(SANDBOX_RUNNER, /validationDisabled = NativeBoolean\(read\(formNoValidateGetter, root\)\)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /crypto\.subtle\.(?:sign|importKey)/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /input\.hmacKey/);
   assert.doesNotMatch(SANDBOX_RUNNER, /\.nativeSubmit\s*=/);
+  assert.doesNotMatch(SANDBOX_RUNNER, /__litosSubmitActivationGuards/);
   const routeAt = SANDBOX_RUNNER.indexOf('activationGate = await armSubmitTransportGate');
-  const armedAt = SANDBOX_RUNNER.indexOf('activationGuardToken = crypto.randomBytes', routeAt);
+  const armedAt = SANDBOX_RUNNER.indexOf("const guardArmResult = await callV4Utility(", routeAt);
   const clickedAt = SANDBOX_RUNNER.indexOf('await submitHandle.click', armedAt);
+  const finalizedAt = SANDBOX_RUNNER.indexOf("'finalizeActivationJson'", clickedAt);
   const checkedAt = SANDBOX_RUNNER.indexOf("if (gateResult.status !== 'allowed')", clickedAt);
   assert.ok(routeAt !== -1 && routeAt < armedAt, 'the request gate must be installed before the DOM witness');
   assert.ok(armedAt < clickedAt, 'the activation witness must be armed before the click');
-  assert.ok(clickedAt < checkedAt, 'the exact terminal gate result must be checked after the click');
+  assert.ok(clickedAt < finalizedAt && finalizedAt < checkedAt,
+    'the closure-held witness must be finalized before the exact terminal gate result is checked');
+});
+
+test('v4 pinned DNS lookup honors Node 22 all-record and scalar callback shapes', async () => {
+  const start = SANDBOX_RUNNER.indexOf('const pinnedLookup = pinned');
+  const end = SANDBOX_RUNNER.indexOf('return new Promise((resolve, reject) => {', start);
+  assert.ok(start !== -1 && end > start, 'the shipped pinned lookup must be extractable');
+  const source = SANDBOX_RUNNER.slice(start, end);
+  const createLookup = new Function('pinned', source + '\nreturn pinnedLookup;');
+  const pinned = { address: '203.0.113.42', family: 4 };
+  const lookup = createLookup(pinned);
+  const all = await new Promise((resolve, reject) => {
+    lookup('example.test', { all: true }, (error, records) => (
+      error ? reject(error) : resolve(records)
+    ));
+  });
+  assert.deepEqual(all, [pinned]);
+  const scalar = await new Promise((resolve, reject) => {
+    lookup('example.test', { all: false }, (error, address, family) => (
+      error ? reject(error) : resolve({ address, family })
+    ));
+  });
+  assert.deepEqual(scalar, pinned);
 });
 
 test('v4 verification no-click preserves the existing no-control security-code outcome', () => {
@@ -1238,7 +1517,21 @@ test('v4 verification no-click preserves the existing no-control security-code o
     SANDBOX_RUNNER,
     /if \(verification\.noClick\) \{\n\s+securityCodeAttempt = \{ supplied: true, entered: true, outcome: 'no_control', resubmitted: false \};/,
   );
+  assert.match(SANDBOX_RUNNER, /entry === 'entered_unaddressed'/);
+  assert.match(SANDBOX_RUNNER, /action\.securityCodePayloadAddressed === false/);
+  assert.match(SANDBOX_RUNNER, /security_code_payload_unaddressed/);
   assert.doesNotMatch(SANDBOX_RUNNER, /submit_control_unavailable/);
+});
+
+test('v4 binds repeated security-code controls to their proved native serialization order', () => {
+  assert.match(SANDBOX_RUNNER, /snapshot\.names = nullArray\(elements\.length\)/);
+  assert.match(SANDBOX_RUNNER, /snapshot\.types = nullArray\(elements\.length\)/);
+  assert.match(SANDBOX_RUNNER, /codeGroupIdentityDigest/);
+  assert.match(SANDBOX_RUNNER, /successfulControlOrder/);
+  assert.match(SANDBOX_RUNNER, /securityCodeGroupId/);
+  assert.match(SANDBOX_RUNNER, /securityCodeIndex: index/);
+  assert.match(SANDBOX_RUNNER, /serializedSecurityCodeIndices\.some\(\(index, position\) => index !== position\)/);
+  assert.match(SANDBOX_RUNNER, /blockerReason = 'security_code_binding_changed'/);
 });
 
 test('exact employer page URL capability is required before actions and at the atomic click', async () => {
@@ -1890,7 +2183,9 @@ const gateScope = () => sandboxScope(
   [
     'clean', 'widgetOf', 'CHOICE_SHELL', 'CHOICE_CONTROL', 'CHOICE_OPENER', 'reactChoiceBinding',
     'chosenValueOf', 'select2SourceAnswered', 'uploadHasFile', 'PILL_SELECTED', 'chosenPillOf',
-    'chosenAshbyYesNoOf', 'semanticChoiceGroup', 'hasAnswer'
+    'chosenAshbyYesNoOf', 'semanticChoiceGroup', 'directSemanticChoicePeers',
+    'enabledSemanticCheckboxGroupAnswered', 'enabledNativeChoiceAnswered',
+    'selectHasEnabledSelection', 'ownedNativeControls', 'hasAnswer'
   ],
   6,
 );
@@ -2094,8 +2389,9 @@ test('one unanswered React Select is not reported twice', () => {
  * continuation timed out" on a run that requested no continuation of anything.
  */
 function silentSandboxApi({ crash = null, result = null } = {}) {
-  const template = { name: 'stratus-browser-runtime', currentSnapshotId: 'snapshot' };
+  const template = { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
   const calls = [];
+  const forkCalls = [];
   class Fake {
     constructor(name) { this.name = name; this.files = new Map(); this.stopped = false; }
     async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
@@ -2117,15 +2413,42 @@ function silentSandboxApi({ crash = null, result = null } = {}) {
   const sandboxes = [];
   return {
     calls,
+    forkCalls,
     sandboxes,
     api: {
       async get({ name }) { return name === template.name ? template : sandboxes.find((entry) => entry.name === name); },
-      async fork({ name }) { const sandbox = new Fake(name); sandboxes.push(sandbox); return sandbox; }
+      async fork(options) {
+        forkCalls.push(options);
+        const sandbox = new Fake(options.name);
+        sandboxes.push(sandbox);
+        return sandbox;
+      }
     }
   };
 }
 
 const urlOnly = async (value) => new URL(value);
+
+test('the public-only policy is installed on the sandbox fork before Chromium starts', async () => {
+  const fake = silentSandboxApi({
+    result: {
+      title: 'Application',
+      url: 'https://example.com/apply',
+      text: 'Ready',
+      humanVerification: null,
+      continuationOffered: false
+    }
+  });
+  await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+    requestContinuation: true
+  }, { sandboxApi: fake.api, urlValidator: urlOnly });
+
+  assert.equal(fake.forkCalls.length, 1);
+  assert.deepEqual(fake.forkCalls[0].networkPolicy, PUBLIC_EGRESS_NETWORK_POLICY);
+  assert.notEqual(fake.forkCalls[0].networkPolicy, 'allow-all');
+});
 
 test('a submit run that produces nothing is a RUN timeout, on the run\'s own budget', async () => {
   const fake = silentSandboxApi();
@@ -2254,7 +2577,7 @@ test('a plain final submit stays and watches the page the way the atomic path do
   // And the snapshot the caller stores is taken after the action loop, which is what makes the
   // watch above sufficient: the first readable state is what the text and screenshot capture.
   assert.ok(
-    SANDBOX_RUNNER.lastIndexOf('await waitForPostSubmitApplicationState();') <
+    SANDBOX_RUNNER.indexOf('await waitForPostSubmitApplicationState();') <
     SANDBOX_RUNNER.indexOf('const text = await observeForResult('),
     'the post-submit watch runs before the final page-text snapshot'
   );

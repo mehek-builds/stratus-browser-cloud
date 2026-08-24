@@ -9,6 +9,43 @@ export const FREE_MANAGED_LIMITS = Object.freeze({
   persistedDays: 30
 });
 
+const PUBLIC_ROUTABLE_SANDBOX_IPV4_CIDRS = Object.freeze([
+  '0.0.0.0/1',
+  '128.0.0.0/2',
+  '192.0.0.0/3'
+]);
+
+/* The Sandbox firewall currently accepts IPv4 CIDRs only. Use a default-deny subnet policy that
+ * allows the routable IPv4 address space through 223.255.255.255, then removes every non-global
+ * range inside it. IPv6, multicast and 240.0.0.0/4 remain denied by omission. The host-side URL
+ * validator still rejects every non-global IPv4 and IPv6 address before a sandbox exists. */
+const NON_GLOBAL_ROUTABLE_SANDBOX_IPV4_CIDRS = Object.freeze([
+  '0.0.0.0/8',
+  '10.0.0.0/8',
+  '100.64.0.0/10',
+  '127.0.0.0/8',
+  '169.254.0.0/16',
+  '172.16.0.0/12',
+  '192.0.0.0/24',
+  '192.0.2.0/24',
+  '192.88.99.0/24',
+  '192.168.0.0/16',
+  '198.18.0.0/15',
+  '198.51.100.0/24',
+  '203.0.113.0/24'
+]);
+
+/* Hostname validation protects the initial URL before a sandbox exists. This policy protects every
+ * connection the sandbox makes after that point, including redirects, subresources and destinations
+ * whose DNS answer changes after validation. The custom policy is default-deny, subnet denies take
+ * precedence over subnet allows, and no IPv6 subnet is allowed. */
+export const PUBLIC_EGRESS_NETWORK_POLICY = Object.freeze({
+  subnets: Object.freeze({
+    allow: PUBLIC_ROUTABLE_SANDBOX_IPV4_CIDRS,
+    deny: NON_GLOBAL_ROUTABLE_SANDBOX_IPV4_CIDRS
+  })
+});
+
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
@@ -146,7 +183,7 @@ export const MANAGED_CONTINUATION_CONTRACT = Object.freeze({
   maxContinuations: 1
 });
 
-const SANDBOX_NAME = 'stratus-browser-runtime';
+const SANDBOX_NAME = 'stratus-browser-runtime-pw-1-61-1-v4';
 const SANDBOX_DEPENDENCIES = [
   'nss', 'dbus-libs', 'atk', 'at-spi2-atk', 'cups-libs', 'libxcb', 'libxkbcommon',
   'at-spi2-core', 'libX11', 'libXcomposite', 'libXdamage', 'libXext', 'libXfixes',
@@ -158,6 +195,10 @@ const SANDBOX_DEPENDENCIES = [
 export const SANDBOX_RUNNER = String.raw`
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const dns = require('node:dns/promises');
+const http = require('node:http');
+const https = require('node:https');
+const net = require('node:net');
 const { chromium } = require('playwright');
 
 (async () => {
@@ -207,11 +248,26 @@ const { chromium } = require('playwright');
     action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
   ));
   const v4ContainmentToken = retainedAtomicV4Run ? crypto.randomBytes(24).toString('hex') : null;
+  let v4OutOfBandTransportAttempted = false;
+  let v4PageTransportLockUnavailable = false;
+  let v4PrimaryPage = null;
+  let v4InitialNavigationActive = retainedAtomicV4Run;
   fs.writeFileSync('stratus-runner-capabilities.json', JSON.stringify({
     protocolVersion: 4,
     capabilities: [extractAssertionsCapability, exactPageUrlCapability, atomicSubmitV4Capability]
   }));
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      ...(retainedAtomicV4Run ? [
+        '--dns-prefetch-disable',
+        '--disable-background-networking',
+        '--disable-blink-features=WebRTC,WebTransport,LinkPreconnect',
+        '--disable-features=PreconnectOnRedirect,PreconnectToSearch,PreconnectFromKeyedService,SearchEnginePreconnect2,LCPPAutoPreconnectLcpOrigin'
+      ] : [])
+    ]
+  });
   try {
     const browserContext = await browser.newContext({
       viewport: input.viewport || { width: 1440, height: 900 },
@@ -222,33 +278,865 @@ const { chromium } = require('playwright');
       serviceWorkers: 'block'
       } : {})
     });
+    if (retainedAtomicV4Run) {
+      // HTTP routing cannot see WebSocket frames. A socket opened by employer code could otherwise
+      // carry applicant data during a fill or final-click handler without crossing either v4
+      // transport gate. Install the deny route before the first Page exists so even load-time
+      // sockets are contained for the full retained run.
+      await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {
+        v4OutOfBandTransportAttempted = true;
+        await webSocketRoute.close({ code: 1008, reason: 'Atomic submit v4 blocks WebSocket transport' });
+      });
+      var v4TransportConsoleToken = '__litosV4Transport_' + crypto.randomBytes(18).toString('hex');
+      await browserContext.addInitScript(({ consoleToken }) => {
+        const nativeWindow = globalThis;
+        const apply = Reflect.apply;
+        const defineProperty = Object.defineProperty;
+        const descriptor = Object.getOwnPropertyDescriptor;
+        const nativeString = String;
+        const stringToLowerCase = String.prototype.toLowerCase;
+        const arrayIsArray = Array.isArray;
+        const NativeTypeError = TypeError;
+        const getAttribute = Element.prototype.getAttribute;
+        const setAttribute = Element.prototype.setAttribute;
+        const setAttributeNS = Element.prototype.setAttributeNS;
+        const setAttributeNode = Element.prototype.setAttributeNode;
+        const setAttributeNodeNS = Element.prototype.setAttributeNodeNS;
+        const elementQuerySelectorAll = Element.prototype.querySelectorAll;
+        const fragmentQuerySelectorAll = DocumentFragment.prototype.querySelectorAll;
+        const documentQuerySelector = Document.prototype.querySelector;
+        const documentQuerySelectorAll = Document.prototype.querySelectorAll;
+        const tagNameGetter = descriptor(Element.prototype, 'tagName')?.get || null;
+        const nodeTypeGetter = descriptor(Node.prototype, 'nodeType')?.get || null;
+        const isConnectedGetter = descriptor(Node.prototype, 'isConnected')?.get || null;
+        const linkRelDescriptor = descriptor(HTMLLinkElement.prototype, 'rel');
+        const linkHrefDescriptor = descriptor(HTMLLinkElement.prototype, 'href');
+        const linkRelListDescriptor = descriptor(HTMLLinkElement.prototype, 'relList');
+        const elementAttributesDescriptor = descriptor(Element.prototype, 'attributes');
+        const tokenListValueDescriptor = descriptor(DOMTokenList.prototype, 'value');
+        const attrNameDescriptor = descriptor(Attr.prototype, 'name');
+        const attrValueDescriptor = descriptor(Attr.prototype, 'value');
+        const attrOwnerElementDescriptor = descriptor(Attr.prototype, 'ownerElement');
+        const nodeValueDescriptor = descriptor(Node.prototype, 'nodeValue');
+        const nodeTextContentDescriptor = descriptor(Node.prototype, 'textContent');
+        const iframeSrcdocDescriptor = descriptor(HTMLIFrameElement.prototype, 'srcdoc');
+        const iframeSrcDescriptor = descriptor(HTMLIFrameElement.prototype, 'src');
+        const eventTargetGetter = descriptor(Event.prototype, 'target')?.get || null;
+        const preventDefault = Event.prototype.preventDefault;
+        const stopImmediatePropagation = Event.prototype.stopImmediatePropagation;
+        const addEventListener = EventTarget.prototype.addEventListener;
+        const closest = Element.prototype.closest;
+        const nodeListLengthGetter = descriptor(NodeList.prototype, 'length')?.get || null;
+        const nodeListItem = NodeList.prototype.item;
+        const mutationTargetGetter = descriptor(MutationRecord.prototype, 'target')?.get || null;
+        const mutationAddedNodesGetter = descriptor(MutationRecord.prototype, 'addedNodes')?.get || null;
+        const nativeConsole = console;
+        const consoleError = console.error;
+        const regexTest = RegExp.prototype.test;
+        const weakMapGet = WeakMap.prototype.get;
+        const weakMapSet = WeakMap.prototype.set;
+        const linkRelListOwners = new WeakMap();
+        const namedNodeMapOwners = new WeakMap();
+        const forbiddenRel = /(?:^|\s)(?:dns-prefetch|preconnect)(?:\s|$)/i;
+        // Raw HTML can encode attribute text with character references, so a regex cannot
+        // safely decide whether a parsed link is a preconnect hint. V4 rejects every dynamic
+        // link-bearing markup sink and lets ordinary initial document parsing happen before
+        // applicant actions begin.
+        const forbiddenMarkup = /<(?:link|iframe)\b/i;
+        const forbiddenFrameSource = (value) => /^(?:data|blob):/i.test(nativeString(value).trim());
+        const notify = (kind) => {
+          try { apply(consoleError, nativeConsole, [consoleToken + ':' + kind]); } catch {}
+        };
+        const reject = () => {
+          notify('attempt');
+          throw new NativeTypeError('Atomic submit v4 blocks route-invisible transport');
+        };
+        const rejectObservedParserTransport = () => {
+          notify('parser-attempt');
+          throw new NativeTypeError('Atomic submit v4 blocks parser-created route-invisible transport');
+        };
+        const tagName = (node) => {
+          try { return apply(stringToLowerCase, apply(tagNameGetter, node, []), []); } catch { return ''; }
+        };
+        const attribute = (node, name) => {
+          try { return nativeString(apply(getAttribute, node, [name]) || ''); } catch { return ''; }
+        };
+        const forbiddenLink = (node) => {
+          if (!node) return false;
+          let nodeType = 0;
+          try { nodeType = apply(nodeTypeGetter, node, []); } catch { return false; }
+          // ParentNode and ChildNode string overloads create ordinary Text nodes. They are not
+          // transport attempts and must remain usable by reactive form frameworks.
+          if (nodeType !== 1 && nodeType !== 9 && nodeType !== 11) return false;
+          if (tagName(node) === 'link'
+            && apply(regexTest, forbiddenRel, [attribute(node, 'rel')])) return true;
+          if (tagName(node) === 'iframe'
+            && apply(regexTest, forbiddenMarkup, [attribute(node, 'srcdoc')])) return true;
+          let links = null;
+          try {
+            links = tagName(node)
+              ? apply(elementQuerySelectorAll, node, ['link[rel], iframe[srcdoc]'])
+              : nodeType === 9
+                ? apply(documentQuerySelectorAll, node, ['link[rel], iframe[srcdoc]'])
+                : apply(fragmentQuerySelectorAll, node, ['link[rel], iframe[srcdoc]']);
+          } catch {}
+          if (!links || typeof nodeListLengthGetter !== 'function' || typeof nodeListItem !== 'function') {
+            return true;
+          }
+          let linkCount = 0;
+          try { linkCount = apply(nodeListLengthGetter, links, []); } catch { return true; }
+          // Oversized insertion batches are not evidence of safety. Treat them as a
+          // forbidden subtree so the caller records the attempt and fails closed.
+          if (linkCount > 256) return true;
+          for (let index = 0; index < linkCount; index += 1) {
+            const candidate = apply(nodeListItem, links, [index]);
+            if (!candidate) return true;
+            if ((tagName(candidate) === 'link'
+                && apply(regexTest, forbiddenRel, [attribute(candidate, 'rel')]))
+              || (tagName(candidate) === 'iframe'
+                && apply(regexTest, forbiddenMarkup, [attribute(candidate, 'srcdoc')]))) return true;
+          }
+          return false;
+        };
+        const blockConstructor = (name) => {
+          const blocked = function litosBlockedRouteInvisibleTransport() { return reject(); };
+          try {
+            defineProperty(nativeWindow, name, {
+              value: blocked,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return nativeWindow[name] === blocked;
+          } catch {
+            return false;
+          }
+        };
+        const blockTransportMethod = (prototype, name) => {
+          const original = prototype?.[name];
+          if (typeof original !== 'function') return true;
+          const blocked = function litosBlockedRouteInvisibleMethod() { return reject(); };
+          try {
+            defineProperty(prototype, name, {
+              value: blocked,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return prototype[name] === blocked;
+          } catch {
+            return false;
+          }
+        };
+        const blockNodeMethod = (prototype, name, positions) => {
+          const original = prototype?.[name];
+          if (typeof original !== 'function') return true;
+          const blocked = function litosGuardedNodeInsertion(...args) {
+            for (let index = 0; index < positions.length; index += 1) {
+              const position = positions[index];
+              if (position === 'all') {
+                for (let item = 0; item < args.length; item += 1) {
+                  if (forbiddenLink(args[item])) reject();
+                }
+              } else if (forbiddenLink(args[position])) reject();
+            }
+            return apply(original, this, args);
+          };
+          try {
+            defineProperty(prototype, name, {
+              value: blocked,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return prototype[name] === blocked;
+          } catch {
+            return false;
+          }
+        };
+        const blockMarkupMethod = (prototype, name, markupIndex) => {
+          const original = prototype?.[name];
+          if (typeof original !== 'function') return true;
+          const blocked = function litosGuardedMarkupInsertion(...args) {
+            if (markupIndex === 'allJoined') {
+              let normalizedMarkup = '';
+              for (let index = 0; index < args.length; index += 1) {
+                const normalized = nativeString(args[index]);
+                normalizedMarkup += normalized;
+                args[index] = normalized;
+              }
+              if (apply(regexTest, forbiddenMarkup, [normalizedMarkup])) reject();
+            } else if (markupIndex === 'all') {
+              for (let index = 0; index < args.length; index += 1) {
+                const normalized = nativeString(args[index]);
+                if (apply(regexTest, forbiddenMarkup, [normalized])) reject();
+                args[index] = normalized;
+              }
+            } else {
+              const normalized = nativeString(args[markupIndex]);
+              if (apply(regexTest, forbiddenMarkup, [normalized])) reject();
+              args[markupIndex] = normalized;
+            }
+            return apply(original, this, args);
+          };
+          try {
+            defineProperty(prototype, name, {
+              value: blocked,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return prototype[name] === blocked;
+          } catch {
+            return false;
+          }
+        };
+        const blockMarkupSetter = (prototype, name) => {
+          const original = descriptor(prototype, name);
+          if (typeof original?.set !== 'function') return false;
+          const guarded = function litosGuardedMarkupSetter(value) {
+            // Web IDL stringifies false and zero. Only nullish markup maps to the empty string.
+            // Validate and apply the exact same primitive so a stateful coercion cannot change it.
+            const normalized = value == null ? '' : nativeString(value);
+            if (apply(regexTest, forbiddenMarkup, [normalized])) reject();
+            return apply(original.set, this, [normalized]);
+          };
+          try {
+            defineProperty(prototype, name, {
+              get: original.get,
+              set: guarded,
+              configurable: false,
+              enumerable: original.enumerable
+            });
+            return descriptor(prototype, name)?.set === guarded;
+          } catch {
+            return false;
+          }
+        };
+        const blockExecCommandInsertHtml = () => {
+          const original = Document.prototype?.execCommand;
+          if (typeof original !== 'function') return true;
+          const guarded = function litosGuardedExecCommand(command, showUi, value) {
+            const normalizedCommand = nativeString(command);
+            const commandName = apply(stringToLowerCase, normalizedCommand, []);
+            if (commandName !== 'inserthtml') {
+              return apply(original, this, [normalizedCommand, showUi, value]);
+            }
+            const normalizedValue = nativeString(value);
+            if (apply(regexTest, forbiddenMarkup, [normalizedValue])) reject();
+            return apply(original, this, [normalizedCommand, showUi, normalizedValue]);
+          };
+          try {
+            defineProperty(Document.prototype, 'execCommand', {
+              value: guarded,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return Document.prototype.execCommand === guarded;
+          } catch {
+            return false;
+          }
+        };
+        const blockDocumentOpenPopup = () => {
+          const original = Document.prototype?.open;
+          if (typeof original !== 'function') return true;
+          const guarded = function litosGuardedDocumentOpen(...args) {
+            // The three-argument overload is the legacy Window.open alias. The zero and
+            // two-argument document rewrite overloads remain available for page compatibility.
+            if (args.length >= 3) reject();
+            return apply(original, this, args);
+          };
+          try {
+            defineProperty(Document.prototype, 'open', {
+              value: guarded,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return Document.prototype.open === guarded;
+          } catch {
+            return false;
+          }
+        };
+        const blockTokenMethod = (name, inspectedPositions) => {
+          const original = DOMTokenList.prototype?.[name];
+          if (typeof original !== 'function') return false;
+          const guarded = function litosGuardedTokenMutation(...args) {
+            const linkOwner = apply(weakMapGet, linkRelListOwners, [this]);
+            if (!linkOwner) return apply(original, this, args);
+            for (let index = 0; index < inspectedPositions.length; index += 1) {
+              const position = inspectedPositions[index];
+              if (position === 'all') {
+                for (let item = 0; item < args.length; item += 1) {
+                  const normalized = nativeString(args[item]);
+                  if (apply(regexTest, forbiddenRel, [normalized])) reject();
+                  args[item] = normalized;
+                }
+              } else {
+                const normalized = nativeString(args[position]);
+                if (apply(regexTest, forbiddenRel, [normalized])) reject();
+                args[position] = normalized;
+              }
+            }
+            return apply(original, this, args);
+          };
+          try {
+            defineProperty(DOMTokenList.prototype, name, {
+              value: guarded,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            return DOMTokenList.prototype[name] === guarded;
+          } catch {
+            return false;
+          }
+        };
+        const originalSetAttribute = setAttribute;
+        const guardedSetAttribute = function litosGuardedSetAttribute(name, value) {
+          const elementTag = tagName(this);
+          const normalizedName = nativeString(name);
+          const normalizedValue = nativeString(value);
+          const attributeName = apply(stringToLowerCase, normalizedName, []);
+          if ((elementTag === 'link' && attributeName === 'rel'
+              && apply(regexTest, forbiddenRel, [normalizedValue]))
+            || (elementTag === 'link' && attributeName === 'href'
+              && apply(regexTest, forbiddenRel, [attribute(this, 'rel')]))
+            || (elementTag === 'iframe' && attributeName === 'srcdoc'
+              && apply(regexTest, forbiddenMarkup, [normalizedValue]))
+            || (elementTag === 'iframe' && attributeName === 'src'
+              && forbiddenFrameSource(normalizedValue))) reject();
+          return apply(originalSetAttribute, this, [normalizedName, normalizedValue]);
+        };
+        const guardedSetAttributeNS = function litosGuardedSetAttributeNS(namespace, name, value) {
+          const elementTag = tagName(this);
+          const normalizedNamespace = namespace == null ? null : nativeString(namespace);
+          const normalizedName = nativeString(name);
+          const normalizedValue = nativeString(value);
+          const attributeName = apply(stringToLowerCase, normalizedName, []);
+          if ((elementTag === 'link' && attributeName === 'rel'
+              && apply(regexTest, forbiddenRel, [normalizedValue]))
+            || (elementTag === 'link' && attributeName === 'href'
+              && apply(regexTest, forbiddenRel, [attribute(this, 'rel')]))
+            || (elementTag === 'iframe' && attributeName === 'srcdoc'
+              && apply(regexTest, forbiddenMarkup, [normalizedValue]))
+            || (elementTag === 'iframe' && attributeName === 'src'
+              && forbiddenFrameSource(normalizedValue))) reject();
+          return apply(setAttributeNS, this, [normalizedNamespace, normalizedName, normalizedValue]);
+        };
+        const guardedSetAttributeNode = function litosGuardedSetAttributeNode(attributeNode) {
+          const name = attrNameDescriptor?.get
+            ? apply(stringToLowerCase, nativeString(apply(attrNameDescriptor.get, attributeNode, [])), [])
+            : '';
+          const value = attrValueDescriptor?.get
+            ? nativeString(apply(attrValueDescriptor.get, attributeNode, []))
+            : '';
+          if ((tagName(this) === 'link' && name === 'rel' && apply(regexTest, forbiddenRel, [value]))
+            || (tagName(this) === 'link' && name === 'href'
+              && apply(regexTest, forbiddenRel, [attribute(this, 'rel')]))
+            || (tagName(this) === 'iframe' && name === 'srcdoc'
+              && apply(regexTest, forbiddenMarkup, [value]))
+            || (tagName(this) === 'iframe' && name === 'src'
+              && forbiddenFrameSource(value))) reject();
+          return apply(setAttributeNode, this, [attributeNode]);
+        };
+        const guardedSetAttributeNodeNS = function litosGuardedSetAttributeNodeNS(attributeNode) {
+          const name = attrNameDescriptor?.get
+            ? apply(stringToLowerCase, nativeString(apply(attrNameDescriptor.get, attributeNode, [])), [])
+            : '';
+          const value = attrValueDescriptor?.get
+            ? nativeString(apply(attrValueDescriptor.get, attributeNode, []))
+            : '';
+          if ((tagName(this) === 'link' && name === 'rel' && apply(regexTest, forbiddenRel, [value]))
+            || (tagName(this) === 'link' && name === 'href'
+              && apply(regexTest, forbiddenRel, [attribute(this, 'rel')]))
+            || (tagName(this) === 'iframe' && name === 'srcdoc'
+              && apply(regexTest, forbiddenMarkup, [value]))
+            || (tagName(this) === 'iframe' && name === 'src'
+              && forbiddenFrameSource(value))) reject();
+          return apply(setAttributeNodeNS, this, [attributeNode]);
+        };
+        const forbiddenAttributeValue = (attributeNode, value) => {
+          let name = '';
+          try {
+            name = attrNameDescriptor?.get
+              ? apply(stringToLowerCase, nativeString(apply(attrNameDescriptor.get, attributeNode, [])), [])
+              : '';
+          } catch {}
+          const normalized = nativeString(value);
+          let owner = null;
+          try {
+            owner = attrOwnerElementDescriptor?.get
+              ? apply(attrOwnerElementDescriptor.get, attributeNode, [])
+              : null;
+          } catch {}
+          return (name === 'rel' && apply(regexTest, forbiddenRel, [normalized]))
+            || (name === 'href' && tagName(owner) === 'link'
+              && apply(regexTest, forbiddenRel, [attribute(owner, 'rel')]))
+            || (name === 'srcdoc' && apply(regexTest, forbiddenMarkup, [normalized]))
+            || (name === 'src' && tagName(owner) === 'iframe' && forbiddenFrameSource(normalized));
+        };
+        let ready = typeof nodeTypeGetter === 'function'
+          && typeof documentQuerySelectorAll === 'function'
+          && typeof nodeListLengthGetter === 'function'
+          && typeof nodeListItem === 'function'
+          && typeof mutationTargetGetter === 'function'
+          && typeof mutationAddedNodesGetter === 'function';
+        try {
+          if (typeof linkRelListDescriptor?.get !== 'function'
+            || typeof elementAttributesDescriptor?.get !== 'function') {
+            throw new NativeTypeError('Missing guarded collection getter');
+          }
+          const guardedRelList = function litosGuardedLinkRelList() {
+            const list = apply(linkRelListDescriptor.get, this, []);
+            apply(weakMapSet, linkRelListOwners, [list, this]);
+            return list;
+          };
+          const guardedAttributes = function litosGuardedAttributes() {
+            const attributes = apply(elementAttributesDescriptor.get, this, []);
+            apply(weakMapSet, namedNodeMapOwners, [attributes, this]);
+            return attributes;
+          };
+          defineProperty(HTMLLinkElement.prototype, 'relList', {
+            get: guardedRelList,
+            configurable: false,
+            enumerable: linkRelListDescriptor.enumerable
+          });
+          defineProperty(Element.prototype, 'attributes', {
+            get: guardedAttributes,
+            configurable: false,
+            enumerable: elementAttributesDescriptor.enumerable
+          });
+          ready = descriptor(HTMLLinkElement.prototype, 'relList')?.get === guardedRelList
+            && descriptor(Element.prototype, 'attributes')?.get === guardedAttributes && ready;
+        } catch {
+          ready = false;
+        }
+        for (const name of [
+          'RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport',
+          'WebSocketStream', 'Worker', 'SharedWorker', 'open'
+        ]) {
+          ready = blockConstructor(name) && ready;
+        }
+        ready = blockTransportMethod(Window.prototype, 'open') && ready;
+        ready = blockDocumentOpenPopup() && ready;
+        try {
+          if (typeof eventTargetGetter !== 'function' || typeof closest !== 'function'
+            || typeof preventDefault !== 'function' || typeof stopImmediatePropagation !== 'function'
+            || typeof addEventListener !== 'function') {
+            throw new NativeTypeError('Missing popup containment primitive');
+          }
+          const blockPopupNavigation = (event) => {
+            let target = null;
+            let anchor = null;
+            try {
+              target = apply(eventTargetGetter, event, []);
+              anchor = target ? apply(closest, target, ['a[href], area[href]']) : null;
+            } catch {}
+            if (!anchor) return;
+            let targetName = attribute(anchor, 'target').trim();
+            if (!targetName) {
+              let base = null;
+              try { base = apply(documentQuerySelector, document, ['base[target]']); } catch {}
+              if (base) targetName = attribute(base, 'target').trim();
+            }
+            targetName = apply(stringToLowerCase, targetName, []);
+            if (!targetName || targetName === '_self' || targetName === '_top' || targetName === '_parent') return;
+            apply(preventDefault, event, []);
+            apply(stopImmediatePropagation, event, []);
+            notify('attempt');
+          };
+          apply(addEventListener, nativeWindow, ['click', blockPopupNavigation, true]);
+        } catch {
+          ready = false;
+        }
+        ready = blockTransportMethod(globalThis.ServiceWorkerContainer?.prototype, 'register') && ready;
+        // Playwright's serviceWorkers:block shim installs an own register method on this instance,
+        // so patching only the Web IDL prototype leaves the shim shadowing the containment guard.
+        ready = blockTransportMethod(globalThis.navigator?.serviceWorker, 'register') && ready;
+        ready = blockTransportMethod(globalThis.ServiceWorkerRegistration?.prototype, 'update') && ready;
+        ready = blockNodeMethod(Node.prototype, 'appendChild', [0]) && ready;
+        ready = blockNodeMethod(Node.prototype, 'insertBefore', [0]) && ready;
+        ready = blockNodeMethod(Node.prototype, 'replaceChild', [0]) && ready;
+        for (const parentPrototype of [Element.prototype, Document.prototype, DocumentFragment.prototype]) {
+          ready = blockNodeMethod(parentPrototype, 'append', ['all']) && ready;
+          ready = blockNodeMethod(parentPrototype, 'prepend', ['all']) && ready;
+          ready = blockNodeMethod(parentPrototype, 'replaceChildren', ['all']) && ready;
+          ready = blockNodeMethod(parentPrototype, 'moveBefore', [0]) && ready;
+        }
+        for (const childPrototype of [Element.prototype, CharacterData.prototype, DocumentType.prototype]) {
+          ready = blockNodeMethod(childPrototype, 'before', ['all']) && ready;
+          ready = blockNodeMethod(childPrototype, 'after', ['all']) && ready;
+          ready = blockNodeMethod(childPrototype, 'replaceWith', ['all']) && ready;
+        }
+        ready = blockNodeMethod(Range.prototype, 'insertNode', [0]) && ready;
+        ready = blockNodeMethod(Range.prototype, 'surroundContents', [0]) && ready;
+        ready = blockNodeMethod(Element.prototype, 'insertAdjacentElement', [1]) && ready;
+        ready = blockMarkupMethod(Element.prototype, 'insertAdjacentHTML', 1) && ready;
+        ready = blockMarkupMethod(Document.prototype, 'write', 'allJoined') && ready;
+        ready = blockMarkupMethod(Document.prototype, 'writeln', 'allJoined') && ready;
+        ready = blockMarkupMethod(DOMParser.prototype, 'parseFromString', 0) && ready;
+        ready = blockMarkupMethod(Range.prototype, 'createContextualFragment', 0) && ready;
+        ready = blockExecCommandInsertHtml() && ready;
+        ready = blockMarkupMethod(Element.prototype, 'setHTML', 0) && ready;
+        ready = blockMarkupMethod(ShadowRoot.prototype, 'setHTML', 0) && ready;
+        ready = blockMarkupMethod(Element.prototype, 'setHTMLUnsafe', 0) && ready;
+        ready = blockMarkupMethod(ShadowRoot.prototype, 'setHTMLUnsafe', 0) && ready;
+        ready = blockMarkupMethod(Document, 'parseHTML', 0) && ready;
+        ready = blockMarkupMethod(Document, 'parseHTMLUnsafe', 0) && ready;
+        // Chromium's streaming Sanitizer APIs are still evolving. They accept or return parser
+        // streams whose later chunks cannot be inspected synchronously here. If a pinned runtime
+        // exposes one, deny the call and record the attempt instead of leaving a shadow-tree sink.
+        for (const parserPrototype of [
+          Element.prototype, ShadowRoot.prototype, DocumentFragment.prototype, Document.prototype
+        ]) {
+          for (const name of [
+            'afterHTML', 'afterHTMLUnsafe', 'beforeHTML', 'beforeHTMLUnsafe',
+            'appendHTML', 'appendHTMLUnsafe', 'prependHTML', 'prependHTMLUnsafe',
+            'replaceWithHTML', 'replaceWithHTMLUnsafe',
+            'streamHTML', 'streamHTMLUnsafe',
+            'streamAfterHTML', 'streamAfterHTMLUnsafe',
+            'streamBeforeHTML', 'streamBeforeHTMLUnsafe',
+            'streamAppendHTML', 'streamAppendHTMLUnsafe',
+            'streamPrependHTML', 'streamPrependHTMLUnsafe',
+            'streamReplaceWithHTML', 'streamReplaceWithHTMLUnsafe'
+          ]) {
+            ready = blockTransportMethod(parserPrototype, name) && ready;
+          }
+        }
+        ready = blockMarkupSetter(Element.prototype, 'innerHTML') && ready;
+        ready = blockMarkupSetter(Element.prototype, 'outerHTML') && ready;
+        ready = blockMarkupSetter(ShadowRoot.prototype, 'innerHTML') && ready;
+        ready = blockTokenMethod('add', ['all']) && ready;
+        ready = blockTokenMethod('toggle', [0]) && ready;
+        ready = blockTokenMethod('replace', [1]) && ready;
+        try {
+          if (typeof tokenListValueDescriptor?.set !== 'function') throw new NativeTypeError('Missing DOMTokenList value setter');
+          const guardedTokenValue = function litosGuardedTokenValue(value) {
+            const linkOwner = apply(weakMapGet, linkRelListOwners, [this]);
+            if (!linkOwner) return apply(tokenListValueDescriptor.set, this, [value]);
+            const normalized = nativeString(value);
+            if (apply(regexTest, forbiddenRel, [normalized])) reject();
+            return apply(tokenListValueDescriptor.set, this, [normalized]);
+          };
+          defineProperty(DOMTokenList.prototype, 'value', {
+            get: tokenListValueDescriptor.get,
+            set: guardedTokenValue,
+            configurable: false,
+            enumerable: tokenListValueDescriptor.enumerable
+          });
+          ready = descriptor(DOMTokenList.prototype, 'value')?.set === guardedTokenValue && ready;
+        } catch {
+          ready = false;
+        }
+        try {
+          defineProperty(Element.prototype, 'setAttributeNS', {
+            value: guardedSetAttributeNS,
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+          defineProperty(Element.prototype, 'setAttributeNode', {
+            value: guardedSetAttributeNode,
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+          defineProperty(Element.prototype, 'setAttributeNodeNS', {
+            value: guardedSetAttributeNodeNS,
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+          ready = Element.prototype.setAttributeNS === guardedSetAttributeNS
+            && Element.prototype.setAttributeNode === guardedSetAttributeNode
+            && Element.prototype.setAttributeNodeNS === guardedSetAttributeNodeNS && ready;
+        } catch {
+          ready = false;
+        }
+        try {
+          if (typeof attrValueDescriptor?.set !== 'function'
+            || typeof attrOwnerElementDescriptor?.get !== 'function'
+            || typeof nodeValueDescriptor?.set !== 'function'
+            || typeof nodeTextContentDescriptor?.set !== 'function'
+            || typeof iframeSrcdocDescriptor?.set !== 'function'
+            || typeof iframeSrcDescriptor?.set !== 'function') {
+            throw new NativeTypeError('Missing route-invisible attribute setter');
+          }
+          const guardedAttrValue = function litosGuardedAttrValue(value) {
+            const normalized = nativeString(value);
+            const owner = apply(attrOwnerElementDescriptor.get, this, []);
+            const name = attrNameDescriptor?.get
+              ? apply(stringToLowerCase, nativeString(apply(attrNameDescriptor.get, this, [])), [])
+              : '';
+            if ((tagName(owner) === 'link' && name === 'rel'
+                && apply(regexTest, forbiddenRel, [normalized]))
+              || (tagName(owner) === 'link' && name === 'href'
+                && apply(regexTest, forbiddenRel, [attribute(owner, 'rel')]))
+              || (tagName(owner) === 'iframe' && name === 'srcdoc'
+                && apply(regexTest, forbiddenMarkup, [normalized]))) reject();
+            return apply(attrValueDescriptor.set, this, [normalized]);
+          };
+          const guardedNodeValue = function litosGuardedNodeValue(value) {
+            const normalized = value == null ? null : nativeString(value);
+            if (forbiddenAttributeValue(this, normalized)) reject();
+            return apply(nodeValueDescriptor.set, this, [normalized]);
+          };
+          const guardedNodeTextContent = function litosGuardedNodeTextContent(value) {
+            const normalized = value == null ? null : nativeString(value);
+            if (forbiddenAttributeValue(this, normalized)) reject();
+            return apply(nodeTextContentDescriptor.set, this, [normalized]);
+          };
+          const guardedSrcdoc = function litosGuardedSrcdoc(value) {
+            const normalized = nativeString(value);
+            if (apply(regexTest, forbiddenMarkup, [normalized])) reject();
+            return apply(iframeSrcdocDescriptor.set, this, [normalized]);
+          };
+          const guardedFrameSrc = function litosGuardedFrameSrc(value) {
+            const normalized = nativeString(value);
+            if (forbiddenFrameSource(normalized)) reject();
+            return apply(iframeSrcDescriptor.set, this, [normalized]);
+          };
+          defineProperty(Attr.prototype, 'value', {
+            get: attrValueDescriptor.get,
+            set: guardedAttrValue,
+            configurable: false,
+            enumerable: attrValueDescriptor.enumerable
+          });
+          defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+            get: iframeSrcdocDescriptor.get,
+            set: guardedSrcdoc,
+            configurable: false,
+            enumerable: iframeSrcdocDescriptor.enumerable
+          });
+          defineProperty(HTMLIFrameElement.prototype, 'src', {
+            get: iframeSrcDescriptor.get,
+            set: guardedFrameSrc,
+            configurable: false,
+            enumerable: iframeSrcDescriptor.enumerable
+          });
+          defineProperty(Node.prototype, 'nodeValue', {
+            get: nodeValueDescriptor.get,
+            set: guardedNodeValue,
+            configurable: false,
+            enumerable: nodeValueDescriptor.enumerable
+          });
+          defineProperty(Node.prototype, 'textContent', {
+            get: nodeTextContentDescriptor.get,
+            set: guardedNodeTextContent,
+            configurable: false,
+            enumerable: nodeTextContentDescriptor.enumerable
+          });
+          ready = descriptor(Attr.prototype, 'value')?.set === guardedAttrValue
+            && descriptor(HTMLIFrameElement.prototype, 'srcdoc')?.set === guardedSrcdoc
+            && descriptor(HTMLIFrameElement.prototype, 'src')?.set === guardedFrameSrc
+            && descriptor(Node.prototype, 'nodeValue')?.set === guardedNodeValue
+            && descriptor(Node.prototype, 'textContent')?.set === guardedNodeTextContent && ready;
+        } catch {
+          ready = false;
+        }
+        for (const name of ['setNamedItem', 'setNamedItemNS']) {
+          const original = NamedNodeMap.prototype?.[name];
+          if (typeof original !== 'function') {
+            ready = false;
+            continue;
+          }
+          const guarded = function litosGuardedNamedAttribute(attributeNode) {
+            const value = attrValueDescriptor?.get
+              ? apply(attrValueDescriptor.get, attributeNode, [])
+              : '';
+            if (forbiddenAttributeValue(attributeNode, value)) reject();
+            const owner = apply(weakMapGet, namedNodeMapOwners, [this]);
+            let name = '';
+            try {
+              name = attrNameDescriptor?.get
+                ? apply(stringToLowerCase, nativeString(apply(attrNameDescriptor.get, attributeNode, [])), [])
+                : '';
+            } catch {}
+            if (tagName(owner) === 'link' && name === 'href'
+              && apply(regexTest, forbiddenRel, [attribute(owner, 'rel')])) reject();
+            return apply(original, this, [attributeNode]);
+          };
+          try {
+            defineProperty(NamedNodeMap.prototype, name, {
+              value: guarded,
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+            ready = NamedNodeMap.prototype[name] === guarded && ready;
+          } catch {
+            ready = false;
+          }
+        }
+        try {
+          if (typeof linkRelDescriptor?.set !== 'function' || typeof linkHrefDescriptor?.set !== 'function') {
+            throw new NativeTypeError('Missing link transport setter');
+          }
+          const guardedRel = function litosGuardedLinkRel(value) {
+            const normalized = nativeString(value);
+            if (apply(regexTest, forbiddenRel, [normalized])) reject();
+            return apply(linkRelDescriptor.set, this, [normalized]);
+          };
+          const guardedHref = function litosGuardedLinkHref(value) {
+            const normalized = nativeString(value);
+            if (apply(regexTest, forbiddenRel, [attribute(this, 'rel')])) reject();
+            return apply(linkHrefDescriptor.set, this, [normalized]);
+          };
+          defineProperty(HTMLLinkElement.prototype, 'rel', {
+            get: linkRelDescriptor.get,
+            set: guardedRel,
+            configurable: false,
+            enumerable: linkRelDescriptor.enumerable
+          });
+          defineProperty(HTMLLinkElement.prototype, 'href', {
+            get: linkHrefDescriptor.get,
+            set: guardedHref,
+            configurable: false,
+            enumerable: linkHrefDescriptor.enumerable
+          });
+          ready = descriptor(HTMLLinkElement.prototype, 'rel')?.set === guardedRel
+            && descriptor(HTMLLinkElement.prototype, 'href')?.set === guardedHref && ready;
+        } catch {
+          ready = false;
+        }
+        for (const name of [
+          'protocol', 'host', 'hostname', 'port', 'pathname', 'search',
+          'username', 'password', 'hash'
+        ]) {
+          const original = descriptor(HTMLLinkElement.prototype, name);
+          if (typeof original?.set !== 'function') continue;
+          const guarded = function litosGuardedLinkUrlComponent(value) {
+            const normalized = nativeString(value);
+            if (apply(regexTest, forbiddenRel, [attribute(this, 'rel')])) reject();
+            return apply(original.set, this, [normalized]);
+          };
+          try {
+            defineProperty(HTMLLinkElement.prototype, name, {
+              get: original.get,
+              set: guarded,
+              configurable: false,
+              enumerable: original.enumerable
+            });
+            ready = descriptor(HTMLLinkElement.prototype, name)?.set === guarded && ready;
+          } catch {
+            ready = false;
+          }
+        }
+        try {
+          defineProperty(Element.prototype, 'setAttribute', {
+            value: guardedSetAttribute,
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+          ready = Element.prototype.setAttribute === guardedSetAttribute && ready;
+        } catch {
+          ready = false;
+        }
+        const observer = new MutationObserver((records) => {
+          if (!arrayIsArray(records) || records.length > 256) {
+            notify('unavailable');
+            return;
+          }
+          for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+            const record = records[recordIndex];
+            let target = null;
+            let addedNodes = null;
+            try {
+              target = apply(mutationTargetGetter, record, []);
+              addedNodes = apply(mutationAddedNodesGetter, record, []);
+            } catch {
+              notify('unavailable');
+              return;
+            }
+            if (forbiddenLink(target)) rejectObservedParserTransport();
+            let addedCount = 0;
+            try { addedCount = apply(nodeListLengthGetter, addedNodes, []); } catch { reject(); }
+            if (addedCount > 256) rejectObservedParserTransport();
+            for (let index = 0; index < addedCount; index += 1) {
+              const node = apply(nodeListItem, addedNodes, [index]);
+              if (!node || forbiddenLink(node)) rejectObservedParserTransport();
+            }
+          }
+        });
+        try {
+          observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['rel', 'href'] });
+        } catch {
+          ready = false;
+        }
+        if (!ready) notify('unavailable');
+      }, { consoleToken: v4TransportConsoleToken });
+      browserContext.on('console', (message) => {
+        const text = message.text();
+        // Synchronous script attempts are always security-relevant, including inline scripts
+        // during the initial navigation. Only parser-observed static hints in the original
+        // document are part of the trusted page load and may be ignored before goto completes.
+        if (text === v4TransportConsoleToken + ':attempt') {
+          v4OutOfBandTransportAttempted = true;
+        }
+        if (text === v4TransportConsoleToken + ':parser-attempt'
+          && !(v4InitialNavigationActive && message.page() === v4PrimaryPage)) {
+          v4OutOfBandTransportAttempted = true;
+        }
+        if (text === v4TransportConsoleToken + ':unavailable') v4PageTransportLockUnavailable = true;
+      });
+    }
     const page = await browserContext.newPage();
+    v4PrimaryPage = page;
+    let v4UtilityContext = null;
+    let v4DocumentGeneration = 0;
+    const v4ClientToServerHandle = (value) => {
+      if (!value || typeof chromium?._connection?.toImpl !== 'function') return null;
+      try { return chromium._connection.toImpl(value) || null; } catch { return null; }
+    };
+    const v4UtilityValue = (value) => {
+      const handle = v4ClientToServerHandle(value);
+      if (handle?.__jshandle) return handle;
+      if (Array.isArray(value)) return value.map(v4UtilityValue);
+      if (value && Object.getPrototypeOf(value) === Object.prototype) {
+        return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, v4UtilityValue(entry)]));
+      }
+      return value;
+    };
+    const callV4Utility = async (method, ...args) => {
+      if (!v4UtilityContext) return null;
+      return v4UtilityContext.evaluate((input) => {
+        const capability = globalThis.__litosV4SubmissionContainment;
+        const operation = capability && capability[input.method];
+        return typeof operation === 'function'
+          ? Reflect.apply(operation, capability, input.args)
+          : null;
+      }, { method, args: v4UtilityValue(args) });
+    };
     let v4PreSubmitTransportContainment = null;
     if (retainedAtomicV4Run) {
-      const containment = { mode: 'initial_navigation', handler: null };
+      const containment = {
+        mode: 'initial_navigation',
+        blockedTransportObserved: false,
+        handler: null
+      };
       containment.handler = async (route) => {
         const request = route.request();
         const method = request.method().toUpperCase();
-        const write = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+        const readOnly = method === 'GET' || method === 'HEAD';
         const navigation = request.isNavigationRequest();
         const mainFrameNavigation = request.isNavigationRequest()
           && request.frame() === page.mainFrame();
-        if (containment.mode === 'initial_navigation' && mainFrameNavigation
-          && canonicalPageUrl(request.url()) === canonicalPageUrl(input.url)) {
-          return route.fallback();
+        if (containment.mode === 'initial_navigation') {
+          if (readOnly && mainFrameNavigation
+            && canonicalPageUrl(request.url()) === canonicalPageUrl(input.url)) {
+            return route.fallback();
+          }
+          if (readOnly && !navigation) return route.fallback();
+          return route.abort('blockedbyclient');
         }
-        // Bootstrap assets may load only while page.goto owns the initial navigation. Once that
-        // await returns, every request is blocked until one exact native submit is authorized.
-        // This includes GET query fetches, images, pings and other read-shaped exfiltration.
-        if (containment.mode === 'initial_navigation' && !write && !navigation) return route.fallback();
         if (containment.mode === 'activation') return route.fallback();
+        containment.blockedTransportObserved = true;
         return route.abort('blockedbyclient');
       };
       await browserContext.route('**/*', containment.handler);
-      if (typeof browserContext.routeWebSocket !== 'function') {
-        throw new Error('Atomic submit v4 requires WebSocket transport containment');
-      }
-      await browserContext.routeWebSocket('**/*', (socket) => socket.close());
       v4PreSubmitTransportContainment = containment;
     }
     // A RUN THAT WAS NOT ASKED TO SUBMIT MUST BE STRUCTURALLY UNABLE TO SUBMIT.
@@ -277,19 +1165,28 @@ const { chromium } = require('playwright');
     // whether the floor was ever reached.
     if (input.allowSubmit !== true) {
       await page.addInitScript(() => {
-        window.__litosBlockedSubmits = 0;
+        const apply = Reflect.apply;
+        const addEventListener = EventTarget.prototype.addEventListener;
+        const preventDefault = Event.prototype.preventDefault;
+        const stopImmediatePropagation = Event.prototype.stopImmediatePropagation;
+        let blockedSubmits = 0;
+        Object.defineProperty(window, '__litosBlockedSubmits', {
+          get: () => blockedSubmits,
+          configurable: false,
+          enumerable: false
+        });
         // Capture phase on document, so this runs before any framework handler and before the
         // browser's own default. stopImmediatePropagation is what stops React's onSubmit, which is
         // attached lower down the tree and would otherwise still fire its own fetch.
-        document.addEventListener('submit', (event) => {
-          window.__litosBlockedSubmits += 1;
-          event.preventDefault();
-          event.stopImmediatePropagation();
-        }, true);
+        apply(addEventListener, document, ['submit', (event) => {
+          apply(preventDefault, event, []);
+          apply(stopImmediatePropagation, event, []);
+          blockedSubmits += 1;
+        }, true]);
         // form.submit() dispatches no submit event at all, by specification, so the listener above
         // cannot see it. requestSubmit() does dispatch one and is therefore already covered.
         HTMLFormElement.prototype.submit = function litosBlockedSubmit() {
-          window.__litosBlockedSubmits += 1;
+          blockedSubmits += 1;
           return undefined;
         };
         // No original-method reference is exposed. A page-visible escape hatch here would hand
@@ -302,113 +1199,1909 @@ const { chromium } = require('playwright');
        * need those events to commit. It is not allowed to turn either event into an application
        * submission before the atomic chooser has selected, rebound and revalidated one exact
        * submitter. The same rule protects emailed-code entry on a retained page. Installing this
-       * capture listener through addInitScript puts it ahead of document, form and framework submit
-       * handlers, while the prototype guard covers form.submit(), which emits no event.
+       * capture listener through an isolated-world init script puts it ahead of document, form and
+       * framework submit handlers. The Node transport lock remains authoritative for direct
+       * form.submit(), which emits no event and cannot be patched safely across JavaScript worlds.
        *
-       * The random capability stays in this closure. The page can see the frozen control methods,
-       * but cannot unlock them without the runner-owned token. Final activation temporarily admits
-       * one exact form and submitter; its stricter snapshot guard below still decides whether that
-       * activation is current enough to transmit. */
-      await page.addInitScript(({ token }) => {
-        const state = { mode: 'locked', root: null, submitter: null };
-        const refuseConstructor = (name) => {
-          try {
-            Object.defineProperty(globalThis, name, {
-              value: class LitosBlockedTransport {
-                constructor() { throw new DOMException('Blocked by atomic submit containment', 'SecurityError'); }
-              },
-              configurable: false,
-              enumerable: false,
-              writable: false
-            });
-          } catch { /* the browser-context route remains the network authority */ }
+       * The capability object stays in this closure and is handed directly to the runner before
+       * employer scripts execute. It is never installed on a page-visible global. Final activation
+       * temporarily admits one exact form and submitter; its stricter snapshot guard below still
+       * decides whether that activation is current enough to transmit. */
+      var installV4UtilityContainment = ({ token }) => {
+        /* Employer code owns the main world after this hook returns, so every primitive used to
+         * describe the native payload is captured now. In particular, the page must never receive
+         * the runner's HMAC key or get a chance to replace Web Crypto before an expected digest is
+         * made. This serializer returns bounded raw entries to the sandbox process, where the key
+         * stays and both expected and observed request entries are authenticated. */
+        const nativeWindow = globalThis;
+        const nativeDocument = document;
+        const nativeLocation = location;
+        const apply = Reflect.apply;
+        const descriptor = Object.getOwnPropertyDescriptor;
+        const getter = (prototype, property) => descriptor(prototype, property)?.get || null;
+        const getAttribute = Element.prototype.getAttribute;
+        const hasAttribute = Element.prototype.hasAttribute;
+        const setAttribute = Element.prototype.setAttribute;
+        const matches = Element.prototype.matches;
+        const closest = Element.prototype.closest;
+        const createElement = Document.prototype.createElement;
+        const getElementById = Document.prototype.getElementById;
+        const appendChild = Node.prototype.appendChild;
+        const getClientRects = Element.prototype.getClientRects;
+        const checkVisibility = Element.prototype.checkVisibility;
+        const nativeGetComputedStyle = globalThis.getComputedStyle;
+        const getStyleProperty = CSSStyleDeclaration.prototype.getPropertyValue;
+        const elementQuerySelector = Element.prototype.querySelector;
+        const elementQuerySelectorAll = Element.prototype.querySelectorAll;
+        const querySelector = Document.prototype.querySelector;
+        const querySelectorAll = Document.prototype.querySelectorAll;
+        const fragmentQuerySelectorAll = DocumentFragment.prototype.querySelectorAll;
+        const addEventListener = EventTarget.prototype.addEventListener;
+        const removeEventListener = EventTarget.prototype.removeEventListener;
+        const preventDefault = Event.prototype.preventDefault;
+        const stopImmediatePropagation = Event.prototype.stopImmediatePropagation;
+        const nodeContains = Node.prototype.contains;
+        const compareDocumentPosition = Node.prototype.compareDocumentPosition;
+        const getRootNode = Node.prototype.getRootNode;
+        const documentPositionFollowing = Node.DOCUMENT_POSITION_FOLLOWING;
+        const isConnectedGetter = getter(Node.prototype, 'isConnected');
+        const parentElementGetter = getter(Node.prototype, 'parentElement');
+        const childNodesGetter = getter(Node.prototype, 'childNodes');
+        const nodeTypeGetter = getter(Node.prototype, 'nodeType');
+        const nodeValueGetter = getter(Node.prototype, 'nodeValue');
+        const textContentGetter = getter(Node.prototype, 'textContent');
+        const innerTextGetter = getter(HTMLElement.prototype, 'innerText');
+        const tagNameGetter = getter(Element.prototype, 'tagName');
+        const eventTargetGetter = getter(Event.prototype, 'target');
+        const eventTypeGetter = getter(Event.prototype, 'type');
+        const eventDefaultPreventedGetter = getter(Event.prototype, 'defaultPrevented');
+        const submitEventSubmitterGetter = getter(SubmitEvent.prototype, 'submitter');
+        const formDataEventFormDataGetter = getter(FormDataEvent.prototype, 'formData');
+        const locationHrefGetter = descriptor(nativeLocation, 'href')?.get || null;
+        const formElementsGetter = getter(HTMLFormElement.prototype, 'elements');
+        const formActionGetter = getter(HTMLFormElement.prototype, 'action');
+        const formMethodGetter = getter(HTMLFormElement.prototype, 'method');
+        const formTargetGetter = getter(HTMLFormElement.prototype, 'target');
+        const formEnctypeGetter = getter(HTMLFormElement.prototype, 'enctype');
+        const formNoValidateGetter = getter(HTMLFormElement.prototype, 'noValidate');
+        const formAcceptCharsetGetter = getter(HTMLFormElement.prototype, 'acceptCharset');
+        const collectionLengthGetter = getter(HTMLCollection.prototype, 'length');
+        const collectionItem = HTMLCollection.prototype.item;
+        const nodeListLengthGetter = getter(NodeList.prototype, 'length');
+        const nodeListItem = NodeList.prototype.item;
+        const inputFormGetter = getter(HTMLInputElement.prototype, 'form');
+        const inputTypeGetter = getter(HTMLInputElement.prototype, 'type');
+        const inputValueGetter = getter(HTMLInputElement.prototype, 'value');
+        const inputCheckedGetter = getter(HTMLInputElement.prototype, 'checked');
+        const inputFilesGetter = getter(HTMLInputElement.prototype, 'files');
+        const inputLabelsGetter = getter(HTMLInputElement.prototype, 'labels');
+        const inputMaxLengthGetter = getter(HTMLInputElement.prototype, 'maxLength');
+        const inputWillValidateGetter = getter(HTMLInputElement.prototype, 'willValidate');
+        const inputValidityGetter = getter(HTMLInputElement.prototype, 'validity');
+        const inputFormActionGetter = getter(HTMLInputElement.prototype, 'formAction');
+        const inputFormMethodGetter = getter(HTMLInputElement.prototype, 'formMethod');
+        const inputFormTargetGetter = getter(HTMLInputElement.prototype, 'formTarget');
+        const inputFormEnctypeGetter = getter(HTMLInputElement.prototype, 'formEnctype');
+        const inputFormNoValidateGetter = getter(HTMLInputElement.prototype, 'formNoValidate');
+        const buttonFormGetter = getter(HTMLButtonElement.prototype, 'form');
+        const buttonTypeGetter = getter(HTMLButtonElement.prototype, 'type');
+        const buttonValueGetter = getter(HTMLButtonElement.prototype, 'value');
+        const buttonFormActionGetter = getter(HTMLButtonElement.prototype, 'formAction');
+        const buttonFormMethodGetter = getter(HTMLButtonElement.prototype, 'formMethod');
+        const buttonFormTargetGetter = getter(HTMLButtonElement.prototype, 'formTarget');
+        const buttonFormEnctypeGetter = getter(HTMLButtonElement.prototype, 'formEnctype');
+        const buttonFormNoValidateGetter = getter(HTMLButtonElement.prototype, 'formNoValidate');
+        const buttonWillValidateGetter = getter(HTMLButtonElement.prototype, 'willValidate');
+        const buttonValidityGetter = getter(HTMLButtonElement.prototype, 'validity');
+        const textareaFormGetter = getter(HTMLTextAreaElement.prototype, 'form');
+        const textareaValueGetter = getter(HTMLTextAreaElement.prototype, 'value');
+        const textareaWillValidateGetter = getter(HTMLTextAreaElement.prototype, 'willValidate');
+        const textareaValidityGetter = getter(HTMLTextAreaElement.prototype, 'validity');
+        const selectFormGetter = getter(HTMLSelectElement.prototype, 'form');
+        const selectValueGetter = getter(HTMLSelectElement.prototype, 'value');
+        const selectOptionsGetter = getter(HTMLSelectElement.prototype, 'options');
+        const selectWillValidateGetter = getter(HTMLSelectElement.prototype, 'willValidate');
+        const selectValidityGetter = getter(HTMLSelectElement.prototype, 'validity');
+        const labelControlGetter = getter(HTMLLabelElement.prototype, 'control');
+        const optionSelectedGetter = getter(HTMLOptionElement.prototype, 'selected');
+        const optionValueGetter = getter(HTMLOptionElement.prototype, 'value');
+        const optionLabelGetter = getter(HTMLOptionElement.prototype, 'label');
+        const optionDisabledGetter = getter(HTMLOptionElement.prototype, 'disabled');
+        const optgroupDisabledGetter = getter(HTMLOptGroupElement.prototype, 'disabled');
+        const fileListLengthGetter = getter(FileList.prototype, 'length');
+        const fileListItem = FileList.prototype.item;
+        const fileNameGetter = getter(File.prototype, 'name');
+        const fileLastModifiedGetter = getter(File.prototype, 'lastModified');
+        const blobSizeGetter = getter(Blob.prototype, 'size');
+        const blobTypeGetter = getter(Blob.prototype, 'type');
+        const blobArrayBuffer = Blob.prototype.arrayBuffer;
+        const mutationRecordTypeGetter = getter(MutationRecord.prototype, 'type');
+        const mutationRecordTargetGetter = getter(MutationRecord.prototype, 'target');
+        const mutationRecordAttributeNameGetter = getter(MutationRecord.prototype, 'attributeName');
+        const mutationRecordAddedNodesGetter = getter(MutationRecord.prototype, 'addedNodes');
+        const mutationRecordRemovedNodesGetter = getter(MutationRecord.prototype, 'removedNodes');
+        const NativeMutationObserver = MutationObserver;
+        const mutationObserve = MutationObserver.prototype.observe;
+        const mutationDisconnect = MutationObserver.prototype.disconnect;
+        const mutationTakeRecords = MutationObserver.prototype.takeRecords;
+        const validityNames = [
+          'badInput', 'customError', 'patternMismatch', 'rangeOverflow', 'rangeUnderflow',
+          'stepMismatch', 'tooLong', 'tooShort', 'typeMismatch', 'valid', 'valueMissing'
+        ];
+        const validityGetters = validityNames.map((name) => getter(ValidityState.prototype, name));
+        const valueMissingGetter = getter(ValidityState.prototype, 'valueMissing');
+        const constraintAttributes = [
+          'disabled', 'form', 'max', 'maxlength', 'min', 'minlength', 'multiple', 'pattern',
+          'readonly', 'required', 'step', 'type'
+        ];
+        const NativeArray = Array;
+        const arrayIsArray = Array.isArray;
+        const NativeArrayBuffer = ArrayBuffer;
+        const NativeBoolean = Boolean;
+        const NativeNumber = Number;
+        const NativeObject = Object;
+        const NativeString = String;
+        const NativeUint8Array = Uint8Array;
+        const objectCreate = Object.create;
+        const objectFreeze = Object.freeze;
+        const objectSetPrototypeOf = Object.setPrototypeOf;
+        const arrayBufferByteLengthGetter = getter(NativeArrayBuffer.prototype, 'byteLength');
+        const typedArrayPrototype = Object.getPrototypeOf(NativeUint8Array.prototype);
+        const typedArrayByteLengthGetter = getter(typedArrayPrototype, 'byteLength');
+        const isInteger = Number.isInteger;
+        const isSafeInteger = Number.isSafeInteger;
+        const min = Math.min;
+        const fromCharCode = String.fromCharCode;
+        const toLowerCase = String.prototype.toLowerCase;
+        const toUpperCase = String.prototype.toUpperCase;
+        const nativeAtob = globalThis.atob;
+        const nativeBtoa = globalThis.btoa;
+        const nativeJSON = JSON;
+        const jsonStringify = JSON.stringify;
+        const textEncoder = new TextEncoder();
+        const textEncode = TextEncoder.prototype.encode;
+        const read = (nativeGetter, receiver) => {
+          if (!nativeGetter) throw new TypeError('Missing native getter');
+          return apply(nativeGetter, receiver, []);
         };
-        for (const name of [
-          'WebSocket', 'WebTransport', 'EventSource', 'Worker', 'SharedWorker',
-          'RTCPeerConnection', 'webkitRTCPeerConnection'
-        ]) {
-          if (name in globalThis) refuseConstructor(name);
-        }
-        try {
-          Object.defineProperty(Navigator.prototype, 'sendBeacon', {
-            value() { return false; },
+        const call = (nativeFunction, receiver, ...args) => apply(nativeFunction, receiver, args);
+        const nullArray = (length = 0) => {
+          const value = new NativeArray(length);
+          apply(objectSetPrototypeOf, NativeObject, [value, null]);
+          return value;
+        };
+        const nullRecord = () => apply(objectCreate, NativeObject, [null]);
+        const connected = (node) => NativeBoolean(read(isConnectedGetter, node));
+        const rendered = (node) => {
+          if (!connected(node)) return false;
+          try {
+            const rects = call(getClientRects, node);
+            if (!rects || NativeNumber(rects.length) === 0) return false;
+            if (typeof checkVisibility === 'function' && !call(checkVisibility, node, {
+              checkOpacity: true,
+              checkVisibilityCSS: true
+            })) return false;
+            const style = call(nativeGetComputedStyle, nativeWindow, node);
+            return lower(call(getStyleProperty, style, 'display')) !== 'none'
+              && lower(call(getStyleProperty, style, 'visibility')) !== 'hidden'
+              && NativeNumber(call(getStyleProperty, style, 'opacity')) > 0;
+          } catch {
+            return false;
+          }
+        };
+        const renderedOwner = (node) => {
+          if (rendered(node)) return true;
+          if (!connected(node)) return false;
+          const style = call(nativeGetComputedStyle, nativeWindow, node);
+          if (lower(call(getStyleProperty, style, 'display')) !== 'contents'
+            || lower(call(getStyleProperty, style, 'visibility')) === 'hidden'
+            || NativeNumber(call(getStyleProperty, style, 'opacity')) <= 0) return false;
+          let ancestor = read(parentElementGetter, node);
+          while (ancestor) {
+            const ancestorStyle = call(nativeGetComputedStyle, nativeWindow, ancestor);
+            if (lower(call(getStyleProperty, ancestorStyle, 'display')) === 'none'
+              || lower(call(getStyleProperty, ancestorStyle, 'visibility')) === 'hidden'
+              || NativeNumber(call(getStyleProperty, ancestorStyle, 'opacity')) <= 0) return false;
+            ancestor = read(parentElementGetter, ancestor);
+          }
+          if (visibleRenderedText(node).trim()) return true;
+          const descendants = nodeListValues(call(elementQuerySelectorAll, node, '*'), 512);
+          if (!descendants) throw new NativeTypeError('Unverifiable rendered owner');
+          for (let index = 0; index < descendants.length; index += 1) {
+            if (rendered(descendants[index])) return true;
+          }
+          return false;
+        };
+        const attribute = (node, name) => call(getAttribute, node, name);
+        const carriesAttribute = (node, name) => call(hasAttribute, node, name);
+        const lower = (value) => apply(toLowerCase, NativeString(value), []);
+        const upper = (value) => apply(toUpperCase, NativeString(value), []);
+        const tagName = (node) => lower(read(tagNameGetter, node));
+        const collectionValues = (collection, maximum) => {
+          const length = NativeNumber(read(collectionLengthGetter, collection));
+          if (!isInteger(length) || length < 0 || length > maximum) return null;
+          const values = new NativeArray(length);
+          for (let index = 0; index < length; index += 1) {
+            const value = call(collectionItem, collection, index);
+            if (!value) return null;
+            values[index] = value;
+          }
+          return values;
+        };
+        const nodeListValues = (collection, maximum) => {
+          const length = NativeNumber(read(nodeListLengthGetter, collection));
+          if (!isInteger(length) || length < 0 || length > maximum) return null;
+          const values = new NativeArray(length);
+          for (let index = 0; index < length; index += 1) {
+            const value = call(nodeListItem, collection, index);
+            if (!value) return null;
+            values[index] = value;
+          }
+          return values;
+        };
+        const visibleRenderedText = (node, depth = 0) => {
+          if (!node || depth > 16) throw new NativeTypeError('Unverifiable rendered text');
+          const nodeType = NativeNumber(read(nodeTypeGetter, node));
+          if (nodeType === 3) return NativeString(read(nodeValueGetter, node) || '').slice(0, 4096);
+          if (nodeType !== 1) return '';
+          const style = call(nativeGetComputedStyle, nativeWindow, node);
+          if (lower(call(getStyleProperty, style, 'display')) === 'none'
+            || lower(call(getStyleProperty, style, 'visibility')) === 'hidden'
+            || NativeNumber(call(getStyleProperty, style, 'opacity')) <= 0) return '';
+          const children = nodeListValues(read(childNodesGetter, node), 512);
+          if (!children) throw new NativeTypeError('Unverifiable rendered text');
+          let text = '';
+          for (let index = 0; index < children.length; index += 1) {
+            text += visibleRenderedText(children[index], depth + 1);
+            if (text.length > 4096) throw new NativeTypeError('Rendered text is too large');
+          }
+          return text;
+        };
+        const fileValues = (files, maximum) => {
+          const length = NativeNumber(read(fileListLengthGetter, files));
+          if (!isInteger(length) || length < 0 || length > maximum) return null;
+          const values = new NativeArray(length);
+          for (let index = 0; index < length; index += 1) {
+            const value = call(fileListItem, files, index);
+            if (!value) return null;
+            values[index] = value;
+          }
+          return values;
+        };
+        const bytesToBase64 = (buffer) => {
+          const bytes = new NativeUint8Array(buffer);
+          const byteLength = NativeNumber(read(arrayBufferByteLengthGetter, buffer));
+          let binary = '';
+          for (let offset = 0; offset < byteLength; offset += 0x8000) {
+            const end = min(offset + 0x8000, byteLength);
+            const chunk = new NativeArray(end - offset);
+            for (let index = offset; index < end; index += 1) chunk[index - offset] = bytes[index];
+            binary += apply(fromCharCode, NativeString, chunk);
+          }
+          return apply(nativeBtoa, globalThis, [binary]);
+        };
+        const submitterState = (element) => {
+          try {
+            return {
+              kind: 'input',
+              form: read(inputFormGetter, element),
+              type: lower(read(inputTypeGetter, element)),
+              valueGetter: inputValueGetter,
+              actionGetter: inputFormActionGetter,
+              methodGetter: inputFormMethodGetter,
+              targetGetter: inputFormTargetGetter,
+              enctypeGetter: inputFormEnctypeGetter,
+              noValidateGetter: inputFormNoValidateGetter
+            };
+          } catch {}
+          try {
+            return {
+              kind: 'button',
+              form: read(buttonFormGetter, element),
+              type: lower(read(buttonTypeGetter, element)),
+              valueGetter: buttonValueGetter,
+              actionGetter: buttonFormActionGetter,
+              methodGetter: buttonFormMethodGetter,
+              targetGetter: buttonFormTargetGetter,
+              enctypeGetter: buttonFormEnctypeGetter,
+              noValidateGetter: buttonFormNoValidateGetter
+            };
+          } catch {}
+          return null;
+        };
+        const pristineConstraintFingerprint = (provided, root, element) => {
+          if (provided !== token) return null;
+          let controls;
+          try {
+            if (!connected(root) || !connected(element)) return null;
+            controls = collectionValues(read(formElementsGetter, root), 512);
+          } catch {
+            return null;
+          }
+          if (!controls) return null;
+          const state = nullArray(controls.length + 1);
+          try {
+            const submitter = submitterState(element);
+            if (!submitter || submitter.form !== root) return null;
+            const formState = nullRecord();
+            formState.formNoValidate = NativeBoolean(read(formNoValidateGetter, root));
+            formState.submitterFormNoValidate = NativeBoolean(read(submitter.noValidateGetter, element));
+            state[0] = formState;
+            for (let index = 0; index < controls.length; index += 1) {
+              const control = controls[index];
+              const controlTag = tagName(control);
+              const attributes = nullArray(constraintAttributes.length);
+              for (let attributeIndex = 0; attributeIndex < constraintAttributes.length; attributeIndex += 1) {
+                const name = constraintAttributes[attributeIndex];
+                attributes[attributeIndex] = attribute(control, name);
+              }
+              let willValidate = false;
+              let validity = null;
+              let willValidateGetter = null;
+              let validityGetter = null;
+              if (controlTag === 'input') {
+                willValidateGetter = inputWillValidateGetter;
+                validityGetter = inputValidityGetter;
+              } else if (controlTag === 'textarea') {
+                willValidateGetter = textareaWillValidateGetter;
+                validityGetter = textareaValidityGetter;
+              } else if (controlTag === 'select') {
+                willValidateGetter = selectWillValidateGetter;
+                validityGetter = selectValidityGetter;
+              } else if (controlTag === 'button') {
+                willValidateGetter = buttonWillValidateGetter;
+                validityGetter = buttonValidityGetter;
+              } else if (controlTag !== 'fieldset' && controlTag !== 'output') {
+                return null;
+              }
+              if (willValidateGetter && validityGetter) {
+                willValidate = NativeBoolean(read(willValidateGetter, control));
+                const nativeValidity = read(validityGetter, control);
+                validity = nullArray(validityNames.length);
+                for (let flagIndex = 0; flagIndex < validityNames.length; flagIndex += 1) {
+                  validity[flagIndex] = NativeBoolean(read(validityGetters[flagIndex], nativeValidity));
+                }
+              }
+              const controlState = nullRecord();
+              controlState.tag = controlTag;
+              controlState.attributes = attributes;
+              controlState.willValidate = willValidate;
+              controlState.validity = validity;
+              state[index + 1] = controlState;
+            }
+            return apply(jsonStringify, nativeJSON, [state]);
+          } catch {
+            return null;
+          }
+        };
+        const pristineActivationFingerprint = (root, element, usesAssociatedForm) => {
+          let controls;
+          let submitter;
+          try {
+            if (!usesAssociatedForm || !connected(root) || !connected(element)) return null;
+            controls = collectionValues(read(formElementsGetter, root), 512);
+            submitter = submitterState(element);
+            if (!controls || !submitter || submitter.form !== root || submitter.type !== 'submit') return null;
+          } catch {
+            return null;
+          }
+          const state = nullRecord();
+          try {
+            state.url = NativeString(read(locationHrefGetter, nativeLocation));
+            const formState = nullRecord();
+            formState.id = attribute(root, 'id');
+            formState.actionAttribute = attribute(root, 'action');
+            formState.methodAttribute = attribute(root, 'method');
+            formState.targetAttribute = attribute(root, 'target');
+            formState.enctypeAttribute = attribute(root, 'enctype');
+            formState.noValidateAttribute = attribute(root, 'novalidate');
+            formState.acceptCharsetAttribute = attribute(root, 'accept-charset');
+            formState.resolvedAction = NativeString(read(formActionGetter, root));
+            formState.method = upper(read(formMethodGetter, root));
+            formState.target = lower(read(formTargetGetter, root));
+            if (!formState.target) {
+              const base = call(querySelector, document, 'base[target]');
+              formState.target = lower(base ? attribute(base, 'target') || '' : '') || '_self';
+            }
+            formState.enctype = lower(read(formEnctypeGetter, root));
+            formState.noValidate = NativeBoolean(read(formNoValidateGetter, root));
+            formState.acceptCharset = NativeString(read(formAcceptCharsetGetter, root));
+            state.form = formState;
+
+            const submitterFingerprint = nullRecord();
+            submitterFingerprint.tag = tagName(element);
+            submitterFingerprint.id = attribute(element, 'id');
+            submitterFingerprint.name = attribute(element, 'name');
+            submitterFingerprint.type = attribute(element, 'type');
+            submitterFingerprint.value = NativeString(read(submitter.valueGetter, element));
+            submitterFingerprint.text = submitter.kind === 'button'
+              ? NativeString(read(innerTextGetter, element))
+              : NativeString(read(submitter.valueGetter, element));
+            submitterFingerprint.ariaLabel = attribute(element, 'aria-label');
+            submitterFingerprint.ariaDisabled = attribute(element, 'aria-disabled');
+            submitterFingerprint.formAction = attribute(element, 'formaction');
+            submitterFingerprint.formMethod = attribute(element, 'formmethod');
+            submitterFingerprint.formTarget = attribute(element, 'formtarget');
+            submitterFingerprint.formEnctype = attribute(element, 'formenctype');
+            submitterFingerprint.formNoValidate = attribute(element, 'formnovalidate');
+            submitterFingerprint.formAssociation = attribute(element, 'form');
+            state.submitter = submitterFingerprint;
+
+            const controlStates = nullArray(controls.length);
+            for (let index = 0; index < controls.length; index += 1) {
+              const control = controls[index];
+              const controlTag = tagName(control);
+              const controlState = nullRecord();
+              controlState.tag = controlTag;
+              controlState.id = attribute(control, 'id');
+              controlState.name = attribute(control, 'name');
+              controlState.typeAttribute = attribute(control, 'type');
+              controlState.valueAttribute = attribute(control, 'value');
+              controlState.formAssociation = attribute(control, 'form');
+              controlState.disabled = NativeBoolean(call(matches, control, ':disabled'));
+              if (controlTag === 'input') {
+                const type = lower(read(inputTypeGetter, control));
+                controlState.type = type;
+                controlState.associated = read(inputFormGetter, control) === root;
+                controlState.checked = NativeBoolean(read(inputCheckedGetter, control));
+                if (type === 'file') {
+                  const files = fileValues(read(inputFilesGetter, control), 16);
+                  if (!files) return null;
+                  const fileStates = nullArray(files.length);
+                  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+                    const file = files[fileIndex];
+                    const fileState = nullRecord();
+                    fileState.name = NativeString(read(fileNameGetter, file));
+                    fileState.size = NativeNumber(read(blobSizeGetter, file));
+                    fileState.type = NativeString(read(blobTypeGetter, file));
+                    fileState.lastModified = NativeNumber(read(fileLastModifiedGetter, file));
+                    fileStates[fileIndex] = fileState;
+                  }
+                  controlState.files = fileStates;
+                  controlState.value = null;
+                } else {
+                  controlState.files = null;
+                  controlState.value = NativeString(read(inputValueGetter, control));
+                }
+              } else if (controlTag === 'textarea') {
+                controlState.associated = read(textareaFormGetter, control) === root;
+                controlState.value = NativeString(read(textareaValueGetter, control));
+              } else if (controlTag === 'select') {
+                controlState.associated = read(selectFormGetter, control) === root;
+                const options = collectionValues(read(selectOptionsGetter, control), 1024);
+                if (!options) return null;
+                const optionStates = nullArray(options.length);
+                for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+                  const option = options[optionIndex];
+                  const optionState = nullRecord();
+                  optionState.value = NativeString(read(optionValueGetter, option));
+                  optionState.selected = NativeBoolean(read(optionSelectedGetter, option));
+                  optionState.disabled = NativeBoolean(read(optionDisabledGetter, option));
+                  const parent = read(parentElementGetter, option);
+                  try {
+                    optionState.parentDisabled = parent
+                      ? NativeBoolean(read(optgroupDisabledGetter, parent))
+                      : false;
+                  } catch {
+                    optionState.parentDisabled = false;
+                  }
+                  optionStates[optionIndex] = optionState;
+                }
+                controlState.options = optionStates;
+              } else if (controlTag === 'button') {
+                controlState.associated = read(buttonFormGetter, control) === root;
+                controlState.type = lower(read(buttonTypeGetter, control));
+                controlState.value = NativeString(read(buttonValueGetter, control));
+              } else if (controlTag !== 'fieldset' && controlTag !== 'output') {
+                return null;
+              }
+              controlStates[index] = controlState;
+            }
+            state.controls = controlStates;
+            state.constraints = pristineConstraintFingerprint(token, root, element);
+            if (typeof state.constraints !== 'string') return null;
+            state.requiredBlockers = pristineRequiredControlBlockers(token, root);
+            if (!call(arrayIsArray, NativeArray, state.requiredBlockers)) return null;
+            return apply(jsonStringify, nativeJSON, [state]);
+          } catch {
+            return null;
+          }
+        };
+        const pristineV4SubmitCandidateSnapshot = (provided, root, element) => {
+          if (provided !== token) return null;
+          try {
+            if (!connected(root) || !connected(element) || !rendered(element)) return null;
+            for (const property of [
+              'innerText', 'textContent', 'value', 'form', 'type', 'disabled',
+              'formAction', 'formMethod', 'formTarget', 'formEnctype', 'formNoValidate'
+            ]) {
+              if (descriptor(element, property)) return null;
+            }
+            const submitter = submitterState(element);
+            if (!submitter || submitter.form !== root || submitter.type !== 'submit') return null;
+            const fingerprint = pristineActivationFingerprint(root, element, true);
+            if (typeof fingerprint !== 'string') return null;
+            const snapshot = nullRecord();
+            snapshot.tag = tagName(element);
+            snapshot.type = submitter.type;
+            snapshot.text = submitter.kind === 'button'
+              ? NativeString(read(innerTextGetter, element))
+              : NativeString(read(submitter.valueGetter, element));
+            snapshot.ariaLabel = NativeString(attribute(element, 'aria-label') || '');
+            snapshot.disabled = NativeBoolean(call(matches, element, ':disabled'))
+              || lower(attribute(element, 'aria-disabled') || '') === 'true';
+            snapshot.bindingFingerprint = fingerprint;
+            return snapshot;
+          } catch {
+            return null;
+          }
+        };
+        const pristineNativePostBinding = async (
+          provided,
+          root,
+          applicationScope,
+          element,
+          usesAssociatedForm,
+          successfulControls
+        ) => {
+          if (provided !== token || root !== applicationScope || !usesAssociatedForm) return null;
+          const initialFingerprint = pristineActivationFingerprint(root, element, usesAssociatedForm);
+          if (typeof initialFingerprint !== 'string') return null;
+          let controls;
+          try {
+            if (!connected(root) || !connected(element)) return null;
+            controls = collectionValues(read(formElementsGetter, root), 512);
+          } catch {
+            return null;
+          }
+          if (!controls) return null;
+          if (!call(arrayIsArray, NativeArray, successfulControls)
+            || successfulControls.length > 64) return null;
+          const successfulProofs = nullArray(successfulControls.length);
+          for (let proofIndex = 0; proofIndex < successfulControls.length; proofIndex += 1) {
+            const proofControl = successfulControls[proofIndex];
+            const proof = await pristineSuccessfulControlSnapshot(token, proofControl, root);
+            if (!proof) return null;
+            successfulProofs[proofIndex] = proof;
+          }
+          /* A proof is indexed by the runner's retained handle order, while a native POST emits
+           * controls in form.elements order. Preserve that second order explicitly so repeated-name
+           * groups, such as one-character OTP boxes, cannot be rearranged after their individual
+           * values were proved and then authorized under a different byte sequence. */
+          const successfulControlOrder = nullArray();
+          const seenSuccessfulControls = nullArray(successfulControls.length);
+          for (let controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+            const control = controls[controlIndex];
+            for (let proofIndex = 0; proofIndex < successfulControls.length; proofIndex += 1) {
+              if (successfulControls[proofIndex] !== control) continue;
+              if (seenSuccessfulControls[proofIndex]) return null;
+              seenSuccessfulControls[proofIndex] = true;
+              successfulControlOrder[successfulControlOrder.length] = proofIndex;
+            }
+          }
+          if (successfulControlOrder.length !== successfulControls.length) return null;
+          const submitter = submitterState(element);
+          if (!submitter || submitter.form !== root || submitter.type !== 'submit') return null;
+          let action;
+          let method;
+          let target;
+          let enctype;
+          try {
+            action = NativeString(carriesAttribute(element, 'formaction')
+              ? read(submitter.actionGetter, element)
+              : read(formActionGetter, root));
+            method = upper(carriesAttribute(element, 'formmethod')
+              ? read(submitter.methodGetter, element)
+              : read(formMethodGetter, root));
+            target = lower(carriesAttribute(element, 'formtarget')
+              ? read(submitter.targetGetter, element)
+              : read(formTargetGetter, root));
+            if (!target) {
+              const base = call(querySelector, document, 'base[target]');
+              target = lower(base ? attribute(base, 'target') || '' : '') || '_self';
+            }
+            enctype = lower(carriesAttribute(element, 'formenctype')
+              ? read(submitter.enctypeGetter, element)
+              : read(formEnctypeGetter, root));
+          } catch {
+            return null;
+          }
+          let validationDisabled;
+          try {
+            validationDisabled = NativeBoolean(read(formNoValidateGetter, root))
+              || NativeBoolean(read(submitter.noValidateGetter, element));
+          } catch {
+            return null;
+          }
+          let populatedFileControl = false;
+          try {
+            for (let controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+              const control = controls[controlIndex];
+              if (tagName(control) !== 'input' || lower(read(inputTypeGetter, control)) !== 'file') continue;
+              const files = fileValues(read(inputFilesGetter, control), 16);
+              if (!files) return null;
+              if (files.length > 0) {
+                populatedFileControl = true;
+                break;
+              }
+            }
+          } catch {
+            return null;
+          }
+          if (validationDisabled || target !== '_self' || method !== 'POST'
+            || (enctype !== 'multipart/form-data' && populatedFileControl)
+            || (enctype !== 'application/x-www-form-urlencoded' && enctype !== 'multipart/form-data')) {
+            return {
+              unsupportedReason: 'submit_transport_unsupported',
+              successfulProofs,
+              successfulControlOrder
+            };
+          }
+          const entries = [];
+          let totalBytes = 0;
+          const addText = (name, value) => {
+            const text = NativeString(value);
+            totalBytes += readLength(text);
+            if (totalBytes > 12_000_000 || entries.length >= 1024) return false;
+            entries[entries.length] = { name, kind: 'text', value: text };
+            return true;
+          };
+          const readLength = (value) => NativeNumber(read(
+            typedArrayByteLengthGetter,
+            apply(textEncode, textEncoder, [value])
+          ));
+          const addFile = async (name, file) => {
+            const size = NativeNumber(read(blobSizeGetter, file));
+            if (!isSafeInteger(size) || size < 0 || size > 12_000_000
+              || totalBytes + size > 12_000_000 || entries.length >= 1024) return false;
+            const bytes = await apply(blobArrayBuffer, file, []);
+            let byteLength;
+            try { byteLength = NativeNumber(read(arrayBufferByteLengthGetter, bytes)); } catch { return false; }
+            if (byteLength !== size) return false;
+            totalBytes += size;
+            entries[entries.length] = {
+              name,
+              kind: 'file',
+              filename: NativeString(read(fileNameGetter, file)),
+              contentType: NativeString(read(blobTypeGetter, file)) || 'application/octet-stream',
+              size,
+              lastModified: NativeNumber(read(fileLastModifiedGetter, file)),
+              bytesBase64: bytesToBase64(bytes)
+            };
+            return true;
+          };
+          const addProofFile = (name, file) => {
+            if (!file || typeof file.bytesBase64 !== 'string'
+              || !isSafeInteger(file.size) || file.size < 0 || file.size > 12_000_000
+              || totalBytes + file.size > 12_000_000 || entries.length >= 1024) return false;
+            const decoded = apply(nativeAtob, globalThis, [file.bytesBase64]);
+            if (NativeNumber(decoded.length) !== file.size) return false;
+            totalBytes += file.size;
+            entries[entries.length] = {
+              name,
+              kind: 'file',
+              filename: NativeString(file.name),
+              contentType: NativeString(file.type) || 'application/octet-stream',
+              size: file.size,
+              lastModified: NativeNumber(file.lastModified),
+              bytesBase64: file.bytesBase64
+            };
+            return true;
+          };
+          for (let controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+            const control = controls[controlIndex];
+            let boundProof = null;
+            for (let proofIndex = 0; proofIndex < successfulControls.length; proofIndex += 1) {
+              if (successfulControls[proofIndex] === control) {
+                boundProof = successfulProofs[proofIndex];
+                break;
+              }
+            }
+            let controlTag;
+            try {
+              controlTag = tagName(control);
+              if (controlTag === 'fieldset' || controlTag === 'output') continue;
+              if (call(matches, control, ':disabled')) continue;
+            } catch {
+              return null;
+            }
+            const name = NativeString(attribute(control, 'name') || '');
+            if (!name) continue;
+            if (boundProof && boundProof.name !== name) return null;
+            if (carriesAttribute(control, 'dirname') || name === '_charset_') return null;
+            if (controlTag === 'button') {
+              let type;
+              try { type = lower(read(buttonTypeGetter, control)); } catch { return null; }
+              if (control === element && type === 'submit'
+                && !addText(name, read(buttonValueGetter, control))) return null;
+              continue;
+            }
+            if (controlTag === 'input') {
+              let type;
+              try { type = lower(read(inputTypeGetter, control)); } catch { return null; }
+              if (boundProof && (boundProof.tag !== 'input' || boundProof.type !== type)) return null;
+              if (type === 'image') {
+                if (control === element) return null;
+                continue;
+              }
+              if (type === 'submit') {
+                if (control === element && !addText(name, read(inputValueGetter, control))) return null;
+                continue;
+              }
+              if (type === 'button' || type === 'reset') continue;
+              if (type === 'checkbox' || type === 'radio') {
+                if (boundProof) {
+                  if (boundProof.kind !== 'choice') return null;
+                  if (boundProof.checked && !addText(name, boundProof.value)) return null;
+                } else if (read(inputCheckedGetter, control)
+                  && !addText(name, read(inputValueGetter, control))) return null;
+                continue;
+              }
+              if (type === 'file') {
+                if (boundProof) {
+                  if (boundProof.kind !== 'file' || !call(arrayIsArray, NativeArray, boundProof.files)) return null;
+                  if (boundProof.files.length === 0) {
+                    if (entries.length >= 1024) return null;
+                    entries[entries.length] = {
+                      name,
+                      kind: 'file',
+                      filename: '',
+                      contentType: 'application/octet-stream',
+                      size: 0,
+                      lastModified: 0,
+                      bytesBase64: ''
+                    };
+                  } else {
+                    for (let fileIndex = 0; fileIndex < boundProof.files.length; fileIndex += 1) {
+                      if (!addProofFile(name, boundProof.files[fileIndex])) return null;
+                    }
+                  }
+                  continue;
+                }
+                let files;
+                try { files = fileValues(read(inputFilesGetter, control), 16); } catch { return null; }
+                if (!files) return null;
+                if (files.length === 0) {
+                  if (entries.length >= 1024) return null;
+                  entries[entries.length] = {
+                    name,
+                    kind: 'file',
+                    filename: '',
+                    contentType: 'application/octet-stream',
+                    size: 0,
+                    lastModified: 0,
+                    bytesBase64: ''
+                  };
+                } else {
+                  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+                    if (!await addFile(name, files[fileIndex])) return null;
+                  }
+                }
+                continue;
+              }
+              if (boundProof) {
+                if (boundProof.kind !== 'value' || !addText(name, boundProof.value)) return null;
+              } else if (!addText(name, read(inputValueGetter, control))) return null;
+              continue;
+            }
+            if (controlTag === 'textarea') {
+              if (boundProof) {
+                if (boundProof.tag !== 'textarea' || boundProof.kind !== 'value'
+                  || !addText(name, boundProof.value)) return null;
+              } else if (!addText(name, read(textareaValueGetter, control))) return null;
+              continue;
+            }
+            if (controlTag === 'select') {
+              if (boundProof) {
+                if (boundProof.tag !== 'select' || boundProof.kind !== 'select'
+                  || !call(arrayIsArray, NativeArray, boundProof.selectedValues)) return null;
+                for (let selectedIndex = 0; selectedIndex < boundProof.selectedValues.length; selectedIndex += 1) {
+                  if (!addText(name, boundProof.selectedValues[selectedIndex])) return null;
+                }
+                continue;
+              }
+              let options;
+              try { options = collectionValues(read(selectOptionsGetter, control), 1024); } catch { return null; }
+              if (!options) return null;
+              for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+                const option = options[optionIndex];
+                let disabled = NativeBoolean(read(optionDisabledGetter, option));
+                if (!disabled) {
+                  const parent = read(parentElementGetter, option);
+                  if (parent) {
+                    try { disabled = NativeBoolean(read(optgroupDisabledGetter, parent)); } catch {}
+                  }
+                }
+                if (!disabled && read(optionSelectedGetter, option)
+                  && !addText(name, read(optionValueGetter, option))) return null;
+              }
+              continue;
+            }
+            return null;
+          }
+          const finalFingerprint = pristineActivationFingerprint(root, element, usesAssociatedForm);
+          if (finalFingerprint !== initialFingerprint) return null;
+          return {
+            action,
+            method,
+            target,
+            enctype,
+            entries,
+            successfulProofs,
+            successfulControlOrder,
+            bindingFingerprint: finalFingerprint
+          };
+        };
+        const semanticChoiceGroupSelector = '[role="group"][aria-labelledby], [role="group"][aria-label],'
+          + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]';
+        const pristineSemanticChoiceBinding = (control, root) => {
+          if (tagName(control) !== 'input') return null;
+          const controlType = lower(read(inputTypeGetter, control));
+          if (controlType !== 'checkbox' && controlType !== 'radio') return null;
+          const group = call(closest, control, semanticChoiceGroupSelector);
+          if (!group || !call(nodeContains, root, group)) return null;
+          const candidates = nodeListValues(
+            call(elementQuerySelectorAll, group, 'input[type="checkbox"], input[type="radio"]'),
+            512
+          );
+          if (!candidates) throw new NativeTypeError('Unverifiable semantic choice group');
+          const peers = nullArray();
+          let includesControl = false;
+          for (let index = 0; index < candidates.length; index += 1) {
+            const peer = candidates[index];
+            if (call(closest, peer, semanticChoiceGroupSelector) !== group) continue;
+            peers[peers.length] = peer;
+            if (peer === control) includesControl = true;
+          }
+          if (!includesControl) return null;
+          const binding = nullRecord();
+          binding.group = group;
+          binding.peers = peers;
+          return binding;
+        };
+        const coherentSemanticCheckboxGroupAnswered = (control, binding, root) => {
+          if (!binding || lower(attribute(binding.group, 'role') || '') !== 'group'
+            || lower(read(inputTypeGetter, control)) !== 'checkbox'
+            || call(matches, control, ':disabled') || binding.peers.length < 2) return null;
+          const expectedForm = read(inputFormGetter, control);
+          if (expectedForm !== root) return null;
+          for (let index = 0; index < binding.peers.length; index += 1) {
+            const peer = binding.peers[index];
+            if (tagName(peer) !== 'input'
+              || read(inputFormGetter, peer) !== expectedForm
+              || lower(read(inputTypeGetter, peer)) !== 'checkbox'
+              || !NativeString(attribute(peer, 'name') || '')) return null;
+          }
+          for (let index = 0; index < binding.peers.length; index += 1) {
+            const peer = binding.peers[index];
+            if (!call(matches, peer, ':disabled')
+              && NativeBoolean(read(inputCheckedGetter, peer))) return true;
+          }
+          return false;
+        };
+        const enabledChoiceGroupAnswered = (control, controls) => {
+          if (tagName(control) !== 'input' || call(matches, control, ':disabled')) return false;
+          const expectedType = lower(read(inputTypeGetter, control));
+          if (expectedType !== 'checkbox' && expectedType !== 'radio') return false;
+          const expectedName = NativeString(attribute(control, 'name') || '');
+          const expectedForm = read(inputFormGetter, control);
+          for (let index = 0; index < controls.length; index += 1) {
+            const peer = controls[index];
+            if (tagName(peer) !== 'input'
+              || read(inputFormGetter, peer) !== expectedForm
+              || lower(read(inputTypeGetter, peer)) !== expectedType
+              || NativeString(attribute(peer, 'name') || '') !== expectedName
+              || call(matches, peer, ':disabled')) continue;
+            if (NativeBoolean(read(inputCheckedGetter, peer))) return true;
+          }
+          return false;
+        };
+        const selectHasSuccessfulValue = (control) => {
+          if (tagName(control) !== 'select' || call(matches, control, ':disabled')) return false;
+          const options = collectionValues(read(selectOptionsGetter, control), 1024);
+          if (!options) throw new NativeTypeError('Unverifiable select options');
+          for (let index = 0; index < options.length; index += 1) {
+            const option = options[index];
+            if (!NativeBoolean(read(optionSelectedGetter, option))) continue;
+            let disabled = NativeBoolean(read(optionDisabledGetter, option));
+            if (!disabled) {
+              const parent = read(parentElementGetter, option);
+              if (parent && tagName(parent) === 'optgroup') {
+                disabled = NativeBoolean(read(optgroupDisabledGetter, parent));
+              }
+            }
+            if (!disabled && NativeString(read(optionValueGetter, option)).trim().length > 0) return true;
+          }
+          return false;
+        };
+        const nativeControlForm = (control) => {
+          const controlTag = tagName(control);
+          if (controlTag === 'input') return read(inputFormGetter, control);
+          if (controlTag === 'textarea') return read(textareaFormGetter, control);
+          if (controlTag === 'select') return read(selectFormGetter, control);
+          return null;
+        };
+        const associatedNamedControlsInside = (container, root) => {
+          const candidates = nodeListValues(
+            call(elementQuerySelectorAll, container, 'input, textarea, select'),
+            512
+          );
+          if (!candidates) throw new NativeTypeError('Unverifiable external required owner');
+          const associated = nullArray();
+          const addAssociated = (candidate) => {
+            if (!candidate || nativeControlForm(candidate) !== root
+              || !NativeString(attribute(candidate, 'name') || '').trim()) return;
+            for (let index = 0; index < associated.length; index += 1) {
+              if (associated[index] === candidate) return;
+            }
+            associated[associated.length] = candidate;
+          };
+          for (let index = 0; index < candidates.length; index += 1) {
+            addAssociated(candidates[index]);
+          }
+          const ownedIds = NativeString(attribute(container, 'aria-owns') || '').trim().split(/\s+/);
+          if (ownedIds.length > 16) throw new NativeTypeError('Unverifiable custom required ownership');
+          for (let index = 0; index < ownedIds.length; index += 1) {
+            if (!ownedIds[index]) continue;
+            addAssociated(call(getElementById, nativeDocument, ownedIds[index]));
+          }
+          return associated;
+        };
+        const unambiguousRequiredOwnerControl = (associated) => {
+          const enabled = nullArray();
+          for (let index = 0; index < associated.length; index += 1) {
+            if (!call(matches, associated[index], ':disabled')) {
+              enabled[enabled.length] = associated[index];
+            }
+          }
+          if (enabled.length === 1) return enabled[0];
+          if (enabled.length < 2) return null;
+          const first = enabled[0];
+          if (tagName(first) !== 'input') return null;
+          const expectedType = lower(read(inputTypeGetter, first));
+          const expectedName = NativeString(attribute(first, 'name') || '');
+          const expectedForm = read(inputFormGetter, first);
+          if ((expectedType !== 'checkbox' && expectedType !== 'radio') || !expectedName) return null;
+          for (let index = 1; index < enabled.length; index += 1) {
+            const peer = enabled[index];
+            if (tagName(peer) !== 'input'
+              || lower(read(inputTypeGetter, peer)) !== expectedType
+              || NativeString(attribute(peer, 'name') || '') !== expectedName
+              || read(inputFormGetter, peer) !== expectedForm) return null;
+          }
+          return first;
+        };
+        const requiredOwnerControlAnswered = (control, controls) => {
+          if (!control || call(matches, control, ':disabled')
+            || !NativeString(attribute(control, 'name') || '').trim()) return false;
+          const controlTag = tagName(control);
+          if (controlTag === 'input') {
+            const type = lower(read(inputTypeGetter, control));
+            if (type === 'checkbox' || type === 'radio') {
+              return enabledChoiceGroupAnswered(control, controls);
+            }
+            if (type === 'file') {
+              const files = fileValues(read(inputFilesGetter, control), 16);
+              return NativeBoolean(files && files.length > 0);
+            }
+            if (['submit', 'button', 'reset', 'image'].includes(type)) return false;
+            return NativeString(read(inputValueGetter, control)).trim().length > 0;
+          }
+          if (controlTag === 'textarea') {
+            return NativeString(read(textareaValueGetter, control)).trim().length > 0;
+          }
+          if (controlTag === 'select') return selectHasSuccessfulValue(control);
+          return false;
+        };
+        const pristineRequiredControlBlockers = (provided, root) => {
+          if (provided !== token) return null;
+          try {
+            if (!connected(root) || tagName(root) !== 'form') return null;
+            const controls = collectionValues(read(formElementsGetter, root), 512);
+            if (!controls) return null;
+            const blockers = nullArray();
+            for (let index = 0; index < controls.length; index += 1) {
+              const control = controls[index];
+              if (call(matches, control, ':disabled')) continue;
+              const controlTag = tagName(control);
+              if (controlTag !== 'input' && controlTag !== 'textarea' && controlTag !== 'select') continue;
+              const nativeRequired = carriesAttribute(control, 'required');
+              const ariaRequired = lower(attribute(control, 'aria-required') || '') === 'true';
+              if (!nativeRequired && !ariaRequired) continue;
+              let missing = !NativeString(attribute(control, 'name') || '').trim();
+              let inputType = '';
+              let semanticBinding = null;
+              let semanticCheckboxAnswered = null;
+              let choicePeers = controls;
+              if (controlTag === 'input') {
+                inputType = lower(read(inputTypeGetter, control));
+                if (inputType === 'checkbox' || inputType === 'radio') {
+                  semanticBinding = pristineSemanticChoiceBinding(control, root);
+                  if (semanticBinding) choicePeers = semanticBinding.peers;
+                  semanticCheckboxAnswered = coherentSemanticCheckboxGroupAnswered(
+                    control,
+                    semanticBinding,
+                    root
+                  );
+                }
+              }
+              let nativeValidity = null;
+              if (controlTag === 'input') nativeValidity = read(inputValidityGetter, control);
+              else if (controlTag === 'textarea') nativeValidity = read(textareaValidityGetter, control);
+              else if (controlTag === 'select') nativeValidity = read(selectValidityGetter, control);
+              if (nativeRequired && nativeValidity) {
+                missing = missing || (semanticCheckboxAnswered === null
+                  ? NativeBoolean(read(valueMissingGetter, nativeValidity))
+                  : !semanticCheckboxAnswered);
+              }
+              if (!missing && (nativeRequired || ariaRequired)) {
+                if (controlTag === 'input') {
+                  if (inputType === 'radio' || (inputType === 'checkbox' && ariaRequired)) {
+                    missing = semanticCheckboxAnswered === null
+                      ? !enabledChoiceGroupAnswered(control, choicePeers)
+                      : !semanticCheckboxAnswered;
+                  } else if (inputType === 'file') {
+                    const files = fileValues(read(inputFilesGetter, control), 16);
+                    missing = !files || files.length === 0;
+                  } else if (ariaRequired && !['submit', 'button', 'reset', 'image'].includes(inputType)) {
+                    missing = NativeString(read(inputValueGetter, control)).trim().length === 0;
+                  }
+                } else if (controlTag === 'textarea' && ariaRequired) {
+                  missing = NativeString(read(textareaValueGetter, control)).trim().length === 0;
+                } else if (controlTag === 'select') {
+                  missing = !selectHasSuccessfulValue(control);
+                }
+              }
+              if (!missing) continue;
+              const blocker = nullRecord();
+              blocker.index = index;
+              blocker.tag = controlTag;
+              blocker.name = NativeString(attribute(control, 'name') || '');
+              blocker.id = NativeString(attribute(control, 'id') || '');
+              blockers[blockers.length] = blocker;
+            }
+            const localCustomRequired = nodeListValues(
+              call(elementQuerySelectorAll, root, '[aria-required]'), 512
+            );
+            const documentCustomRequired = nodeListValues(
+              call(querySelectorAll, nativeDocument, '[aria-required]'), 2048
+            );
+            if (!localCustomRequired || !documentCustomRequired) return null;
+            const customRequired = nullArray();
+            const addCustomRequired = (candidate) => {
+              for (let index = 0; index < customRequired.length; index += 1) {
+                if (customRequired[index] === candidate) return;
+              }
+              if (!call(nodeContains, root, candidate)
+                && associatedNamedControlsInside(candidate, root).length === 0) return;
+              customRequired[customRequired.length] = candidate;
+            };
+            for (let index = 0; index < localCustomRequired.length; index += 1) {
+              addCustomRequired(localCustomRequired[index]);
+            }
+            for (let index = 0; index < documentCustomRequired.length; index += 1) {
+              addCustomRequired(documentCustomRequired[index]);
+            }
+            for (let index = 0; index < customRequired.length; index += 1) {
+              const custom = customRequired[index];
+              const customTag = tagName(custom);
+              if (customTag === 'input' || customTag === 'textarea' || customTag === 'select'
+                || lower(attribute(custom, 'aria-required') || '') !== 'true'
+                || lower(attribute(custom, 'aria-disabled') || '') === 'true'
+                || !renderedOwner(custom)) continue;
+              const associated = associatedNamedControlsInside(custom, root);
+              const answerControl = unambiguousRequiredOwnerControl(associated);
+              const answered = requiredOwnerControlAnswered(answerControl, controls);
+              if (answered) continue;
+              const blocker = nullRecord();
+              blocker.index = controls.length + index;
+              blocker.tag = customTag;
+              blocker.name = NativeString(attribute(custom, 'name') || '');
+              blocker.id = NativeString(attribute(custom, 'id') || '');
+              blockers[blockers.length] = blocker;
+            }
+            const rootTree = call(getRootNode, root);
+            const markerNodes = rootTree === nativeDocument
+              ? call(querySelectorAll, nativeDocument, 'label, legend')
+              : call(fragmentQuerySelectorAll, rootTree, 'label, legend');
+            const markers = nodeListValues(markerNodes, 2048);
+            if (!markers) return null;
+            for (let markerIndex = 0; markerIndex < markers.length; markerIndex += 1) {
+              const marker = markers[markerIndex];
+              if (!renderedOwner(marker)) continue;
+              const classMarksRequired = /_required_/.test(attribute(marker, 'class') || '');
+              const markerText = visibleRenderedText(marker)
+                .replace(/\s+/g, ' ').trim();
+              const starMarksRequired = /\*(?:\s|$)|(?:^|\s)\*/.test(markerText)
+                && !/\*\s*(?:indicates|denotes|means|marks|=)/i.test(markerText);
+              if (!classMarksRequired && !starMarksRequired) continue;
+              let control = null;
+              if (tagName(marker) === 'label') {
+                try { control = read(labelControlGetter, marker); } catch {}
+              }
+              if (!control) {
+                try { control = call(elementQuerySelector, marker, 'input, textarea, select'); } catch {}
+              }
+              if (!control && tagName(marker) === 'legend') {
+                const owner = read(parentElementGetter, marker);
+                const associated = owner && tagName(owner) === 'fieldset'
+                  ? associatedNamedControlsInside(owner, root)
+                  : nullArray();
+                control = unambiguousRequiredOwnerControl(associated);
+              }
+              if (!control && !call(nodeContains, root, marker)) {
+                const owner = read(parentElementGetter, marker);
+                const associated = owner ? associatedNamedControlsInside(owner, root) : nullArray();
+                control = unambiguousRequiredOwnerControl(associated);
+                if (!control && associated.length > 1) {
+                  const blocker = nullRecord();
+                  blocker.index = controls.length + customRequired.length + markerIndex;
+                  blocker.tag = tagName(marker);
+                  blocker.name = '';
+                  blocker.id = NativeString(attribute(marker, 'id') || '');
+                  blockers[blockers.length] = blocker;
+                  continue;
+                }
+              }
+              if (!control) {
+                if (!call(nodeContains, root, marker)) continue;
+                const blocker = nullRecord();
+                blocker.index = controls.length + customRequired.length + markerIndex;
+                blocker.tag = tagName(marker);
+                blocker.name = '';
+                blocker.id = NativeString(attribute(marker, 'id') || '');
+                blockers[blockers.length] = blocker;
+                continue;
+              }
+              const controlTag = tagName(control);
+              const associatedForm = nativeControlForm(control);
+              if (associatedForm !== root) continue;
+              const missing = !requiredOwnerControlAnswered(control, controls);
+              if (!missing) continue;
+              const blocker = nullRecord();
+              blocker.index = controls.length + customRequired.length + markerIndex;
+              blocker.tag = controlTag;
+              blocker.name = NativeString(attribute(control, 'name') || '');
+              blocker.id = NativeString(attribute(control, 'id') || '');
+              blockers[blockers.length] = blocker;
+            }
+            return blockers;
+          } catch {
+            return null;
+          }
+        };
+        const pristineSecurityCodeGroup = (provided, elements, root, parent) => {
+          if (provided !== token || !call(arrayIsArray, NativeArray, elements)
+            || elements.length < 1 || elements.length > 12) return null;
+          try {
+            if (!connected(root) || tagName(root) !== 'form') return null;
+            let allAutocomplete = true;
+            let allSingleCharacter = elements.length >= 4 && NativeBoolean(parent) && connected(parent);
+            for (let index = 0; index < elements.length; index += 1) {
+              const element = elements[index];
+              if (!connected(element) || !rendered(element) || tagName(element) !== 'input'
+                || read(inputFormGetter, element) !== root) return null;
+              const type = lower(read(inputTypeGetter, element));
+              if (!['text', 'search', 'tel', 'url', 'email', 'password'].includes(type)) return null;
+              for (let prior = 0; prior < index; prior += 1) {
+                if (elements[prior] === element) return null;
+              }
+              if (index > 0) {
+                const position = call(compareDocumentPosition, elements[index - 1], element);
+                if ((position & documentPositionFollowing) === 0) return null;
+              }
+              const autocomplete = lower(attribute(element, 'autocomplete') || '');
+              if (!/(?:^|\s)one-time-code(?:\s|$)/.test(autocomplete)) allAutocomplete = false;
+              if (NativeNumber(read(inputMaxLengthGetter, element)) !== 1
+                || read(parentElementGetter, element) !== parent) allSingleCharacter = false;
+            }
+            if (!allAutocomplete && !allSingleCharacter) return null;
+            const snapshot = nullRecord();
+            snapshot.kind = allAutocomplete ? 'autocomplete' : 'single_character_group';
+            snapshot.count = elements.length;
+            snapshot.allNamed = true;
+            snapshot.names = nullArray(elements.length);
+            snapshot.types = nullArray(elements.length);
+            snapshot.values = nullArray(elements.length);
+            for (let index = 0; index < elements.length; index += 1) {
+              snapshot.names[index] = NativeString(attribute(elements[index], 'name') || '');
+              snapshot.types[index] = lower(read(inputTypeGetter, elements[index]));
+              snapshot.values[index] = NativeString(read(inputValueGetter, elements[index]));
+              if (!snapshot.names[index]) snapshot.allNamed = false;
+            }
+            return snapshot;
+          } catch {
+            return null;
+          }
+        };
+        const pristineSuccessfulControlForm = (provided, element) => {
+          if (provided !== token) return null;
+          try {
+            if (!connected(element)) return null;
+            const controlTag = tagName(element);
+            const associatedForm = controlTag === 'input'
+              ? read(inputFormGetter, element)
+              : controlTag === 'textarea'
+                ? read(textareaFormGetter, element)
+                : controlTag === 'select'
+                  ? read(selectFormGetter, element)
+                  : null;
+            return connected(associatedForm) ? associatedForm : null;
+          } catch {
+            return null;
+          }
+        };
+        const pristineSuccessfulControlSnapshot = async (provided, element, root) => {
+          if (provided !== token) return null;
+          try {
+            if (!connected(root) || !connected(element)) return null;
+            if (call(matches, element, ':disabled')) return null;
+            const controlTag = tagName(element);
+            const associatedForm = controlTag === 'input'
+              ? read(inputFormGetter, element)
+              : controlTag === 'textarea'
+                ? read(textareaFormGetter, element)
+                : controlTag === 'select'
+                  ? read(selectFormGetter, element)
+                  : null;
+            if (associatedForm !== root) return null;
+            const controls = collectionValues(read(formElementsGetter, root), 512);
+            if (!controls) return null;
+            let belongs = false;
+            for (let index = 0; index < controls.length; index += 1) {
+              if (controls[index] === element) {
+                belongs = true;
+                break;
+              }
+            }
+            if (!belongs) return null;
+            const snapshot = nullRecord();
+            snapshot.tag = controlTag;
+            snapshot.name = NativeString(attribute(element, 'name') || '');
+            if (!snapshot.name) return null;
+            if (controlTag === 'input') {
+              const type = lower(read(inputTypeGetter, element));
+              snapshot.type = type;
+              if (type === 'file') {
+                const files = fileValues(read(inputFilesGetter, element), 16);
+                if (!files) return null;
+                const fileSnapshots = nullArray(files.length);
+                let totalBytes = 0;
+                for (let index = 0; index < files.length; index += 1) {
+                  const file = files[index];
+                  const size = NativeNumber(read(blobSizeGetter, file));
+                  if (!isSafeInteger(size) || size < 0 || size > 12_000_000
+                    || totalBytes + size > 12_000_000) return null;
+                  const buffer = await apply(blobArrayBuffer, file, []);
+                  if (NativeNumber(read(arrayBufferByteLengthGetter, buffer)) !== size) return null;
+                  totalBytes += size;
+                  const fileSnapshot = nullRecord();
+                  fileSnapshot.name = NativeString(read(fileNameGetter, file));
+                  fileSnapshot.type = NativeString(read(blobTypeGetter, file));
+                  fileSnapshot.size = size;
+                  fileSnapshot.lastModified = NativeNumber(read(fileLastModifiedGetter, file));
+                  fileSnapshot.bytesBase64 = bytesToBase64(buffer);
+                  fileSnapshots[index] = fileSnapshot;
+                }
+                snapshot.kind = 'file';
+                snapshot.files = fileSnapshots;
+              } else if (type === 'checkbox' || type === 'radio') {
+                snapshot.kind = 'choice';
+                snapshot.checked = NativeBoolean(read(inputCheckedGetter, element));
+                snapshot.value = NativeString(read(inputValueGetter, element));
+                snapshot.ariaLabel = NativeString(attribute(element, 'aria-label') || '');
+                const labels = nodeListValues(read(inputLabelsGetter, element), 16);
+                if (!labels) return null;
+                const labelTexts = nullArray(labels.length);
+                for (let index = 0; index < labels.length; index += 1) {
+                  labelTexts[index] = rendered(labels[index])
+                    ? NativeString(read(innerTextGetter, labels[index]))
+                    : '';
+                }
+                snapshot.labels = labelTexts;
+              } else {
+                snapshot.kind = 'value';
+                snapshot.value = NativeString(read(inputValueGetter, element));
+                const phoneHint = [
+                  attribute(element, 'placeholder') || '',
+                  attribute(element, 'aria-label') || '',
+                  attribute(element, 'name') || '',
+                  attribute(element, 'id') || '',
+                  attribute(element, 'data-input') || '',
+                  attribute(element, 'data-testid') || ''
+                ].join(' ');
+                snapshot.telShaped = type === 'tel'
+                  || lower(attribute(element, 'inputmode') || '') === 'tel'
+                  || /(?:^|\s|:)tel(?:$|\s|-)/.test(lower(attribute(element, 'autocomplete') || ''))
+                  || /(?:\b|_)(?:phone|mobile|telephone|tel)(?:\b|_)/i.test(phoneHint);
+                snapshot.datePrecision = type === 'date'
+                  ? 'day'
+                  : type === 'month'
+                    ? 'month'
+                    : (call(closest, element,
+                        '.react-datepicker-wrapper, .react-datepicker__input-container,'
+                        + ' [class*="datepicker" i], [class*="date-picker" i]')
+                      || /\b(?:pick|choose|select)\b\s*(?:a|an|the)?\s*date\b/i.test(
+                        attribute(element, 'placeholder') || ''
+                      ))
+                        ? 'day'
+                        : '';
+              }
+            } else if (controlTag === 'textarea') {
+              snapshot.kind = 'value';
+              snapshot.value = NativeString(read(textareaValueGetter, element));
+              snapshot.telShaped = false;
+              snapshot.datePrecision = '';
+            } else if (controlTag === 'select') {
+              const options = collectionValues(read(selectOptionsGetter, element), 1024);
+              if (!options) return null;
+              const selected = nullArray();
+              const selectedLabels = nullArray();
+              const optionValues = nullArray(options.length);
+              const optionLabels = nullArray(options.length);
+              let selectedIndex = -1;
+              for (let index = 0; index < options.length; index += 1) {
+                optionValues[index] = NativeString(read(optionValueGetter, options[index]));
+                optionLabels[index] = NativeString(read(optionLabelGetter, options[index]));
+                if (!NativeBoolean(read(optionSelectedGetter, options[index]))) continue;
+                if (selectedIndex === -1) selectedIndex = index;
+                selected[selected.length] = optionValues[index];
+                selectedLabels[selectedLabels.length] = optionLabels[index];
+              }
+              snapshot.kind = 'select';
+              snapshot.selectedIndex = selectedIndex;
+              snapshot.selectedValues = selected;
+              snapshot.selectedLabels = selectedLabels;
+              snapshot.optionValues = optionValues;
+              snapshot.optionLabels = optionLabels;
+            } else {
+              return null;
+            }
+            return snapshot;
+          } catch {
+            return null;
+          }
+        };
+        const transportState = { mode: 'locked', root: null, submitter: null };
+        let activationState = null;
+        const cancelEvent = (event) => {
+          if (!event) return;
+          try { call(preventDefault, event); } catch {}
+          try { call(stopImmediatePropagation, event); } catch {}
+        };
+        const trustedEvent = (event) => {
+          try {
+            const trust = descriptor(event, 'isTrusted');
+            return NativeBoolean(trust && trust.configurable === false && typeof trust.get === 'function'
+              && call(trust.get, event));
+          } catch {
+            return false;
+          }
+        };
+        const eventTarget = (event) => {
+          try { return read(eventTargetGetter, event); } catch { return null; }
+        };
+        const submitterForEvent = (event) => {
+          try { return read(submitEventSubmitterGetter, event); } catch { return null; }
+        };
+        const eventType = (event) => {
+          try { return NativeString(read(eventTypeGetter, event)); } catch { return 'activation'; }
+        };
+        call(addEventListener, nativeDocument, 'submit', (event) => {
+          const eventSubmitter = submitterForEvent(event);
+          const exactActivation = transportState.mode === 'activation'
+            && trustedEvent(event)
+            && eventTarget(event) === transportState.root
+            && eventSubmitter === transportState.submitter
+            && eventSubmitter;
+          if (!exactActivation) cancelEvent(event);
+        }, true);
+        const activationAttributeFilter = [
+          'id', 'action', 'method', 'target', 'enctype', 'novalidate', 'accept-charset',
+          'form', 'type', 'name', 'value', 'disabled', 'readonly', 'required', 'pattern',
+          'min', 'max', 'step', 'minlength', 'maxlength', 'multiple',
+          'formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate',
+          'href', 'selected', 'aria-label', 'aria-disabled', 'aria-required', 'aria-owns',
+          'aria-labelledby', 'role', 'class', 'style', 'hidden', 'for'
+        ];
+        const ordinaryActivationEvents = ['pointerdown', 'mousedown', 'focus', 'click'];
+        const appendUnique = (values, candidate) => {
+          if (!candidate) return;
+          for (let index = 0; index < values.length; index += 1) {
+            if (values[index] === candidate) return;
+          }
+          values[values.length] = candidate;
+        };
+        const cleanupActivation = (state) => {
+          if (!state) return;
+          for (let index = 0; index < ordinaryActivationEvents.length; index += 1) {
+            const type = ordinaryActivationEvents[index];
+            call(removeEventListener, nativeDocument, type, state.activationListener, true);
+            call(removeEventListener, nativeDocument, type, state.activationListener, false);
+            call(removeEventListener, nativeWindow, type, state.activationListener, false);
+          }
+          call(removeEventListener, nativeDocument, 'submit', state.submitCapture, true);
+          call(removeEventListener, nativeDocument, 'submit', state.submitDocumentBubble, false);
+          call(removeEventListener, nativeWindow, 'submit', state.submitWindowBubble, false);
+          call(removeEventListener, state.root, 'formdata', state.formDataListener, false);
+          call(mutationDisconnect, state.observer);
+          transportState.mode = 'locked';
+          transportState.root = null;
+          transportState.submitter = null;
+          if (activationState === state) activationState = null;
+        };
+        const armActivation = (
+          provided,
+          root,
+          applicationScope,
+          element,
+          usesAssociatedForm,
+          authorizedFingerprint
+        ) => {
+          if (provided !== token || activationState || root !== applicationScope || !usesAssociatedForm) return null;
+          let submitter;
+          let controls;
+          try {
+            submitter = submitterState(element);
+            controls = collectionValues(read(formElementsGetter, root), 512);
+            if (!connected(root) || !connected(element) || !submitter || !controls
+              || submitter.form !== root || submitter.type !== 'submit') return 'submit_activation_guard_unavailable';
+            if (NativeBoolean(read(formNoValidateGetter, root))
+              || NativeBoolean(read(submitter.noValidateGetter, element))) return 'submit_transport_unsupported';
+          } catch {
+            return 'submit_activation_guard_unavailable';
+          }
+          const expected = pristineActivationFingerprint(root, element, usesAssociatedForm);
+          if (typeof expected !== 'string' || typeof authorizedFingerprint !== 'string') {
+            return 'submit_activation_guard_unavailable';
+          }
+          if (expected !== authorizedFingerprint) return 'submit_activation_binding_changed';
+          const protectedNodes = new NativeArray();
+          appendUnique(protectedNodes, root);
+          appendUnique(protectedNodes, element);
+          let bases;
+          try { bases = nodeListValues(call(querySelectorAll, nativeDocument, 'base'), 32); } catch { bases = null; }
+          if (!bases) return 'submit_activation_guard_unavailable';
+          for (let index = 0; index < bases.length; index += 1) appendUnique(protectedNodes, bases[index]);
+          for (let controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+            const control = controls[controlIndex];
+            appendUnique(protectedNodes, control);
+            try {
+              if (tagName(control) === 'select') {
+                const options = collectionValues(read(selectOptionsGetter, control), 1024);
+                if (!options) return 'submit_activation_guard_unavailable';
+                for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+                  appendUnique(protectedNodes, options[optionIndex]);
+                }
+              }
+              let ancestor = read(parentElementGetter, control);
+              while (ancestor) {
+                const ancestorTag = tagName(ancestor);
+                if (ancestorTag === 'fieldset' || ancestorTag === 'legend') {
+                  appendUnique(protectedNodes, ancestor);
+                }
+                if (ancestor === root) break;
+                ancestor = read(parentElementGetter, ancestor);
+              }
+            } catch {
+              return 'submit_activation_guard_unavailable';
+            }
+          }
+          const isProtected = (candidate) => {
+            for (let index = 0; index < protectedNodes.length; index += 1) {
+              if (protectedNodes[index] === candidate) return true;
+            }
+            return false;
+          };
+          const nodeTouchesProtected = (candidate, target) => {
+            if (!candidate) return false;
+            if (isProtected(candidate)) return true;
+            try {
+              if (tagName(candidate) === 'base' || call(elementQuerySelector, candidate, 'base')) return true;
+            } catch {}
+            for (let index = 0; index < protectedNodes.length; index += 1) {
+              const protectedNode = protectedNodes[index];
+              try {
+                if (call(nodeContains, candidate, protectedNode)) return true;
+                if (protectedNode !== root && call(nodeContains, protectedNode, candidate)) return true;
+              } catch {}
+            }
+            try {
+              const targetTag = tagName(target);
+              if (isProtected(target) && (target === element || targetTag === 'select' || targetTag === 'option')) {
+                return true;
+              }
+            } catch {}
+            return false;
+          };
+          const state = nullRecord();
+          state.status = 'armed';
+          state.reason = null;
+          state.root = root;
+          state.submitter = element;
+          state.expected = expected;
+          state.submitEvent = null;
+          state.captureSeen = false;
+          state.documentBubbleSeen = false;
+          state.windowBubbleSeen = false;
+          state.formDataSeen = false;
+          state.mutated = false;
+          const blockActivation = (reason, event = null) => {
+            state.status = 'blocked';
+            state.reason = state.reason || reason;
+            cancelEvent(event);
+            return false;
+          };
+          const protectedMutation = (record) => {
+            let recordType;
+            let target;
+            let attributeName = '';
+            try {
+              recordType = NativeString(read(mutationRecordTypeGetter, record));
+              target = read(mutationRecordTargetGetter, record);
+              if (recordType === 'attributes') {
+                attributeName = lower(read(mutationRecordAttributeNameGetter, record) || '');
+              }
+            } catch {
+              return true;
+            }
+            if (recordType === 'attributes') {
+              if (attributeName === 'aria-required' || attributeName === 'aria-owns') return true;
+              if (isProtected(target)) return true;
+              try { return target === root || call(nodeContains, root, target); } catch { return true; }
+            }
+            if (recordType === 'characterData') {
+              try { return target === root || call(nodeContains, root, target); } catch { return true; }
+            }
+            if (recordType !== 'childList') return false;
+            try {
+              if (target === root || call(nodeContains, root, target)) return true;
+            } catch {
+              return true;
+            }
+            let added;
+            let removed;
+            try {
+              added = nodeListValues(read(mutationRecordAddedNodesGetter, record), 2048);
+              removed = nodeListValues(read(mutationRecordRemovedNodesGetter, record), 2048);
+            } catch {
+              return true;
+            }
+            if (!added || !removed) return true;
+            for (let index = 0; index < added.length; index += 1) {
+              if (nodeTouchesProtected(added[index], target)) return true;
+            }
+            for (let index = 0; index < removed.length; index += 1) {
+              if (nodeTouchesProtected(removed[index], target)) return true;
+            }
+            return false;
+          };
+          const inspectMutations = (records) => {
+            for (let index = 0; index < records.length; index += 1) {
+              if (protectedMutation(records[index])) {
+                state.mutated = true;
+                blockActivation('protected_surface_mutated');
+                return;
+              }
+            }
+          };
+          state.observer = new NativeMutationObserver(inspectMutations);
+          const drainMutations = () => {
+            let records;
+            try { records = call(mutationTakeRecords, state.observer); } catch {
+              blockActivation('protected_surface_mutated');
+              return;
+            }
+            inspectMutations(records);
+          };
+          const unchanged = (reason, event = null) => {
+            drainMutations();
+            if (state.status === 'blocked' || state.mutated) {
+              return blockActivation(state.reason || reason, event);
+            }
+            if (pristineActivationFingerprint(root, element, usesAssociatedForm) !== expected) {
+              return blockActivation(reason, event);
+            }
+            return true;
+          };
+          state.finalizeCurrent = () => unchanged('post_click_binding_changed');
+          state.activationListener = (event) => {
+            unchanged(eventType(event) + '_binding_changed', event);
+          };
+          state.submitCapture = (event) => {
+            if (!unchanged('submit_capture_binding_changed', event)) return;
+            const eventSubmitter = submitterForEvent(event);
+            if (!trustedEvent(event) || eventTarget(event) !== root
+              || eventSubmitter !== element || !eventSubmitter) {
+              blockActivation('submit_identity_changed', event);
+              return;
+            }
+            state.submitEvent = event;
+            state.captureSeen = true;
+            state.status = 'capture_only';
+          };
+          state.submitDocumentBubble = (event) => {
+            if (!unchanged('submit_document_bubble_binding_changed', event)) return;
+            const eventSubmitter = submitterForEvent(event);
+            if (!state.captureSeen || event !== state.submitEvent || !trustedEvent(event)
+              || eventTarget(event) !== root || eventSubmitter !== element || !eventSubmitter) {
+              blockActivation('submit_document_bubble_missing', event);
+              return;
+            }
+            state.documentBubbleSeen = true;
+            state.status = 'document_bubble';
+          };
+          state.submitWindowBubble = (event) => {
+            if (!unchanged('submit_window_bubble_binding_changed', event)) return;
+            const eventSubmitter = submitterForEvent(event);
+            if (!state.captureSeen || !state.documentBubbleSeen || event !== state.submitEvent
+              || !trustedEvent(event) || eventTarget(event) !== root
+              || eventSubmitter !== element || !eventSubmitter) {
+              blockActivation('submit_window_bubble_missing', event);
+              return;
+            }
+            let defaultPrevented = true;
+            try { defaultPrevented = NativeBoolean(read(eventDefaultPreventedGetter, event)); } catch {}
+            if (defaultPrevented) {
+              blockActivation('submit_event_canceled', event);
+              return;
+            }
+            state.windowBubbleSeen = true;
+            state.status = 'bubble_complete';
+          };
+          state.formDataListener = (event) => {
+            let formData;
+            try { formData = read(formDataEventFormDataGetter, event); } catch { formData = null; }
+            if (!trustedEvent(event) || eventTarget(event) !== root || !formData) {
+              blockActivation('submit_formdata_unobserved', event);
+              return;
+            }
+            state.formDataSeen = true;
+          };
+          try {
+            call(mutationObserve, state.observer, nativeDocument, {
+              subtree: true,
+              childList: true,
+              characterData: true,
+              attributes: true,
+              attributeFilter: activationAttributeFilter
+            });
+            for (let index = 0; index < ordinaryActivationEvents.length; index += 1) {
+              const type = ordinaryActivationEvents[index];
+              call(addEventListener, nativeDocument, type, state.activationListener, true);
+              call(addEventListener, nativeDocument, type, state.activationListener, false);
+              call(addEventListener, nativeWindow, type, state.activationListener, false);
+            }
+            call(addEventListener, nativeDocument, 'submit', state.submitCapture, true);
+            call(addEventListener, nativeDocument, 'submit', state.submitDocumentBubble, false);
+            call(addEventListener, nativeWindow, 'submit', state.submitWindowBubble, false);
+            call(addEventListener, root, 'formdata', state.formDataListener, false);
+          } catch {
+            cleanupActivation(state);
+            return 'submit_activation_guard_unavailable';
+          }
+          activationState = state;
+          transportState.mode = 'activation';
+          transportState.root = root;
+          transportState.submitter = element;
+          return 'armed';
+        };
+        const finalizeActivation = (provided) => {
+          if (provided !== token || !activationState) return null;
+          const state = activationState;
+          let current = false;
+          try { current = state.finalizeCurrent(); } catch {}
+          if (!current && state.status !== 'blocked') {
+            state.status = 'blocked';
+            state.reason = state.reason || 'post_click_binding_changed';
+          }
+          if (state.status !== 'blocked') {
+            if (!state.submitEvent || !state.captureSeen) {
+              state.status = 'blocked';
+              state.reason = 'submit_event_unobserved';
+            } else {
+              let defaultPrevented = true;
+              try {
+                defaultPrevented = NativeBoolean(read(eventDefaultPreventedGetter, state.submitEvent));
+              } catch {}
+              if (defaultPrevented) {
+                state.status = 'blocked';
+                state.reason = 'submit_event_canceled';
+              }
+            }
+            if (state.status !== 'blocked' && (!state.documentBubbleSeen || !state.windowBubbleSeen)) {
+              state.status = 'blocked';
+              state.reason = 'submit_bubble_witness_missing';
+            } else if (state.status !== 'blocked' && !state.formDataSeen) {
+              state.status = 'blocked';
+              state.reason = 'submit_formdata_unobserved';
+            } else if (state.status !== 'blocked') {
+              state.status = 'allowed';
+              state.reason = null;
+            }
+          }
+          const result = nullRecord();
+          result.status = state.status;
+          result.reason = state.reason;
+          cleanupActivation(state);
+          return result;
+        };
+        let capabilityClaimed = false;
+        const claim = (provided) => {
+          if (provided !== token || capabilityClaimed) return null;
+          capabilityClaimed = true;
+          let applicationRoot = null;
+          let proofRoot = null;
+          let authorizedActivationFingerprint = null;
+          const successfulControls = nullArray();
+          const canonicalJson = (value) => {
+            if (value == null) return null;
+            try { return apply(jsonStringify, nativeJSON, [value]); } catch { return null; }
+          };
+          const capability = nullRecord();
+          capability.bindApplicationRoot = (root) => {
+            try {
+              if (!connected(root)) return 'detached';
+              if (tagName(root) !== 'form') return 'not_form';
+              if (applicationRoot && applicationRoot !== root) return 'changed';
+              applicationRoot = root;
+              return 'bound';
+            } catch {
+              return 'unavailable';
+            }
+          };
+          capability.setProofRoot = (root) => {
+            try {
+              if (!connected(root) || tagName(root) !== 'form') return false;
+              proofRoot = root;
+              return true;
+            } catch {
+              proofRoot = null;
+              return false;
+            }
+          };
+          capability.successfulControlForm = (element) => (
+            pristineSuccessfulControlForm(token, element)
+          );
+          capability.disableDnsPrefetch = () => {
+            try {
+              const head = call(querySelector, nativeDocument, 'head');
+              if (!head) return false;
+              const meta = call(createElement, nativeDocument, 'meta');
+              call(setAttribute, meta, 'http-equiv', 'x-dns-prefetch-control');
+              call(setAttribute, meta, 'content', 'off');
+              call(appendChild, head, meta);
+              return connected(meta)
+                && lower(attribute(meta, 'http-equiv') || '') === 'x-dns-prefetch-control'
+                && lower(attribute(meta, 'content') || '') === 'off';
+            } catch {
+              return false;
+            }
+          };
+          capability.successfulControlBelongsToForm = (element, form) => (
+            NativeBoolean(form) && pristineSuccessfulControlForm(token, element) === form
+          );
+          capability.successfulControlBelongsToApplication = (element) => (
+            NativeBoolean(applicationRoot)
+            && pristineSuccessfulControlForm(token, element) === applicationRoot
+          );
+          capability.sameNode = (left, right) => NativeBoolean(left) && left === right;
+          capability.distinctSuccessfulFormCount = (elements) => {
+            if (!call(arrayIsArray, NativeArray, elements) || elements.length > 64) return null;
+            const forms = nullArray();
+            for (let index = 0; index < elements.length; index += 1) {
+              const form = pristineSuccessfulControlForm(token, elements[index]);
+              if (!form) continue;
+              let seen = false;
+              for (let prior = 0; prior < forms.length; prior += 1) {
+                if (forms[prior] === form) {
+                  seen = true;
+                  break;
+                }
+              }
+              if (!seen) forms[forms.length] = form;
+            }
+            return forms.length;
+          };
+          capability.successfulControlSnapshotJson = async (element) => (
+            canonicalJson(await pristineSuccessfulControlSnapshot(token, element, proofRoot))
+          );
+          capability.securityCodeGroupSnapshotJson = (elements, form, parent) => (
+            canonicalJson(pristineSecurityCodeGroup(token, elements, form, parent))
+          );
+          capability.requiredControlBlockersJson = () => (
+            canonicalJson(pristineRequiredControlBlockers(token, applicationRoot))
+          );
+          capability.candidateSnapshotJson = (element) => (
+            canonicalJson(pristineV4SubmitCandidateSnapshot(token, applicationRoot, element))
+          );
+          capability.clearSuccessfulControls = () => {
+            successfulControls.length = 0;
+            authorizedActivationFingerprint = null;
+            return true;
+          };
+          capability.addSuccessfulControl = (element) => {
+            try {
+              if (!connected(element) || successfulControls.length >= 64) return false;
+              successfulControls[successfulControls.length] = element;
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          capability.nativePostBindingJson = async (element) => {
+            const binding = await pristineNativePostBinding(
+              token,
+              applicationRoot,
+              applicationRoot,
+              element,
+              true,
+              successfulControls
+            );
+            authorizedActivationFingerprint = typeof binding?.bindingFingerprint === 'string'
+              ? binding.bindingFingerprint
+              : null;
+            return canonicalJson(binding);
+          };
+          capability.armActivation = (element) => {
+            const authorizedFingerprint = authorizedActivationFingerprint;
+            authorizedActivationFingerprint = null;
+            return armActivation(
+              token,
+              applicationRoot,
+              applicationRoot,
+              element,
+              true,
+              authorizedFingerprint
+            );
+          };
+          capability.finalizeActivationJson = () => canonicalJson(finalizeActivation(token));
+          capability.relock = () => {
+            cleanupActivation(activationState);
+            authorizedActivationFingerprint = null;
+            transportState.mode = 'locked';
+            transportState.root = null;
+            transportState.submitter = null;
+            return true;
+          };
+          return apply(objectFreeze, NativeObject, [capability]);
+        };
+        const capability = claim(token);
+        if (capability) {
+          NativeObject.defineProperty(nativeWindow, '__litosV4SubmissionContainment', {
+            value: capability,
             configurable: false,
             enumerable: false,
             writable: false
           });
-        } catch { /* browser routing still blocks ping requests */ }
-        for (const name of ['pushState', 'replaceState']) {
-          try {
-            const original = History.prototype[name];
-            Object.defineProperty(History.prototype, name, {
-              value: function litosExactUrlHistory(data, unused, url) {
-                if (url != null) {
-                  const before = new URL(location.href);
-                  const after = new URL(String(url), location.href);
-                  before.hash = '';
-                  after.hash = '';
-                  if (before.href !== after.href) {
-                    throw new DOMException('Blocked by atomic submit URL containment', 'SecurityError');
-                  }
-                }
-                return Reflect.apply(original, this, [data, unused, url]);
-              },
-              configurable: false,
-              enumerable: false,
-              writable: false
-            });
-          } catch { /* exact URL checks remain fail-closed at every action boundary */ }
         }
-        const block = (event = null) => {
-          event?.preventDefault();
-          event?.stopImmediatePropagation();
-        };
-        document.addEventListener('submit', (event) => {
-          const exactActivation = state.mode === 'activation'
-            && event.target === state.root
-            && event.submitter === state.submitter
-            && event.submitter;
-          if (!exactActivation) block(event);
-        }, true);
-        const guardedSubmit = function () {
-          // Direct submit has no SubmitEvent and therefore cannot prove the exact submitter. It is
-          // never admitted, including during the one authorized activation. Native default action
-          // does not call this JavaScript property and remains available through the event path.
-          return undefined;
-        };
-        HTMLFormElement.prototype.submit = guardedSubmit;
-        const control = Object.freeze({
-          authorize(provided, root, submitter, usesAssociatedForm) {
-            if (provided !== token || !(root instanceof HTMLFormElement)
-              || !root.isConnected || !submitter?.isConnected) return false;
-            const associated = usesAssociatedForm
-              ? submitter.form === root
-              : submitter.closest?.('form') === root;
-            if (!associated) return false;
-            state.mode = 'activation';
-            state.root = root;
-            state.submitter = submitter;
-            return true;
-          },
-          relock(provided) {
-            if (provided !== token) return false;
-            state.mode = 'locked';
-            state.root = null;
-            state.submitter = null;
-            return true;
-          }
-        });
-        Object.defineProperty(globalThis, '__litosV4SubmissionContainment', {
-          value: control,
-          configurable: false,
-          enumerable: false,
-          writable: false
-        });
-      }, { token: v4ContainmentToken }).catch(() => undefined);
+      };
+    }
+    const v4PageImplementation = retainedAtomicV4Run
+      ? v4ClientToServerHandle(page)
+      : null;
+    if (retainedAtomicV4Run) {
+      if (!v4PageImplementation?.delegate?.addInitScript
+        || typeof installV4UtilityContainment !== 'function') {
+        throw new Error('Atomic submit v4 isolated execution world is unavailable');
+      }
+      const source = '(' + installV4UtilityContainment.toString() + ')('
+        + JSON.stringify({ token: v4ContainmentToken }) + ')';
+      await v4PageImplementation.delegate.addInitScript({ source }, 'utility');
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     await page.goto(input.url, { waitUntil, timeout: 45000 });
-    if (v4PreSubmitTransportContainment) v4PreSubmitTransportContainment.mode = 'locked';
+    if (retainedAtomicV4Run) {
+      v4PreSubmitTransportContainment.mode = 'locked';
+      v4InitialNavigationActive = false;
+      if (!v4PageImplementation?.mainFrame) {
+        throw new Error('Atomic submit v4 isolated execution world is unavailable');
+      }
+      v4UtilityContext = await v4PageImplementation.mainFrame().utilityContext();
+      v4DocumentGeneration = 1;
+      const capabilityReady = await callV4Utility('relock').catch(() => false);
+      if (!capabilityReady) throw new Error('Atomic submit v4 isolated capability did not initialize');
+    }
     let requiresExactPageUrl = false;
     let exactPageUrlProof = null;
     // Continuations may keep the exact page and context alive, but they may not turn that context
@@ -443,8 +3136,9 @@ const { chromium } = require('playwright');
     // Handles, values and selectors stay inside this sandbox process and never enter the result.
     const successfulAddresses = [];
     const unsuccessfulChoices = [];
+    let successfulAddressIntegrityFailure = false;
     let applicationScopeProofHandle = null;
-    let applicationScopeProofState = null;
+    let applicationScopeProofGeneration = null;
     let applicationScopeFailureReason = null;
     let tracksChoiceFailures = false;
     let mirrorsLegacyChoiceMarkers = false;
@@ -496,6 +3190,11 @@ const { chromium } = require('playwright');
     let submitNetwork = null;
     let submitTransportDisposition = null;
     let postSubmitObservationDisposition = null;
+    const submitTransportResponseUnavailable = () => [
+      'write_redirect_blocked',
+      'receipt_redirect_blocked',
+      'transport_replay_observation_failed'
+    ].includes(submitTransportDisposition);
     const markPostSubmitObservationFailed = () => {
       postSubmitObservationDisposition = postSubmitObservationDisposition
         || 'post_submit_observation_failed';
@@ -536,20 +3235,22 @@ const { chromium } = require('playwright');
      * Any one of those handlers can retarget the same node, rewrite the form action, or call a
      * cached native submit method. The only safe release is therefore one exact native document
      * request whose method, destination, encoding and semantic entry list still match the binding
-     * captured before activation. Every potentially submit-shaped request is held until that
-     * decision. A release uses fallback, never continue, so the continuation host lock remains in
-     * the chain. The route stays installed through receipt settlement so delayed transports cannot
-     * bypass the decision.
+     * captured before activation. Every request is held until that decision, so a GET fetch or
+     * image URL cannot carry applicant data around the native transport gate. The validated request
+     * is replayed for one response hop with its exact browser
+     * method, body and complete observed header set, then that response fulfills the navigation.
+     * The route stays installed through receipt settlement so delayed transports cannot bypass the
+     * decision.
      *
      * The binding and payload below never enter the result. They live only in this runner process,
      * for this click, and are discarded with the route. */
     let activeSubmitTransportGate = null;
     const armV4PreSubmitTransportContainment = async () => {
       if (v4PreSubmitTransportContainment) return v4PreSubmitTransportContainment;
-      const containment = { mode: 'locked', handler: null };
+      const containment = { mode: 'locked', blockedTransportObserved: false, handler: null };
       containment.handler = async (route) => {
-        const request = route.request();
         if (containment.mode === 'activation') return route.fallback();
+        containment.blockedTransportObserved = true;
         return route.abort('blockedbyclient');
       };
       await browserContext.route('**/*', containment.handler);
@@ -680,6 +3381,9 @@ const { chromium } = require('playwright');
       }
       const actualUrl = new URL(request.url());
       actualUrl.hash = '';
+      if (actualUrl.origin !== binding.allowedOrigin) {
+        return { allowed: false, reason: 'submit_destination_changed' };
+      }
       if (input.requestContinuation
         && actualUrl.hostname.toLowerCase() !== String(input.allowedHost || '').toLowerCase()) {
         return { allowed: false, reason: 'submit_destination_changed' };
@@ -722,31 +3426,207 @@ const { chromium } = require('playwright');
       }
       return false;
     };
-    const managedRequestCarriesApplication = (request, binding) => {
-      if (request.resourceType() === 'document') return false;
-      return true;
-    };
+    const requestIsUnpinnedTransport = (request) => request.resourceType() !== 'document';
     const routeDecisionForAllowedGate = (gate, request) => {
       if (request === gate.allowedRequest) return 'release';
-      if (requestIsRedirectOf(request, gate.allowedRequest)) {
-        const method = request.method().toUpperCase();
-        return method === 'GET' || method === 'HEAD' ? 'fallback' : 'abort';
-      }
+      if (gate.receipt && !gate.receipt.completed
+        && request.method().toUpperCase() === 'GET'
+        && request.resourceType() === 'document'
+        && request.frame() === page.mainFrame()
+        && request.url() === gate.receipt.url
+        && requestIsRedirectOf(request, gate.allowedRequest)) return 'receipt';
+      // No other descendant of the original Chromium request may fall back to fresh DNS.
+      if (requestIsRedirectOf(request, gate.allowedRequest)) return 'abort';
       return 'abort';
     };
+    const nonGlobalReplayIpv6Ranges = new net.BlockList();
+    for (const [network, prefix] of [
+      ['2001::', 32],
+      ['2001:2::', 48],
+      ['2001:10::', 28],
+      ['2001:20::', 28],
+      ['2001:db8::', 32],
+      ['3fff::', 20]
+    ]) {
+      nonGlobalReplayIpv6Ranges.addSubnet(network, prefix, 'ipv6');
+    }
+    const isPrivateReplayAddress = (address) => {
+      if (!address) return true;
+      if (net.isIPv4(address)) {
+        const [a, b, c] = address.split('.').map(Number);
+        return a === 0
+          || a === 10
+          || (a === 100 && b >= 64 && b <= 127)
+          || a === 127
+          || (a === 169 && b === 254)
+          || (a === 172 && b >= 16 && b <= 31)
+          || (a === 192 && b === 0 && (c === 0 || c === 2))
+          || (a === 192 && b === 88 && c === 99)
+          || (a === 192 && b === 168)
+          || (a === 198 && (b === 18 || b === 19))
+          || (a === 198 && b === 51 && c === 100)
+          || (a === 203 && b === 0 && c === 113)
+          || a >= 224;
+      }
+      const value = String(address).toLowerCase();
+      if (!net.isIPv6(value) || value.startsWith('::ffff:')) return true;
+      const firstHextet = Number.parseInt(value.split(':', 1)[0], 16);
+      return !Number.isInteger(firstHextet)
+        || (firstHextet & 0xe000) !== 0x2000
+        || nonGlobalReplayIpv6Ranges.check(value, 'ipv6');
+    };
+    /* Replay exactly one response hop without Playwright's APIRequestContext redirect machinery.
+     * In Playwright 1.61, route.fetch({ maxRedirects: 0 }) rejects the first 3xx instead of
+     * returning it, so it cannot distinguish a safe GET receipt redirect from a body-preserving
+     * 307 or 308. Node's native client does not follow redirects. The destination is resolved once,
+     * checked for private addresses, and pinned into the request lookup to close DNS rebinding
+     * between validation and the write. The shipped runner always rejects private addresses. The
+     * browser replay harness changes this constant only in its local child-process preload. */
+    const replayOneNativeHop = async (request, browserHeaders, onDispatch, options = {}) => {
+      const destination = new URL(options.destination || request.url());
+      if (!['http:', 'https:'].includes(destination.protocol)) {
+        throw new Error('Unsupported native replay protocol');
+      }
+      const deadlineAt = Date.now() + 20_000;
+      const timeoutError = () => {
+        const error = new Error('Native replay timed out');
+        error.code = 'STRATUS_NATIVE_REPLAY_TIMEOUT';
+        return error;
+      };
+      const allowPrivateForTests = false;
+      let pinned = options.pinned || null;
+      if (options.reusePinned && !allowPrivateForTests && !pinned) {
+        throw new Error('Native receipt replay lost its pinned destination');
+      }
+      if (!allowPrivateForTests && !options.reusePinned) {
+        let lookupTimer;
+        const records = await Promise.race([
+          dns.lookup(destination.hostname, { all: true, family: 4 }),
+          new Promise((resolve, reject) => {
+            lookupTimer = setTimeout(() => reject(timeoutError()), Math.max(1, deadlineAt - Date.now()));
+          })
+        ]).finally(() => clearTimeout(lookupTimer));
+        if (!records.length || records.some((record) => isPrivateReplayAddress(record.address))) {
+          throw new Error('Native replay destination is private');
+        }
+        pinned = records[0];
+      }
+      const headers = {};
+      for (const [name, value] of Object.entries(browserHeaders || {})) {
+        const normalizedName = String(name).toLowerCase();
+        const normalizedValue = String(value);
+        if (!/^[!#$%&'*+.^_|~0-9a-z-]+$/.test(normalizedName)
+          || /[\r\n]/.test(normalizedValue)) continue;
+        headers[normalizedName] = normalizedValue;
+      }
+      if (!Object.keys(headers).some((name) => name.toLowerCase() === 'cookie')) headers.cookie = '';
+      const body = Object.prototype.hasOwnProperty.call(options, 'body')
+        ? options.body
+        : request.postDataBuffer();
+      const method = String(options.method || request.method()).toUpperCase();
+      const pinnedLookup = pinned
+        ? (_hostname, options, callback) => {
+            if (options?.all) {
+              callback(null, [{ address: pinned.address, family: pinned.family }]);
+              return;
+            }
+            callback(null, pinned.address, pinned.family);
+          }
+        : null;
+      return new Promise((resolve, reject) => {
+        let dispatched = false;
+        let settled = false;
+        let deadlineTimer = null;
+        const markDispatched = () => {
+          if (dispatched) return;
+          // Once a fresh TCP or TLS connection is established, headers or a body prefix may have
+          // left the process even if ClientRequest never reaches its finish event. Classify the
+          // write conservatively so connection resets cannot invite an unsafe duplicate retry.
+          dispatched = true;
+          try { onDispatch?.(); } catch {}
+        };
+        const fail = (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadlineTimer);
+          error.replayDispatched = dispatched;
+          reject(error);
+        };
+        const succeed = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(deadlineTimer);
+          resolve(value);
+        };
+        const transport = destination.protocol === 'https:' ? https : http;
+        let outgoing;
+        try {
+          outgoing = transport.request(destination, {
+            method,
+            headers,
+            agent: false,
+            ...(pinned ? {
+              lookup: pinnedLookup
+            } : {})
+          }, (incoming) => {
+            const chunks = [];
+            let size = 0;
+            incoming.on('data', (chunk) => {
+              size += chunk.length;
+              if (size > 20_000_000) {
+                incoming.destroy(new Error('Native replay response is too large'));
+                return;
+              }
+              chunks.push(chunk);
+            });
+            incoming.once('error', fail);
+            incoming.once('end', () => {
+              const responseHeaders = {};
+              for (const [name, value] of Object.entries(incoming.headers)) {
+                if (value == null || ['connection', 'keep-alive', 'proxy-authenticate',
+                  'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'
+                ].includes(String(name).toLowerCase())) continue;
+                responseHeaders[name] = Array.isArray(value) ? value.join('\n') : String(value);
+              }
+              succeed({
+                status: Number(incoming.statusCode) || 502,
+                headers: responseHeaders,
+                body: Buffer.concat(chunks),
+                pinned
+              });
+            });
+          });
+        } catch (error) {
+          fail(error);
+          return;
+        }
+        deadlineTimer = setTimeout(() => outgoing.destroy(timeoutError()), Math.max(1, deadlineAt - Date.now()));
+        outgoing.once('error', fail);
+        outgoing.once('socket', (socket) => {
+          const event = destination.protocol === 'https:' ? 'secureConnect' : 'connect';
+          socket.once(event, markDispatched);
+        });
+        if (body?.length) outgoing.write(body);
+        outgoing.end();
+      });
+    };
     const settleHeldRoute = async (record, decision) => {
+      let replayDispatched = false;
       try {
         if (decision === 'release') {
-          /* Playwright's ordinary fallback follows a 307 or 308 inside the same routed request,
-           * before a second handler can reject the preserved application POST. Fetch exactly one
-           * response hop, then give that response to the browser. Write-preserving redirects are
-           * stopped before their Location can receive the body; safe receipt redirects re-enter
-           * the route stack as GET or HEAD. The continuation host constraint is checked above
-           * because route.fetch deliberately bypasses older handlers for this one proven request. */
-          const response = await record.route.fetch({ maxRedirects: 0, timeout: 20_000 });
+          /* Playwright routing does not expose redirected descendants to the same handler, so the
+           * one validated write is replayed as one raw response hop and inspected before Chromium
+           * receives it. This is a server-side HTTP replay, not the original Chromium TCP or TLS
+           * connection. Callers must keep connection-bound endpoints on v3. */
+          const browserHeaders = await record.request.allHeaders();
+          let response = await replayOneNativeHop(
+            record.request,
+            browserHeaders,
+            () => { replayDispatched = true; }
+          );
           const method = record.request.method().toUpperCase();
           if (!['GET', 'HEAD', 'OPTIONS'].includes(method)
-            && (response.status() === 307 || response.status() === 308)) {
+            && (response.status === 307 || response.status === 308)) {
             submitTransportDisposition = 'write_redirect_blocked';
             await record.route.fulfill({
               status: 409,
@@ -755,16 +3635,96 @@ const { chromium } = require('playwright');
                 + '<p>Stratus blocked a write-preserving submit redirect.</p>'
             });
           } else {
-            await record.route.fulfill({ response });
+            if (response.status >= 300 && response.status < 400) {
+              const location = response.headers.location;
+              let redirected = null;
+              let redirectAllowed = false;
+              try {
+                redirected = new URL(location, record.request.url());
+                redirectAllowed = Boolean(location)
+                  && redirected.origin === record.binding.allowedOrigin
+                  && !redirected.username
+                  && !redirected.password
+                  && [301, 302, 303].includes(response.status);
+              } catch {}
+              if (!redirectAllowed) {
+                submitTransportDisposition = 'receipt_redirect_blocked';
+                await record.route.fulfill({
+                  status: 409,
+                  contentType: 'text/html; charset=utf-8',
+                  body: '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
+                    + '<p>Stratus blocked an unbound receipt redirect.</p>'
+                });
+                return { released: true };
+              }
+              // Give Chromium the original redirect so it applies Set-Cookie and commits the
+              // receipt URL. The descendant GET is caught by this same gate and replayed through
+              // the address pinned for the POST, never through a fresh browser DNS lookup.
+              record.gate.receipt = {
+                url: (() => {
+                  redirected.hash = '';
+                  return redirected.href;
+                })(),
+                pinned: response.pinned,
+                completed: false
+              };
+            }
+            await record.route.fulfill({
+              status: response.status,
+              headers: response.headers,
+              body: response.body
+            });
+          }
+        } else if (decision === 'receipt') {
+          const receipt = record.gate?.receipt;
+          if (!receipt || receipt.completed) throw new Error('Native receipt replay is not armed');
+          receipt.completed = true;
+          const receiptHeaders = await record.request.allHeaders();
+          const response = await replayOneNativeHop(record.request, receiptHeaders, null, {
+            destination: receipt.url,
+            method: 'GET',
+            body: Buffer.alloc(0),
+            pinned: receipt.pinned,
+            reusePinned: true
+          });
+          if (response.status >= 300 && response.status < 400) {
+            submitTransportDisposition = 'receipt_redirect_blocked';
+            await record.route.fulfill({
+              status: 409,
+              contentType: 'text/html; charset=utf-8',
+              body: '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
+                + '<p>Stratus blocked an additional receipt redirect.</p>'
+            });
+          } else {
+            await record.route.fulfill({
+              status: response.status,
+              headers: response.headers,
+              body: response.body
+            });
           }
         } else if (decision === 'fallback') {
           await record.route.fallback();
         } else {
           await record.route.abort('blockedbyclient');
         }
-      } catch {
-        // A release failure is never converted into an unguarded retry.
+        return { released: decision === 'release' };
+      } catch (error) {
+        // Once the replay write is dispatched it may be irreversible. Preserve pressed=true and a
+        // typed unknown observation instead of inviting a duplicate retry. Before dispatch, fail
+        // closed and report that no transport was released.
+        if ((decision === 'release' && (replayDispatched || error?.replayDispatched))
+          || decision === 'receipt') {
+          submitTransportDisposition = 'transport_replay_observation_failed';
+          await record.route.fulfill({
+            status: 502,
+            contentType: 'text/html; charset=utf-8',
+            body: '<!doctype html><meta charset="utf-8"><title>Submission response unavailable</title>'
+              + '<p>The application transport was dispatched, but its response could not be observed.</p>'
+          }).catch(() => undefined);
+          return { released: true };
+        }
         await record.route.abort('blockedbyclient').catch(() => undefined);
+        return { released: false };
       }
     };
     const armSubmitTransportGate = async (binding) => {
@@ -775,6 +3735,7 @@ const { chromium } = require('playwright');
         reason: null,
         pending: [],
         allowedRequest: null,
+        receipt: null,
         inFlight: 0,
         handler: null
       };
@@ -786,12 +3747,29 @@ const { chromium } = require('playwright');
             return await route.abort('blockedbyclient');
           }
           if (gate.terminal === 'allowed') {
-            return await settleHeldRoute({ route, request }, routeDecisionForAllowedGate(gate, request));
+            const decision = routeDecisionForAllowedGate(gate, request);
+            if (decision === 'abort') {
+              v4OutOfBandTransportAttempted = true;
+              submitTransportDisposition = submitTransportDisposition
+                || 'ancillary_transport_blocked_after_release';
+            }
+            return await settleHeldRoute({ route, request, binding: gate.binding, gate }, decision);
           }
-          const record = { route, request, resolve: null };
+          const record = {
+            route,
+            request,
+            binding: gate.binding,
+            gate,
+            resolve: null,
+            complete: null,
+            completed: null
+          };
+          record.completed = new Promise((resolve) => { record.complete = resolve; });
           gate.pending.push(record);
           const decision = await new Promise((resolve) => { record.resolve = resolve; });
-          return await settleHeldRoute(record, decision);
+          const outcome = await settleHeldRoute(record, decision);
+          record.complete?.(outcome);
+          return outcome;
         } catch { /* fail-closed resolution happens in the gate owner */ }
         finally { gate.inFlight -= 1; }
       };
@@ -801,22 +3779,28 @@ const { chromium } = require('playwright');
     };
     const waitForHeldSubmitRequest = async (gate) => {
       const deadline = Date.now() + 750;
-      // Keep the exact native request held for the whole bounded activation window. Returning as
-      // soon as the document request arrived let a fetch, image or ping queued by the same click
-      // reach this handler one task later, after the native request had already been released.
-      // Nothing can transmit while this gate is armed, so waiting the declared window lets every
-      // competing activation transport veto the native release without exposing applicant data.
+      let lastCount = 0;
+      let quietSince = null;
       while (Date.now() < deadline) {
+        if (gate.pending.length !== lastCount) {
+          lastCount = gate.pending.length;
+          quietSince = lastCount > 0 ? Date.now() : null;
+        }
+        if (quietSince != null && Date.now() - quietSince >= 100) return;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     };
     const decideSubmitTransportGate = async (gate, guardResult) => {
       await waitForHeldSubmitRequest(gate);
       let reason = guardResult?.status === 'allowed' ? null : (guardResult?.reason || 'submit_activation_unobserved');
+      if (!reason && (v4PreSubmitTransportContainment?.blockedTransportObserved
+        || v4OutOfBandTransportAttempted || v4PageTransportLockUnavailable)) {
+        reason = 'submit_transport_unpinned';
+      }
       const native = gate.pending.filter((record) => record.request.resourceType() === 'document');
       const managedCandidates = gate.pending.filter((record) => (
         record.request.resourceType() !== 'document'
-        && managedRequestCarriesApplication(record.request, gate.binding)
+        && requestIsUnpinnedTransport(record.request)
       ));
       if (!reason && managedCandidates.length > 0) reason = 'submit_transport_unpinned';
       if (!reason && native.length !== 1) {
@@ -833,7 +3817,21 @@ const { chromium } = require('playwright');
         const decision = reason ? 'abort' : routeDecisionForAllowedGate(gate, record.request);
         record.resolve?.(decision);
       }
-      return { status: gate.terminal, reason };
+      if (!reason) {
+        // replayOneNativeHop owns one hard deadline spanning DNS, connect, request and response.
+        // Await that terminal result directly so a synthetic outer timeout cannot report no write
+        // while a delayed lookup or socket continues in the background.
+        const released = await native[0].completed;
+        if (!released?.released) {
+          reason = 'submit_transport_release_failed';
+          gate.reason = reason;
+          gate.terminal = 'blocked';
+        }
+      }
+      const mainFrameRequestObserved = native.some((record) => (
+        record.request.frame() === page.mainFrame()
+      ));
+      return { status: gate.terminal, reason, mainFrameRequestObserved };
     };
     const finishSubmitTransportGate = async () => {
       const gate = activeSubmitTransportGate;
@@ -1605,51 +4603,8 @@ const { chromium } = require('playwright');
      * retain the exact ElementHandles they found. This small adapter keeps the existing helper
      * vocabulary while every nested query stays rooted at those exact handles and every item is
      * cached before a later read or mutation can resolve it again. */
-    const exactLocatorContext = (
-      expectedPageUrl = null,
-      requiredApplicationForm = null,
-      requiredApplicationState = null
-    ) => {
+    const exactLocatorContext = () => {
       const owned = new Set();
-      const assertExactUrl = async () => {
-        if (!expectedPageUrl) return;
-        const browserUrl = canonicalPageUrl(page.url());
-        const documentUrl = await page.evaluate(() => {
-          const current = new URL(location.href);
-          current.hash = '';
-          return current.href;
-        }).catch(() => null);
-        if (browserUrl !== expectedPageUrl || documentUrl !== expectedPageUrl) {
-          throw new Error('Employer page URL changed across an exact applicant action');
-        }
-      };
-      const assertApplicationScope = async () => {
-        if (!requiredApplicationForm || !requiredApplicationState) return;
-        const mismatches = await requiredApplicationForm.evaluate((form, expected) => {
-          if (!(form instanceof HTMLFormElement) || !form.isConnected) return ['form'];
-          const action = new URL(form.getAttribute('action') || location.href, document.baseURI).href;
-          const rawMethod = String(form.getAttribute('method') || '').toLowerCase();
-          const method = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
-          const rawEnctype = String(form.getAttribute('enctype') || '').toLowerCase();
-          const enctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-            ? rawEnctype
-            : 'application/x-www-form-urlencoded';
-          const changed = [];
-          if (action !== expected.resolvedAction) changed.push('action');
-          if (method !== expected.method) changed.push('method');
-          if (String(form.getAttribute('target')
-            || document.querySelector('base[target]')?.getAttribute('target') || '')
-            .toLowerCase() !== expected.target) changed.push('target');
-          if (enctype !== expected.enctype) changed.push('enctype');
-          if (form.hasAttribute('novalidate') !== expected.noValidate) changed.push('noValidate');
-          if (String(form.getAttribute('accept-charset') || '') !== expected.acceptCharset) changed.push('acceptCharset');
-          return changed;
-        }, requiredApplicationState).catch(() => ['form']);
-        if (mismatches.length > 0) {
-          throw new Error('Caller-bound application form semantics changed across an exact applicant action: '
-            + mismatches.join(','));
-        }
-      };
       const own = (handle) => {
         if (handle) owned.add(handle);
         return handle;
@@ -1671,8 +4626,6 @@ const { chromium } = require('playwright');
         };
         const one = async () => (await handles())[0] || null;
         const assertBound = async (handle) => {
-          await assertExactUrl();
-          await assertApplicationScope();
           const roots = await authorityHandles();
           if (roots.length === 0) return;
           const current = await handle.evaluate((element, candidates) => (
@@ -1687,33 +4640,12 @@ const { chromium } = require('playwright');
               const form = element.form instanceof HTMLFormElement
                 ? element.form
                 : element.closest?.('form');
-              const action = bound.form
-                ? new URL(bound.form.getAttribute('action') || location.href, document.baseURI).href
-                : '';
-              const rawMethod = bound.form ? String(bound.form.getAttribute('method') || '').toLowerCase() : '';
-              const method = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
-              const rawEnctype = bound.form ? String(bound.form.getAttribute('enctype') || '').toLowerCase() : '';
-              const enctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-                ? rawEnctype
-                : 'application/x-www-form-urlencoded';
-              const sameFormState = !bound.form || !bound.formState || (
-                bound.form.isConnected
-                && action === bound.formState.resolvedAction
-                && method === bound.formState.method
-                && String(bound.form.getAttribute('target')
-                  || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
-                    === bound.formState.target
-                && enctype === bound.formState.enctype
-                && bound.form.hasAttribute('novalidate') === bound.formState.noValidate
-                && String(bound.form.getAttribute('accept-charset') || '') === bound.formState.acceptCharset
-              );
               return bound.form
-                ? form === bound.form && sameFormState
+                ? form === bound.form
                 : !form && (element === bound.scope || bound.scope.contains(element));
             }, {
               form: semanticBinding.formHandle || null,
-              scope: semanticBinding.scopeHandle,
-              formState: semanticBinding.formState || null
+              scope: semanticBinding.scopeHandle
             }).catch(() => false);
             if (!associated) throw new Error('Exact action target changed its form association');
           }
@@ -1846,57 +4778,43 @@ const { chromium } = require('playwright');
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.click(options);
-            await assertBound(handle);
-            return result;
+            return handle.click(options);
           },
           fill: async (value, options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.fill(value, options);
-            await assertBound(handle);
-            return result;
+            return handle.fill(value, options);
           },
           type: async (value, options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.type(value, options);
-            await assertBound(handle);
-            return result;
+            return handle.type(value, options);
           },
           check: async (options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.check(options);
-            await assertBound(handle);
-            return result;
+            return handle.check(options);
           },
           press: async (key, options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.press(key, options);
-            await assertBound(handle);
-            return result;
+            return handle.press(key, options);
           },
           selectOption: async (values, options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.selectOption(values, options);
-            await assertBound(handle);
-            return result;
+            return handle.selectOption(values, options);
           },
           setInputFiles: async (files, options) => {
             const handle = await one();
             if (!handle) throw new Error('Exact action target is no longer available');
             await assertBound(handle);
-            const result = await handle.setInputFiles(files, options);
-            await assertBound(handle);
-            return result;
+            return handle.setInputFiles(files, options);
           }
         };
         return api;
@@ -1910,32 +4828,14 @@ const { chromium } = require('playwright');
         for (const handle of owned) await handle.dispose().catch(() => undefined);
         owned.clear();
       };
-      const assertAuthority = async () => {
-        await assertExactUrl();
-        await assertApplicationScope();
-      };
-      return { own, fromHandle, collection, dispose, assertAuthority };
+      return { own, fromHandle, collection, dispose };
     };
     const exactBoundRootFromLocator = async (locator, context) => {
       const reference = await locator.evaluateHandle((element) => {
         const form = element.form instanceof HTMLFormElement
           ? element.form
           : element.closest?.('form');
-        const rawMethod = form ? String(form.getAttribute('method') || '').toLowerCase() : '';
-        const rawEnctype = form ? String(form.getAttribute('enctype') || '').toLowerCase() : '';
-        const formState = form ? {
-          resolvedAction: new URL(form.getAttribute('action') || location.href, document.baseURI).href,
-          method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
-          target: String(form.getAttribute('target')
-            || document.querySelector('base[target]')?.getAttribute('target') || '')
-            .toLowerCase(),
-          enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-            ? rawEnctype
-            : 'application/x-www-form-urlencoded',
-          noValidate: form.hasAttribute('novalidate'),
-          acceptCharset: String(form.getAttribute('accept-charset') || '')
-        } : null;
-        return { element, form: form || null, scope: form || element.parentElement || element, formState };
+        return { element, form: form || null, scope: form || element.parentElement || element };
       }).catch(() => null);
       if (!reference) return null;
       const readElement = async (name) => {
@@ -1948,11 +4848,8 @@ const { chromium } = require('playwright');
       const handle = await readElement('element');
       const formHandle = await readElement('form');
       const scopeHandle = await readElement('scope');
-      const formStateProperty = await reference.getProperty('formState').catch(() => null);
-      const formState = await formStateProperty?.jsonValue?.().catch(() => null);
-      await formStateProperty?.dispose?.().catch(() => undefined);
       await reference.dispose().catch(() => undefined);
-      return handle && scopeHandle ? { handle, formHandle, scopeHandle, formState } : null;
+      return handle && scopeHandle ? { handle, formHandle, scopeHandle } : null;
     };
     const exactFillBinding = async (locator, context, rootBinding = null) => {
       const boundRoot = rootBinding || await exactBoundRootFromLocator(locator, context);
@@ -3034,7 +5931,8 @@ const { chromium } = require('playwright');
       const pageUrl = canonicalPageUrl(page.url());
       const entries = unsuccessfulChoices
         .map((failure, index) => ({ failure, index }))
-        .filter(({ failure }) => failure.pageUrl === pageUrl);
+        .filter(({ failure }) => failure.pageUrl === pageUrl
+          && failure.documentGeneration === v4DocumentGeneration);
       if (entries.length === 0) return [];
       return candidate.evaluate((element, candidates) => candidates
         .filter((candidateEntry) => candidateEntry.handle === element)
@@ -3090,7 +5988,8 @@ const { chromium } = require('playwright');
         formHandle,
         ancestryHandle,
         kind,
-        pageUrl: canonicalPageUrl(page.url())
+        pageUrl: canonicalPageUrl(page.url()),
+        documentGeneration: v4DocumentGeneration
       };
       const existingIndexes = await unsuccessfulChoiceIndexesFor(handle);
       if (existingIndexes.length > 0) {
@@ -5069,8 +7968,8 @@ const { chromium } = require('playwright');
      *     the platform-name branch of the detector never fires on Greenhouse and the maxLength-1
      *     group branch is what finds it. That is why the group branch is not a fallback.
      *   - it AUTO-ADVANCES. Its onChange writes the character, joins all eight box values, and calls
-     *     select() on the NEXT box's ref. Every character must still be applied through its exact
-     *     retained box handle, because focus is page-owned state and can be redirected by a handler.
+     *     select() on the NEXT box's ref. So one focus and eight keystrokes puts one character in
+     *     each box, and typing eight characters is right rather than typing one and moving on.
      *   - it also DISTRIBUTES A PASTE from the pasted box rightwards, which is a second correct way
      *     in and needs a real clipboard event to reach; typing needs none, so typing is what this
      *     does.
@@ -5081,11 +7980,11 @@ const { chromium } = require('playwright');
      *     confirmAndSubmitPass filters its candidates on !disabled and would report the form's own
      *     submit as missing.
      *
-     * Each retained box receives its own value through the native input setter and exact event
-     * dispatch. A single field receives the whole value through that same exact-handle path.
+     * Focus-and-type first, then per-box filling for a group that does not auto-advance, then the
+     * whole-value fill for a single field.
      *
      * NEVER GUESSES A CODE. It types the one it was handed or it reports that it could not. */
-    const enterSecurityCode = async (code, requiredFormHandle = null) => {
+    const enterSecurityCode = async (code) => {
       let detected = null;
       let boxesProperty = null;
       let formProperty = null;
@@ -5093,62 +7992,22 @@ const { chromium } = require('playwright');
       const boxHandles = [];
       let formHandle = null;
       let parentHandle = null;
+      const codeWitnesses = [];
+      let codeWitnessesRetained = false;
+      let codePayloadAddressed = false;
+      let codeGroupIdentityDigest = null;
+      const securityCodeGroupId = crypto.randomBytes(16).toString('hex');
       try {
-      detected = await page.evaluateHandle((requiredForm) => {
+      detected = await page.evaluateHandle(() => {
         const isVisible = (element) => {
           const rect = element.getBoundingClientRect();
           return (rect.width > 0 || rect.height > 0) && getComputedStyle(element).visibility !== 'hidden';
         };
-        const strictForm = requiredForm instanceof HTMLFormElement && requiredForm.isConnected
-          ? requiredForm
-          : null;
-        if (requiredForm && !strictForm) {
-          return { boxes: [], form: null, parent: null, scopeInvalid: true };
-        }
-        const inputPool = strictForm
-          ? [...strictForm.elements].filter((element) => element.form === strictForm)
-          : [...document.querySelectorAll('input')];
-        const typed = inputPool.filter((element) => (
-          element instanceof HTMLInputElement
-          && element.isConnected
-          && isVisible(element)
-          && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
+        const typed = [...document.querySelectorAll('input')].filter((element) => (
+          isVisible(element) && !/checkbox|radio|file|hidden|submit|button|image|reset/.test(element.type || 'text')
         ));
-        let boxes = [];
-        if (strictForm) {
-          const groups = [];
-          const oneTime = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
-          if (oneTime.length === 1) {
-            groups.push(oneTime);
-          } else if (oneTime.length > 1) {
-            const byParent = new Map();
-            for (const element of oneTime) {
-              const parent = element.parentElement;
-              if (!parent) continue;
-              if (!byParent.has(parent)) byParent.set(parent, []);
-              byParent.get(parent).push(element);
-            }
-            groups.push(...byParent.values());
-          }
-          if (groups.length === 0) {
-            const byParent = new Map();
-            for (const element of typed) {
-              if (element.maxLength !== 1) continue;
-              const parent = element.parentElement;
-              if (!parent) continue;
-              if (!byParent.has(parent)) byParent.set(parent, []);
-              byParent.get(parent).push(element);
-            }
-            groups.push(...[...byParent.values()].filter((group) => group.length >= 4));
-          }
-          if (groups.length !== 1) {
-            return { boxes: [], form: strictForm, parent: null, ambiguous: groups.length > 1 };
-          }
-          boxes = groups[0];
-        } else {
-          boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
-        }
-        if (!strictForm && boxes.length === 0) {
+        let boxes = typed.filter((element) => /one-time-code/i.test(element.getAttribute('autocomplete') || ''));
+        if (boxes.length === 0) {
           const byParent = new Map();
           for (const element of typed) {
             if (element.maxLength !== 1) continue;
@@ -5162,17 +8021,14 @@ const { chromium } = require('playwright');
           }
         }
         if (boxes.length === 0) return { boxes: [], form: null, parent: null };
-        const form = strictForm || (boxes[0].form instanceof HTMLFormElement
+        const form = boxes[0].form instanceof HTMLFormElement
           ? boxes[0].form
-          : boxes[0].closest('form'));
-        if (strictForm && boxes.some((element) => element.form !== strictForm)) {
-          return { boxes: [], form: strictForm, parent: null, scopeInvalid: true };
-        }
+          : boxes[0].closest('form');
         const parent = boxes.every((element) => element.parentElement === boxes[0].parentElement)
           ? boxes[0].parentElement
           : null;
         return { boxes, form, parent };
-      }, requiredFormHandle).catch(() => null);
+      }).catch(() => null);
       if (!detected) return 'no_control';
       boxesProperty = await detected.getProperty('boxes');
       const indexedBoxes = [...(await boxesProperty.getProperties()).entries()]
@@ -5190,10 +8046,78 @@ const { chromium } = require('playwright');
       parentProperty = await detected.getProperty('parent');
       parentHandle = parentProperty.asElement();
       if (!parentHandle) await parentProperty.dispose().catch(() => undefined);
-      const bindingCurrent = async () => page.evaluate((bound) => {
+      const pristineCodeGroup = async () => {
+        if (!retainedAtomicV4Run || !formHandle || boxHandles.length === 0) return null;
+        const rawJson = await callV4Utility(
+          'securityCodeGroupSnapshotJson',
+          boxHandles,
+          formHandle,
+          parentHandle
+        ).catch(() => null);
+        let raw = null;
+        try { raw = typeof rawJson === 'string' ? JSON.parse(rawJson) : null; } catch {}
+        if (!(raw && ['autocomplete', 'single_character_group'].includes(raw.kind)
+          && raw.count === boxHandles.length
+          && typeof raw.allNamed === 'boolean'
+          && Array.isArray(raw.names)
+          && raw.names.length === boxHandles.length
+          && raw.names.every((name) => typeof name === 'string' && name.length <= 16_384)
+          && raw.allNamed === raw.names.every(Boolean)
+          && Array.isArray(raw.types)
+          && raw.types.length === boxHandles.length
+          && raw.types.every((type) => ['text', 'search', 'tel', 'url', 'email', 'password'].includes(type))
+          && Array.isArray(raw.values)
+          && raw.values.length === boxHandles.length
+          && raw.values.every((value) => typeof value === 'string' && value.length <= 16_384))) {
+          return null;
+        }
+        const identityDigest = crypto.createHash('sha256').update(JSON.stringify({
+          kind: raw.kind,
+          count: raw.count,
+          names: raw.names,
+          types: raw.types
+        })).digest('hex');
+        if (codeGroupIdentityDigest && identityDigest !== codeGroupIdentityDigest) return null;
+        return { ...raw, identityDigest };
+      };
+      if (retainedAtomicV4Run) {
+        const initialCodeGroup = await pristineCodeGroup();
+        if (!initialCodeGroup) return 'not_entered';
+        codeGroupIdentityDigest = initialCodeGroup.identityDigest;
+        if (retainedV4SecurityCodeContinuation) {
+          if (applicationScopeProofGeneration !== v4DocumentGeneration) return 'not_entered';
+          const scopeState = await callV4Utility(
+            'bindApplicationRoot',
+            formHandle
+          ).catch(() => 'unavailable') || 'unavailable';
+          if (scopeState !== 'bound') return 'not_entered';
+          const scopeReference = await formHandle.evaluateHandle((element) => element)
+            .catch(() => null);
+          const retainedScopeHandle = scopeReference?.asElement?.() || null;
+          if (!retainedScopeHandle) {
+            await scopeReference?.dispose?.().catch(() => undefined);
+            return 'not_entered';
+          }
+          await applicationScopeProofHandle?.dispose().catch(() => undefined);
+          applicationScopeProofHandle = retainedScopeHandle;
+          applicationScopeFailureReason = null;
+        }
+        /* Exact isolated bytes are enough to continue to a chooser that may refuse every control.
+         * They are not native payload authority. Only named successful controls can be retained for
+         * transport binding, and an unaddressed group is blocked before a unique submit can click. */
+        codePayloadAddressed = initialCodeGroup.allNamed;
+        if (codePayloadAddressed) {
+          for (const box of boxHandles) {
+            const witness = await captureSuccessfulAddressWitness(box, formHandle).catch(() => null);
+            if (!witness) return 'not_entered';
+            codeWitnesses.push(witness);
+          }
+        }
+      }
+      const bindingCurrent = async () => retainedAtomicV4Run
+        ? Boolean(await pristineCodeGroup())
+        : page.evaluate((bound) => {
         if (!Array.isArray(bound.boxes) || bound.boxes.length === 0) return false;
-        if (bound.requiredForm && (!(bound.requiredForm instanceof HTMLFormElement)
-          || !bound.requiredForm.isConnected || bound.form !== bound.requiredForm)) return false;
         if (bound.boxes.some((element) => !(element instanceof HTMLInputElement) || !element.isConnected)) return false;
         const currentForm = bound.boxes[0].form instanceof HTMLFormElement
           ? bound.boxes[0].form
@@ -5205,38 +8129,85 @@ const { chromium } = require('playwright');
         })) return false;
         if (bound.parent && bound.boxes.some((element) => element.parentElement !== bound.parent)) return false;
         return !bound.parent || bound.parent.isConnected;
-      }, {
-        boxes: boxHandles,
-        form: formHandle,
-        parent: parentHandle,
-        requiredForm: requiredFormHandle
-      }).catch(() => false);
+      }, { boxes: boxHandles, form: formHandle, parent: parentHandle }).catch(() => false);
       if (!await bindingCurrent()) return 'not_entered';
       const first = boxHandles[0];
+      await first.click().catch(() => undefined);
+      await page.keyboard.type(code, { delay: 30 }).catch(() => undefined);
+      const readPristineCode = async () => {
+        const group = await pristineCodeGroup();
+        if (!group) return null;
+        const groupValue = group.values.join('');
+        if (!codePayloadAddressed) return { value: groupValue, proofs: [] };
+        const editableCodeTypes = new Set(['text', 'search', 'tel', 'url', 'email', 'password']);
+        const proofs = [];
+        for (const witness of codeWitnesses) {
+          if (!await callV4Utility(
+            'successfulControlBelongsToForm',
+            witness.handle,
+            witness.formHandle
+          ).catch(() => false)) return null;
+          const proof = await readPristineSuccessfulControlProof(
+            witness.handle,
+            witness.formHandle
+          );
+          if (!proof || proof.identityDigest !== witness.pristineControlIdentityDigest
+            || proof.proof.tag !== 'input' || proof.proof.kind !== 'value'
+            || !editableCodeTypes.has(proof.proof.type)) return null;
+          proofs.push(proof);
+        }
+        const proofValue = proofs.map((proof) => proof.proof.value).join('');
+        return group.allNamed && proofValue === groupValue
+          ? { value: proofValue, proofs }
+          : null;
+      };
       const readBack = async () => {
+        if (retainedAtomicV4Run) return (await readPristineCode())?.value || '';
         if (!await bindingCurrent()) return '';
         return page.evaluate((boxes) => boxes.map((element) => element.value || '').join(''), boxHandles)
           .catch(() => '');
       };
-      for (let index = 0; index < boxHandles.length; index += 1) {
-        if (!await bindingCurrent()) return 'not_entered';
-        const value = boxHandles.length === 1 ? code : (code[index] || '');
-        const box = boxHandles[index];
-        const committed = await box.evaluate((element, nextValue) => {
-          if (!(element instanceof HTMLInputElement) || !element.isConnected) return false;
-          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-          if (typeof setter !== 'function') return false;
-          setter.call(element, nextValue);
-          const inputEvent = typeof InputEvent === 'function'
-            ? new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue })
-            : new Event('input', { bubbles: true });
-          element.dispatchEvent(inputEvent);
-          element.dispatchEvent(new Event('change', { bubbles: true }));
-          return element.isConnected && element.value === nextValue;
-        }, value).catch(() => false);
-        if (!committed || !await bindingCurrent()) return 'not_entered';
+      if ((await readBack()) !== code) {
+        for (let index = 0; index < boxHandles.length; index += 1) {
+          if (!await bindingCurrent()) return 'not_entered';
+          const value = boxHandles.length === 1 ? code : (code[index] || '');
+          const box = boxHandles[index];
+          await box.fill(value).catch(() => undefined);
+          await box.evaluate((element) => {
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+          }).catch(() => undefined);
+        }
       }
       if ((await readBack()) !== code) return 'not_entered';
+      if (retainedAtomicV4Run) {
+        const finalCode = await readPristineCode();
+        if (!finalCode || finalCode.value !== code
+          || (codePayloadAddressed && finalCode.proofs.length !== codeWitnesses.length)) {
+          return 'not_entered';
+        }
+        if (codePayloadAddressed) {
+          const retained = [];
+          for (let index = 0; index < codeWitnesses.length; index += 1) {
+            const witness = codeWitnesses[index];
+            const expected = codeWitnesses.length === 1 ? code : code[index] || '';
+            const proof = finalCode.proofs[index];
+            if (proof.proof.value !== expected) return 'not_entered';
+            retained.push({
+              handle: witness.handle,
+              formHandle: witness.formHandle,
+              pristineControlProofDigest: proof.digest,
+              securityCodeGroupId,
+              securityCodeIndex: index,
+              securityCodeGroupSize: codeWitnesses.length,
+              pageUrl: canonicalPageUrl(page.url()),
+              documentGeneration: witness.documentGeneration
+            });
+          }
+          successfulAddresses.push(...retained);
+          codeWitnessesRetained = true;
+        }
+      }
       /* THE CHARACTERS ARE IN THE BOXES AND THE FORM IS NOT NECESSARILY READY YET.
        *
        * Greenhouse re-enables its submit button from React state, not from the keystroke:
@@ -5278,13 +8249,16 @@ const { chromium } = require('playwright');
       while (Date.now() < deadline && !(await submitReady())) {
         await page.waitForTimeout(50).catch(() => undefined);
       }
-      return 'entered';
+      return retainedAtomicV4Run && !codePayloadAddressed ? 'entered_unaddressed' : 'entered';
       } finally {
         await boxesProperty?.dispose().catch(() => undefined);
         await detected?.dispose().catch(() => undefined);
         for (const handle of boxHandles) await handle.dispose().catch(() => undefined);
         await formHandle?.dispose().catch(() => undefined);
         await parentHandle?.dispose().catch(() => undefined);
+        if (!codeWitnessesRetained) {
+          for (const witness of codeWitnesses) await disposeSuccessfulAddressWitness(witness);
+        }
       }
     };
 
@@ -5297,7 +8271,21 @@ const { chromium } = require('playwright');
       // empty innerText is meaningful, as with a successfully rendered <object>'s fallback copy.
       const renderedText = (node) => {
         if (!node) return '';
-        return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+        if (typeof node.getClientRects !== 'function' && typeof node.innerText === 'string') return node.innerText;
+        if (node.getClientRects?.().length > 0 && typeof node.innerText === 'string') return node.innerText;
+        const visibleText = (current, depth = 0) => {
+          if (!current || depth > 16) return '';
+          if (current.nodeType === 3) return current.nodeValue || '';
+          if (current.nodeType !== 1) return '';
+          const style = getComputedStyle(current);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0) return '';
+          let text = '';
+          for (let index = 0; index < current.childNodes.length && text.length <= 4096; index += 1) {
+            text += visibleText(current.childNodes[index], depth + 1);
+          }
+          return text.slice(0, 4096);
+        };
+        return visibleText(node);
       };
       const isVisible = (element) => {
         if (!element) return false;
@@ -5684,6 +8672,53 @@ const { chromium } = require('playwright');
         '[role="group"][aria-labelledby], [role="group"][aria-label],'
         + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
       ) || null;
+      const directSemanticChoicePeers = (element, group = semanticChoiceGroup(element)) => (
+        group?.querySelectorAll
+          ? [...group.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+            .filter((peer) => semanticChoiceGroup(peer) === group)
+          : []
+      );
+      const enabledSemanticCheckboxGroupAnswered = (element, group) => {
+        if (element?.tagName !== 'INPUT' || element.type !== 'checkbox'
+          || element.matches?.(':disabled') || group?.getAttribute?.('role') !== 'group') return null;
+        const peers = directSemanticChoicePeers(element, group);
+        if (peers.length < 2 || !peers.some((peer) => peer === element)
+          || peers.some((peer) => peer?.tagName !== 'INPUT'
+            || peer.form !== element.form || peer.type !== 'checkbox' || !peer.name)) return null;
+        return peers.some((peer) => !peer.matches?.(':disabled') && peer.checked);
+      };
+      const enabledNativeChoiceAnswered = (element, candidates) => {
+        if (element?.tagName !== 'INPUT'
+          || !['checkbox', 'radio'].includes(element.type) || element.matches?.(':disabled')) return false;
+        if (element.checked) return true;
+        if (!element.name) return false;
+        const peers = candidates || element.form?.elements
+          || (typeof root !== 'undefined' && root?.querySelectorAll
+            ? root.querySelectorAll('input[type="checkbox"], input[type="radio"]')
+            : [element]);
+        return [...peers].some((peer) => peer?.tagName === 'INPUT'
+          && peer.form === element.form
+          && peer.name === element.name
+          && peer.type === element.type
+          && !peer.matches?.(':disabled')
+          && peer.checked);
+      };
+      const selectHasEnabledSelection = (element) => element?.tagName === 'SELECT'
+        && [...(element.options || [])].some((option) => option.selected
+          && !option.disabled
+          && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled)
+          && String(option.value || '').trim().length > 0);
+      const ownedNativeControls = (element) => {
+        if (typeof root === 'undefined'
+          || typeof HTMLFormElement === 'undefined'
+          || !(root instanceof HTMLFormElement)
+          || !element?.getAttribute) return [];
+        const ids = String(element.getAttribute('aria-owns') || '').trim().split(/\s+/).filter(Boolean);
+        if (ids.length > 16) return [];
+        return [...new Set(ids.map((id) => document.getElementById(id)).filter((control) => (
+          control && control.form === root && clean(control.name) && !control.matches?.(':disabled')
+        )))];
+      };
       const hasAnswer = (element) => {
         if (!element) return false;
         const select2Answer = select2SourceAnswered(element);
@@ -5697,7 +8732,7 @@ const { chromium } = require('playwright');
           if (element.type === 'hidden') return false;
           if (element.type === 'file') return uploadHasFile(element.parentElement);
           if (element.type === 'checkbox' || element.type === 'radio') {
-            if (element.checked) return true;
+            if (enabledNativeChoiceAnswered(element, [element])) return true;
             // Ashby's hidden yes/no checkbox is unchecked whether the applicant picked "No" or picked
             // nothing, so the pills beside it are the only place the answer is legible. Asked before
             // the peer-group walk because that walk reads the same unchecked inputs.
@@ -5705,16 +8740,16 @@ const { chromium } = require('playwright');
             if (pill !== null) return pill;
             const semanticGroup = semanticChoiceGroup(element);
             if (semanticGroup) {
-              return [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
-                .some((peer) => peer.checked);
+              const semanticAnswer = enabledSemanticCheckboxGroupAnswered(element, semanticGroup);
+              if (semanticAnswer !== null) return semanticAnswer;
+              return enabledNativeChoiceAnswered(
+                element,
+                directSemanticChoicePeers(element, semanticGroup)
+              );
             }
-            if (!element.name) return false;
-            // One answered radio answers its whole group, and only the checked member carries it.
-            for (const peer of (element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')) {
-              if (peer.checked) return true;
-            }
-            return false;
+            return enabledNativeChoiceAnswered(element);
           }
+          if (element.tagName === 'SELECT') return selectHasEnabledSelection(element);
           return Boolean(clean(element.value));
         }
         // Not a form control at all. Greenhouse marks its uploader required with a
@@ -5753,7 +8788,20 @@ const { chromium } = require('playwright');
           if (openerAriaLabel && rendered.toLowerCase() === openerAriaLabel.toLowerCase()) return false;
           return !BARE_OPENER_FURNITURE.test(rendered) && !PLACEHOLDER_SHAPED.test(rendered);
         }
-        for (const control of element.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
+        const backingControls = [...new Set([
+          ...element.querySelectorAll('input, textarea, select'),
+          ...ownedNativeControls(element)
+        ])];
+        for (const control of backingControls) {
+          if (typeof root !== 'undefined' && root?.tagName === 'FORM'
+            && control.form === root
+            && clean(control.name)
+            && !control.matches(':disabled')
+            && control.tagName === 'INPUT'
+            && control.type === 'hidden') {
+            if (clean(control.value)) return true;
+            continue;
+          }
           if (hasAnswer(control)) return true;
         }
         return false;
@@ -5766,6 +8814,21 @@ const { chromium } = require('playwright');
           for (const control of root.elements) {
             if (control.form === root && control.matches?.(selector)) found.add(control);
           }
+          for (const candidate of document.querySelectorAll(selector)) {
+            if (candidate.form === root) found.add(candidate);
+            else if (!(candidate instanceof HTMLInputElement
+              || candidate instanceof HTMLTextAreaElement
+              || candidate instanceof HTMLSelectElement)
+              && [...candidate.querySelectorAll?.('input, textarea, select') || []]
+                .some((control) => control.form === root && clean(control.name))) {
+              found.add(candidate);
+            } else if (!(candidate instanceof HTMLInputElement
+              || candidate instanceof HTMLTextAreaElement
+              || candidate instanceof HTMLSelectElement)
+              && ownedNativeControls(candidate).length > 0) {
+              found.add(candidate);
+            }
+          }
         }
         return [...found];
       };
@@ -5775,7 +8838,9 @@ const { chromium } = require('playwright');
           for (const marker of document.querySelectorAll(selector)) {
             const named = marker.getAttribute?.('for');
             const control = marker.control || (named ? document.getElementById(named) : null);
-            if (control?.form === root) found.add(marker);
+            const parentControls = [...marker.parentElement?.querySelectorAll?.('input, textarea, select') || []]
+              .filter((candidate) => candidate.form === root && clean(candidate.name));
+            if (control?.form === root || parentControls.length > 0) found.add(marker);
           }
         }
         return [...found];
@@ -5860,7 +8925,10 @@ const { chromium } = require('playwright');
       for (const element of scopedControls(
         '${SUBMIT_READINESS_POLICY.requiredAttributes}'
       )) {
-        if (element.disabled) continue;
+        if (element.matches?.(':disabled')) continue;
+        const nativeRequired = element.hasAttribute?.('required');
+        const ariaRequired = element.getAttribute?.('aria-required') === 'true';
+        if (nativeRequired && !ariaRequired && 'willValidate' in element && !element.willValidate) continue;
         if (securityCodeBoxes.has(element)) continue;
         if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
         note(widgetOf(element), element, 'required');
@@ -5960,7 +9028,7 @@ const { chromium } = require('playwright');
       const ASTERISK_MARK = /${SUBMIT_READINESS_POLICY.asteriskMark}/;
       const ASTERISK_LEGEND = /${SUBMIT_READINESS_POLICY.asteriskLegend}/i;
       for (const marker of scopedMarkers('label, legend')) {
-        const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
+        const markerText = renderedText(marker).replace(/\s+/g, ' ').trim();
         if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
         noteMarkedLabel(marker, false);
       }
@@ -6144,21 +9212,16 @@ const { chromium } = require('playwright');
       if (element.matches?.(':disabled') || element.getAttribute?.('aria-disabled') === 'true') return null;
       if ('readOnly' in element && element.readOnly === true) return null;
       const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const rawMethod = String(form.getAttribute('method') || '').toLowerCase();
-      const rawEnctype = String(form.getAttribute('enctype') || '').toLowerCase();
       const formState = {
         id: form.id || null,
         name: form.getAttribute('name') || null,
         action: form.getAttribute('action') || null,
-        resolvedAction: new URL(form.getAttribute('action') || location.href, document.baseURI).href,
-        method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
-        effectiveTarget: form.getAttribute('target')
-          || document.querySelector('base[target]')?.getAttribute('target') || '',
-        enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-          ? rawEnctype
-          : 'application/x-www-form-urlencoded',
-        noValidate: form.hasAttribute('novalidate'),
-        acceptCharset: form.getAttribute('accept-charset') || '',
+        resolvedAction: form.action,
+        method: form.method,
+        effectiveTarget: form.target || document.querySelector('base[target]')?.getAttribute('target') || '',
+        enctype: form.enctype,
+        noValidate: form.noValidate,
+        acceptCharset: form.acceptCharset,
         ariaLabel: form.getAttribute('aria-label') || null
       };
       const controlState = {
@@ -6262,28 +9325,49 @@ const { chromium } = require('playwright');
         await handleReference?.dispose?.().catch(() => undefined);
         return null;
       }
-      const formReference = await handle.evaluateHandle((element) => (
-        element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')
-      )).catch(() => null);
+      if (retainedAtomicV4Run && !await callV4Utility('sameNode', sourceHandle, handle).catch(() => false)) {
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      const formReference = retainedAtomicV4Run
+        ? requiredForm
+          ? await requiredForm.evaluateHandle((form) => form).catch(() => null)
+          : null
+        : await handle.evaluateHandle((element) => (
+            element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')
+          )).catch(() => null);
       const formHandle = formReference?.asElement?.() || null;
       if (!formHandle) {
         await formReference?.dispose?.().catch(() => undefined);
         await handle.dispose().catch(() => undefined);
         return null;
       }
-      if (requiredForm && !await handle.evaluate((element, originalForm) => (
-        (element.form instanceof HTMLFormElement ? element.form : element.closest?.('form')) === originalForm
-      ), requiredForm).catch(() => false)) {
+      const formMatches = retainedAtomicV4Run
+        ? await callV4Utility('sameNode', requiredForm, formHandle).catch(() => false)
+          && await callV4Utility('successfulControlBelongsToForm', handle, formHandle).catch(() => false)
+        : !requiredForm || await formHandle.evaluate(
+            (currentForm, originalForm) => currentForm === originalForm,
+            requiredForm
+          ).catch(() => false);
+      if (!formMatches) {
         await formHandle.dispose().catch(() => undefined);
         await handle.dispose().catch(() => undefined);
         return null;
       }
-      const identity = await handle.evaluate(successfulAddressSnapshot, {
+      const pristineControlProof = retainedAtomicV4Run
+        ? await readPristineSuccessfulControlProof(handle, formHandle)
+        : null;
+      if (retainedAtomicV4Run && !pristineControlProof) {
+        await formHandle.dispose().catch(() => undefined);
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      const identity = retainedAtomicV4Run ? null : await handle.evaluate(successfulAddressSnapshot, {
         originalForm: formHandle,
         requiredForm: null,
         onlyIdentity: true
       }).catch(() => null);
-      if (!identity) {
+      if (!retainedAtomicV4Run && !identity) {
         await formHandle.dispose().catch(() => undefined);
         await handle.dispose().catch(() => undefined);
         return null;
@@ -6291,9 +9375,201 @@ const { chromium } = require('playwright');
       return {
         handle,
         formHandle,
-        identityDigest: crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
-        pageUrl: canonicalPageUrl(page.url())
+        identityDigest: retainedAtomicV4Run
+          ? pristineControlProof.identityDigest
+          : crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
+        ...(pristineControlProof ? {
+          pristineControlIdentityDigest: pristineControlProof.identityDigest
+        } : {}),
+        pageUrl: canonicalPageUrl(page.url()),
+        documentGeneration: v4DocumentGeneration
       };
+    };
+    const normalizePristineSuccessfulControlProof = (raw) => {
+      if (!raw || !['input', 'textarea', 'select'].includes(raw.tag)
+        || typeof raw.name !== 'string' || raw.name.length === 0 || raw.name.length > 16_384
+        || !['file', 'value', 'choice', 'select'].includes(raw.kind)) return null;
+      const proof = {
+        tag: raw.tag,
+        name: raw.name,
+        type: typeof raw.type === 'string' && raw.type.length <= 128 ? raw.type : null,
+        kind: raw.kind
+      };
+      if (raw.kind === 'file') {
+        if (!Array.isArray(raw.files) || raw.files.length > 16) return null;
+        let totalBytes = 0;
+        proof.files = [];
+        for (const file of raw.files) {
+          if (!file || typeof file.name !== 'string' || file.name.length > 512
+            || typeof file.type !== 'string' || file.type.length > 256
+            || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > 12_000_000
+            || !Number.isFinite(file.lastModified) || typeof file.bytesBase64 !== 'string') return null;
+          const bytes = Buffer.from(file.bytesBase64, 'base64');
+          if (bytes.length !== file.size || bytes.toString('base64') !== file.bytesBase64) return null;
+          totalBytes += bytes.length;
+          if (totalBytes > 12_000_000) return null;
+          proof.files.push({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            lastModified: file.lastModified,
+            sha256: crypto.createHash('sha256').update(bytes).digest('hex')
+          });
+        }
+      } else if (raw.kind === 'value') {
+        if (typeof raw.value !== 'string' || Buffer.byteLength(raw.value) > 12_000_000
+          || typeof raw.telShaped !== 'boolean'
+          || !['', 'day', 'month'].includes(raw.datePrecision)) return null;
+        proof.value = raw.value;
+        proof.telShaped = raw.telShaped;
+        proof.datePrecision = raw.datePrecision;
+      } else if (raw.kind === 'choice') {
+        if (typeof raw.checked !== 'boolean' || typeof raw.value !== 'string'
+          || Buffer.byteLength(raw.value) > 1_000_000
+          || typeof raw.ariaLabel !== 'string' || Buffer.byteLength(raw.ariaLabel) > 16_384
+          || !Array.isArray(raw.labels) || raw.labels.length > 16) return null;
+        proof.checked = raw.checked;
+        proof.value = raw.value;
+        proof.ariaLabel = raw.ariaLabel;
+        proof.labels = [];
+        for (const label of raw.labels) {
+          if (typeof label !== 'string' || Buffer.byteLength(label) > 16_384) return null;
+          proof.labels.push(label);
+        }
+      } else {
+        if (!Number.isSafeInteger(raw.selectedIndex) || raw.selectedIndex < -1
+          || !Array.isArray(raw.selectedValues) || raw.selectedValues.length > 1024
+          || !Array.isArray(raw.selectedLabels)
+          || raw.selectedLabels.length !== raw.selectedValues.length
+          || !Array.isArray(raw.optionValues) || raw.optionValues.length > 1024
+          || !Array.isArray(raw.optionLabels)
+          || raw.optionLabels.length !== raw.optionValues.length) return null;
+        let totalBytes = 0;
+        proof.selectedIndex = raw.selectedIndex;
+        proof.selectedValues = [];
+        proof.selectedLabels = [];
+        for (let index = 0; index < raw.selectedValues.length; index += 1) {
+          const value = raw.selectedValues[index];
+          const label = raw.selectedLabels[index];
+          if (typeof value !== 'string' || typeof label !== 'string') return null;
+          totalBytes += Buffer.byteLength(value) + Buffer.byteLength(label);
+          if (totalBytes > 12_000_000) return null;
+          proof.selectedValues.push(value);
+          proof.selectedLabels.push(label);
+        }
+        proof.optionValues = [];
+        proof.optionLabels = [];
+        for (let index = 0; index < raw.optionValues.length; index += 1) {
+          const value = raw.optionValues[index];
+          const label = raw.optionLabels[index];
+          if (typeof value !== 'string' || typeof label !== 'string') return null;
+          totalBytes += Buffer.byteLength(value) + Buffer.byteLength(label);
+          if (totalBytes > 12_000_000) return null;
+          proof.optionValues.push(value);
+          proof.optionLabels.push(label);
+        }
+      }
+      const identity = {
+        tag: proof.tag,
+        name: proof.name,
+        type: proof.type,
+        kind: proof.kind,
+        ...(proof.kind === 'value' ? {
+          telShaped: proof.telShaped,
+          datePrecision: proof.datePrecision
+        } : {}),
+        ...(proof.kind === 'choice' ? {
+          value: proof.value,
+          ariaLabel: proof.ariaLabel,
+          labels: proof.labels
+        } : {}),
+        ...(proof.kind === 'select' ? {
+          optionValues: proof.optionValues,
+          optionLabels: proof.optionLabels
+        } : {})
+      };
+      return {
+        proof,
+        identityDigest: crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'),
+        digest: crypto.createHash('sha256').update(JSON.stringify(proof)).digest('hex')
+      };
+    };
+    const readPristineSuccessfulControlProof = async (handle, formHandle) => {
+      if (!retainedAtomicV4Run || !handle || !formHandle) return null;
+      const rootSet = await callV4Utility('setProofRoot', formHandle).catch(() => false);
+      if (!rootSet) return null;
+      const rawJson = await callV4Utility('successfulControlSnapshotJson', handle).catch(() => null);
+      let raw = null;
+      try { raw = typeof rawJson === 'string' ? JSON.parse(rawJson) : null; } catch {}
+      return normalizePristineSuccessfulControlProof(raw);
+    };
+    const pristineProofMatchesAction = (proof, action, fillByUsesNativeVerifier) => {
+      if (!proof) return false;
+      if (action.type === 'upload') {
+        const intendedBytes = action.file?.base64 ? Buffer.from(action.file.base64, 'base64') : null;
+        const observed = proof.kind === 'file' && proof.files.length === 1 ? proof.files[0] : null;
+        return Boolean(intendedBytes && observed
+          && observed.name === action.file?.name
+          && observed.type === action.file?.mimeType
+          && observed.size === intendedBytes.length
+          && observed.sha256 === crypto.createHash('sha256').update(intendedBytes).digest('hex'));
+      }
+      if (!['fill', 'select', 'fillByLabelText'].includes(action.type)) return true;
+      if (action.type === 'fillByLabelText' && !fillByUsesNativeVerifier
+        && proof.kind !== 'choice') return true;
+      const wantedExact = String(action.value || '');
+      const wanted = wantedExact.replace(/\s+/g, ' ').trim();
+      if (proof.kind === 'value') {
+        const shownExact = proof.value;
+        const shown = shownExact.replace(/\s+/g, ' ').trim();
+        if (proof.telShaped) {
+          const shownDigits = shown.replace(/\D/g, '');
+          const wantedDigits = wanted.replace(/\D/g, '');
+          const phoneLength = proof.type === 'tel'
+            || (shownDigits.length >= 7 && wantedDigits.length >= 7);
+          return Boolean(shownDigits && wantedDigits && phoneLength
+            && !/[a-z]/i.test(shown) && !/[a-z]/i.test(wanted)
+            && shownDigits === wantedDigits);
+        }
+        const datePrecision = proof.datePrecision;
+        if (datePrecision) {
+          const wantedPoint = calendarPointOf(wanted);
+          if (!wantedPoint || wantedPoint.precision === 'year') return false;
+          const asked = wantedPoint.precision === 'month' && datePrecision === 'day'
+            ? { year: wantedPoint.year, month: wantedPoint.month, day: 1, precision: 'day' }
+            : wantedPoint;
+          return sameCalendarPoint(calendarPointOf(shown), asked);
+        }
+        if (proof.tag === 'textarea') {
+          return shownExact === wantedExact.replace(/\r\n?|\n/g, '\n');
+        }
+        return shownExact === wantedExact;
+      }
+      if (proof.kind === 'select') {
+        if (proof.selectedValues.length !== 1) return false;
+        if (action.type === 'select') return proof.selectedValues[0] === wantedExact;
+        const exactAnswers = answerOptions(wantedExact).map((value) => clean(value).toLowerCase());
+        const selectedCandidates = [
+          proof.optionLabels[proof.selectedIndex],
+          proof.optionValues[proof.selectedIndex],
+          proof.selectedValues[0]
+        ];
+        return selectedCandidates.some((candidate) => (
+          exactAnswers.includes(clean(candidate).toLowerCase())
+          || declineMatches(candidate, wantedExact)
+        ));
+      }
+      if (proof.kind === 'choice' && action.type === 'fillByLabelText') {
+        const renderedLabel = proof.labels.find((value) => clean(value));
+        const candidate = renderedLabel || proof.ariaLabel || proof.value;
+        /* This is proof of the value already selected, not a fresh option list. Reusing the full
+         * chooser here admitted its single-option affirmative widening, so any lone native value
+         * could verify as "Yes" after a page-world getter redirected the click. The isolated proof
+         * may authorize only exact wording or a value that independently reads as a decline. */
+        return proof.checked && (optionMatchesExactly(candidate, wantedExact)
+          || declineMatches(candidate, wantedExact));
+      }
+      return false;
     };
     const intendedFillByChoiceTarget = async (scope, wanted, kind) => {
       if (!scope || !clean(wanted)) return null;
@@ -6323,31 +9599,49 @@ const { chromium } = require('playwright');
       const { handle, formHandle } = witness;
       let retained = false;
       try {
-      if (witness.pageUrl !== canonicalPageUrl(page.url())) return;
+      if (witness.pageUrl !== canonicalPageUrl(page.url())
+        || witness.documentGeneration !== v4DocumentGeneration) return;
       const target = handle;
+      const pristineControlProof = retainedAtomicV4Run
+        ? await readPristineSuccessfulControlProof(handle, formHandle)
+        : null;
+      if (retainedAtomicV4Run && (!pristineControlProof
+        || pristineControlProof.identityDigest !== witness.pristineControlIdentityDigest)) {
+        successfulAddressIntegrityFailure = true;
+        return;
+      }
       const fillByUsesNativeVerifier = action.type === 'fillByLabelText'
-        && await target.evaluate((element) => (
-          element instanceof HTMLTextAreaElement
-          || element instanceof HTMLSelectElement
-          || (element instanceof HTMLInputElement
-            && element.type !== 'checkbox' && element.type !== 'radio' && element.type !== 'file')
-        )).catch(() => false);
-      if ((action.type === 'fill' || action.type === 'select' || fillByUsesNativeVerifier)
+        && (retainedAtomicV4Run
+          ? pristineControlProof?.proof?.kind === 'value'
+            || pristineControlProof?.proof?.kind === 'select'
+          : await target.evaluate((element) => (
+              element instanceof HTMLTextAreaElement
+              || element instanceof HTMLSelectElement
+              || (element instanceof HTMLInputElement
+                && element.type !== 'checkbox' && element.type !== 'radio' && element.type !== 'file')
+            )).catch(() => false));
+      if (!retainedAtomicV4Run
+        && (action.type === 'fill' || action.type === 'select' || fillByUsesNativeVerifier)
         && !await verifySuccessfulAddressIntent(target, action.value || '').catch(() => false)) {
         return;
       }
-      const snapshot = await handle.evaluate(
+      if (retainedAtomicV4Run
+        && !pristineProofMatchesAction(pristineControlProof.proof, action, fillByUsesNativeVerifier)) {
+        successfulAddressIntegrityFailure = true;
+        return;
+      }
+      const snapshot = retainedAtomicV4Run ? null : await handle.evaluate(
         successfulAddressSnapshot,
         { originalForm: formHandle, requiredForm: null }
       ).catch(() => null);
-      if (!snapshot) {
-        return;
+      if (!retainedAtomicV4Run && !snapshot) return;
+      if (!retainedAtomicV4Run) {
+        const currentIdentityDigest = crypto.createHash('sha256').update(JSON.stringify({
+          formState: snapshot.formState,
+          controlState: snapshot.controlState
+        })).digest('hex');
+        if (currentIdentityDigest !== witness.identityDigest) return;
       }
-      const currentIdentityDigest = crypto.createHash('sha256').update(JSON.stringify({
-        formState: snapshot.formState,
-        controlState: snapshot.controlState
-      })).digest('hex');
-      if (currentIdentityDigest !== witness.identityDigest) return;
       const expectedFileSize = action.type === 'upload' && action.file?.base64
         ? Buffer.from(action.file.base64, 'base64').length
         : null;
@@ -6356,12 +9650,15 @@ const { chromium } = require('playwright');
         : null;
       const cleanExact = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const expectedExact = cleanExact(action.value);
-      const fillByChoiceMatches = action.type === 'fillByLabelText' && !fillByUsesNativeVerifier
+      const fillByChoiceMatches = !retainedAtomicV4Run
+        && action.type === 'fillByLabelText' && !fillByUsesNativeVerifier
         && (snapshot.kind === 'choice'
           ? [snapshot.value, snapshot.label, snapshot.ariaLabel, ...(snapshot.controlState?.labels || [])]
             .some((value) => cleanExact(value) === expectedExact)
           : snapshot.kind === 'custom-choice' && cleanExact(snapshot.text) === expectedExact);
-      const matchesAction = fillByChoiceMatches
+      const matchesAction = retainedAtomicV4Run
+        ? true
+        : fillByChoiceMatches
         || ((action.type === 'fill' || action.type === 'select' || fillByUsesNativeVerifier)
           && await verifySuccessfulAddressIntent(target, action.value || '').catch(() => false))
         || (action.type === 'upload' && snapshot.kind === 'file'
@@ -6376,8 +9673,12 @@ const { chromium } = require('playwright');
       successfulAddresses.push({
         handle,
         formHandle,
-        snapshotDigest: crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex'),
-        pageUrl: canonicalPageUrl(page.url())
+        ...(!retainedAtomicV4Run ? {
+          snapshotDigest: crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
+        } : {}),
+        ...(pristineControlProof ? { pristineControlProofDigest: pristineControlProof.digest } : {}),
+        pageUrl: canonicalPageUrl(page.url()),
+        documentGeneration: witness.documentGeneration
       });
       retained = true;
       } finally {
@@ -6387,15 +9688,38 @@ const { chromium } = require('playwright');
     const currentSuccessfulAddressHandles = async (requiredForm = null) => {
       const currentHandles = [];
       for (const address of successfulAddresses) {
-        if (address.pageUrl !== canonicalPageUrl(page.url())) continue;
-        const current = await address.handle.evaluate(
+        if (address.pageUrl !== canonicalPageUrl(page.url())
+          || address.documentGeneration !== v4DocumentGeneration) continue;
+        if (requiredForm) {
+          const sameForm = retainedAtomicV4Run
+            ? await callV4Utility('sameNode', address.formHandle, requiredForm).catch(() => false)
+            : await address.formHandle.evaluate(
+                (originalForm, currentForm) => originalForm === currentForm,
+                requiredForm
+              ).catch(() => false);
+          if (!sameForm) continue;
+        }
+        const current = retainedAtomicV4Run ? null : await address.handle.evaluate(
           successfulAddressSnapshot,
           { originalForm: address.formHandle, requiredForm }
         ).catch(() => null);
-        const currentDigest = current
-          ? crypto.createHash('sha256').update(JSON.stringify(current)).digest('hex')
+        const currentDigest = retainedAtomicV4Run
+          ? null
+          : current
+            ? crypto.createHash('sha256').update(JSON.stringify(current)).digest('hex')
+            : null;
+        const currentControlProof = address.pristineControlProofDigest
+          ? await readPristineSuccessfulControlProof(address.handle, address.formHandle)
           : null;
-        if (!currentDigest || currentDigest !== address.snapshotDigest) continue;
+        const controlProofMatches = !address.pristineControlProofDigest
+          || currentControlProof?.digest === address.pristineControlProofDigest;
+        const pageSnapshotMatches = retainedAtomicV4Run
+          ? true
+          : Boolean(currentDigest && currentDigest === address.snapshotDigest);
+        if (!pageSnapshotMatches || !controlProofMatches) {
+          successfulAddressIntegrityFailure = true;
+          continue;
+        }
         currentHandles.push(address.handle);
       }
       return currentHandles;
@@ -6404,8 +9728,38 @@ const { chromium } = require('playwright');
       if (!requiredScope) return [];
       const currentPageFailures = unsuccessfulChoices.filter((failure) => (
         failure.pageUrl === canonicalPageUrl(page.url())
+        && failure.documentGeneration === v4DocumentGeneration
       ));
       if (currentPageFailures.length === 0) return [];
+      // V4 treats a detached failed choice as a run-global refusal because every successful
+      // application mutation is already required to belong to its one caller-bound form. V3 has
+      // no such global-form invariant. Preserve its original selected-scope behavior by deciding
+      // membership from the retained form or ancestry handles before a detached unrelated form can
+      // be mistaken for a failure in the application form that the chooser actually selected.
+      const scopeRelevantFailures = retainedAtomicV4Run
+        ? currentPageFailures
+        : [];
+      if (!retainedAtomicV4Run) {
+        for (const failure of currentPageFailures) {
+          let belongs = false;
+          if (scopeKind === 'form' && failure.formHandle) {
+            belongs = await requiredScope.evaluate(
+              (scope, originalForm) => scope === originalForm,
+              failure.formHandle
+            ).catch(() => false);
+          } else if (scopeKind === 'container' && !failure.formHandle && failure.ancestryHandle) {
+            belongs = await requiredScope.evaluate((scope, ancestry) => {
+              if (!Array.isArray(ancestry)) return false;
+              for (let index = 0; index < ancestry.length; index += 1) {
+                if (ancestry[index] === scope) return true;
+              }
+              return false;
+            }, failure.ancestryHandle).catch(() => false);
+          }
+          if (belongs) scopeRelevantFailures.push(failure);
+        }
+      }
+      if (scopeRelevantFailures.length === 0) return [];
       return requiredScope.evaluate((scope, input) => {
         const failures = [];
         for (const failure of input.failures) {
@@ -6429,13 +9783,13 @@ const { chromium } = require('playwright');
         return failures;
       }, {
         scopeKind,
-        failures: currentPageFailures.map((failure) => ({
+        failures: scopeRelevantFailures.map((failure) => ({
           handle: failure.handle,
           form: failure.formHandle,
           ancestry: failure.ancestryHandle,
           kind: failure.kind
         }))
-      }).catch(() => currentPageFailures.map((failure) => failure.kind));
+      }).catch(() => scopeRelevantFailures.map((failure) => failure.kind));
     };
     const protectChooserBinding = (binding) => {
       if (!binding || !Array.isArray(binding.formShape?.submittedControls)) return binding;
@@ -6458,11 +9812,17 @@ const { chromium } = require('playwright');
       if (chooserHash !== action.chooserPolicy.grammarHash) {
         throw new Error('Atomic submit chooser grammar hash mismatch');
       }
-      const chooserVersion = action.chooserPolicy.version;
-      const requiresNativeTransport = chooserVersion === 4
-        || (retainedV4SecurityCodeContinuation
-          && chooserVersion === 3
-          && action.submitKind === 'verification');
+      const chooserVersion = retainedV4SecurityCodeContinuation
+        && action.chooserPolicy.version === 3
+        && action.submitKind === 'verification'
+        ? 4
+        : action.chooserPolicy.version;
+      const trustedFinalPattern = chooserVersion === 4
+        ? new RegExp(action.chooserPolicy.finalPattern, 'i')
+        : null;
+      const trustedExclusionPattern = chooserVersion === 4
+        ? new RegExp(action.chooserPolicy.exclusionPattern, 'i')
+        : null;
       if (chooserVersion === 4) {
         if (!requiresExactPageUrl || !exactPageUrlProof
           || action.expectedPageUrl !== exactPageUrlProof.expected) {
@@ -6473,18 +9833,23 @@ const { chromium } = require('playwright');
           throw new Error('Employer page URL changed before the final submit chooser');
         }
         exactPageUrlProof.beforeFinalChooser = observed;
-      } else if (requiresNativeTransport) {
-        if (!requiresExactPageUrl || !exactPageUrlProof
-          || action.expectedPageUrl !== exactPageUrlProof.expected) {
-          throw new Error('A retained atomic submit verification requires the exact employer page URL capability');
-        }
-        const observed = canonicalPageUrl(page.url());
-        if (observed !== exactPageUrlProof.expected) {
-          throw new Error('Employer page URL changed before the retained verification chooser');
-        }
       }
-      let chooserSuccessfulControls = chooserVersion === 4
+      const successfulControlsForApplicationForm = async (handles) => {
+        const scoped = [];
+        for (const handle of handles) {
+          const belongs = await callV4Utility(
+            'successfulControlBelongsToApplication',
+            handle
+          ).catch(() => false);
+          if (belongs) scoped.push(handle);
+        }
+        return scoped;
+      };
+      let chooserAllSuccessfulControls = chooserVersion === 4
         ? await currentSuccessfulAddressHandles()
+        : [];
+      let chooserSuccessfulControls = chooserVersion === 4
+        ? await successfulControlsForApplicationForm(chooserAllSuccessfulControls)
         : [];
       /* THE SUBMISSION SCOPE IS NOT ALWAYS A <form>, AND ON ASHBY IT NEVER IS.
        *
@@ -6512,8 +9877,125 @@ const { chromium } = require('playwright');
        *      inside, or be named by the control itself, so that refusing a form withholds the
        *      click rather than relocating it onto a decoy that collects a little more;
        *   5. never body and never documentElement, because "the whole page" is not a scope. */
-      const readSubmitChoices = async (successfulControls = []) => {
+      const readPristineV4SubmitCandidate = async (handle) => {
+        if (!handle || !applicationScopeProofHandle) return null;
+        const rawJson = await callV4Utility('candidateSnapshotJson', handle).catch(() => null);
+        let raw = null;
+        try { raw = typeof rawJson === 'string' ? JSON.parse(rawJson) : null; } catch {}
+        if (!raw || !['button', 'input'].includes(raw.tag) || raw.type !== 'submit'
+          || typeof raw.text !== 'string' || typeof raw.ariaLabel !== 'string'
+          || raw.text.length > 16_384 || raw.ariaLabel.length > 16_384
+          || typeof raw.disabled !== 'boolean' || typeof raw.bindingFingerprint !== 'string'
+          || raw.bindingFingerprint.length > 2_000_000 || !chooserBindingHmacKey) return null;
+        return {
+          ...raw,
+          bindingFingerprint: crypto.createHmac('sha256', chooserBindingHmacKey)
+            .update(raw.bindingFingerprint)
+            .digest('hex')
+        };
+      };
+      const distinctSuccessfulControlCount = async (handles) => {
+        const unique = [];
+        for (const handle of handles) {
+          let seen = false;
+          for (const retained of unique) {
+            if (await callV4Utility('sameNode', handle, retained).catch(() => false)) {
+              seen = true;
+              break;
+            }
+          }
+          if (!seen) unique.push(handle);
+        }
+        return unique.length;
+      };
+      const distinctSuccessfulFormCount = async (handles) => {
+        const count = await callV4Utility('distinctSuccessfulFormCount', handles).catch(() => null);
+        return Number.isSafeInteger(count) ? count : handles.length + 1;
+      };
+      const readV4SubmitChoices = async (candidateHandles, successfulControls, allSuccessfulControls) => {
+        const successfulCount = await distinctSuccessfulControlCount(successfulControls);
+        const allSuccessfulCount = await distinctSuccessfulControlCount(allSuccessfulControls);
+        const addressedScopeCount = await distinctSuccessfulFormCount(allSuccessfulControls);
+        const proofScopeConsistent = allSuccessfulCount === successfulCount
+          && addressedScopeCount <= 1;
+        const bareSendAuthorized = successfulCount >= 2 && proofScopeConsistent
+          && addressedScopeCount === 1;
+        const rows = [];
+        for (let index = 0; index < candidateHandles.length; index += 1) {
+          const handle = candidateHandles[index];
+          const candidate = await readPristineV4SubmitCandidate(handle);
+          if (!candidate) continue;
+          const visible = await handle.isVisible().catch(() => false);
+          const text = String(candidate.text || candidate.ariaLabel || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          trustedFinalPattern.lastIndex = 0;
+          trustedExclusionPattern.lastIndex = 0;
+          const bareSend = /^send$/i.test(text);
+          const finalVerification = /^(?:verify(?:\s+(?:code|email|identity|application))?|confirm\s+(?:code|email|identity|application)|submit\s+(?:verification|code))$/i.test(text);
+          const canonicalFinal = trustedFinalPattern.test(text) && !trustedExclusionPattern.test(text);
+          const finalIntent = action.submitKind === 'verification'
+            ? proofScopeConsistent && (finalVerification || (canonicalFinal && !bareSend))
+            : proofScopeConsistent && canonicalFinal && (!bareSend || bareSendAuthorized);
+          let score = 0;
+          if (action.submitKind === 'verification' && finalVerification) score = 3;
+          else if (/\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b/i.test(text)) score = 3;
+          else if (/\bfinish\s+(?:and|&)\s+apply\b|^apply\s+now$/i.test(text)) score = 2;
+          else if (finalIntent && !bareSend) score = 1;
+          rows.push({
+            index,
+            visible,
+            disabled: candidate.disabled,
+            hasScope: true,
+            scopeKind: 'form',
+            finalIntent,
+            text,
+            score,
+            bareSend,
+            nativeBareSend: bareSend && bareSendAuthorized,
+            usesAssociatedForm: true,
+            bindingFingerprint: candidate.bindingFingerprint,
+            handle
+          });
+        }
+        const viable = rows.filter((row) => row.visible && !row.disabled && row.finalIntent)
+          .sort((left, right) => right.score - left.score || left.index - right.index);
+        const selected = viable[0] || null;
+        const tied = Boolean(selected && viable[1] && viable[1].score === selected.score);
+        let selectedHandle = null;
+        let selectedScopeHandle = null;
+        if (selected && !tied) {
+          const selectedReference = await selected.handle.evaluateHandle((element) => element).catch(() => null);
+          selectedHandle = selectedReference?.asElement?.() || null;
+          if (!selectedHandle) await selectedReference?.dispose?.().catch(() => undefined);
+          const scopeReference = await applicationScopeProofHandle.evaluateHandle((element) => element)
+            .catch(() => null);
+          selectedScopeHandle = scopeReference?.asElement?.() || null;
+          if (!selectedScopeHandle) await scopeReference?.dispose?.().catch(() => undefined);
+        }
+        return {
+          choices: rows.map(({ handle: _handle, ...row }) => row),
+          addressedScopeCount,
+          selectedHandle,
+          selectedScopeHandle
+        };
+      };
+      const readSubmitChoices = async (
+        successfulControls = [],
+        allSuccessfulControls = successfulControls
+      ) => {
         const candidateHandles = await page.locator(action.selector).elementHandles().catch(() => []);
+        if (chooserVersion === 4) {
+          try {
+            return await readV4SubmitChoices(
+              candidateHandles,
+              successfulControls,
+              allSuccessfulControls
+            );
+          } finally {
+            for (const handle of candidateHandles) await handle.dispose().catch(() => undefined);
+          }
+        }
         let evaluated = null;
         let choiceReadHandle = null;
         try {
@@ -6580,7 +10062,9 @@ const { chromium } = require('playwright');
             add(fromMarker(marker));
           }
           for (const marker of root.querySelectorAll('label, legend')) {
-            const text = String(marker.textContent || '').replace(/\s+/g, ' ').trim();
+            const text = String(
+              typeof marker.innerText === 'string' ? marker.innerText : (marker.textContent || '')
+            ).replace(/\s+/g, ' ').trim();
             if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
             add(fromMarker(marker));
           }
@@ -6755,38 +10239,20 @@ const { chromium } = require('playwright');
           : null;
         const invalidFormOverride = chooser.version === 4 && nativeFormControl
           && element.hasAttribute('form') && !(associatedForm instanceof HTMLFormElement);
-        const usesAssociatedForm = (chooser.version === 4 || chooser.requiresNativeTransport) && nativeFormControl
+        const usesAssociatedForm = chooser.version === 4 && nativeFormControl
           && associatedForm instanceof HTMLFormElement;
         const form = usesAssociatedForm ? associatedForm : closestForm;
         const baseTarget = document.querySelector('base[target]')?.getAttribute('target') || '';
         const effectiveFormTarget = form instanceof HTMLFormElement
-          ? String(form.getAttribute('target') || baseTarget).toLowerCase()
+          ? String(form.target || baseTarget).toLowerCase()
           : '';
-        const formAction = form instanceof HTMLFormElement
-          ? new URL(form.getAttribute('action') || location.href, document.baseURI).href
-          : '';
-        const formMethodRaw = form instanceof HTMLFormElement
-          ? String(form.getAttribute('method') || '').toLowerCase()
-          : '';
-        const formMethod = /^(?:get|post|dialog)$/.test(formMethodRaw) ? formMethodRaw : 'get';
-        const formEnctypeRaw = form instanceof HTMLFormElement
-          ? String(form.getAttribute('enctype') || '').toLowerCase()
-          : '';
-        const formEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
-          .test(formEnctypeRaw) ? formEnctypeRaw : 'application/x-www-form-urlencoded';
         const submitterMatchesForm = form instanceof HTMLFormElement
           && associatedForm === form
           && (!effectiveFormTarget || effectiveFormTarget === '_self')
-          && (!element.hasAttribute('formaction')
-            || new URL(element.getAttribute('formaction') || location.href, document.baseURI).href === formAction)
-          && (!element.hasAttribute('formmethod')
-            || String(element.getAttribute('formmethod') || '').toLowerCase() === formMethod)
-          && (!element.hasAttribute('formtarget')
-            || String(element.getAttribute('formtarget') || '').toLowerCase()
-              === String(form.getAttribute('target') || '').toLowerCase())
-          && (!element.hasAttribute('formenctype')
-            || String(element.getAttribute('formenctype') || '').toLowerCase() === formEnctype)
-          && !element.hasAttribute('formnovalidate');
+          && (!element.hasAttribute('formaction') || element.formAction === form.action)
+          && (!element.hasAttribute('formmethod') || element.formMethod === form.method)
+          && (!element.hasAttribute('formtarget') || element.formTarget === form.target)
+          && (!element.hasAttribute('formenctype') || element.formEnctype === form.enctype);
         const nativeBareSend = bareSend && chooser.submitKind === 'application'
           && submitterMatchesForm
           && ((element instanceof HTMLButtonElement && element.type === 'submit')
@@ -6853,10 +10319,8 @@ const { chromium } = require('playwright');
         const proofAuthorizedBareSendForm = bareSendApplicationForms.size === 1
           ? [...bareSendApplicationForms][0]
           : null;
-        const capabilityBoundApplicationForm = (
-          (chooser.version === 4 && chooser.submitKind === 'application')
-          || chooser.requiresNativeTransport
-        )
+        const capabilityBoundApplicationForm = chooser.version === 4
+          && chooser.submitKind === 'application'
           && chooser.applicationScopeForm instanceof HTMLFormElement
           ? chooser.applicationScopeForm
           : null;
@@ -6919,7 +10383,6 @@ const { chromium } = require('playwright');
         };
       }, {
         ...action.chooserPolicy,
-        requiresNativeTransport,
         submitKind: action.submitKind,
         addressed: [...new Set(addressedSelectors)],
         successfulControls,
@@ -6950,7 +10413,7 @@ const { chromium } = require('playwright');
         list.sort((a, b) => b.score - a.score || a.index - b.index);
         return list;
       };
-      let choices = await readSubmitChoices(chooserSuccessfulControls);
+      let choices = await readSubmitChoices(chooserSuccessfulControls, chooserAllSuccessfulControls);
       let viable = viableAmong(choices);
       /* A SEND CONTROL THE FORM ITSELF IS HOLDING DISABLED over one unanswered opt-in.
        *
@@ -6975,12 +10438,12 @@ const { chromium } = require('playwright');
        * control ('sms_opt_in'), and a name-anchored gate cannot be widened by whatever sentence
        * sits nearby. A group with no identifiable decline member is left alone, and the pass
        * falls through to the same refusal it would have raised anyway. */
-      if (viable.length === 0 && Array.isArray(choices?.choices)
+      // V4 only serializes caller-proved native values. Its chooser may not mutate an unproved
+      // consent control, even to decline it, because page-world accessors can swap the radio whose
+      // native value is submitted. V3 retains this compatibility helper; v4 returns no_submit_control.
+      if (chooserVersion !== 4 && viable.length === 0 && Array.isArray(choices?.choices)
         && choices.choices.some((choice) => choice.visible && choice.finalIntent && choice.disabled)) {
-        const declineCandidateHandles = requiresNativeTransport
-          ? await page.locator(action.selector).elementHandles().catch(() => [])
-          : [];
-        const declined = await page.evaluate((input) => {
+        const declined = await page.evaluate(() => {
           const OPTIN_NAME = /(?:^|[_-])(?:sms|text|email|marketing|news(?:letter)?|updates?)[_-]?opt[_-]?in/i;
           const DECLINE_VALUE = /^(?:false|no|0|decline[d]?)$/i;
           /* ANCHORED AND ONE-SIDED, and the review that tightened this is worth keeping in mind.
@@ -6995,37 +10458,8 @@ const { chromium } = require('playwright');
            * disqualified from being that member. */
           const DECLINE_WORDING = /^\s*no\b|\bdo\s*(?:not|n[’']t)\s+consent\b|\bdecline\b/i;
           const ACCEPT_WORDING = /\byes\b|\bagree\b|\bsign\s+me\s+up\b|\b(?:text|email|send)\s+me\b|\bopt\s*in\b/i;
-          const boundForm = input.form instanceof HTMLFormElement && input.form.isConnected
-            ? input.form
-            : null;
-          if (input.requiresBoundForm) {
-            if (!boundForm) return [];
-            const finalPattern = new RegExp(input.finalPattern, 'i');
-            const exclusionPattern = new RegExp(input.exclusionPattern, 'i');
-            const hasExactDisabledTrigger = input.candidates.some((element) => {
-              if (!element?.isConnected || element.form !== boundForm) return false;
-              if (!(element instanceof HTMLButtonElement) && !(element instanceof HTMLInputElement)) return false;
-              const rect = element.getBoundingClientRect();
-              const style = getComputedStyle(element);
-              const visible = (rect.width > 0 || rect.height > 0)
-                && style.display !== 'none' && style.visibility !== 'hidden';
-              const disabled = Boolean(element.disabled) || element.getAttribute('aria-disabled') === 'true';
-              const text = String(element.innerText || element.value || element.getAttribute('aria-label') || '')
-                .replace(/\s+/g, ' ').trim();
-              return visible && disabled && finalPattern.test(text) && !exclusionPattern.test(text);
-            });
-            if (!hasExactDisabledTrigger) return [];
-          }
           const groups = new Map();
-          const radios = boundForm
-            ? [...boundForm.elements].filter((element) => (
-                element instanceof HTMLInputElement
-                && element.type === 'radio'
-                && element.form === boundForm
-                && element.hasAttribute('name')
-              ))
-            : [...document.querySelectorAll('input[type="radio"][name]')];
-          for (const radio of radios) {
+          for (const radio of document.querySelectorAll('input[type="radio"][name]')) {
             const name = radio.getAttribute('name') || '';
             if (!OPTIN_NAME.test(name)) continue;
             if (!groups.has(name)) groups.set(name, []);
@@ -7048,32 +10482,28 @@ const { chromium } = require('playwright');
               }
             }
             if (!decline) continue;
-            if (!decline.isConnected || (boundForm && decline.form !== boundForm)) continue;
             decline.click();
             decline.dispatchEvent(new Event('input', { bubbles: true }));
             decline.dispatchEvent(new Event('change', { bubbles: true }));
-            if (!decline.isConnected || !decline.checked || (boundForm && decline.form !== boundForm)) continue;
             declinedNames.push(name);
           }
           return declinedNames;
-        }, {
-          requiresBoundForm: requiresNativeTransport,
-          form: requiresNativeTransport ? applicationScopeProofHandle : null,
-          candidates: declineCandidateHandles,
-          finalPattern: action.chooserPolicy.finalPattern,
-          exclusionPattern: action.chooserPolicy.exclusionPattern
         }).catch(() => []);
-        for (const handle of declineCandidateHandles) await handle.dispose().catch(() => undefined);
         if (Array.isArray(declined) && declined.length > 0) {
           await page.waitForTimeout(600).catch(() => undefined);
           for (const name of declined) {
             filledFields.push('question:' + name
               + ' (an unanswered communications opt-in was holding the send button disabled; Litos declined it for you)');
           }
-          if (chooserVersion === 4) chooserSuccessfulControls = await currentSuccessfulAddressHandles();
+          if (chooserVersion === 4) {
+            chooserAllSuccessfulControls = await currentSuccessfulAddressHandles();
+            chooserSuccessfulControls = await successfulControlsForApplicationForm(
+              chooserAllSuccessfulControls
+            );
+          }
           await choices?.selectedHandle?.dispose().catch(() => undefined);
           await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
-          choices = await readSubmitChoices(chooserSuccessfulControls);
+          choices = await readSubmitChoices(chooserSuccessfulControls, chooserAllSuccessfulControls);
           viable = viableAmong(choices);
         }
       }
@@ -7103,16 +10533,22 @@ const { chromium } = require('playwright');
           addressedScopeCount: Number(choices?.addressedScopeCount) || 0,
           bareSendCandidateCount: rows.filter((choice) => choice.visible && !choice.disabled && choice.bareSend).length
         };
-        if (!selected || tied) {
-          await choices?.selectedHandle?.dispose().catch(() => undefined);
-          await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
-          return { noClick: true };
-        }
-      } else if (!selected || tied) {
+          if (!selected || tied) {
+            await choices?.selectedHandle?.dispose().catch(() => undefined);
+            await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
+            return { noClick: true };
+          }
+          if (action.submitKind === 'verification' && action.securityCodePayloadAddressed === false) {
+            finalSubmitChooser = { ...finalSubmitChooser, outcome: 'activation_blocked' };
+            await choices?.selectedHandle?.dispose().catch(() => undefined);
+            await choices?.selectedScopeHandle?.dispose().catch(() => undefined);
+            return { noClick: true, blockerReason: 'security_code_payload_unaddressed' };
+          }
+        } else if (!selected || tied) {
         throw new Error('Atomic submit control was missing or ambiguous');
       }
       const scopeKind = selected.scopeKind;
-      const usesAssociatedForm = requiresNativeTransport && selected.usesAssociatedForm === true;
+      const usesAssociatedForm = chooserVersion === 4 && selected.usesAssociatedForm === true;
       const submitLocator = chooserVersion === 4
         ? null
         : page.locator('[data-litos-submit-candidate-v2="' + selected.index + '"]');
@@ -7121,18 +10557,23 @@ const { chromium } = require('playwright');
         : page.locator('[data-litos-submit-scope-v2~="' + selected.index + '"]');
       const submitHandle = choices.selectedHandle || null;
       const scopeHandle = choices.selectedScopeHandle || null;
-      const chooserBindingCurrent = Boolean(submitHandle && scopeHandle) && await submitHandle.evaluate(
-        (element, bound) => {
-          if (!element.isConnected || !bound.scope?.isConnected) return false;
-          if (bound.scopeKind === 'form') {
-            return bound.usesAssociatedForm
-              ? element.form === bound.scope
-              : element.closest('form') === bound.scope;
-          }
-          return bound.scope.contains(element);
-        },
-        { scope: scopeHandle, scopeKind, usesAssociatedForm }
-      ).catch(() => false);
+      const currentTrustedCandidate = chooserVersion === 4
+        ? await readPristineV4SubmitCandidate(submitHandle)
+        : null;
+      const chooserBindingCurrent = Boolean(submitHandle && scopeHandle) && (chooserVersion === 4
+        ? currentTrustedCandidate?.bindingFingerprint === selected.bindingFingerprint
+        : await submitHandle.evaluate(
+            (element, bound) => {
+              if (!element.isConnected || !bound.scope?.isConnected) return false;
+              if (bound.scopeKind === 'form') {
+                return bound.usesAssociatedForm
+                  ? element.form === bound.scope
+                  : element.closest('form') === bound.scope;
+              }
+              return bound.scope.contains(element);
+            },
+            { scope: scopeHandle, scopeKind, usesAssociatedForm }
+          ).catch(() => false));
       if (!submitHandle || !scopeHandle || !chooserBindingCurrent) {
         await submitHandle?.dispose().catch(() => undefined);
         await scopeHandle?.dispose().catch(() => undefined);
@@ -7148,35 +10589,16 @@ const { chromium } = require('playwright');
         }
         throw new Error('Atomic submit control had no exact application form');
       }
-      const approvedTransportHmacKey = requiresNativeTransport
-        ? crypto.randomBytes(32).toString('base64')
-        : null;
-      const initialBindingBundle = await submitHandle.evaluate(async (element, bound) => {
+      const binding = chooserVersion === 4 ? {
+        formShape: {
+          scopeKind: 'form',
+          submittedControlsWithinBound: true,
+          trustedBindingFingerprint: selected.bindingFingerprint
+        },
+        submitShape: { trustedBindingFingerprint: selected.bindingFingerprint }
+      } : protectChooserBinding(await submitHandle.evaluate((element, bound) => {
         const root = bound.scope;
-        const canonical = (value) => {
-          const parsed = new URL(value, document.baseURI);
-          parsed.hash = '';
-          return parsed.href;
-        };
-        const normalizeMethod = (value) => {
-          const raw = String(value || '').toLowerCase();
-          return /^(?:get|post|dialog)$/.test(raw) ? raw : 'get';
-        };
-        const normalizeEnctype = (value) => {
-          const raw = String(value || '').toLowerCase();
-          return /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(raw)
-            ? raw
-            : 'application/x-www-form-urlencoded';
-        };
-        const formAction = bound.scopeKind === 'form'
-          ? canonical(root.getAttribute('action') || location.href)
-          : null;
-        const formMethod = bound.scopeKind === 'form' ? normalizeMethod(root.getAttribute('method')) : null;
-        const formTarget = bound.scopeKind === 'form'
-          ? (root.getAttribute('target') || document.querySelector('base[target]')?.getAttribute('target') || '')
-          : null;
-        const formEnctype = bound.scopeKind === 'form' ? normalizeEnctype(root.getAttribute('enctype')) : null;
-        const submittedElements = bound.bindSubmittedState
+        const submittedElements = bound.chooserVersion === 4
           ? (bound.scopeKind === 'form'
               ? [...root.elements]
               : [...root.querySelectorAll('input, textarea, select')])
@@ -7233,14 +10655,14 @@ const { chromium } = require('playwright');
           action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
           method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
           ...(bound.usesAssociatedForm && bound.scopeKind === 'form' ? {
-            resolvedAction: formAction,
-            effectiveMethod: formMethod,
-            effectiveTarget: formTarget,
-            effectiveEnctype: formEnctype,
-            noValidate: root.hasAttribute('novalidate'),
-            acceptCharset: root.getAttribute('accept-charset') || ''
+            resolvedAction: root.action,
+            effectiveMethod: root.method,
+            effectiveTarget: root.target || document.querySelector('base[target]')?.getAttribute('target') || '',
+            effectiveEnctype: root.enctype,
+            noValidate: root.noValidate,
+            acceptCharset: root.acceptCharset
           } : {}),
-          ...(bound.bindSubmittedState ? {
+          ...(bound.chooserVersion === 4 ? {
             submittedControlCount: submittedControls.length,
             submittedControlsWithinBound,
             submittedControls: submittedControlsWithinBound ? submittedControls : []
@@ -7254,7 +10676,7 @@ const { chromium } = require('playwright');
           tag: element.tagName.toLowerCase(), id: element.id || null,
           name: element.getAttribute('name') || null, type: element.getAttribute('type') || null,
           text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
-          ...(bound.bindSubmittedState ? {
+          ...(bound.chooserVersion === 4 ? {
             value: element.getAttribute('value') || null,
             formAction: element.getAttribute('formaction') || null,
             formMethod: element.getAttribute('formmethod') || null,
@@ -7264,166 +10686,14 @@ const { chromium } = require('playwright');
             formAssociation: element.getAttribute('form') || null
           } : {})
         };
-        const canonicalUrl = () => {
-          const current = new URL(location.href);
-          current.hash = '';
-          return current.href;
-        };
-        const approvedSnapshot = { url: canonicalUrl(), formShape, submitShape };
-        let transportBinding = null;
-        if (bound.bindSubmittedState) {
-          if (!(root instanceof HTMLFormElement) || root !== bound.applicationScope
-            || !root.isConnected || !element.isConnected || element.form !== root
-            || !globalThis.crypto?.subtle) {
-            transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-          } else {
-            const isNativeSubmitter = (element instanceof HTMLButtonElement && element.type === 'submit')
-              || (element instanceof HTMLInputElement && element.type === 'submit');
-            if (!isNativeSubmitter || bound.scopeKind !== 'form' || bound.usesAssociatedForm !== true) {
-              transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-            } else {
-              const method = normalizeMethod(element.hasAttribute('formmethod')
-                ? element.getAttribute('formmethod')
-                : root.getAttribute('method')).toUpperCase();
-              const action = canonical(element.hasAttribute('formaction')
-                ? element.getAttribute('formaction') || location.href
-                : root.getAttribute('action') || location.href);
-              const target = String(element.hasAttribute('formtarget')
-                ? element.getAttribute('formtarget')
-                : (root.getAttribute('target')
-                  || document.querySelector('base[target]')?.getAttribute('target') || '_self'))
-                .toLowerCase() || '_self';
-              const enctype = normalizeEnctype(element.hasAttribute('formenctype')
-                ? element.getAttribute('formenctype')
-                : root.getAttribute('enctype'));
-              if (target !== '_self' || method !== 'POST'
-                || !['application/x-www-form-urlencoded', 'multipart/form-data'].includes(enctype)) {
-                transportBinding = { unsupportedReason: 'submit_transport_unsupported' };
-              } else {
-                const disabledByFieldset = (control) => {
-                  for (let fieldset = control.parentElement?.closest('fieldset[disabled]'); fieldset;
-                    fieldset = fieldset.parentElement?.closest('fieldset[disabled]')) {
-                    const firstLegend = [...fieldset.children].find((child) => child instanceof HTMLLegendElement);
-                    if (!firstLegend || !firstLegend.contains(control)) return true;
-                  }
-                  return false;
-                };
-                const successful = [];
-                const listed = [...root.elements];
-                if (listed.length > 512) {
-                  transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-                } else {
-                  for (const control of listed) {
-                    if (control.form !== root || control.disabled || disabledByFieldset(control)) continue;
-                    if (control instanceof HTMLFieldSetElement || control instanceof HTMLOutputElement) continue;
-                    if (!(control instanceof HTMLInputElement)
-                      && !(control instanceof HTMLTextAreaElement)
-                      && !(control instanceof HTMLSelectElement)
-                      && !(control instanceof HTMLButtonElement)) {
-                      transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-                      break;
-                    }
-                    const name = control.getAttribute('name') || '';
-                    if (!name) continue;
-                    if (control.hasAttribute('dirname') || name === '_charset_') {
-                      transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-                      break;
-                    }
-                    if (control instanceof HTMLButtonElement) {
-                      if (control === element && control.type === 'submit') successful.push([name, control.value]);
-                      continue;
-                    }
-                    if (control instanceof HTMLInputElement) {
-                      const type = control.type.toLowerCase();
-                      if (type === 'image') {
-                        transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-                        break;
-                      }
-                      if (type === 'submit') {
-                        if (control === element) successful.push([name, control.value]);
-                        continue;
-                      }
-                      if (type === 'button' || type === 'reset') continue;
-                      if ((type === 'checkbox' || type === 'radio') && !control.checked) continue;
-                      if (type === 'file') {
-                        const files = [...(control.files || [])];
-                        if (files.length === 0) {
-                          successful.push([name, new File([], '', { type: 'application/octet-stream' })]);
-                        } else {
-                          for (const file of files) successful.push([name, file]);
-                        }
-                        continue;
-                      }
-                      successful.push([name, control.value]);
-                      continue;
-                    }
-                    if (control instanceof HTMLSelectElement) {
-                      for (const option of control.options) {
-                        if (!option.selected || option.disabled || option.parentElement?.disabled) continue;
-                        successful.push([name, option.value]);
-                      }
-                      continue;
-                    }
-                    successful.push([name, control.value]);
-                  }
-                  if (!transportBinding && successful.length > 1024) {
-                    transportBinding = { unsupportedReason: 'submit_payload_unverifiable' };
-                  }
-                  if (!transportBinding) {
-                    const keyBytes = Uint8Array.from(atob(bound.hmacKey), (character) => character.charCodeAt(0));
-                    const key = await globalThis.crypto.subtle.importKey(
-                      'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-                    );
-                    const digest = async (bytes) => {
-                      const signature = await globalThis.crypto.subtle.sign('HMAC', key, bytes);
-                      return [...new Uint8Array(signature)]
-                        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
-                    };
-                    const entries = await Promise.all(successful.map(async ([name, value]) => {
-                      if (value instanceof File) {
-                        return {
-                          name,
-                          kind: 'file',
-                          filename: value.name,
-                          contentType: value.type || 'application/octet-stream',
-                          size: value.size,
-                          digest: await digest(await value.arrayBuffer())
-                        };
-                      }
-                      const normalized = String(value).replace(/\r\n|\r|\n/g, '\r\n');
-                      return {
-                        name,
-                        kind: 'text',
-                        digest: await digest(new TextEncoder().encode(normalized))
-                      };
-                    }));
-                    transportBinding = { action, method, target, enctype, entries };
-                  }
-                }
-              }
-            }
-          }
-        }
-        return { formShape, submitShape, approvedSnapshot, transportBinding };
-      }, {
-        scope: scopeHandle,
-        scopeKind,
-        chooserVersion,
-        usesAssociatedForm,
-        bindSubmittedState: requiresNativeTransport,
-        applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
-        hmacKey: approvedTransportHmacKey
-      }).catch(() => null);
-      const approvedActivationSnapshot = initialBindingBundle?.approvedSnapshot
-        ? JSON.parse(JSON.stringify(initialBindingBundle.approvedSnapshot))
-        : null;
-      const approvedTransportBinding = initialBindingBundle?.transportBinding || null;
-      const binding = protectChooserBinding(initialBindingBundle ? JSON.parse(JSON.stringify({
-        formShape: initialBindingBundle.formShape,
-        submitShape: initialBindingBundle.submitShape
-      })) : null);
-      const formFingerprint = crypto.createHash('sha256').update(JSON.stringify(binding.formShape)).digest('hex');
-      const submitFingerprint = crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
+        return { formShape, submitShape };
+      }, { scope: scopeHandle, scopeKind, chooserVersion, usesAssociatedForm }));
+      const formFingerprint = chooserVersion === 4
+        ? selected.bindingFingerprint
+        : crypto.createHash('sha256').update(JSON.stringify(binding.formShape)).digest('hex');
+      const submitFingerprint = chooserVersion === 4
+        ? selected.bindingFingerprint
+        : crypto.createHash('sha256').update(formFingerprint + ':' + JSON.stringify(binding.submitShape)).digest('hex');
       const scopeTarget = scopeHandle;
       let requiredScanHandle = null;
       let requiredRowsHandle = null;
@@ -7436,7 +10706,21 @@ const { chromium } = require('playwright');
         const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
         const renderedText = (node) => {
           if (!node) return '';
-          return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+          if (typeof node.getClientRects !== 'function' && typeof node.innerText === 'string') return node.innerText;
+          if (node.getClientRects?.().length > 0 && typeof node.innerText === 'string') return node.innerText;
+          const visibleText = (current, depth = 0) => {
+            if (!current || depth > 16) return '';
+            if (current.nodeType === 3) return current.nodeValue || '';
+            if (current.nodeType !== 1) return '';
+            const style = getComputedStyle(current);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0) return '';
+            let text = '';
+            for (let index = 0; index < current.childNodes.length && text.length <= 4096; index += 1) {
+              text += visibleText(current.childNodes[index], depth + 1);
+            }
+            return text.slice(0, 4096);
+          };
+          return visibleText(node);
         };
         const isVisible = (element) => {
           if (!element) return false;
@@ -7575,23 +10859,70 @@ const { chromium } = require('playwright');
           '[role="group"][aria-labelledby], [role="group"][aria-label],'
           + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
         ) || null;
+        const directSemanticChoicePeers = (element, group = semanticChoiceGroup(element)) => (
+          group?.querySelectorAll
+            ? [...group.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+              .filter((peer) => semanticChoiceGroup(peer) === group)
+            : []
+        );
+        const enabledSemanticCheckboxGroupAnswered = (element, group) => {
+          if (element?.tagName !== 'INPUT' || element.type !== 'checkbox'
+            || element.matches?.(':disabled') || group?.getAttribute?.('role') !== 'group') return null;
+          const peers = directSemanticChoicePeers(element, group);
+          if (peers.length < 2 || !peers.some((peer) => peer === element)
+            || peers.some((peer) => peer?.tagName !== 'INPUT'
+              || peer.form !== element.form || peer.type !== 'checkbox' || !peer.name)) return null;
+          return peers.some((peer) => !peer.matches?.(':disabled') && peer.checked);
+        };
+        const enabledNativeChoiceAnswered = (element, candidates) => {
+          if (element?.tagName !== 'INPUT'
+            || !['checkbox', 'radio'].includes(element.type) || element.matches?.(':disabled')) return false;
+          if (element.checked) return true;
+          if (!element.name) return false;
+          const peers = candidates || element.form?.elements
+            || (typeof root !== 'undefined' && root?.querySelectorAll
+              ? root.querySelectorAll('input[type="checkbox"], input[type="radio"]')
+              : [element]);
+          return [...peers].some((peer) => peer?.tagName === 'INPUT'
+            && peer.form === element.form
+            && peer.name === element.name
+            && peer.type === element.type
+            && !peer.matches?.(':disabled')
+            && peer.checked);
+        };
+        const selectHasEnabledSelection = (element) => element?.tagName === 'SELECT'
+          && [...(element.options || [])].some((option) => option.selected
+            && !option.disabled
+            && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled)
+            && String(option.value || '').trim().length > 0);
+        const ownedNativeControls = (element) => {
+          if (typeof root === 'undefined'
+            || typeof HTMLFormElement === 'undefined'
+            || !(root instanceof HTMLFormElement)
+            || !element?.getAttribute) return [];
+          const ids = String(element.getAttribute('aria-owns') || '').trim().split(/\s+/).filter(Boolean);
+          if (ids.length > 16) return [];
+          return [...new Set(ids.map((id) => document.getElementById(id)).filter((control) => (
+            control && control.form === root && clean(control.name) && !control.matches?.(':disabled')
+          )))];
+        };
         const chosenValue = (element, widget) => {
           if (element instanceof HTMLInputElement && (element.type === 'radio' || element.type === 'checkbox')) {
-            if (element.checked) return true;
+            if (enabledNativeChoiceAnswered(element, [element])) return true;
             const pill = chosenAshbyYesNoOf(element);
             if (pill !== null) return pill;
             const semanticGroup = semanticChoiceGroup(element);
             if (semanticGroup) {
-              return [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
-                .some((peer) => peer.checked);
+              const semanticAnswer = enabledSemanticCheckboxGroupAnswered(element, semanticGroup);
+              if (semanticAnswer !== null) return semanticAnswer;
+              return enabledNativeChoiceAnswered(
+                element,
+                directSemanticChoicePeers(element, semanticGroup)
+              );
             }
-            if (element.name) {
-              return [...(element.form || document).querySelectorAll('input[name="' + CSS.escape(element.name) + '"]')]
-                .some((peer) => peer.checked);
-            }
-            return false;
+            return enabledNativeChoiceAnswered(element);
           }
-          if (element instanceof HTMLSelectElement) return Boolean(clean(element.value));
+          if (element instanceof HTMLSelectElement) return selectHasEnabledSelection(element);
           if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
             if (element instanceof HTMLInputElement && element.type === 'file') return Boolean(element.files && element.files.length > 0);
             const binding = reactChoiceBinding(element);
@@ -7601,6 +10932,20 @@ const { chromium } = require('playwright');
           const uploadedFile = element.querySelector && element.querySelector('input[type="file"]');
           if (uploadedFile && uploadedFile.files && uploadedFile.files.length > 0) return true;
           if (element.querySelector && element.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
+          const backingControls = [...new Set([
+            ...(element.querySelectorAll?.('input, textarea, select') || []),
+            ...ownedNativeControls(element)
+          ])];
+          for (const backing of backingControls) {
+            if (root instanceof HTMLFormElement
+              && backing.form === root
+              && clean(backing.name)
+              && !backing.matches(':disabled')) {
+              if (backing instanceof HTMLInputElement && backing.type === 'hidden') {
+                if (clean(backing.value)) return true;
+              } else if (chosenValue(backing, widget)) return true;
+            }
+          }
           for (const choice of element.querySelectorAll?.(CHOICE_OPENER) || []) {
             const binding = reactChoiceBinding(choice);
             if (binding && reactChoiceAnswered(binding)) return true;
@@ -7649,13 +10994,32 @@ const { chromium } = require('playwright');
             || element instanceof HTMLTextAreaElement
             || element instanceof HTMLSelectElement
             || element instanceof HTMLButtonElement;
-          return native ? element.form === root : root.contains(element);
+          return native
+            ? element.form === root
+            : root.contains(element) || [...element.querySelectorAll?.('input, textarea, select') || []]
+              .some((control) => control.form === root && clean(control.name))
+              || ownedNativeControls(element).length > 0;
         };
         const controlsForRoot = (selector) => {
           const found = new Set(root.querySelectorAll(selector));
           if (root instanceof HTMLFormElement) {
             for (const control of root.elements) {
               if (control.form === root && control.matches?.(selector)) found.add(control);
+            }
+            for (const candidate of document.querySelectorAll(selector)) {
+              if (candidate.form === root) found.add(candidate);
+              else if (!(candidate instanceof HTMLInputElement
+                || candidate instanceof HTMLTextAreaElement
+                || candidate instanceof HTMLSelectElement)
+                && [...candidate.querySelectorAll?.('input, textarea, select') || []]
+                  .some((control) => control.form === root && clean(control.name))) {
+                found.add(candidate);
+              } else if (!(candidate instanceof HTMLInputElement
+                || candidate instanceof HTMLTextAreaElement
+                || candidate instanceof HTMLSelectElement)
+                && ownedNativeControls(candidate).length > 0) {
+                found.add(candidate);
+              }
             }
           }
           return [...found];
@@ -7666,7 +11030,9 @@ const { chromium } = require('playwright');
             for (const marker of document.querySelectorAll(selector)) {
               const named = marker.getAttribute?.('for');
               const control = marker.control || (named ? document.getElementById(named) : null);
-              if (control?.form === root) found.add(marker);
+              const parentControls = [...marker.parentElement?.querySelectorAll?.('input, textarea, select') || []]
+                .filter((candidate) => candidate.form === root && clean(candidate.name));
+              if (control?.form === root || parentControls.length > 0) found.add(marker);
             }
           }
           return [...found];
@@ -7713,7 +11079,7 @@ const { chromium } = require('playwright');
         };
         const addControl = (control) => {
           const canonical = canonicalControl(control);
-          if (!canonical || !belongsToRoot(canonical)) return;
+          if (!canonical || !belongsToRoot(canonical) || canonical.matches?.(':disabled')) return;
           const validationSources = controls.get(canonical) || new Set([canonical]);
           validationSources.add(control);
           const select2 = select2Binding(control);
@@ -7725,7 +11091,13 @@ const { chromium } = require('playwright');
         };
         for (const control of controlsForRoot(
           'input[required], textarea[required], select[required], [aria-required="true"]'
-        )) addControl(control);
+        )) {
+          if (control.matches?.(':disabled')) continue;
+          const nativeRequired = control.hasAttribute?.('required');
+          const ariaRequired = control.getAttribute?.('aria-required') === 'true';
+          if (nativeRequired && !ariaRequired && 'willValidate' in control && !control.willValidate) continue;
+          addControl(control);
+        }
         for (const marker of markersForRoot('label[class*="_required_"], legend[class*="_required_"]')) {
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
@@ -7737,7 +11109,7 @@ const { chromium } = require('playwright');
         const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
         const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
         for (const marker of markersForRoot('label, legend')) {
-          const text = clean(marker.textContent);
+          const text = clean(renderedText(marker));
           if (!ASTERISK_MARK.test(text) || ASTERISK_LEGEND.test(text)) continue;
           const block = widgetOf(marker);
           const named = marker.getAttribute('for');
@@ -7893,6 +11265,19 @@ const { chromium } = require('playwright');
       }));
       const attempts = [];
       const unresolved = [];
+      let blockerReason = null;
+      const recordBlockedAncillaryTransport = () => {
+        if (chooserVersion !== 4 || (!v4PreSubmitTransportContainment?.blockedTransportObserved
+          && !v4OutOfBandTransportAttempted && !v4PageTransportLockUnavailable)) return;
+        blockerReason = blockerReason || 'submit_transport_unpinned';
+        const message = 'The page attempted an unbound network transport after applicant actions began';
+        if (!unresolved.includes(message)) unresolved.push(message);
+      };
+      if (chooserVersion === 4 && successfulAddressIntegrityFailure) {
+        blockerReason = 'successful_address_changed';
+        unresolved.push('A caller-supplied application value or file changed after it was confirmed');
+      }
+      recordBlockedAncillaryTransport();
       const runnerChoiceFailures = tracksChoiceFailures
         ? await unsuccessfulChoiceFailuresForScope(scopeHandle, scopeKind)
         : [];
@@ -7901,7 +11286,7 @@ const { chromium } = require('playwright');
           ? 'A choice this run could not verify remains unresolved in the bound application scope'
           : 'A choice this run could not preserve remains unresolved in the bound application scope');
       }
-      if (requiresNativeTransport && binding.formShape.submittedControlsWithinBound === false) {
+      if (chooserVersion === 4 && binding.formShape.submittedControlsWithinBound === false) {
         unresolved.push('The bound application form has too many or oversized submitted controls to fingerprint safely');
       }
       let retries = 0;
@@ -8298,7 +11683,22 @@ const { chromium } = require('playwright');
             || element instanceof HTMLTextAreaElement
             || element instanceof HTMLSelectElement
             || element instanceof HTMLButtonElement;
-          return native ? element.form === root : root.contains(element);
+          return native
+            ? element.form === root
+            : root.contains(element) || [...element.querySelectorAll?.('input, textarea, select') || []]
+              .some((control) => control.form === root && String(control.name || '').trim())
+              || (() => {
+                const ids = String(element.getAttribute?.('aria-owns') || '').trim()
+                  .split(/\s+/).filter(Boolean);
+                if (ids.length === 0 || ids.length > 16) return false;
+                return ids.some((id) => {
+                  const control = document.getElementById(id);
+                  return control?.isConnected
+                    && control.form === root
+                    && String(control.name || '').trim()
+                    && !control.matches?.(':disabled');
+                });
+              })();
         }, scopeHandle).catch(() => false);
         if (!targetIsCurrent) {
           attempts.push({ selector: proofSelector, label: candidate.label, fieldType, outcome: 'failed', attemptCount: 1, reason: 'required control selector did not resolve exactly once' });
@@ -8434,11 +11834,36 @@ const { chromium } = require('playwright');
               element.blur();
               if (element instanceof HTMLInputElement
                 && (element.type === 'radio' || element.type === 'checkbox')) {
+                if (element.matches(':disabled')) return false;
                 if (element.checked) return true;
                 if (!element.name) return false;
-                return [...(element.form || document).querySelectorAll(
-                  'input[name="' + CSS.escape(element.name) + '"]'
-                )].some((peer) => peer.checked);
+                const semanticSelector = '[role="group"][aria-labelledby], [role="group"][aria-label],'
+                  + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]';
+                const semanticGroup = element.closest(semanticSelector);
+                const directPeers = semanticGroup
+                  ? [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')]
+                    .filter((peer) => peer.closest(semanticSelector) === semanticGroup)
+                  : [];
+                const coherentSemanticCheckboxGroup = element.type === 'checkbox'
+                  && semanticGroup?.getAttribute('role') === 'group'
+                  && directPeers.length >= 2
+                  && directPeers.some((peer) => peer === element)
+                  && directPeers.every((peer) => peer instanceof HTMLInputElement
+                    && peer.form === element.form && peer.type === 'checkbox' && peer.name);
+                if (coherentSemanticCheckboxGroup) {
+                  return directPeers.some((peer) => !peer.matches(':disabled') && peer.checked);
+                }
+                const peers = semanticGroup
+                  ? directPeers
+                  : [...(element.form?.elements || document.querySelectorAll(
+                    'input[type="checkbox"], input[type="radio"]'
+                  ))];
+                return peers.some((peer) => peer instanceof HTMLInputElement
+                  && peer.form === element.form
+                  && peer.name === element.name
+                  && peer.type === element.type
+                  && !peer.matches(':disabled')
+                  && peer.checked);
               }
               if (element instanceof HTMLSelectElement
                 || element instanceof HTMLInputElement
@@ -8472,39 +11897,54 @@ const { chromium } = require('playwright');
       unresolved.push(...scopedReadiness.blocking, ...scopedReadiness.unmatched.map(
         (text) => 'The bound application form still shows an unmatched validation error: ' + text
       ));
-      const sameNode = Boolean(scopeHandle) && await submitHandle.evaluate(
-        (element, bound) => {
-          if (!element.isConnected) return false;
-          if (bound.scopeKind === 'form') {
-            return bound.usesAssociatedForm
-              ? element.form === bound.scope
-              : element.closest('form') === bound.scope;
-          }
-          return bound.scope.isConnected && bound.scope.contains(element);
-        },
-        { scope: scopeHandle, scopeKind, usesAssociatedForm }
-      ).catch(() => false);
-      let blockerReason = null;
-      let readCurrentBinding = null;
-      if (!sameNode) {
-        blockerReason = 'submit_node_replaced';
-        unresolved.push('Bound submit control or application form was replaced before submission');
-      } else {
-        readCurrentBinding = async () => protectChooserBinding(await submitHandle.evaluate((element, bound) => {
-          const root = bound.scope;
-          const resolvedAction = bound.scopeKind === 'form'
-            ? new URL(root.getAttribute('action') || location.href, document.baseURI).href
+      if (chooserVersion === 4) {
+        const pristineRequiredJson = await callV4Utility(
+          'requiredControlBlockersJson'
+        ).catch(() => null);
+        let pristineRequired = null;
+        try {
+          pristineRequired = typeof pristineRequiredJson === 'string'
+            ? JSON.parse(pristineRequiredJson)
             : null;
-          const rawMethod = bound.scopeKind === 'form'
-            ? String(root.getAttribute('method') || '').toLowerCase()
-            : '';
-          const effectiveMethod = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
-          const rawEnctype = bound.scopeKind === 'form'
-            ? String(root.getAttribute('enctype') || '').toLowerCase()
-            : '';
-          const effectiveEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
-            .test(rawEnctype) ? rawEnctype : 'application/x-www-form-urlencoded';
-          const submittedElements = bound.bindSubmittedState
+        } catch {}
+        if (!Array.isArray(pristineRequired)) {
+          unresolved.push('The isolated required-control scan was unavailable');
+        } else {
+          for (const control of pristineRequired) {
+            const identity = String(control?.name || control?.id || control?.tag || 'control').slice(0, 160);
+            unresolved.push('Required application control "' + identity + '" is empty');
+          }
+        }
+      }
+      const postConfirmationTrustedCandidate = chooserVersion === 4
+        ? await readPristineV4SubmitCandidate(submitHandle)
+        : null;
+      const sameNode = Boolean(scopeHandle) && (chooserVersion === 4
+        ? postConfirmationTrustedCandidate?.bindingFingerprint === selected.bindingFingerprint
+        : await submitHandle.evaluate(
+            (element, bound) => {
+              if (!element.isConnected) return false;
+              if (bound.scopeKind === 'form') {
+                return bound.usesAssociatedForm
+                  ? element.form === bound.scope
+                  : element.closest('form') === bound.scope;
+              }
+              return bound.scope.isConnected && bound.scope.contains(element);
+            },
+            { scope: scopeHandle, scopeKind, usesAssociatedForm }
+          ).catch(() => false));
+      if (!sameNode) {
+        if (chooserVersion === 4 && postConfirmationTrustedCandidate) {
+          blockerReason = blockerReason || 'form_identity_changed';
+          unresolved.push('Bound application form or submit identity changed during confirmation');
+        } else {
+          blockerReason = blockerReason || 'submit_node_replaced';
+          unresolved.push('Bound submit control or application form was replaced before submission');
+        }
+      } else if (chooserVersion !== 4) {
+        const currentBinding = protectChooserBinding(await submitHandle.evaluate((element, bound) => {
+          const root = bound.scope;
+          const submittedElements = bound.chooserVersion === 4
             ? (bound.scopeKind === 'form'
                 ? [...root.elements]
                 : [...root.querySelectorAll('input, textarea, select')])
@@ -8562,15 +12002,14 @@ const { chromium } = require('playwright');
               action: bound.scopeKind === 'form' ? root.getAttribute('action') || null : null,
               method: bound.scopeKind === 'form' ? root.getAttribute('method') || null : null,
               ...(bound.usesAssociatedForm && bound.scopeKind === 'form' ? {
-                resolvedAction,
-                effectiveMethod,
-                effectiveTarget: root.getAttribute('target')
-                  || document.querySelector('base[target]')?.getAttribute('target') || '',
-                effectiveEnctype,
-                noValidate: root.hasAttribute('novalidate'),
-                acceptCharset: root.getAttribute('accept-charset') || ''
+                resolvedAction: root.action,
+                effectiveMethod: root.method,
+                effectiveTarget: root.target || document.querySelector('base[target]')?.getAttribute('target') || '',
+                effectiveEnctype: root.enctype,
+                noValidate: root.noValidate,
+                acceptCharset: root.acceptCharset
               } : {}),
-              ...(bound.bindSubmittedState ? {
+              ...(bound.chooserVersion === 4 ? {
                 submittedControlCount: submittedControls.length,
                 submittedControlsWithinBound,
                 submittedControls: submittedControlsWithinBound ? submittedControls : []
@@ -8584,7 +12023,7 @@ const { chromium } = require('playwright');
               tag: element.tagName.toLowerCase(), id: element.id || null,
               name: element.getAttribute('name') || null, type: element.getAttribute('type') || null,
               text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
-              ...(bound.bindSubmittedState ? {
+              ...(bound.chooserVersion === 4 ? {
                 value: element.getAttribute('value') || null,
                 formAction: element.getAttribute('formaction') || null,
                 formMethod: element.getAttribute('formmethod') || null,
@@ -8595,14 +12034,7 @@ const { chromium } = require('playwright');
               } : {})
             }
           };
-        }, {
-          scope: scopeHandle,
-          scopeKind,
-          chooserVersion,
-          usesAssociatedForm,
-          bindSubmittedState: requiresNativeTransport
-        }).catch(() => null));
-        const currentBinding = await readCurrentBinding();
+        }, { scope: scopeHandle, scopeKind, chooserVersion, usesAssociatedForm }).catch(() => null));
         const currentFormFingerprint = currentBinding && crypto.createHash('sha256').update(JSON.stringify(currentBinding.formShape)).digest('hex');
         const currentSubmitFingerprint = currentBinding && crypto.createHash('sha256').update(currentFormFingerprint + ':' + JSON.stringify(currentBinding.submitShape)).digest('hex');
         if (currentFormFingerprint !== formFingerprint || currentSubmitFingerprint !== submitFingerprint) {
@@ -8610,58 +12042,54 @@ const { chromium } = require('playwright');
           unresolved.push('Bound application form or submit identity changed during confirmation');
         }
       }
-      if (requiresNativeTransport) {
-        const finalSuccessfulControls = await currentSuccessfulAddressHandles();
-        const finalChoices = await readSubmitChoices(finalSuccessfulControls);
+      if (chooserVersion === 4) {
+        const finalAllSuccessfulControls = await currentSuccessfulAddressHandles();
+        const finalSuccessfulControls = await successfulControlsForApplicationForm(
+          finalAllSuccessfulControls
+        );
+        const finalChoices = await readSubmitChoices(
+          finalSuccessfulControls,
+          finalAllSuccessfulControls
+        );
         const finalViable = viableAmong(finalChoices);
         const finalSelected = finalViable[0];
         const finalTied = Boolean(finalSelected && finalViable[1]
           && finalViable[1].score === finalSelected.score);
         const finalRows = Array.isArray(finalChoices?.choices) ? finalChoices.choices : [];
         const finalTopScore = finalSelected ? finalSelected.score : null;
-        if (chooserVersion === 4) {
-          finalSubmitChooser = {
-            ...finalSubmitChooser,
-            outcome: !finalSelected ? 'no_submit_control' : (finalTied ? 'ambiguous_submit' : 'selected'),
-            candidateCount: finalRows.filter((choice) => choice.visible && !choice.disabled && choice.finalIntent).length,
-            viableCandidateCount: finalViable.length,
-            topScore: finalTopScore,
-            topScoreCount: finalTopScore === null
-              ? 0
-              : finalViable.filter((choice) => choice.score === finalTopScore).length,
-            addressedScopeCount: Number(finalChoices?.addressedScopeCount) || 0,
-            bareSendCandidateCount: finalRows.filter((choice) => (
-              choice.visible && !choice.disabled && choice.bareSend
-            )).length
-          };
-        }
+        finalSubmitChooser = {
+          ...finalSubmitChooser,
+          outcome: !finalSelected ? 'no_submit_control' : (finalTied ? 'ambiguous_submit' : 'selected'),
+          candidateCount: finalRows.filter((choice) => choice.visible && !choice.disabled && choice.finalIntent).length,
+          viableCandidateCount: finalViable.length,
+          topScore: finalTopScore,
+          topScoreCount: finalTopScore === null
+            ? 0
+            : finalViable.filter((choice) => choice.score === finalTopScore).length,
+          addressedScopeCount: Number(finalChoices?.addressedScopeCount) || 0,
+          bareSendCandidateCount: finalRows.filter((choice) => (
+            choice.visible && !choice.disabled && choice.bareSend
+          )).length
+        };
         let sameChooserBinding = false;
         if (finalSelected && !finalTied && finalSelected.scopeKind === scopeKind) {
           const finalSubmitHandle = finalChoices.selectedHandle || null;
           const finalScopeHandle = finalChoices.selectedScopeHandle || null;
           try {
-            const sameSubmit = finalSubmitHandle && await submitHandle.evaluate(
-              (element, current) => element === current,
-              finalSubmitHandle
-            ).catch(() => false);
-            const sameScope = finalScopeHandle && await scopeHandle.evaluate(
-              (root, current) => root === current,
-              finalScopeHandle
-            ).catch(() => false);
-            const finalAssociation = finalSubmitHandle && finalScopeHandle
-              && await finalSubmitHandle.evaluate((element, bound) => {
-                if (!element.isConnected || !bound.scope?.isConnected) return false;
-                if (bound.scopeKind === 'form') {
-                  return bound.usesAssociatedForm
-                    ? element.form === bound.scope
-                    : element.closest('form') === bound.scope;
-                }
-                return bound.scope.contains(element);
-              }, {
-                scope: finalScopeHandle,
-                scopeKind: finalSelected.scopeKind,
-                usesAssociatedForm: finalSelected.usesAssociatedForm === true
-              }).catch(() => false);
+            const sameSubmit = finalSubmitHandle && (chooserVersion === 4
+              ? await callV4Utility('sameNode', submitHandle, finalSubmitHandle).catch(() => false)
+              : await submitHandle.evaluate(
+                  (element, current) => element === current,
+                  finalSubmitHandle
+                ).catch(() => false));
+            const sameScope = finalScopeHandle && (chooserVersion === 4
+              ? await callV4Utility('sameNode', scopeHandle, finalScopeHandle).catch(() => false)
+              : await scopeHandle.evaluate(
+                  (root, current) => root === current,
+                  finalScopeHandle
+                ).catch(() => false));
+            const finalAssociation = Boolean(finalSubmitHandle && finalScopeHandle
+              && finalSelected.bindingFingerprint === selected.bindingFingerprint);
             sameChooserBinding = Boolean(sameSubmit && sameScope && finalAssociation);
           } finally {
             await finalSubmitHandle?.dispose().catch(() => undefined);
@@ -8674,20 +12102,22 @@ const { chromium } = require('playwright');
         if (!sameChooserBinding) {
           if (!blockerReason) blockerReason = 'submit_chooser_changed';
           unresolved.push('Final submit chooser changed during required-field confirmation');
-        } else if (readCurrentBinding) {
-          const finalBinding = await readCurrentBinding();
-          const finalFormFingerprint = finalBinding
-            && crypto.createHash('sha256').update(JSON.stringify(finalBinding.formShape)).digest('hex');
-          const finalSubmitFingerprint = finalBinding
-            && crypto.createHash('sha256').update(
-              finalFormFingerprint + ':' + JSON.stringify(finalBinding.submitShape)
-            ).digest('hex');
-          if (finalFormFingerprint !== formFingerprint || finalSubmitFingerprint !== submitFingerprint) {
-            blockerReason = 'form_identity_changed';
-            unresolved.push('The immutable application form, submitter, or submitted state changed during the final chooser');
-          }
         }
       }
+      const setV4SafetyOutcome = (reason) => {
+        if (chooserVersion !== 4 || !reason || finalSubmitChooser?.outcome !== 'selected') return;
+        if (reason === 'submit_transport_unsupported') {
+          finalSubmitChooser = { ...finalSubmitChooser, outcome: 'transport_unsupported' };
+          return;
+        }
+        const bindingChanged = /(?:changed|mutated|identity|witness|bubble|replaced)/.test(reason)
+          || reason === 'submit_event_unobserved';
+        finalSubmitChooser = {
+          ...finalSubmitChooser,
+          outcome: bindingChanged ? 'binding_changed' : 'activation_blocked'
+        };
+      };
+      recordBlockedAncillaryTransport();
       let blocked = unresolved.length > 0;
       if (!blocked) {
         if (requiresExactPageUrl) {
@@ -8697,152 +12127,229 @@ const { chromium } = require('playwright');
           }
           exactPageUrlProof.beforeSubmit = observed;
         }
-        let activationGuardToken = null;
         let activationGate = null;
-        if (requiresNativeTransport) {
-          const transportHmacKey = approvedTransportHmacKey;
-          const currentTransportBinding = await submitHandle.evaluate(async (element, input) => {
-            const root = input.scope;
-            if (!(root instanceof HTMLFormElement) || root !== input.applicationScope
-              || !root.isConnected || !element.isConnected || element.form !== root
-              || !globalThis.crypto?.subtle) return null;
-            const isNativeSubmitter = (element instanceof HTMLButtonElement && element.type === 'submit')
-              || (element instanceof HTMLInputElement && element.type === 'submit');
-            if (!isNativeSubmitter || input.scopeKind !== 'form' || input.usesAssociatedForm !== true) return null;
-            const canonical = (value) => {
-              const parsed = new URL(value, document.baseURI);
-              parsed.hash = '';
-              return parsed.href;
-            };
-            const normalizeMethod = (value) => {
-              const raw = String(value || '').toLowerCase();
-              return /^(?:get|post|dialog)$/.test(raw) ? raw : 'get';
-            };
-            const normalizeEnctype = (value) => {
-              const raw = String(value || '').toLowerCase();
-              return /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(raw)
-                ? raw
-                : 'application/x-www-form-urlencoded';
-            };
-            const method = normalizeMethod(element.hasAttribute('formmethod')
-              ? element.getAttribute('formmethod')
-              : root.getAttribute('method')).toUpperCase();
-            const action = canonical(element.hasAttribute('formaction')
-              ? element.getAttribute('formaction') || location.href
-              : root.getAttribute('action') || location.href);
-            const target = String(element.hasAttribute('formtarget')
-              ? element.getAttribute('formtarget')
-              : (root.getAttribute('target')
-                || document.querySelector('base[target]')?.getAttribute('target') || '_self'))
-              .toLowerCase() || '_self';
-            const enctype = normalizeEnctype(element.hasAttribute('formenctype')
-              ? element.getAttribute('formenctype')
-              : root.getAttribute('enctype'));
-            if (target !== '_self' || method !== 'POST'
-              || !['application/x-www-form-urlencoded', 'multipart/form-data'].includes(enctype)) {
-              return { unsupportedReason: 'submit_transport_unsupported' };
+        if (chooserVersion === 4) {
+          const transportHmacKey = crypto.randomBytes(32).toString('base64');
+          const transportProofAddresses = [];
+          for (const address of successfulAddresses) {
+            if (address.pageUrl !== canonicalPageUrl(page.url())
+              || address.documentGeneration !== v4DocumentGeneration
+              || !address.pristineControlProofDigest) continue;
+            const sameForm = await callV4Utility(
+              'successfulControlBelongsToApplication',
+              address.handle
+            ).catch(() => false);
+            if (sameForm) transportProofAddresses.push(address);
+          }
+          let rawTransportBinding = null;
+          let successfulControlOrder = null;
+          let securityCodeBindingChanged = false;
+          const clearedProofs = await callV4Utility('clearSuccessfulControls').catch(() => false);
+          let addedProofs = Boolean(clearedProofs);
+          for (const address of transportProofAddresses) {
+            if (!addedProofs) break;
+            addedProofs = Boolean(await callV4Utility(
+              'addSuccessfulControl',
+              address.handle
+            ).catch(() => false));
+          }
+          if (addedProofs) {
+            const rawTransportBindingJson = await callV4Utility(
+              'nativePostBindingJson',
+              submitHandle
+            ).catch(() => null);
+            try {
+              rawTransportBinding = typeof rawTransportBindingJson === 'string'
+                ? JSON.parse(rawTransportBindingJson)
+                : null;
+            } catch {}
+          }
+          if (rawTransportBinding && Array.isArray(rawTransportBinding.successfulProofs)
+            && rawTransportBinding.successfulProofs.length === transportProofAddresses.length) {
+            for (let proofIndex = 0; proofIndex < transportProofAddresses.length; proofIndex += 1) {
+              const normalized = normalizePristineSuccessfulControlProof(
+                rawTransportBinding.successfulProofs[proofIndex]
+              );
+              if (normalized?.digest !== transportProofAddresses[proofIndex].pristineControlProofDigest) {
+                successfulAddressIntegrityFailure = true;
+                break;
+              }
             }
-            const keyBytes = Uint8Array.from(atob(input.hmacKey), (character) => character.charCodeAt(0));
-            const key = await globalThis.crypto.subtle.importKey(
-              'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-            );
-            const digest = async (bytes) => {
-              const signature = await globalThis.crypto.subtle.sign('HMAC', key, bytes);
-              return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-            };
-            const disabledByFieldset = (control) => {
-              for (let fieldset = control.parentElement?.closest('fieldset[disabled]'); fieldset;
-                fieldset = fieldset.parentElement?.closest('fieldset[disabled]')) {
-                const firstLegend = [...fieldset.children].find((child) => child instanceof HTMLLegendElement);
-                if (!firstLegend || !firstLegend.contains(control)) return true;
-              }
-              return false;
-            };
-            const successful = [];
-            const listed = [...root.elements];
-            if (listed.length > 512) return null;
-            for (const control of listed) {
-              if (control.form !== root || control.disabled || disabledByFieldset(control)) continue;
-              if (control instanceof HTMLFieldSetElement || control instanceof HTMLOutputElement) continue;
-              if (!(control instanceof HTMLInputElement)
-                && !(control instanceof HTMLTextAreaElement)
-                && !(control instanceof HTMLSelectElement)
-                && !(control instanceof HTMLButtonElement)) return null;
-              const name = control.getAttribute('name') || '';
-              if (!name) continue;
-              if (control.hasAttribute('dirname') || name === '_charset_') return null;
-              if (control instanceof HTMLButtonElement) {
-                if (control === element && control.type === 'submit') successful.push([name, control.value]);
-                continue;
-              }
-              if (control instanceof HTMLInputElement) {
-                const type = control.type.toLowerCase();
-                if (type === 'image') return null;
-                if (type === 'submit') {
-                  if (control === element) successful.push([name, control.value]);
-                  continue;
+            if (Array.isArray(rawTransportBinding.successfulControlOrder)
+              && rawTransportBinding.successfulControlOrder.length === transportProofAddresses.length) {
+              const seenProofIndices = new Set();
+              successfulControlOrder = [];
+              for (const proofIndex of rawTransportBinding.successfulControlOrder) {
+                if (!Number.isSafeInteger(proofIndex) || proofIndex < 0
+                  || proofIndex >= transportProofAddresses.length || seenProofIndices.has(proofIndex)) {
+                  successfulControlOrder = null;
+                  break;
                 }
-                if (type === 'button' || type === 'reset') continue;
-                if ((type === 'checkbox' || type === 'radio') && !control.checked) continue;
-                if (type === 'file') {
-                  const files = [...(control.files || [])];
-                  if (files.length === 0) {
-                    successful.push([name, new File([], '', { type: 'application/octet-stream' })]);
-                  } else {
-                    for (const file of files) successful.push([name, file]);
+                seenProofIndices.add(proofIndex);
+                successfulControlOrder.push(proofIndex);
+              }
+            }
+            if (!successfulControlOrder) successfulAddressIntegrityFailure = true;
+          } else {
+            successfulAddressIntegrityFailure = true;
+          }
+          if (!successfulAddressIntegrityFailure) {
+            const expectedSecurityCodeGroups = new Map();
+            for (const address of successfulAddresses) {
+              if (address.pageUrl !== canonicalPageUrl(page.url())
+                || address.documentGeneration !== v4DocumentGeneration) continue;
+              const hasSecurityCodeMetadata = address.securityCodeGroupId !== undefined
+                || address.securityCodeIndex !== undefined
+                || address.securityCodeGroupSize !== undefined;
+              if (!hasSecurityCodeMetadata) continue;
+              if (typeof address.securityCodeGroupId !== 'string'
+                || !Number.isSafeInteger(address.securityCodeIndex)
+                || !Number.isSafeInteger(address.securityCodeGroupSize)
+                || address.securityCodeGroupSize < 1 || address.securityCodeGroupSize > 12
+                || address.securityCodeIndex < 0
+                || address.securityCodeIndex >= address.securityCodeGroupSize) {
+                securityCodeBindingChanged = true;
+                break;
+              }
+              let group = expectedSecurityCodeGroups.get(address.securityCodeGroupId);
+              if (!group) {
+                group = {
+                  size: address.securityCodeGroupSize,
+                  addressesByIndex: new Map()
+                };
+                expectedSecurityCodeGroups.set(address.securityCodeGroupId, group);
+              }
+              if (group.size !== address.securityCodeGroupSize
+                || group.addressesByIndex.has(address.securityCodeIndex)) {
+                securityCodeBindingChanged = true;
+                break;
+              }
+              group.addressesByIndex.set(address.securityCodeIndex, address);
+            }
+            for (const [groupId, group] of expectedSecurityCodeGroups) {
+              if (securityCodeBindingChanged) break;
+              if (group.addressesByIndex.size !== group.size) {
+                securityCodeBindingChanged = true;
+                break;
+              }
+              for (let index = 0; index < group.size; index += 1) {
+                const expectedAddress = group.addressesByIndex.get(index);
+                if (!expectedAddress || !transportProofAddresses.includes(expectedAddress)) {
+                  securityCodeBindingChanged = true;
+                  break;
+                }
+              }
+              if (securityCodeBindingChanged) break;
+              const serializedSecurityCodeIndices = successfulControlOrder
+                .map((proofIndex) => transportProofAddresses[proofIndex])
+                .filter((address) => address.securityCodeGroupId === groupId)
+                .map((address) => address.securityCodeIndex);
+              if (serializedSecurityCodeIndices.length !== group.size
+                || serializedSecurityCodeIndices.some((index, position) => index !== position)) {
+                securityCodeBindingChanged = true;
+              }
+            }
+          }
+          let transportBinding = null;
+          if (securityCodeBindingChanged) {
+            blockerReason = 'security_code_binding_changed';
+            unresolved.push('The security code control order changed before transport binding');
+            blocked = true;
+          } else if (successfulAddressIntegrityFailure) {
+            blockerReason = 'successful_address_changed';
+            unresolved.push('A caller-supplied application value or file changed before transport binding');
+            blocked = true;
+          } else if (rawTransportBinding?.unsupportedReason) {
+            transportBinding = { unsupportedReason: rawTransportBinding.unsupportedReason };
+          } else if (rawTransportBinding && Array.isArray(rawTransportBinding.entries)
+            && rawTransportBinding.entries.length <= 1024
+            && typeof rawTransportBinding.bindingFingerprint === 'string'
+            && rawTransportBinding.bindingFingerprint.length <= 2_000_000) {
+            try {
+              const rawBindingFingerprint = crypto.createHmac('sha256', chooserBindingHmacKey)
+                .update(rawTransportBinding.bindingFingerprint)
+                .digest('hex');
+              if (rawBindingFingerprint !== selected.bindingFingerprint) {
+                throw new Error('Native binding changed after chooser authorization');
+              }
+              const actionUrl = new URL(rawTransportBinding.action);
+              actionUrl.hash = '';
+              const allowedOrigin = new URL(exactPageUrlProof.expected).origin;
+              if (!['http:', 'https:'].includes(actionUrl.protocol)
+                || actionUrl.origin !== allowedOrigin
+                || actionUrl.username
+                || actionUrl.password
+                || rawTransportBinding.method !== 'POST'
+                || rawTransportBinding.target !== '_self'
+                || !['application/x-www-form-urlencoded', 'multipart/form-data']
+                  .includes(rawTransportBinding.enctype)) {
+                transportBinding = { unsupportedReason: 'submit_transport_unsupported' };
+              } else {
+                let totalBytes = 0;
+                const entries = rawTransportBinding.entries.map((entry) => {
+                  if (!entry || typeof entry.name !== 'string' || entry.name.length > 16_384) {
+                    throw new Error('Invalid native entry name');
                   }
-                  continue;
-                }
-                successful.push([name, control.value]);
-                continue;
-              }
-              if (control instanceof HTMLSelectElement) {
-                for (const option of control.options) {
-                  if (!option.selected || option.disabled || option.parentElement?.disabled) continue;
-                  successful.push([name, option.value]);
-                }
-                continue;
-              }
-              successful.push([name, control.value]);
-            }
-            if (successful.length > 1024) return null;
-            const entries = await Promise.all(successful.map(async ([name, value]) => {
-              if (value instanceof File) {
-                return {
-                  name,
-                  kind: 'file',
-                  filename: value.name,
-                  contentType: value.type || 'application/octet-stream',
-                  size: value.size,
-                  digest: await digest(await value.arrayBuffer())
+                  if (entry.kind === 'text' && typeof entry.value === 'string') {
+                    totalBytes += Buffer.byteLength(entry.value);
+                    if (totalBytes > 12_000_000) throw new Error('Native entry list is too large');
+                    return {
+                      name: entry.name,
+                      kind: 'text',
+                      digest: payloadDigest(
+                        { hmacKey: transportHmacKey },
+                        { kind: 'text', value: entry.value }
+                      )
+                    };
+                  }
+                  if (entry.kind === 'file'
+                    && typeof entry.filename === 'string' && entry.filename.length <= 512
+                    && typeof entry.contentType === 'string' && entry.contentType.length <= 256
+                    && typeof entry.bytesBase64 === 'string') {
+                    const bytes = Buffer.from(entry.bytesBase64, 'base64');
+                    if (bytes.toString('base64') !== entry.bytesBase64
+                      || !Number.isSafeInteger(entry.size) || entry.size !== bytes.length) {
+                      throw new Error('Invalid native file entry');
+                    }
+                    totalBytes += bytes.length;
+                    if (totalBytes > 12_000_000) throw new Error('Native entry list is too large');
+                    return {
+                      name: entry.name,
+                      kind: 'file',
+                      filename: entry.filename,
+                      contentType: entry.contentType,
+                      size: entry.size,
+                      lastModified: Number.isFinite(entry.lastModified) ? entry.lastModified : 0,
+                      digest: payloadDigest(
+                        { hmacKey: transportHmacKey },
+                        { kind: 'file', bytes }
+                      )
+                    };
+                  }
+                  throw new Error('Invalid native entry');
+                });
+                transportBinding = {
+                  action: actionUrl.href,
+                  method: rawTransportBinding.method,
+                  target: rawTransportBinding.target,
+                  enctype: rawTransportBinding.enctype,
+                  allowedOrigin,
+                  entries
                 };
               }
-              const normalized = String(value).replace(/\r\n|\r|\n/g, '\r\n');
-              return { name, kind: 'text', digest: await digest(new TextEncoder().encode(normalized)) };
-            }));
-            return { action, method, target, enctype, entries };
-          }, {
-            scope: scopeHandle,
-            applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
-            hmacKey: transportHmacKey,
-            scopeKind,
-            usesAssociatedForm
-          }).catch(() => null);
-          const transportBinding = approvedTransportBinding;
-          if (!transportBinding || !approvedActivationSnapshot) {
+            } catch {
+              transportBinding = null;
+            }
+          }
+          if (!blocked && !transportBinding) {
             blockerReason = 'submit_payload_unverifiable';
             unresolved.push('The exact native submit transport or payload could not be bound');
             blocked = true;
-          } else if (transportBinding.unsupportedReason) {
+          } else if (!blocked && transportBinding.unsupportedReason) {
             blockerReason = transportBinding.unsupportedReason;
             unresolved.push('The native submit transport is not supported by atomic submit v4');
             blocked = true;
-          } else if (!currentTransportBinding
-            || JSON.stringify(currentTransportBinding) !== JSON.stringify(transportBinding)) {
-            blockerReason = 'form_identity_changed';
-            unresolved.push('The approved native submit transport or payload changed before activation');
-            blocked = true;
-          } else {
+          } else if (!blocked) {
           activationGate = await armSubmitTransportGate({
             ...transportBinding,
             hmacKey: transportHmacKey
@@ -8860,300 +12367,12 @@ const { chromium } = require('playwright');
             activationGate = null;
           }
           if (!blocked) {
-          activationGuardToken = crypto.randomBytes(24).toString('hex');
-          const guardArmed = await submitHandle.evaluate((element, input) => {
-            const root = input.scope;
-            if (!(root instanceof HTMLFormElement) || root !== input.applicationScope
-              || !root.isConnected || !element.isConnected || element.form !== root) return false;
-            const canonicalUrl = () => {
-              const current = new URL(location.href);
-              current.hash = '';
-              return current.href;
-            };
-            const associatedWithBoundScope = () => input.usesAssociatedForm && element.form === root;
-            if (!associatedWithBoundScope()) return false;
-            const snapshot = () => {
-              const submittedControls = [...root.elements].map((control, index) => {
-                const isInput = control instanceof HTMLInputElement;
-                const isSelect = control instanceof HTMLSelectElement;
-                const type = String(control.getAttribute?.('type') || '').toLowerCase();
-                return {
-                  index,
-                  tag: String(control.tagName || '').toLowerCase(),
-                  id: control.id || null,
-                  name: control.getAttribute?.('name') || null,
-                  type: type || null,
-                  disabled: Boolean(control.disabled),
-                  readOnly: 'readOnly' in control ? Boolean(control.readOnly) : null,
-                  formAssociation: control.getAttribute?.('form') || null,
-                  associatedWithRoot: control.form === root,
-                  value: isInput && type === 'file' ? null : ('value' in control ? String(control.value || '') : null),
-                  checked: isInput && (type === 'checkbox' || type === 'radio') ? Boolean(control.checked) : null,
-                  selected: isSelect ? [...control.selectedOptions].map((option) => ({
-                    index: option.index,
-                    value: String(option.value || ''),
-                    label: String(option.label || option.textContent || ''),
-                    disabled: Boolean(option.disabled)
-                  })) : null,
-                  files: isInput && type === 'file' ? [...(control.files || [])].map((file) => ({
-                    name: file.name,
-                    size: file.size,
-                    type: file.type,
-                    lastModified: file.lastModified
-                  })) : null
-                };
-              });
-              const submittedControlsJson = JSON.stringify(submittedControls);
-              const submittedControlsWithinBound = submittedControls.length <= 256
-                && submittedControlsJson.length <= 2_000_000
-                && submittedControls.every((control) => (
-                  String(control.id || '').length <= 256
-                  && String(control.name || '').length <= 256
-                  && String(control.type || '').length <= 64
-                  && String(control.formAssociation || '').length <= 256
-                  && String(control.value || '').length <= 16_384
-                  && (!control.selected || (control.selected.length <= 128 && control.selected.every((option) => (
-                    String(option.value || '').length <= 16_384 && String(option.label || '').length <= 16_384
-                  ))))
-                  && (!control.files || (control.files.length <= 16 && control.files.every((file) => (
-                    String(file.name || '').length <= 512 && String(file.type || '').length <= 256
-                  ))))
-                ));
-              const rawMethod = String(root.getAttribute('method') || '').toLowerCase();
-              const effectiveMethod = /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get';
-              const rawEnctype = String(root.getAttribute('enctype') || '').toLowerCase();
-              const effectiveEnctype = /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/
-                .test(rawEnctype) ? rawEnctype : 'application/x-www-form-urlencoded';
-              const formShape = {
-                scopeKind: input.scopeKind,
-                id: root.id || null,
-                action: root.getAttribute('action') || null,
-                method: root.getAttribute('method') || null,
-                resolvedAction: new URL(root.getAttribute('action') || location.href, document.baseURI).href,
-                effectiveMethod,
-                effectiveTarget: root.getAttribute('target')
-                  || document.querySelector('base[target]')?.getAttribute('target') || '',
-                effectiveEnctype,
-                noValidate: root.hasAttribute('novalidate'),
-                acceptCharset: root.getAttribute('accept-charset') || '',
-                submittedControlCount: submittedControls.length,
-                submittedControlsWithinBound,
-                submittedControls: submittedControlsWithinBound ? submittedControls : [],
-                controls: [...root.querySelectorAll('input, textarea, select, button, [role="button"]')]
-                  .map((control) => ({
-                    tag: control.tagName.toLowerCase(),
-                    id: control.id || null,
-                    name: control.getAttribute('name') || null,
-                    type: control.getAttribute('type') || null,
-                    label: control.getAttribute('aria-label') || null
-                  }))
-              };
-              const submitShape = {
-                tag: element.tagName.toLowerCase(),
-                id: element.id || null,
-                name: element.getAttribute('name') || null,
-                type: element.getAttribute('type') || null,
-                text: String(element.innerText || element.value || '').replace(/\s+/g, ' ').trim(),
-                value: element.getAttribute('value') || null,
-                formAction: element.getAttribute('formaction') || null,
-                formMethod: element.getAttribute('formmethod') || null,
-                formTarget: element.getAttribute('formtarget') || null,
-                formEnctype: element.getAttribute('formenctype') || null,
-                formNoValidate: element.hasAttribute('formnovalidate'),
-                formAssociation: element.getAttribute('form') || null
-              };
-              return { url: canonicalUrl(), formShape, submitShape };
-            };
-            const expected = JSON.stringify(input.approvedSnapshot);
-            if (JSON.stringify(snapshot()) !== expected) return false;
-            const guards = globalThis.__litosSubmitActivationGuards instanceof Map
-              ? globalThis.__litosSubmitActivationGuards
-              : new Map();
-            if (!(globalThis.__litosSubmitActivationGuards instanceof Map)) {
-              Object.defineProperty(globalThis, '__litosSubmitActivationGuards', {
-                value: guards,
-                configurable: true
-              });
-            }
-            const state = {
-              status: 'armed', reason: null, submitEvent: null, formData: null,
-              captureSeen: false, documentBubbleSeen: false, windowBubbleSeen: false,
-              mutated: false, cleanup: null, finalize: null
-            };
-            const protectedNodes = new Set([root, element, ...document.querySelectorAll('base')]);
-            for (const control of root.elements) {
-              protectedNodes.add(control);
-              if (control instanceof HTMLSelectElement) {
-                for (const option of control.options) protectedNodes.add(option);
-              }
-              for (let ancestor = control.parentElement; ancestor && ancestor !== document.body;
-                ancestor = ancestor.parentElement) {
-                if (ancestor instanceof HTMLFieldSetElement || ancestor instanceof HTMLLegendElement) {
-                  protectedNodes.add(ancestor);
-                }
-                if (ancestor === root) break;
-              }
-            }
-            const protectedChild = (node, target) => {
-              if (protectedNodes.has(node)) return true;
-              if (!(node instanceof Element)) return false;
-              if (node.matches('base') || node.querySelector('base')) return true;
-              if ([...protectedNodes].some((protectedNode) => node.contains(protectedNode))) return true;
-              const associated = [node, ...node.querySelectorAll('input, textarea, select, button, option')];
-              return associated.some((candidate) => (
-                candidate instanceof HTMLOptionElement
-                  ? protectedNodes.has(target)
-                  : candidate.form === root
-              )) || (root.contains(target) && associated.some((candidate) => (
-                candidate.matches?.('input, textarea, select, button, option')
-              )));
-            };
-            const protectedMutation = (record) => {
-              if (record.type === 'attributes') return protectedNodes.has(record.target);
-              return [...record.addedNodes, ...record.removedNodes]
-                .some((node) => protectedChild(node, record.target));
-            };
-            const block = (reason, event = null) => {
-              state.status = 'blocked';
-              state.reason = state.reason || reason;
-              if (event instanceof SubmitEvent) event.preventDefault();
-              return false;
-            };
-            const bindingCurrent = () => JSON.stringify(snapshot()) === expected;
-            const observer = new MutationObserver((records) => {
-              if (records.some(protectedMutation)) {
-                state.mutated = true;
-                block('protected_surface_mutated');
-              }
-            });
-            const drainMutations = () => {
-              if (observer.takeRecords().some(protectedMutation)) {
-                state.mutated = true;
-                block('protected_surface_mutated');
-              }
-            };
-            const unchanged = (reason, event = null) => {
-              drainMutations();
-              if (state.status === 'blocked' || state.mutated) return block(state.reason || reason, event);
-              if (!bindingCurrent()) return block(reason, event);
-              return true;
-            };
-            const activationListener = (event) => { unchanged(event.type + '_binding_changed', event); };
-            const submitCapture = (event) => {
-              if (!unchanged('submit_capture_binding_changed', event)) return;
-              if (!event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
-                block('submit_identity_changed', event);
-                return;
-              }
-              state.submitEvent = event;
-              state.captureSeen = true;
-              state.status = 'capture_only';
-            };
-            const submitDocumentBubble = (event) => {
-              if (!unchanged('submit_document_bubble_binding_changed', event)) return;
-              if (!state.captureSeen || event !== state.submitEvent
-                || !event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
-                block('submit_document_bubble_missing', event);
-                return;
-              }
-              state.documentBubbleSeen = true;
-              state.status = 'document_bubble';
-            };
-            const submitWindowBubble = (event) => {
-              if (!unchanged('submit_window_bubble_binding_changed', event)) return;
-              if (!state.captureSeen || !state.documentBubbleSeen || event !== state.submitEvent
-                || !event.isTrusted || event.target !== root || event.submitter !== element || !event.submitter) {
-                block('submit_window_bubble_missing', event);
-                return;
-              }
-              state.windowBubbleSeen = true;
-              state.status = 'bubble_complete';
-              queueMicrotask(() => {
-                if (unchanged('post_dispatch_binding_changed', event)
-                  && state.captureSeen && state.documentBubbleSeen && state.windowBubbleSeen) {
-                  state.status = 'allowed';
-                }
-              });
-            };
-            const formDataListener = (event) => {
-              if (!event.isTrusted || event.target !== root || !(event.formData instanceof FormData)) {
-                block('submit_formdata_unobserved');
-                return;
-              }
-              // Keep the actual object, not a copied entry list. A later formdata listener can
-              // mutate this same object, and the held native request remains the final authority.
-              state.formData = event.formData;
-            };
-            const ordinaryEvents = ['pointerdown', 'mousedown', 'focus', 'click'];
-            observer.observe(root, {
-              subtree: true,
-              childList: true,
-              attributes: true,
-              attributeFilter: [
-                'id', 'action', 'method', 'target', 'enctype', 'novalidate', 'accept-charset',
-                'form', 'type', 'name', 'value', 'disabled', 'readonly',
-                'formaction', 'formmethod', 'formtarget', 'formenctype', 'formnovalidate',
-                'href', 'selected'
-              ]
-            });
-            if (document.head) observer.observe(document.head, {
-              subtree: true,
-              childList: true,
-              attributes: true,
-              attributeFilter: ['href', 'target']
-            });
-            state.cleanup = () => {
-              for (const type of ordinaryEvents) {
-                document.removeEventListener(type, activationListener, true);
-                document.removeEventListener(type, activationListener, false);
-                window.removeEventListener(type, activationListener, false);
-              }
-              document.removeEventListener('submit', submitCapture, true);
-              document.removeEventListener('submit', submitDocumentBubble, false);
-              window.removeEventListener('submit', submitWindowBubble, false);
-              root.removeEventListener('formdata', formDataListener, false);
-              observer.disconnect();
-              globalThis.__litosV4SubmissionContainment?.relock(input.containmentToken);
-            };
-            state.finalize = () => {
-              unchanged('post_click_binding_changed');
-              if (state.status === 'allowed' && !state.formData) block('submit_formdata_unobserved');
-              if (state.status !== 'allowed' && state.status !== 'blocked') {
-                block(state.captureSeen ? 'submit_bubble_witness_missing' : 'submit_event_unobserved');
-              }
-              state.cleanup();
-              return { status: state.status, reason: state.reason };
-            };
-            guards.set(input.token, state);
-            for (const type of ordinaryEvents) {
-              document.addEventListener(type, activationListener, true);
-              document.addEventListener(type, activationListener, false);
-              window.addEventListener(type, activationListener, false);
-            }
-            document.addEventListener('submit', submitCapture, true);
-            document.addEventListener('submit', submitDocumentBubble, false);
-            window.addEventListener('submit', submitWindowBubble, false);
-            root.addEventListener('formdata', formDataListener, false);
-            const containmentAuthorized = globalThis.__litosV4SubmissionContainment?.authorize(
-              input.containmentToken, root, element, input.usesAssociatedForm
-            );
-            if (!containmentAuthorized) {
-              state.cleanup();
-              guards.delete(input.token);
-              return false;
-            }
-            return true;
-          }, {
-            scope: scopeHandle,
-            token: activationGuardToken,
-            containmentToken: v4ContainmentToken,
-            usesAssociatedForm,
-            applicationScope: requiresNativeTransport ? applicationScopeProofHandle : scopeHandle,
-            scopeKind,
-            approvedSnapshot: approvedActivationSnapshot
-          }).catch(() => false);
-          if (!guardArmed) {
-            blockerReason = 'submit_activation_guard_unavailable';
+          const guardArmResult = await callV4Utility(
+            'armActivation',
+            submitHandle
+          ).catch(() => null);
+          if (guardArmResult !== 'armed') {
+            blockerReason = guardArmResult || 'submit_activation_guard_unavailable';
             unresolved.push('The exact submit-time binding guard could not be armed');
             blocked = true;
             await finishSubmitTransportGate();
@@ -9171,17 +12390,15 @@ const { chromium } = require('playwright');
           } catch (error) {
             activationError = error;
           } finally {
-            if (activationGuardToken) {
-              guardResult = await page.evaluate(async (token) => {
-                await Promise.resolve();
-                await Promise.resolve();
-                const guards = globalThis.__litosSubmitActivationGuards;
-                const state = guards instanceof Map ? guards.get(token) : null;
-                if (!state) return null;
-                const result = state.finalize?.() || null;
-                guards.delete(token);
-                return result;
-              }, activationGuardToken).catch(() => null);
+            if (chooserVersion === 4) {
+              const guardResultJson = await callV4Utility(
+                'finalizeActivationJson'
+              ).catch(() => null);
+              try {
+                guardResult = typeof guardResultJson === 'string'
+                  ? JSON.parse(guardResultJson)
+                  : null;
+              } catch {}
             }
           }
           const gateResult = activationGate
@@ -9192,16 +12409,8 @@ const { chromium } = require('playwright');
             : { status: activationError ? 'blocked' : 'allowed', reason: activationError ? 'submit_click_failed' : null };
           if (gateResult.status !== 'allowed') {
             blockerReason = gateResult.reason || 'submit_binding_changed_during_activation';
+            if (gateResult.mainFrameRequestObserved) markPostSubmitObservationFailed();
             unresolved.push('The final activation or native request no longer matched the caller-bound application');
-            if (chooserVersion === 4) {
-              finalSubmitChooser = {
-                ...finalSubmitChooser,
-                outcome: /(?:changed|mutated|identity|witness|bubble)/.test(blockerReason)
-                  || blockerReason === 'submit_event_unobserved'
-                  ? 'binding_changed'
-                  : 'activation_blocked'
-              };
-            }
             blocked = true;
             finalSubmitPressed = false;
             await finishSubmitTransportGate();
@@ -9211,6 +12420,7 @@ const { chromium } = require('playwright');
           }
         }
       }
+      setV4SafetyOutcome(blockerReason);
       const passResult = {
         pass: {
           submitKind: action.submitKind,
@@ -9301,15 +12511,36 @@ const { chromium } = require('playwright');
       if (continuationMutations.length > 0 && !oneSecurityCode) {
         throw new Error('Retained atomic submit continuation attempted a second mutation path');
       }
-      retainedV4SecurityCodeContinuation = oneSecurityCode;
+      retainedV4SecurityCodeContinuation = oneSecurityCode
+        && securityCodeAction.chooserPolicy?.version === 3;
     }
     const exactPageUrlAction = (currentInput.actions || []).find((action) => typeof action.expectedPageUrl === 'string');
     requiresExactPageUrl = (currentInput.actions || []).some((action) => action.type === 'requireCapability'
       && action.value === exactPageUrlCapability);
-    const recordsSuccessfulAddresses = (currentInput.actions || []).some((action) => (
+    const recordsSuccessfulAddresses = retainedV4SecurityCodeContinuation
+      || (currentInput.actions || []).some((action) => (
       action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
-    ));
+      ));
     if (retainedAtomicV4Run) {
+      const nextUtilityContext = await v4PageImplementation.mainFrame().utilityContext();
+      const documentChanged = Boolean(v4UtilityContext && nextUtilityContext !== v4UtilityContext);
+      v4UtilityContext = nextUtilityContext;
+      if (documentChanged) {
+        v4DocumentGeneration += 1;
+        for (const address of successfulAddresses.splice(0)) {
+          await address.handle?.dispose().catch(() => undefined);
+          await address.formHandle?.dispose().catch(() => undefined);
+        }
+        await Promise.all(unsuccessfulChoices.splice(0).map(disposeUnsuccessfulChoice));
+      }
+      const phaseCapabilityReady = await callV4Utility('relock').catch(() => false);
+      if (!phaseCapabilityReady) {
+        throw new Error('Atomic submit v4 isolated capability was unavailable for this phase');
+      }
+      const dnsPrefetchDisabled = await callV4Utility('disableDnsPrefetch').catch(() => false);
+      if (!dnsPrefetchDisabled) {
+        throw new Error('Atomic submit v4 could not disable speculative DNS for this phase');
+      }
       await armV4PreSubmitTransportContainment();
       relockV4SubmitTransport();
     }
@@ -9317,10 +12548,9 @@ const { chromium } = require('playwright');
       .filter((action) => action.type === 'confirmAndSubmit')
       .map((action) => action.chooserPolicy?.version);
     tracksChoiceFailures = negotiatedSubmitVersions.some((version) => version === 3 || version === 4);
-    mirrorsLegacyChoiceMarkers = negotiatedSubmitVersions.includes(3);
-    chooserBindingHmacKey = recordsSuccessfulAddresses || retainedV4SecurityCodeContinuation
-      ? crypto.randomBytes(32)
-      : null;
+    mirrorsLegacyChoiceMarkers = negotiatedSubmitVersions.includes(3)
+      && !retainedV4SecurityCodeContinuation;
+    chooserBindingHmacKey = recordsSuccessfulAddresses ? crypto.randomBytes(32) : null;
     exactPageUrlProof = requiresExactPageUrl
       ? {
           expected: canonicalPageUrl(exactPageUrlAction?.expectedPageUrl || ''),
@@ -9337,53 +12567,13 @@ const { chromium } = require('playwright');
       }
       exactPageUrlProof.beforeActions = observed;
     }
+    await applicationScopeProofHandle?.dispose().catch(() => undefined);
+    applicationScopeProofHandle = null;
     applicationScopeFailureReason = null;
     const atomicV4CapabilityAction = (currentInput.actions || []).find((action) => (
       action.type === 'requireCapability' && action.value === atomicSubmitV4Capability
     ));
-    if (phase > 0 && retainedAtomicV4Run) {
-      const retainedScopeState = applicationScopeProofHandle
-        ? await applicationScopeProofHandle.evaluate((element) => {
-            const isForm = element instanceof HTMLFormElement;
-            const rawMethod = isForm ? String(element.getAttribute('method') || '').toLowerCase() : '';
-            const rawEnctype = isForm ? String(element.getAttribute('enctype') || '').toLowerCase() : '';
-            return {
-              isForm,
-              connected: element.isConnected,
-              resolvedAction: isForm
-                ? new URL(element.getAttribute('action') || location.href, document.baseURI).href
-                : '',
-              method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
-              target: isForm
-                ? String(element.getAttribute('target')
-                  || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
-                : '',
-              enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-                ? rawEnctype
-                : 'application/x-www-form-urlencoded',
-              noValidate: isForm ? element.hasAttribute('novalidate') : false,
-              acceptCharset: isForm ? String(element.getAttribute('accept-charset') || '') : ''
-            };
-          }).catch(() => null)
-        : null;
-      if (!retainedScopeState) applicationScopeFailureReason = 'application_scope_missing';
-      else if (!retainedScopeState.isForm) applicationScopeFailureReason = 'application_scope_not_form';
-      else if (!retainedScopeState.connected) applicationScopeFailureReason = 'application_scope_detached';
-      else if (!applicationScopeProofState
-        || retainedScopeState.resolvedAction !== applicationScopeProofState.resolvedAction
-        || retainedScopeState.method !== applicationScopeProofState.method
-        || retainedScopeState.target !== applicationScopeProofState.target
-        || retainedScopeState.enctype !== applicationScopeProofState.enctype
-        || retainedScopeState.noValidate !== applicationScopeProofState.noValidate
-        || retainedScopeState.acceptCharset !== applicationScopeProofState.acceptCharset) {
-        applicationScopeFailureReason = 'application_scope_semantics_changed';
-      }
-    } else {
-      await applicationScopeProofHandle?.dispose().catch(() => undefined);
-      applicationScopeProofHandle = null;
-      applicationScopeProofState = null;
-    }
-    if (!(phase > 0 && retainedAtomicV4Run) && atomicV4CapabilityAction?.applicationScopeSelector) {
+    if (atomicV4CapabilityAction?.applicationScopeSelector) {
       const scopeCandidates = await page.locator(atomicV4CapabilityAction.applicationScopeSelector)
         .elementHandles().catch(() => []);
       if (scopeCandidates.length === 0) {
@@ -9395,35 +12585,18 @@ const { chromium } = require('playwright');
         for (const candidate of scopeCandidates) await candidate.dispose().catch(() => undefined);
       } else {
         const candidate = scopeCandidates[0];
-        const scopeState = await candidate.evaluate((element) => {
-          const isForm = element instanceof HTMLFormElement;
-          const rawMethod = isForm ? String(element.getAttribute('method') || '').toLowerCase() : '';
-          const rawEnctype = isForm ? String(element.getAttribute('enctype') || '').toLowerCase() : '';
-          return {
-            isForm,
-            connected: element.isConnected,
-            resolvedAction: isForm
-              ? new URL(element.getAttribute('action') || location.href, document.baseURI).href
-              : '',
-            method: /^(?:get|post|dialog)$/.test(rawMethod) ? rawMethod : 'get',
-            target: isForm
-              ? String(element.getAttribute('target')
-                || document.querySelector('base[target]')?.getAttribute('target') || '').toLowerCase()
-              : '',
-            enctype: /^(?:application\/x-www-form-urlencoded|multipart\/form-data|text\/plain)$/.test(rawEnctype)
-              ? rawEnctype
-              : 'application/x-www-form-urlencoded',
-            noValidate: isForm ? element.hasAttribute('novalidate') : false,
-            acceptCharset: isForm ? String(element.getAttribute('accept-charset') || '') : ''
-          };
-        }).catch(() => null);
-        if (!scopeState?.isForm) applicationScopeFailureReason = 'application_scope_not_form';
-        else if (!scopeState.connected) applicationScopeFailureReason = 'application_scope_detached';
+        const scopeState = await callV4Utility(
+          'bindApplicationRoot',
+          candidate
+        ).catch(() => 'unavailable') || 'unavailable';
+        if (scopeState === 'not_form') applicationScopeFailureReason = 'application_scope_not_form';
+        else if (scopeState === 'detached') applicationScopeFailureReason = 'application_scope_detached';
+        else if (scopeState !== 'bound') applicationScopeFailureReason = 'application_scope_unavailable';
         if (applicationScopeFailureReason) {
           await candidate.dispose().catch(() => undefined);
         } else {
           applicationScopeProofHandle = candidate;
-          applicationScopeProofState = scopeState;
+          applicationScopeProofGeneration = v4DocumentGeneration;
         }
       }
     }
@@ -9435,21 +12608,20 @@ const { chromium } = require('playwright');
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
     finalSubmitChooser = null;
+    successfulAddressIntegrityFailure = false;
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
     for (const action of currentInput.actions || []) {
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
-       ? exactLocatorContext(
-           exactPageUrlProof?.expected || null,
-           applicationScopeProofHandle,
-           applicationScopeProofState
-         )
+       ? exactLocatorContext()
        : null;
      let successfulAddressWitness = null;
+     let successfulAddressMutationArmed = false;
      const pinSuccessfulAddressWitness = async (target, requiredForm = null) => {
        await disposeSuccessfulAddressWitness(successfulAddressWitness);
+       successfulAddressMutationArmed = successfulAddressMutationArmed || Boolean(target);
        successfulAddressWitness = await captureSuccessfulAddressWitness(target, requiredForm).catch(() => null);
      };
      // Cleared once per ACTION rather than once per chooser, so a question that goes through two of
@@ -9457,7 +12629,7 @@ const { chromium } = require('playwright');
      // field before it. A chooser that succeeds never has its reason read.
      lastChoiceRefusal = '';
      try {
-      if (finalSubmitPressed && submitTransportDisposition === 'write_redirect_blocked') {
+      if (finalSubmitPressed && submitTransportResponseUnavailable()) {
         markPostSubmitObservationFailed();
       }
       if (postSubmitObservationDisposition) {
@@ -9473,25 +12645,13 @@ const { chromium } = require('playwright');
         skipped.push((action.label || action.type) + ': skipped because the caller-bound application form was unavailable');
         continue;
       }
-      if (requiresExactPageUrl && recordsSuccessfulAddresses
-        && ['click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'confirmAndSubmit'].includes(action.type)) {
-        const observed = canonicalPageUrl(page.url());
-        const documentObserved = await page.evaluate(() => {
-          const current = new URL(location.href);
-          current.hash = '';
-          return current.href;
-        }).catch(() => null);
-        if (observed !== exactPageUrlProof.expected || documentObserved !== exactPageUrlProof.expected) {
-          throw new Error('Employer page URL changed before an exact applicant action was bound');
-        }
-      }
       const matches = action.selector ? page.locator(action.selector) : null;
       let exactActionRootHandle = null;
       let exactActionRootBinding = null;
-      await exactActionContext?.assertAuthority?.();
       if (exactActionContext && matches && ['fill', 'upload', 'select'].includes(action.type)) {
         exactActionRootBinding = await exactBoundRootFromLocator(matches.first(), exactActionContext);
         exactActionRootHandle = exactActionRootBinding?.handle || null;
+        successfulAddressMutationArmed = Boolean(exactActionRootBinding);
       }
       const matchCount = action.requireUnique && matches
         ? await matches.count()
@@ -10298,15 +13458,10 @@ const { chromium } = require('playwright');
         discovered.push(...found);
       }
       if (action.type === 'confirmAndSubmit') {
-        submitDecisionTerminal = action.chooserPolicy?.version === 4 || retainedV4SecurityCodeContinuation;
-        if (retainedV4SecurityCodeContinuation && applicationScopeFailureReason) {
-          const scopeMessage = 'The retained caller-bound application form was unavailable for verification';
-          securityCodeAttempt = { supplied: true, entered: false, outcome: 'no_control', resubmitted: false };
-          submitGateBlockers.push(scopeMessage);
-          skipped.push('confirm_and_submit: retained application form was unavailable for verification');
-          continue;
-        }
-        if (action.chooserPolicy?.version === 4 && applicationScopeFailureReason) {
+        const usesAtomicV4Submit = action.chooserPolicy?.version === 4
+          || retainedV4SecurityCodeContinuation;
+        submitDecisionTerminal = usesAtomicV4Submit;
+        if (usesAtomicV4Submit && applicationScopeFailureReason) {
           if (requiresExactPageUrl) {
             const observed = canonicalPageUrl(page.url());
             if (observed !== exactPageUrlProof.expected) {
@@ -10368,14 +13523,52 @@ const { chromium } = require('playwright');
         }
         const passes = [];
         if (action.securityCode) {
-          const entry = await enterSecurityCode(
-            action.securityCode,
-            retainedV4SecurityCodeContinuation ? applicationScopeProofHandle : null
-          );
-          if (entry !== 'entered') {
+          const entry = await enterSecurityCode(action.securityCode);
+          const codeEntered = entry === 'entered'
+            || (usesAtomicV4Submit && entry === 'entered_unaddressed');
+          if (!codeEntered) {
             securityCodeAttempt = { supplied: true, entered: false, outcome: entry, resubmitted: false };
-            if (retainedV4SecurityCodeContinuation) {
-              skipped.push('confirm_and_submit: retained verification code control was unavailable or ambiguous');
+            if (usesAtomicV4Submit) {
+              const message = 'The security code controls did not retain the exact caller-supplied code';
+              requiredFieldConfirmation = {
+                version: 2,
+                status: 'blocked',
+                passes: [{
+                  submitKind: 'verification',
+                  scope: {
+                    scopeKind: 'form',
+                    formFingerprint: null,
+                    submitFingerprint: null,
+                    formMatchCount: 1,
+                    submitMatchCount: 0,
+                    requiredControlCount: 0,
+                    sameNode: false
+                  },
+                  requiredControls: [],
+                  attempts: [],
+                  retries: 0,
+                  unresolved: [message],
+                  blockerReason: 'successful_address_changed',
+                  submissionOutcome: 'blocked'
+                }]
+              };
+              finalSubmitChooser = {
+                version: 1,
+                policyName: action.chooserPolicy.name,
+                policyVersion: action.chooserPolicy.version,
+                grammarHash: action.chooserPolicy.grammarHash,
+                submitKind: 'verification',
+                outcome: 'binding_changed',
+                candidateCount: 0,
+                viableCandidateCount: 0,
+                topScore: null,
+                topScoreCount: 0,
+                addressedScopeCount: 0,
+                bareSendCandidateCount: 0
+              };
+              submitGateBlockers.push(message);
+              skipped.push('confirm_and_submit: security code binding changed before verification');
+              submitDecisionTerminal = true;
               continue;
             }
             throw new Error('Security code was not entered before atomic verification');
@@ -10383,10 +13576,16 @@ const { chromium } = require('playwright');
             // A continuation already sits on the changed verification DOM. Enter first, bind the
             // current verification submit second, and click exactly once. Clicking before entry can
             // reject or rotate the code and must remain structurally impossible.
-            const verification = await confirmAndSubmitPass({ ...action, securityCode: undefined });
+            const verification = await confirmAndSubmitPass({
+              ...action,
+              securityCode: undefined,
+              securityCodePayloadAddressed: entry === 'entered'
+            });
             if (verification.noClick) {
               securityCodeAttempt = { supplied: true, entered: true, outcome: 'no_control', resubmitted: false };
-              skipped.push('confirm_and_submit: no unambiguous verification submit control was selected');
+              skipped.push(verification.blockerReason === 'security_code_payload_unaddressed'
+                ? 'confirm_and_submit: exact security code had no successful native payload control'
+                : 'confirm_and_submit: no unambiguous verification submit control was selected');
               continue;
             }
             passes.push(verification.pass);
@@ -10415,10 +13614,15 @@ const { chromium } = require('playwright');
             try {
               if (verification.pass.submissionOutcome === 'clicked') {
                 await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-                await waitForPostSubmitApplicationState({ securityCodeSettles: false });
-                const receipt = await readSubmitOutcome();
-                const still = await readSecurityCodeChallenge();
-                codeOutcome = securityCodeVerdict(receipt, still);
+                if (submitTransportResponseUnavailable()) {
+                  markPostSubmitObservationFailed();
+                  codeOutcome = 'unknown';
+                } else {
+                  await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+                  const receipt = await readSubmitOutcome();
+                  const still = await readSecurityCodeChallenge();
+                  codeOutcome = securityCodeVerdict(receipt, still);
+                }
               }
             } finally {
               await finishSubmitTransportGate();
@@ -10440,7 +13644,11 @@ const { chromium } = require('playwright');
           try {
             if (application.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-              await waitForPostSubmitApplicationState();
+              if (submitTransportResponseUnavailable()) {
+                markPostSubmitObservationFailed();
+              } else {
+                await waitForPostSubmitApplicationState();
+              }
             }
           } finally {
             await finishSubmitTransportGate();
@@ -11112,6 +14320,7 @@ const { chromium } = require('playwright');
         if (exactActionContext && !exactBinding) {
           throw new Error('fillByLabelText: exact question scope could not be bound');
         }
+        if (exactBinding) successfulAddressMutationArmed = true;
         const container = exactActionContext
           ? exactBinding.container
           : label.locator(
@@ -11491,12 +14700,6 @@ const { chromium } = require('playwright');
         if (action.label) filledFields.push(action.label);
       }
       if (action.type === 'extract') {
-        if (submitDecisionTerminal && !finalSubmitPressed
-          && finalSubmitChooser?.outcome === 'activation_blocked') {
-          skipped.push((action.label || action.type)
-            + ': skipped because the denied native activation may have replaced the employer document');
-          continue;
-        }
         /* 'requireVisible' answers a different question from the plain read above, and the caller
          * has to say which one it wants because the two disagree on real employer pages.
          *
@@ -11586,17 +14789,7 @@ const { chromium } = require('playwright');
       // An optional action that fails is now recorded and stepped over; a required one still stops
       // the run, because the caller marked it as something the run cannot proceed without.
       const actionFailure = String(actionError?.message || actionError).split('\n')[0].slice(0, 200);
-      if (recordsSuccessfulAddresses
-        && /(?:Caller-bound application form semantics|Employer page URL changed across an exact applicant action)/
-          .test(actionFailure)) {
-        applicationScopeFailureReason = 'application_scope_semantics_changed';
-      }
-      if (submitDecisionTerminal && action.type === 'extract' && !finalSubmitPressed) {
-        // A denied native navigation can leave Chromium between the employer document and its
-        // aborted replacement. Result observation is best-effort after the atomic decision, and
-        // must not erase the already established structured no-click outcome.
-        skipped.push((action.label || action.type) + ': post-decision observation unavailable: ' + actionFailure);
-      } else if (!action.optional) {
+      if (!action.optional) {
         if (!finalSubmitPressed) throw actionError;
         markPostSubmitObservationFailed();
         skipped.push((action.label || action.type) + ': post-submit observation failed: ' + actionFailure);
@@ -11604,22 +14797,33 @@ const { chromium } = require('playwright');
         skipped.push((action.label || action.type) + ': ' + actionFailure);
       }
      } finally {
-      if (recordsSuccessfulAddresses && successfulMutation
+      if (recordsSuccessfulAddresses
         && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)) {
-        await rememberSuccessfulAddress(action, successfulAddressWitness).catch(async () => {
-          await disposeSuccessfulAddressWitness(successfulAddressWitness);
-        });
-        successfulAddressWitness = null;
+        if (retainedAtomicV4Run && successfulAddressMutationArmed && !successfulMutation) {
+          successfulAddressIntegrityFailure = true;
+        }
+        if (successfulMutation) {
+          if (retainedAtomicV4Run && !successfulAddressWitness) {
+            successfulAddressIntegrityFailure = true;
+          } else {
+            await rememberSuccessfulAddress(action, successfulAddressWitness).catch(async () => {
+              if (retainedAtomicV4Run) successfulAddressIntegrityFailure = true;
+              await disposeSuccessfulAddressWitness(successfulAddressWitness);
+            });
+          }
+          successfulAddressWitness = null;
+        }
       }
       await disposeSuccessfulAddressWitness(successfulAddressWitness);
       await exactActionContext?.dispose?.();
      }
     }
     const observeForResult = async (reader, fallback) => {
+      if (postSubmitObservationDisposition) return fallback;
       try {
         return await reader();
       } catch (error) {
-        if (!finalSubmitPressed) throw error;
+        if (!finalSubmitPressed && !postSubmitObservationDisposition) throw error;
         markPostSubmitObservationFailed();
         return fallback;
       }
@@ -11714,7 +14918,7 @@ const { chromium } = require('playwright');
         null
       );
     }
-    if (finalSubmitPressed && postSubmitObservationDisposition) {
+    if (postSubmitObservationDisposition) {
       submitOutcome.observationDisposition = postSubmitObservationDisposition;
     }
     // 'skipped' is reported, never swallowed: an optional action that failed is something the
@@ -11823,7 +15027,6 @@ const { chromium } = require('playwright');
       await finishV4PreSubmitTransportContainment();
       await applicationScopeProofHandle?.dispose().catch(() => undefined);
       applicationScopeProofHandle = null;
-      applicationScopeProofState = null;
       for (const address of successfulAddresses.splice(0)) {
         await address.handle?.dispose().catch(() => undefined);
         await address.formHandle?.dispose().catch(() => undefined);
@@ -11950,7 +15153,11 @@ export function normalizeManagedActions(actions = []) {
         typeof file.base64 !== 'string' || !file.base64 || file.base64.length > MAX_FILE_BASE64_LENGTH ||
         file.base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(file.base64)
       ) throw inputError('Upload file data must be valid non-empty base64 no longer than 6000000 characters', 'INVALID_UPLOAD');
-      normalized.file = { name: file.name.trim(), mimeType: file.mimeType.trim(), base64: file.base64 };
+      normalized.file = {
+        name: file.name.trim(),
+        mimeType: file.mimeType.trim().toLowerCase(),
+        base64: file.base64
+      };
     }
     if (action.type === 'waitForSelector') normalized.timeout = Math.min(Math.max(Number(action.timeout) || 10_000, 100), 20_000);
     // The emailed code that finishes a Greenhouse submit, carried on the submit click itself. Kept
@@ -12248,7 +15455,7 @@ async function throwSandboxRunnerError(sandbox) {
   throw Object.assign(new Error(message), { status: 502, code: 'SANDBOX_RUN_FAILED' });
 }
 
-export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);const required=JSON.parse(requiredJson);if(required.includes('atomic-submit-v4')){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
+export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);const required=JSON.parse(requiredJson);const requiresV4=required.includes('atomic-submit-v4');if(requiresV4&&marker.continuationPolicy!=='v4-observation-or-security-code')process.exit(10);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);if(requiresV4){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
@@ -12264,7 +15471,7 @@ async function ensureSandboxTemplate() {
       if (dependencies.exitCode !== 0) throw new Error(`Sandbox browser dependency installation failed: ${await dependencies.stderr()}`);
       const npmInit = await sandbox.runCommand('npm', ['init', '-y']);
       if (npmInit.exitCode !== 0) throw new Error(`Sandbox npm initialization failed: ${await npmInit.stderr()}`);
-      const playwright = await sandbox.runCommand('npm', ['install', 'playwright@1.54.1']);
+      const playwright = await sandbox.runCommand('npm', ['install', 'playwright@1.61.1']);
       if (playwright.exitCode !== 0) throw new Error(`Sandbox Playwright installation failed: ${await playwright.stderr()}`);
       const chromium = await sandbox.runCommand('npx', ['playwright', 'install', 'chromium']);
       if (chromium.exitCode !== 0) throw new Error(`Sandbox Chromium installation failed: ${await chromium.stderr()}`);
@@ -12299,6 +15506,12 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
         throw Object.assign(
           new Error('The retained atomic submit session only permits receipt observation or one security code'),
           { status: 409, code: 'CONTINUATION_ACTION_FORBIDDEN' }
+        );
+      }
+      if (claim.exitCode === 10) {
+        throw Object.assign(
+          new Error('The retained browser session was not launched under atomic submit v4'),
+          { status: 409, code: 'CONTINUATION_V4_UPGRADE_FORBIDDEN' }
         );
       }
       if (claim.exitCode !== 0) {
@@ -12357,7 +15570,7 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
         : MANAGED_RUN_TIMEOUT_MS,
       resources: { vcpus: 2 },
       persistent: false,
-      networkPolicy: 'allow-all'
+      networkPolicy: PUBLIC_EGRESS_NETWORK_POLICY
     });
     const files = [
       { path: 'stratus-runner.cjs', content: Buffer.from(SANDBOX_RUNNER) },

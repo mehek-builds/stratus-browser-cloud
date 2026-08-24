@@ -34,7 +34,29 @@ test('release transitions are idempotent and usage is bounded', () => {
 test('security helpers block local ranges and redact credentials', () => {
   assert.equal(isPrivateIp('127.0.0.1'), true);
   assert.equal(isPrivateIp('169.254.169.254'), true);
+  assert.equal(isPrivateIp('100.64.0.1'), true);
+  assert.equal(isPrivateIp('100.100.100.200'), true);
+  assert.equal(isPrivateIp('192.0.0.1'), true);
+  assert.equal(isPrivateIp('192.0.2.1'), true);
+  assert.equal(isPrivateIp('192.88.99.1'), true);
+  assert.equal(isPrivateIp('198.18.0.1'), true);
+  assert.equal(isPrivateIp('198.51.100.1'), true);
+  assert.equal(isPrivateIp('203.0.113.1'), true);
+  assert.equal(isPrivateIp('224.0.0.1'), true);
+  assert.equal(isPrivateIp('240.0.0.1'), true);
+  assert.equal(isPrivateIp('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateIp('::ffff:169.254.169.254'), true);
+  assert.equal(isPrivateIp('ff02::1'), true);
+  assert.equal(isPrivateIp('2001:2::1'), true);
+  assert.equal(isPrivateIp('2001:10::1'), true);
+  assert.equal(isPrivateIp('2001:20::1'), true);
+  assert.equal(isPrivateIp('2001:db8::1'), true);
+  assert.equal(isPrivateIp('3fff::1'), true);
+  assert.equal(isPrivateIp('2::1'), true);
+  assert.equal(isPrivateIp('20::1'), true);
+  assert.equal(isPrivateIp('200::1'), true);
   assert.equal(isPrivateIp('8.8.8.8'), false);
+  assert.equal(isPrivateIp('2606:4700:4700::1111'), false);
   assert.deepEqual(redact({ apiKey: 'sk_secretvalue123', nested: { authorization: 'Bearer token' } }), { apiKey: '[REDACTED]', nested: { authorization: '[REDACTED]' } });
 });
 

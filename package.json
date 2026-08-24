@@ -20,7 +20,7 @@
   "dependencies": {
     "@vercel/sandbox": "^2.8.0",
     "jose": "^6.2.4",
-    "playwright-core": "^1.54.1",
+    "playwright-core": "1.61.1",
     "ws": "^8.18.3"
   },
   "engines": {

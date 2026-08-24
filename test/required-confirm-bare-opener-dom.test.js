@@ -16,7 +16,8 @@ import { chromium } from 'playwright-core';
 import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 function chosenValueSource() {
-  const start = SANDBOX_RUNNER.indexOf('const chosenValue = (element, widget) => {');
+  const start = SANDBOX_RUNNER.indexOf('const ownedNativeControls = (element) => {',
+    SANDBOX_RUNNER.indexOf('const ownedNativeControls = (element) => {') + 1);
   assert.notEqual(start, -1, 'the confirm-scan chosenValue must exist');
   const end = SANDBOX_RUNNER.indexOf('const errorText = (widget)', start);
   assert.ok(end > start);
@@ -42,8 +43,11 @@ async function chosen(markup, selector) {
     const reactChoiceAnswered = () => false;
     const chosenAshbyYesNoOf = () => null;
     const semanticChoiceGroup = () => null;
+    const enabledNativeChoiceAnswered = () => false;
+    const selectHasEnabledSelection = () => false;
+    const root = document.body;
     let chosenValue;
-    eval('chosenValue = ' + source.slice(source.indexOf('(element, widget)')));
+    eval(source.replace('const chosenValue =', 'chosenValue ='));
     const element = document.querySelector(selector);
     return Boolean(chosenValue(element, element.parentElement || element));
   `);

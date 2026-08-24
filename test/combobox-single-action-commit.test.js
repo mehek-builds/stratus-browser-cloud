@@ -61,8 +61,7 @@ function build() {
     let lastChoiceRefusal = '';
     let choiceRefusals = 0;
     let lastChoiceUnreadable = false;
-    let tracksChoiceFailures = false;
-    let mirrorsLegacyChoiceMarkers = false;
+    const tracksChoiceFailures = false;
     ${SRC}
     return {
       fillCustomChoice,
