@@ -190,6 +190,38 @@ const SANDBOX_DEPENDENCIES = [
   'libXrandr', 'mesa-libgbm', 'cairo', 'pango', 'alsa-lib'
 ];
 
+/**
+ * Resolve the page boundary that may receive applicant data. Apart from exact equality, the only
+ * accepted transition is Workable's public /j/<token>/apply link resolving to its same-host
+ * /<tenant>/j/<token>/apply page. Workable accepts and preserves either token case, so the token is
+ * compared case-insensitively while the complete query string and every other URL component stay
+ * bound.
+ */
+export function resolvedManagedExactPageUrl(expectedValue, observedValue) {
+  let expected;
+  let observed;
+  try {
+    expected = new URL(expectedValue);
+    observed = new URL(observedValue);
+  } catch {
+    return null;
+  }
+  expected.hash = '';
+  observed.hash = '';
+  if (expected.href === observed.href) return observed.href;
+  if (expected.protocol !== 'https:' || observed.protocol !== 'https:'
+    || expected.hostname.toLowerCase() !== 'apply.workable.com'
+    || observed.hostname.toLowerCase() !== 'apply.workable.com'
+    || expected.username || expected.password || observed.username || observed.password
+    || (expected.port && expected.port !== '443') || (observed.port && observed.port !== '443')
+    || expected.origin !== observed.origin || expected.search !== observed.search) return null;
+  const from = expected.pathname.match(/^\/j\/([A-Fa-f0-9]{10})\/apply\/?$/);
+  const to = observed.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-Fa-f0-9]{10})\/apply\/?$/);
+  return from && to && from[1].toUpperCase() === to[2].toUpperCase() ? observed.href : null;
+}
+
+const RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE = `(${resolvedManagedExactPageUrl.toString()})`;
+
 // Exported so tests can pin the load-bearing branches of the runner. It ships to the sandbox as a
 // string, so a regression here is invisible until a real portal run fails on a real application.
 export const SANDBOX_RUNNER = String.raw`
@@ -229,6 +261,7 @@ const { chromium } = require('playwright');
     parsed.hash = '';
     return parsed.href;
   };
+  const resolvedManagedExactPageUrl = ${RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE};
   const assertRequiredCapabilities = (actions) => {
     const required = (actions || [])
       .filter((action) => action.type === 'requireCapability')
@@ -1128,6 +1161,7 @@ const { chromium } = require('playwright');
       }, { method, args: v4UtilityValue(args) });
     };
     let v4PreSubmitTransportContainment = null;
+    let v4InitialNavigationBoundary = canonicalPageUrl(input.url);
     if (retainedAtomicV4Run) {
       const containment = {
         mode: 'initial_navigation',
@@ -1142,9 +1176,16 @@ const { chromium } = require('playwright');
         const mainFrameNavigation = request.isNavigationRequest()
           && request.frame() === page.mainFrame();
         if (containment.mode === 'initial_navigation') {
-          if (readOnly && mainFrameNavigation
-            && canonicalPageUrl(request.url()) === canonicalPageUrl(input.url)) {
-            return route.fallback();
+          if (readOnly && mainFrameNavigation) {
+            const target = canonicalPageUrl(request.url());
+            if (target === v4InitialNavigationBoundary) return route.fallback();
+            if (v4InitialNavigationBoundary === canonicalPageUrl(input.url)) {
+              const resolved = resolvedManagedExactPageUrl(input.url, target);
+              if (resolved) {
+                v4InitialNavigationBoundary = resolved;
+                return route.fallback();
+              }
+            }
           }
           if (readOnly && !navigation) return route.fallback();
           return route.abort('blockedbyclient');
@@ -3107,8 +3148,37 @@ const { chromium } = require('playwright');
       await v4PageImplementation.delegate.addInitScript({ source }, 'utility');
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
-    await page.goto(input.url, { waitUntil, timeout: 45000 });
+    const navigationResponse = await page.goto(input.url, { waitUntil, timeout: 45000 });
     if (retainedAtomicV4Run) {
+      /* Playwright's route handler currently sees the initial request but not an HTTP redirect
+       * target after route.fallback(). Validate the browser's own immutable redirectedFrom chain
+       * before unlocking any applicant action: either the page never redirected, or it made the one
+       * measured Workable short-link transition and nothing else. */
+      const navigationChain = [];
+      let navigationRequest = navigationResponse?.request() || null;
+      while (navigationRequest && navigationChain.length < 4) {
+        navigationChain.unshift({
+          method: navigationRequest.method().toUpperCase(),
+          url: canonicalPageUrl(navigationRequest.url())
+        });
+        navigationRequest = navigationRequest.redirectedFrom();
+      }
+      const expectedNavigationUrl = canonicalPageUrl(input.url);
+      const committedNavigationUrl = canonicalPageUrl(page.url());
+      const readOnlyNavigation = navigationChain.every((entry) => (
+        entry.method === 'GET' || entry.method === 'HEAD'
+      ));
+      const exactNavigation = navigationChain.length === 1
+        && navigationChain[0].url === expectedNavigationUrl
+        && committedNavigationUrl === expectedNavigationUrl;
+      const workableNavigation = navigationChain.length === 2
+        && navigationChain[0].url === expectedNavigationUrl
+        && navigationChain[1].url === committedNavigationUrl
+        && resolvedManagedExactPageUrl(expectedNavigationUrl, committedNavigationUrl) === committedNavigationUrl;
+      if (navigationRequest || !readOnlyNavigation || (!exactNavigation && !workableNavigation)) {
+        throw new Error('Atomic submit v4 initial navigation left its approved page boundary');
+      }
+      v4InitialNavigationBoundary = committedNavigationUrl;
       v4PreSubmitTransportContainment.mode = 'locked';
       v4InitialNavigationActive = false;
       if (!v4PageImplementation?.mainFrame) {
@@ -7488,7 +7558,7 @@ const { chromium } = require('playwright');
       /* THE FORM IS THE COUNTER-WITNESS, so it has to be hard to miss. Probing only for file, email
        * and textarea controls missed a form whose email field is type="text", which is common, and
        * that single miss let the weakest arm below confirm a submission with the Submit button still
-       * on the page. A live submit control is the least ambiguous evidence that nothing was sent. */
+       * on the page. A live submit control remains the safe default evidence that nothing was sent. */
       /* A SUBMIT-SHAPED BUTTON IS THE FORM SAYING IT IS STILL HERE, whatever it is wrapped in.
        * Measured on the live transparent-hiring.breezy.hr form (2026-08-20, runs 549604ee and
        * b966c219): breezy renders its application in plain divs - no <form> element, the email
@@ -7502,10 +7572,33 @@ const { chromium } = require('playwright');
       const SUBMIT_SHAPED_BUTTON = /^(?:submit(?:\s+(?:your\s+)?application)?|apply(?:\s+now)?|send(?:\s+(?:your\s+)?application)?)$/i;
       const submitShapedButton = [...document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
         .some((node) => isVisible(node) && SUBMIT_SHAPED_BUTTON.test(clean(node.innerText || node.value || '')));
-      const formStillPresent = Boolean(visibleOne([
-        'input[type=file]', 'input[type=email]', 'textarea',
-        'form button[type=submit]', 'form input[type=submit]',
-      ].join(', '))) || submitShapedButton;
+      const formFields = visibleOne('input[type=file], input[type=email], textarea');
+      const formSubmitControls = [...document.querySelectorAll('form button[type=submit], form input[type=submit]')]
+        .filter(isVisible);
+      const genericFormStillPresent = Boolean(formFields || formSubmitControls.length > 0 || submitShapedButton);
+
+      /* TEAMTAILOR KEEPS A SECOND, UNRELATED FORM AFTER SUBMISSION. Measured on Fully run 885b0ae5
+       * on 2026-08-24: the retained URL was fully.teamtailor.com/jobs/6360832-internship/
+       * applications/new, the page visibly said both "Thanks for applying" and "We have received
+       * your application", and the only remaining submit control was the talent-network action
+       * "Connect". The generic counter-witness correctly distrusts every unrecognized submit form,
+       * so this exception is bound to that ATS host and route, both receipt phrases, exactly one
+       * isolated Connect submit, and the absence of every measured Teamtailor application field. */
+      const pageText = clean(document.body ? document.body.innerText : '');
+      const teamtailorApplicationField = visibleOne([
+        'input[type=file]', 'input[type=email]', 'input[type=tel]', 'textarea', 'select',
+        'input[name^="candidate["]', 'input[id^="candidate_"]',
+      ].join(', '));
+      const onlyIsolatedConnectSubmit = formSubmitControls.length === 1
+        && /^connect$/i.test(clean(formSubmitControls[0].innerText || formSubmitControls[0].value || ''));
+      const teamtailorReceipt = /^[a-z0-9-]+\.teamtailor\.com$/i.test(location.hostname)
+        && /\/jobs\/[^/]+\/applications\/new\/?$/i.test(location.pathname)
+        && /thanks for applying/i.test(pageText)
+        && /we have received your application/i.test(pageText)
+        && onlyIsolatedConnectSubmit
+        && !teamtailorApplicationField
+        && !submitShapedButton;
+      const formStillPresent = teamtailorReceipt ? false : genericFormStillPresent;
       for (const selector of REJECTED_CONTAINERS) {
         const node = visibleOne(selector);
         if (node) return { state: 'rejected', source: 'ats_state', evidence: selector, message: clean(node.innerText).slice(0, 600), formStillPresent };
@@ -7543,6 +7636,41 @@ const { chromium } = require('playwright');
             formStillPresent
           };
         }
+      }
+      /* WORKABLE PUBLISHES A SUCCESS-STATE HOOK. Read from the candidate bundle shared by the
+       * current Max Borges, Pony.ai, and Quandela tenants on 2026-08-24: a successful apply renders
+       * data-ui="successful-submit", announces its message in a descendant role=status, and changes
+       * the same tenant/job apply URL to the exact ?success query. The application page uses
+       * data-ui="application-form". The same success view can carry a separate EEOC or candidate
+       * survey form, so that unrelated follow-up form is not a counter-witness once every Workable
+       * signal agrees. A copied hook on another host or route is named as untrusted and cannot fall
+       * through to the weaker prose arm. */
+      const workableSuccess = visibleOne('[data-ui="successful-submit"]');
+      if (workableSuccess) {
+        const workableStatus = [...workableSuccess.querySelectorAll('[role="status"]')].find(isVisible) || null;
+        const message = clean(workableStatus ? workableStatus.innerText : '').slice(0, 600);
+        const workableApplicationForm = visibleOne('[data-ui="application-form"]');
+        const exactWorkableReceipt = location.hostname === 'apply.workable.com'
+          && /^\/[a-z0-9][a-z0-9-]{0,99}\/j\/[A-Fa-f0-9]{10}\/apply\/?$/.test(location.pathname)
+          && location.search === '?success'
+          && !workableApplicationForm
+          && Boolean(message);
+        if (exactWorkableReceipt) {
+          return {
+            state: 'confirmed',
+            source: 'ats_state',
+            evidence: '[data-ui="successful-submit"]',
+            message,
+            formStillPresent: false
+          };
+        }
+        return {
+          state: 'unknown',
+          source: 'ats_state_unconfirmed',
+          evidence: '[data-ui="successful-submit"]',
+          message: message || null,
+          formStillPresent
+        };
       }
       /* GREENHOUSE CONFIRMS BY ROUTING, NOT BY RENDERING A PANEL.
        *
@@ -7624,12 +7752,11 @@ const { chromium } = require('playwright');
         return { state: 'confirmed', source: 'page_text', evidence: 'body', message: clean(body.slice(Math.max(0, body.indexOf(sentence)), body.indexOf(sentence) + 400)), formStillPresent };
       }
       /* NO ARM RECOGNISED THIS PAGE, and the old shape threw that fact away: message/evidence went
-       * back null, so a genuinely new ATS shape (no live confirmation evidence exists for breezy.hr
-       * or workable.com anywhere in this codebase or the vault, measured 2026-08-20) left no residue
-       * to build a real arm from. It costs nothing to keep what the page actually said - state stays
-       * 'unknown' and no verdict anywhere reads this arm's message for the unknown state, so nothing
-       * downstream can mistake it for a confirmation. It is the ONLY way the next real Workable or
-       * breezy send produces ground truth instead of another silent unverified dead end. */
+       * back null, so a genuinely new ATS shape left no residue from which to build a measured arm.
+       * It costs nothing to keep what the page actually said: state stays unknown and no verdict
+       * reads this arm's message for the unknown state, so downstream cannot mistake it for a
+       * confirmation. This is how an unsupported board such as Breezy can produce the ground truth
+       * needed for a dedicated arm instead of another silent unverified dead end. */
       return { state: 'unknown', source: 'unmatched_page_text', evidence: location.href, message: body.slice(0, 600) || null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 
@@ -9846,7 +9973,7 @@ const { chromium } = require('playwright');
           throw new Error('Atomic submit chooser v4 requires the exact employer page URL capability');
         }
         const observed = canonicalPageUrl(page.url());
-        if (observed !== exactPageUrlProof.expected) {
+        if (observed !== exactPageUrlProof.beforeActions) {
           throw new Error('Employer page URL changed before the final submit chooser');
         }
         exactPageUrlProof.beforeFinalChooser = observed;
@@ -10527,7 +10654,7 @@ const { chromium } = require('playwright');
       if (chooserVersion === 4 && !choices) throw new Error('Atomic submit chooser evaluation failed');
       if (chooserVersion === 4) {
         const observed = canonicalPageUrl(page.url());
-        if (observed !== exactPageUrlProof.expected || action.expectedPageUrl !== exactPageUrlProof.expected) {
+        if (observed !== exactPageUrlProof.beforeActions || action.expectedPageUrl !== exactPageUrlProof.expected) {
           throw new Error('Employer page URL changed during the final submit chooser');
         }
       }
@@ -12139,7 +12266,7 @@ const { chromium } = require('playwright');
       if (!blocked) {
         if (requiresExactPageUrl) {
           const observed = canonicalPageUrl(page.url());
-          if (observed !== exactPageUrlProof.expected || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          if (observed !== exactPageUrlProof.beforeActions || action.expectedPageUrl !== exactPageUrlProof.expected) {
             throw new Error('Employer page URL changed before the final submit click');
           }
           exactPageUrlProof.beforeSubmit = observed;
@@ -12291,7 +12418,7 @@ const { chromium } = require('playwright');
               }
               const actionUrl = new URL(rawTransportBinding.action);
               actionUrl.hash = '';
-              const allowedOrigin = new URL(exactPageUrlProof.expected).origin;
+              const allowedOrigin = new URL(exactPageUrlProof.beforeActions).origin;
               if (!['http:', 'https:'].includes(actionUrl.protocol)
                 || actionUrl.origin !== allowedOrigin
                 || actionUrl.username
@@ -12603,10 +12730,11 @@ const { chromium } = require('playwright');
       : null;
     if (requiresExactPageUrl) {
       const observed = canonicalPageUrl(page.url());
-      if (observed !== exactPageUrlProof.expected) {
+      const resolved = resolvedManagedExactPageUrl(exactPageUrlProof.expected, observed);
+      if (!resolved) {
         throw new Error('Employer page URL changed before the first application action');
       }
-      exactPageUrlProof.beforeActions = observed;
+      exactPageUrlProof.beforeActions = resolved;
     }
     await applicationScopeProofHandle?.dispose().catch(() => undefined);
     applicationScopeProofHandle = null;
@@ -12677,7 +12805,11 @@ const { chromium } = require('playwright');
         skipped.push((action.label || action.type) + ': skipped after post-submit observation failed');
         continue;
       }
-      if (submitDecisionTerminal && !['extract', 'requireCapability'].includes(action.type)) {
+      /* A terminal submit decision blocks every later mutation, but receipt observation remains
+       * read-only. Callers can already extract from the committed page; let their bounded
+       * waitForSelector settle that same page first instead of racing an immediate extract against
+       * a client-rendered receipt. The post-submit transport gate remains active during the wait. */
+      if (submitDecisionTerminal && !['extract', 'requireCapability', 'waitForSelector'].includes(action.type)) {
         skipped.push((action.label || action.type) + ': skipped after the atomic submit decision became terminal');
         continue;
       }
@@ -12717,7 +12849,7 @@ const { chromium } = require('playwright');
       if (requiresExactPageUrl && (!exactPageUrlCheckedBeforeApplicantData || recordsSuccessfulAddresses)
         && ['click', 'fill', 'fillByLabelText', 'upload', 'press', 'select', 'confirmAndSubmit'].includes(action.type)) {
         const observed = canonicalPageUrl(page.url());
-        if (observed !== exactPageUrlProof.expected) {
+        if (observed !== exactPageUrlProof.beforeActions) {
           throw new Error('Employer page URL changed before applicant data could be applied');
         }
         exactPageUrlProof.beforeApplicantData = observed;
@@ -13517,7 +13649,7 @@ const { chromium } = require('playwright');
         if (usesAtomicV4Submit && applicationScopeFailureReason) {
           if (requiresExactPageUrl) {
             const observed = canonicalPageUrl(page.url());
-            if (observed !== exactPageUrlProof.expected) {
+            if (observed !== exactPageUrlProof.beforeActions) {
               throw new Error('Employer page URL changed before the final submit chooser');
             }
             exactPageUrlProof.beforeFinalChooser = observed;

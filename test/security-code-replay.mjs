@@ -410,9 +410,11 @@ const v4ReceiptLeaks = [];
 const v4NativeReceipt = `<!doctype html><meta charset="utf-8"><title>Application submitted</title>
 <main id="v4-receipt">Thank you for applying. Your application has been received.</main>
 <script>
+  var receipt = document.getElementById('v4-receipt');
   setTimeout(function () {
-    document.getElementById('v4-receipt').setAttribute('data-leak-attempted', 'true');
-    fetch('/v4-receipt-leak', { method: 'POST', body: 'must=stay-blocked' }).catch(function () {});
+    fetch('/v4-receipt-leak', { method: 'POST', body: 'must=stay-blocked' }).finally(function () {
+      receipt.setAttribute('data-leak-attempted', 'true');
+    }).catch(function () {});
   }, 50);
 </script>`;
 const server = http.createServer((request, response) => {
@@ -985,9 +987,15 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
         submitKind: 'verification',
         securityCode: CODE
       },
-      { type: 'waitForSelector', selector: '#v4-receipt[data-leak-attempted="true"]', optional: false },
-      { type: 'extract', selector: '#v4-receipt' },
-      { type: 'extract', selector: '#v4-receipt', attribute: 'data-leak-attempted' }
+      {
+        type: 'waitForSelector', selector: '#v4-receipt[data-leak-attempted="true"]',
+        label: 'receipt_wait', optional: false
+      },
+      { type: 'extract', selector: '#v4-receipt', label: 'receipt_text' },
+      {
+        type: 'extract', selector: '#v4-receipt', attribute: 'data-leak-attempted',
+        label: 'receipt_leak_settled'
+      }
     ],
     screenshot: false,
     fullPage: false
@@ -1016,9 +1024,12 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(second.requiredFieldConfirmation?.passes.length, 1);
   assert.equal(second.requiredFieldConfirmation?.passes[0]?.submitKind, 'verification');
   assert.equal(second.finalSubmitChooser?.outcome, 'selected');
+  assert.equal(second.skipped.includes(
+    'receipt_wait: skipped after the atomic submit decision became terminal'
+  ), false, 'the required post-submit receipt wait must run after the terminal decision');
   assert.match(valueOf(second, '#v4-receipt') || '', /application has been received/i);
-  assert.equal(second.extracted.filter((entry) => entry.selector === '#v4-receipt').at(-1)?.value,
-    'true', 'the receipt page must actually attempt its delayed background write');
+  assert.equal(second.extracted.find((entry) => entry.label === 'receipt_leak_settled')?.value,
+    'true', 'the delayed background write must settle before receipt observation completes');
   assert.deepEqual(v4ReceiptLeaks, [], 'post-receipt writes must stay blocked until the browser closes');
 }
 

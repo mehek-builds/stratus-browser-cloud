@@ -40,7 +40,9 @@ Module._extensions['.cjs'] = (module, filename) => {
 
 const core = require('playwright-core');
 const executablePath = process.env.STRATUS_RUNNER_CHROMIUM_PATH || core.chromium.executablePath();
-const HOST_RESOLVER_RULES = '--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1';
+const workableHttpsPort = process.env.STRATUS_TEST_WORKABLE_HTTPS_PORT || null;
+const HOST_RESOLVER_RULES = '--host-resolver-rules=MAP job-boards.greenhouse.io 127.0.0.1'
+  + (workableHttpsPort ? ', MAP apply.workable.com 127.0.0.1:' + workableHttpsPort : '');
 
 const playwright = {
   ...core,
@@ -50,7 +52,11 @@ const playwright = {
       const browser = await core.chromium.launch({
         ...options,
         executablePath,
-        args: [...(options.args || []), HOST_RESOLVER_RULES]
+        args: [
+          ...(options.args || []),
+          HOST_RESOLVER_RULES,
+          ...(workableHttpsPort ? ['--ignore-certificate-errors'] : [])
+        ]
       });
       const seededCookies = process.env.STRATUS_TEST_SEED_COOKIES_JSON
         ? JSON.parse(process.env.STRATUS_TEST_SEED_COOKIES_JSON)
