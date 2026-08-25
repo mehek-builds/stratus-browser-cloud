@@ -12805,7 +12805,11 @@ const { chromium } = require('playwright');
         skipped.push((action.label || action.type) + ': skipped after post-submit observation failed');
         continue;
       }
-      if (submitDecisionTerminal && !['extract', 'requireCapability'].includes(action.type)) {
+      /* A terminal submit decision blocks every later mutation, but receipt observation remains
+       * read-only. Callers can already extract from the committed page; let their bounded
+       * waitForSelector settle that same page first instead of racing an immediate extract against
+       * a client-rendered receipt. The post-submit transport gate remains active during the wait. */
+      if (submitDecisionTerminal && !['extract', 'requireCapability', 'waitForSelector'].includes(action.type)) {
         skipped.push((action.label || action.type) + ': skipped after the atomic submit decision became terminal');
         continue;
       }
