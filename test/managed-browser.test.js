@@ -826,7 +826,7 @@ test('a choice control that already holds an answer is never emptied to look for
   // An answer that already matches is left exactly as it is, with no click at all.
   assert.match(SANDBOX_RUNNER, /if \(alreadyAnswered\.kind === 'chosen' && optionMatches\(alreadyAnswered\.value, wanted\)\) return true;/);
   // And if it was somehow lost anyway, it goes back.
-  assert.match(SANDBOX_RUNNER, /if \(await searchFor\(control, alreadyAnswered\.value\)\) break;/);
+  assert.match(SANDBOX_RUNNER, /activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder\(control\);\n\s+if \(await searchFor\(control, alreadyAnswered\.value\)\) break;/);
 });
 
 test('a choice we could not make is reported as the applicant\'s, not as filled', () => {
@@ -950,7 +950,7 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /shape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /ariaAutocomplete === 'list'/);
-  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(target\) =>/);
+  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(target, allowIdenticalExactLocationRows = false\) =>/);
   assert.match(SANDBOX_RUNNER, /await control\.fill\(option\)/);
   assert.match(SANDBOX_RUNNER, /await page\.keyboard\.type\(option, \{ delay: 5 \}\)/);
   assert.match(SANDBOX_RUNNER, /waitForTimeout\(1200\)/);
@@ -960,6 +960,210 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /selectorShowsChoicePlaceholder/);
   assert.match(SANDBOX_RUNNER, /label\[for="' \+ greenhouseQuestionId \+ '"\]/);
   assert.match(SANDBOX_RUNNER, /targetInChoiceShell \|\| targetInGreenhouseQuestionChoice \? target : null/);
+});
+
+test('only duplicate literal Location City geocoder rows may collapse to one click', async () => {
+  const detectorStart = SANDBOX_RUNNER.indexOf('      const isGreenhouseLocationCityGeocoder = async');
+  const chooserStart = SANDBOX_RUNNER.indexOf('      const clickMatchingOption = async', detectorStart);
+  const chooserEnd = SANDBOX_RUNNER.indexOf('      /* REAL ROWS, NOT THE WIDGET', chooserStart);
+  assert.notEqual(detectorStart, -1);
+  assert.notEqual(chooserStart, -1);
+  assert.notEqual(chooserEnd, -1);
+
+  const detectorSource = SANDBOX_RUNNER.slice(detectorStart, chooserStart);
+  const detector = Function(`${detectorSource}\nreturn isGreenhouseLocationCityGeocoder;`)();
+  const control = ({
+    id = 'candidate-location',
+    role = 'combobox',
+    autocomplete = 'list',
+    label = 'Location (City)*',
+  } = {}) => ({
+    evaluate: async (callback) => callback({
+      id,
+      labels: [{ textContent: label }],
+      ownerDocument: { getElementById: () => null },
+      getAttribute(name) {
+        return {
+          role,
+          'aria-autocomplete': autocomplete,
+          'aria-labelledby': '',
+        }[name] ?? null;
+      },
+      closest: () => null,
+    }),
+  });
+
+  assert.equal(await detector(control()), true);
+  assert.equal(await detector(control({ id: 'school' })), false, 'the provider id is mandatory');
+  assert.equal(await detector(control({ role: 'textbox' })), false, 'the combobox role is mandatory');
+  assert.equal(await detector(control({ autocomplete: 'both' })), false, 'a list geocoder is mandatory');
+  assert.equal(await detector(control({ label: 'Preferred location*' })), false, 'the exact question label is mandatory');
+
+  const chooserSource = SANDBOX_RUNNER.slice(chooserStart, chooserEnd);
+  const choose = Function('names', 'allowIdenticalExactLocationRows', 'target', `
+    let clicked = null;
+    let lastClickedOptionAnswer = '';
+    let lastChoiceRefusal = '';
+    let choiceRefusals = 0;
+    const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const normalized = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const escapeName = (value) => String(value).replace(/[.*+?^{}()|[\\]\\\\$]/g, '\\\\$&');
+    const wholeName = (option) => new RegExp('^\\\\s*' + escapeName(option) + '\\\\s*$', 'i');
+    const looseWholeName = (option) => {
+      const words = normalized(option).split(' ').filter(Boolean);
+      return words.length
+        ? new RegExp('^[^a-z0-9]*' + words.map(escapeName).join('[^a-z0-9]+') + '[^a-z0-9]*$', 'i')
+        : null;
+    };
+    const paddedWholeName = (option) => new RegExp('^' + escapeName(clean(option)) + '$', 'i');
+    const answerOptions = (value) => [value];
+    const nearMissChoiceReason = (value, count) => String(count) + ' matches for ' + value;
+    const refuseChoice = (reason) => {
+      lastChoiceRefusal = reason;
+      choiceRefusals += 1;
+      return false;
+    };
+    const rowLocator = (matches) => ({
+      matches,
+      nth: (position) => ({
+        click: async () => { clicked = matches[position].index; },
+        textContent: async () => matches[position].name,
+      }),
+      filter: () => rowLocator(matches),
+    });
+    const root = {
+      getByRole: (_role, query) => rowLocator(names
+        .map((name, index) => ({ name, index }))
+        .filter((row) => query.name instanceof RegExp
+          ? query.name.test(row.name)
+          : (query.exact ? row.name === query.name : row.name.includes(query.name)))),
+      locator: () => rowLocator(names.map((name, index) => ({ name, index }))),
+    };
+    const widenRoot = () => root;
+    const menuRoot = () => root;
+    const offeredRows = async (rows) => rows.matches.map((_, index) => index);
+    const clickIfPresent = async (row) => { await row.click(); return true; };
+    const OPTION_NODES = '[role="option"]';
+    ${chooserSource}
+    return clickMatchingOption(target, allowIdenticalExactLocationRows).then((hit) => ({
+      hit,
+      clicked,
+      refusal: lastChoiceRefusal,
+      answer: lastClickedOptionAnswer,
+    }));
+  `);
+
+  const place = 'Los Angeles, California, United States';
+  assert.deepEqual(await choose([place, place], true, place), {
+    hit: true,
+    clicked: 0,
+    refusal: '',
+    answer: place,
+  });
+  const generic = await choose([place, place], false, place);
+  assert.equal(generic.hit, false);
+  assert.equal(generic.clicked, null);
+  assert.match(generic.refusal, /2 matches/);
+
+  const caseDifferent = await choose([place, place.toUpperCase()], true, place);
+  assert.equal(caseDifferent.hit, false, 'literal accessible names must themselves be identical');
+  assert.equal(caseDifferent.clicked, null);
+  assert.match(caseDifferent.refusal, /2 matches/);
+
+  const punctuationOnly = await choose([
+    'Los Angeles California United States',
+    'Los Angeles  California  United States',
+  ], true, place);
+  assert.equal(punctuationOnly.hit, false, 'the punctuation-tolerant tier must keep its ambiguity refusal');
+  assert.equal(punctuationOnly.clicked, null);
+  assert.match(punctuationOnly.refusal, /2 matches/);
+
+  assert.match(SANDBOX_RUNNER, /if \(choiceFilled\) \{\n\s+const landed = await choiceLanded\([\s\S]*?if \(action\.label && landed\) filledFields\.push/,
+    'a duplicate-row click is not reported filled until the committed value is read back');
+});
+
+test('Location City waits briefly for a geocoder result that arrives after the ordinary settle', async () => {
+  const helperStart = SANDBOX_RUNNER.indexOf('      const waitForGreenhouseLocationResults = async');
+  const helperEnd = SANDBOX_RUNNER.indexOf('      /* HOW MANY ROWS THE MENU IS OFFERING', helperStart);
+  assert.notEqual(helperStart, -1);
+  assert.notEqual(helperEnd, -1);
+  const helperSource = SANDBOX_RUNNER.slice(helperStart, helperEnd);
+
+  const simulate = async ({ rowAt = Infinity, noOptionsAt = Infinity } = {}) => {
+    let poll = -1;
+    let declaredReads = 0;
+    let portalReads = 0;
+    let waits = 0;
+    let now = 0;
+    const readDeclaredMenu = async () => { declaredReads += 1; poll += 1; };
+    const readMenuPortal = async () => { portalReads += 1; };
+    const realOfferedRows = async () => ({ indices: poll >= rowAt ? [0] : [] });
+    const notice = {
+      isVisible: async () => true,
+      textContent: async () => 'No options',
+    };
+    const notices = {
+      count: async () => (poll >= noOptionsAt ? 1 : 0),
+      nth: () => notice,
+    };
+    const root = {
+      locator: (selector) => {
+        assert.equal(selector, '[class*="select__menu-notice--no-options"]');
+        return notices;
+      },
+    };
+    const menuRoot = () => root;
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const page = {
+      waitForTimeout: async (milliseconds) => {
+        assert.ok(milliseconds > 0 && milliseconds <= 50);
+        now += milliseconds;
+        waits += 1;
+      },
+    };
+    const FakeDate = { now: () => now };
+    const wait = Function(
+      'readDeclaredMenu',
+      'readMenuPortal',
+      'menuRoot',
+      'realOfferedRows',
+      'clean',
+      'page',
+      'Date',
+      `${helperSource}\nreturn waitForGreenhouseLocationResults;`,
+    )(readDeclaredMenu, readMenuPortal, menuRoot, realOfferedRows, clean, page, FakeDate);
+    const outcome = await wait({});
+    return { outcome, declaredReads, portalReads, waits };
+  };
+
+  assert.deepEqual(await simulate({ noOptionsAt: 0, rowAt: 2 }), {
+    outcome: 'rows',
+    declaredReads: 3,
+    portalReads: 3,
+    waits: 2,
+  }, 'a row arriving 100ms into the grace supersedes a stale visible no-options notice');
+  assert.deepEqual(await simulate({ noOptionsAt: 1 }), {
+    outcome: 'empty',
+    declaredReads: 11,
+    portalReads: 11,
+    waits: 10,
+  }, 'an exact no-options response is remembered but does not shorten the 500ms grace');
+  assert.deepEqual(await simulate(), {
+    outcome: 'timeout',
+    declaredReads: 11,
+    portalReads: 11,
+    waits: 10,
+  }, 'the extra grace is bounded to 500ms');
+
+  assert.match(SANDBOX_RUNNER,
+    /await page\.waitForTimeout\(1200\)\.catch\(\(\) => undefined\);[\s\S]{0,500}?if \(activeControlAllowsIdenticalExactLocationRows\) \{\n\s+await waitForGreenhouseLocationResults\(control\);/,
+    'the location-only poll starts after, and does not replace, the ordinary settle');
+  assert.match(SANDBOX_RUNNER,
+    /if \(activeControlAllowsIdenticalExactLocationRows\) \{\n\s+await waitForGreenhouseLocationResults\(control\);\n\s+\} else \{\n\s+await readDeclaredMenu\(control\);\n\s+await readMenuPortal\(\);/,
+    'all other controls retain the single existing menu read with no extra wait');
+  assert.match(SANDBOX_RUNNER,
+    /if \(await chooseFromOfferedRows\(wanted\)\) return true;\n\s+if \(await searchFor\(control, wanted\)\) return true;/,
+    'detecting the location control cannot split the unfiltered list tier from the typed search');
 });
 
 test('decline style EEO answers can match common portal option text', () => {
