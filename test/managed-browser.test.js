@@ -1746,6 +1746,52 @@ test('exact employer page URL capability is required before actions and at the a
   );
 });
 
+/* Greenhouse's embed URL (?for=<board>&token=<jobId>) re-serializes its own query string after
+ * mount, reordering the same params it was given - the exact-page-url check must tolerate that
+ * reordering (params carry a posting's identity and can never be dropped) while still refusing a
+ * genuinely different board or job id. Regression coverage for the false-refusal this caused live
+ * on Redwood Materials, 3/3 identical failures via backend logs. */
+test('canonicalPageUrl tolerates query param reordering but not a changed param set', () => {
+  const { canonicalPageUrl } = sandboxScope(['canonicalPageUrl'], 2);
+  const asGiven = 'https://boards.greenhouse.io/embed/job_app?for=redwood&token=123456';
+  const asReordered = 'https://boards.greenhouse.io/embed/job_app?token=123456&for=redwood';
+  assert.equal(canonicalPageUrl(asReordered), canonicalPageUrl(asGiven));
+  assert.notEqual(
+    canonicalPageUrl('https://boards.greenhouse.io/embed/job_app?for=other&token=123456'),
+    canonicalPageUrl(asGiven),
+  );
+  assert.notEqual(
+    canonicalPageUrl('https://boards.greenhouse.io/embed/job_app?for=redwood&token=999999'),
+    canonicalPageUrl(asGiven),
+  );
+  assert.equal(canonicalPageUrl(asGiven + '#section'), canonicalPageUrl(asGiven));
+});
+
+/* confirmAndSubmitPass compares action.expectedPageUrl (hash-stripped only) against
+ * exactPageUrlProof.expected (sorted, via canonicalPageUrl) at three checkpoints. Comparing the
+ * raw field directly caused a real false-refusal - any portal whose original param order was not
+ * already alphabetical would fail here even though the page never moved. Pinning that the
+ * normalized local variable, not the raw field, is what every checkpoint reads. */
+test('confirmAndSubmitPass canonicalizes expectedPageUrl once, and every checkpoint reads the normalized value', () => {
+  const confirmAndSubmitPassSource = extractConstSource('confirmAndSubmitPass', 4);
+  assert.match(
+    confirmAndSubmitPassSource,
+    /const expectedPageUrl = action\.expectedPageUrl != null\s*\n\s*\? canonicalPageUrl\(action\.expectedPageUrl\)\s*\n\s*: action\.expectedPageUrl;/,
+    'expectedPageUrl must be canonicalized once at the top of confirmAndSubmitPass',
+  );
+  const rawComparisons = confirmAndSubmitPassSource.match(/action\.expectedPageUrl !== exactPageUrlProof\.expected/g) || [];
+  assert.equal(
+    rawComparisons.length,
+    0,
+    'no comparison inside confirmAndSubmitPass should read the raw, unsorted action.expectedPageUrl again',
+  );
+  assert.equal(
+    (confirmAndSubmitPassSource.match(/expectedPageUrl !== exactPageUrlProof\.expected/g) || []).length,
+    3,
+    'all three exact-page-url checkpoints inside confirmAndSubmitPass must compare against the normalized local variable',
+  );
+});
+
 test('discover scans choice controls as well as text-shaped ones', () => {
   /* This used to exclude select, radio and checkbox on the reasoning that the caller never clicks a
      choice control. That reasoning was already stale - fillByLabelText has select, radio and
