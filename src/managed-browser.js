@@ -256,9 +256,24 @@ const { chromium } = require('playwright');
   const extractAssertionsCapability = 'extract-assertions-v1';
   const exactPageUrlCapability = 'exact-page-url-v1';
   const atomicSubmitV4Capability = 'atomic-submit-v4';
+  /* Query params are part of the identity this check protects, not noise to drop - Greenhouse's
+   * embed URL (?for=<board>&token=<jobId>) encodes the exact posting in the query string, so
+   * stripping/ignoring params would let a managed run silently act on the wrong job. What IS safe
+   * to normalize is param ORDER: Greenhouse's own client-side bootstrap re-serializes the address
+   * bar after mount, reordering the same for/token pair it was given. Confirmed live on Redwood
+   * Materials (3/3 identical failures, same applicationId, same thrown error, via backend logs) -
+   * the exact before/after query string was never packet-captured, so param reordering is the
+   * best-supported explanation from the evidence gathered, not a confirmed capture. Sorting by
+   * key-then-value can only make two URLs compare equal if their param SETS were already
+   * identical, so a genuinely different board or job id still fails this check. */
   const canonicalPageUrl = (value) => {
     const parsed = new URL(value);
     parsed.hash = '';
+    const params = [...parsed.searchParams.entries()].sort(
+      ([keyA, valueA], [keyB, valueB]) => (keyA < keyB ? -1 : keyA > keyB ? 1 : (valueA < valueB ? -1 : valueA > valueB ? 1 : 0))
+    );
+    parsed.search = '';
+    for (const [key, entryValue] of params) parsed.searchParams.append(key, entryValue);
     return parsed.href;
   };
   const resolvedManagedExactPageUrl = ${RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE};
@@ -1180,7 +1195,13 @@ const { chromium } = require('playwright');
             const target = canonicalPageUrl(request.url());
             if (target === v4InitialNavigationBoundary) return route.fallback();
             if (v4InitialNavigationBoundary === canonicalPageUrl(input.url)) {
-              const resolved = resolvedManagedExactPageUrl(input.url, target);
+              /* v4InitialNavigationBoundary is already sorted (it's canonicalPageUrl's own output,
+               * and the guard above just proved it still equals canonicalPageUrl(input.url)), while
+               * target is also sorted (line above). Passing raw input.url here instead compared an
+               * unsorted expected against a sorted observed - the same unsorted-vs-sorted mismatch
+               * the Redwood Materials fix eliminated elsewhere in this file, just relocated to this
+               * checkpoint. */
+              const resolved = resolvedManagedExactPageUrl(v4InitialNavigationBoundary, target);
               if (resolved) {
                 v4InitialNavigationBoundary = resolved;
                 return route.fallback();
@@ -10042,6 +10063,18 @@ const { chromium } = require('playwright');
      * field type, then reads the same validation state back. An unresolved control is proof of
      * failure and the following submit is withheld. */
     const confirmAndSubmitPass = async (action) => {
+      /* action.expectedPageUrl arrives hash-stripped only (see the top-level action normalizer),
+       * never sorted - volley-backend leaves sorting to this runner's own canonicalPageUrl on
+       * purpose, so both sides only ever have to agree on ONE sort. Every exact-page-url check
+       * below this point compares against exactPageUrlProof.expected, which IS sorted (it's built
+       * via canonicalPageUrl), so this function canonicalizes expectedPageUrl once, here, rather
+       * than at each individual comparison - the raw field caused a real false-refusal bug at one
+       * such comparison before this normalization existed, and the fix keeps any future checkpoint
+       * added to this function safe by construction instead of relying on each call site to
+       * remember to wrap it. */
+      const expectedPageUrl = action.expectedPageUrl != null
+        ? canonicalPageUrl(action.expectedPageUrl)
+        : action.expectedPageUrl;
       const chooserHash = crypto.createHash('sha256')
         .update(action.chooserPolicy.finalPattern + '\n' + action.chooserPolicy.exclusionPattern)
         .digest('hex');
@@ -10061,7 +10094,7 @@ const { chromium } = require('playwright');
         : null;
       if (chooserVersion === 4) {
         if (!requiresExactPageUrl || !exactPageUrlProof
-          || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          || expectedPageUrl !== exactPageUrlProof.expected) {
           throw new Error('Atomic submit chooser v4 requires the exact employer page URL capability');
         }
         const observed = canonicalPageUrl(page.url());
@@ -10746,7 +10779,7 @@ const { chromium } = require('playwright');
       if (chooserVersion === 4 && !choices) throw new Error('Atomic submit chooser evaluation failed');
       if (chooserVersion === 4) {
         const observed = canonicalPageUrl(page.url());
-        if (observed !== exactPageUrlProof.beforeActions || action.expectedPageUrl !== exactPageUrlProof.expected) {
+        if (observed !== exactPageUrlProof.beforeActions || expectedPageUrl !== exactPageUrlProof.expected) {
           throw new Error('Employer page URL changed during the final submit chooser');
         }
       }
@@ -12358,7 +12391,7 @@ const { chromium } = require('playwright');
       if (!blocked) {
         if (requiresExactPageUrl) {
           const observed = canonicalPageUrl(page.url());
-          if (observed !== exactPageUrlProof.beforeActions || action.expectedPageUrl !== exactPageUrlProof.expected) {
+          if (observed !== exactPageUrlProof.beforeActions || expectedPageUrl !== exactPageUrlProof.expected) {
             throw new Error('Employer page URL changed before the final submit click');
           }
           exactPageUrlProof.beforeSubmit = observed;
