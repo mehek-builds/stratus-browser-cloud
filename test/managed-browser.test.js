@@ -2419,23 +2419,46 @@ test('one unanswered React Select is not reported twice', () => {
  * caller does about it. On origin/main this waits 60 seconds and reports "Managed browser
  * continuation timed out" on a run that requested no continuation of anything.
  */
-function silentSandboxApi({ crash = null, result = null, progress = null } = {}) {
+function silentSandboxApi({
+  crash = null,
+  result = null,
+  progress = null,
+  terminalAfterPolls = 0,
+  maxSdkStreamMs = Infinity,
+} = {}) {
   const template = { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
   const calls = [];
   const forkCalls = [];
   class Fake {
-    constructor(name) { this.name = name; this.files = new Map(); this.stopped = false; }
+    constructor(name) {
+      this.name = name;
+      this.files = new Map();
+      this.stopped = false;
+      this.polls = 0;
+    }
+    materializeTerminal() {
+      if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+      if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify(progress)));
+      if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(result)));
+    }
     async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
-    async runCommand(command, args) {
-      if (typeof command === 'object') {
-        if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
-        if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify(progress)));
-        if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(result)));
-        return { exitCode: null };
+    async runCommand(command, args, options) {
+      const startsRunner = typeof command === 'object'
+        || (command === 'node' && args?.[0] === 'stratus-runner.cjs');
+      if (startsRunner) {
+        if (terminalAfterPolls === 0) this.materializeTerminal();
+        return typeof command === 'object'
+          ? { exitCode: null }
+          : { exitCode: 0, stderr: async () => '' };
+      }
+      if (Number(options?.timeoutMs) > maxSdkStreamMs) {
+        throw new Error('Sandbox stream was closed and is not accepting commands.');
       }
       const timeoutMs = Number(args[2]);
       const wanted = args.slice(3);
-      calls.push({ timeoutMs, wanted });
+      this.polls += 1;
+      if (this.polls > terminalAfterPolls) this.materializeTerminal();
+      calls.push({ timeoutMs, commandTimeoutMs: Number(options?.timeoutMs), wanted });
       const found = wanted.find((path) => this.files.has(path));
       return found ? { exitCode: 0, stdout: async () => found } : { exitCode: 3, stdout: async () => '' };
     }
@@ -2483,9 +2506,9 @@ test('the public-only policy is installed on the sandbox fork before Chromium st
 });
 
 test('a submit run that produces nothing is a RUN timeout, on the run\'s own budget', async () => {
-  const fake = silentSandboxApi();
+  const fake = silentSandboxApi({ maxSdkStreamMs: 7_000 });
   await assert.rejects(
-    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
     (error) => {
       // Not CONTINUATION_EXPIRED. The applicant was told her application had hit a continuation
@@ -2495,12 +2518,116 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
       return true;
     }
   );
-  // Requesting a continuation must not shorten the run. 150_000 is what a managed run gets when
-  // it does not request one; this was 60_000 (a 67-second Skydio submit died inside it), then
-  // 90_000 (the Mercari workable fill + 30s receipt watch died inside THAT, three times, reported
-  // as a temporary secure-browser error).
-  assert.equal(fake.calls[0].timeoutMs, 150_000, 'phase 0 gets the full run budget: ' + JSON.stringify(fake.calls));
-  assert.deepEqual(fake.calls[0].wanted, ['stratus-result-0.json', 'stratus-error.json']);
+  // Jump run 3586ce1e used the old one-command 150-second wait and the SDK closed that command's
+  // stream at the exact budget boundary. The 240-second phase budget is split into short command
+  // streams, leaving 35 seconds inside the caller's 300-second function after its measured
+  // roughly 25-second discovery pass.
+  assert.equal(fake.calls.reduce((total, call) => total + call.timeoutMs, 0), 240_000,
+    'phase 0 gets the measured large-form budget: ' + JSON.stringify(fake.calls));
+  assert.ok(fake.calls.length > 1, 'the full phase budget must never be one SDK command stream');
+  assert.ok(fake.calls.every((call) => call.timeoutMs <= 5_000), JSON.stringify(fake.calls));
+  assert.ok(fake.calls.every((call) => call.commandTimeoutMs <= 7_000), JSON.stringify(fake.calls));
+  assert.ok(fake.calls.every((call) => (
+    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-0.json', 'stratus-error.json'])
+  )));
+});
+
+test('sandbox lifetime leaves cleanup grace even when no continuation was requested', async () => {
+  const fake = silentSandboxApi({
+    result: {
+      title: 'Application',
+      url: 'https://example.com/apply',
+      text: 'Ready',
+      humanVerification: null,
+      continuationOffered: false,
+    },
+  });
+  await executeSandboxRun({ url: 'https://example.com/apply', actions: [] }, {
+    sandboxApi: fake.api,
+    urlValidator: urlOnly,
+  });
+
+  assert.equal(fake.forkCalls[0].timeout, 270_000,
+    'a 240-second run must retain a separate 30-second result-read and cleanup window');
+  assert.equal(fake.sandboxes[0].stopped, true);
+});
+
+test('a result written between polling chunks is returned without spending the full run budget', async () => {
+  const fake = silentSandboxApi({
+    terminalAfterPolls: 2,
+    result: {
+      title: 'Preview complete',
+      url: 'https://example.com/apply',
+      text: 'No submit attempted',
+      humanVerification: null,
+      continuationOffered: false,
+    },
+  });
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+  }, { sandboxApi: fake.api, urlValidator: urlOnly });
+
+  assert.equal(result.title, 'Preview complete');
+  assert.equal(fake.calls.length, 3, 'two empty chunks are followed by the terminal result chunk');
+  assert.equal(fake.sandboxes[0].stopped, true);
+});
+
+test('a result written at the final polling boundary wins over the run timeout', async () => {
+  const fake = silentSandboxApi({
+    terminalAfterPolls: 48,
+    result: {
+      title: 'Preview completed at boundary',
+      url: 'https://example.com/apply',
+      text: 'No submit attempted',
+      humanVerification: null,
+      continuationOffered: false,
+    },
+  });
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+  }, { sandboxApi: fake.api, urlValidator: urlOnly });
+
+  assert.equal(result.title, 'Preview completed at boundary');
+  assert.equal(fake.calls.length, 49);
+  assert.equal(fake.calls.at(-1).timeoutMs, 0, 'the final result check must not extend the run budget');
+});
+
+test('a continuation timeout keeps its own identity across bounded polling chunks', async () => {
+  const calls = [];
+  let stopped = false;
+  const sandbox = {
+    async runCommand(command, args, options) {
+      if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) return { exitCode: 0 };
+      const timeoutMs = Number(args[2]);
+      calls.push({ timeoutMs, commandTimeoutMs: Number(options?.timeoutMs), wanted: args.slice(3) });
+      return { exitCode: 3, stdout: async () => '' };
+    },
+    async writeFiles() {},
+    async readFileToBuffer() { return null; },
+    async stop() { stopped = true; },
+  };
+
+  await assert.rejects(
+    executeSandboxRun({ continuationToken: 'c'.repeat(43), actions: [] }, {
+      sandboxApi: { async get() { return sandbox; } },
+      projectBinding: 'continuation-timeout',
+    }),
+    (error) => {
+      assert.equal(error.code, 'CONTINUATION_EXPIRED');
+      assert.equal(error.status, 410);
+      assert.match(error.message, /continuation timed out/);
+      return true;
+    },
+  );
+  assert.equal(calls.reduce((total, call) => total + call.timeoutMs, 0), 60_000);
+  assert.ok(calls.length > 1);
+  assert.ok(calls.every((call) => call.timeoutMs <= 5_000 && call.commandTimeoutMs <= 7_000));
+  assert.ok(calls.every((call) => (
+    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-1.json', 'stratus-error.json'])
+  )));
+  assert.equal(stopped, true);
 });
 
 test('a detached runner that crashes reports the crash, not a timeout', async () => {
@@ -2514,9 +2641,13 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
     submitKind: 'application',
     policyVersion: 4,
   };
-  const fake = silentSandboxApi({ crash: 'page.goto: net::ERR_CONNECTION_REFUSED', progress });
+  const fake = silentSandboxApi({
+    crash: 'page.goto: net::ERR_CONNECTION_REFUSED',
+    progress,
+    terminalAfterPolls: 2,
+  });
   await assert.rejects(
-    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
     (error) => {
       // Detaching the run took stderr away from the caller, so every crash arrived as "the run took
@@ -2527,6 +2658,7 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
       return true;
     }
   );
+  assert.equal(fake.calls.length, 3, 'a crash written between chunks must end the wait immediately');
 });
 
 test('malformed crash progress is not returned as submit evidence', async () => {
