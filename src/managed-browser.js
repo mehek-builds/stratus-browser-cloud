@@ -15621,16 +15621,17 @@ function continuationEligible(result, checkpoint) {
  * at 12:25:49.894. 67.4 seconds end to end, of which one 60-second wait, on a form with no
  * challenge and nothing to continue.
  */
-/* 150 seconds, raised from 90 on a measurement: the live Mercari workable run (Class of 2028,
- * 2026-08-20) died three times with 'Sandbox stream was closed and is not accepting commands' -
- * the sandbox's own LIFETIME is set from this value, and a long form's fill + submit + the
- * 30-second post-submit receipt watch overran 90s, so the box was evicted mid-run and the report
- * said "temporary secure-browser error". Worse, a box evicted DURING the receipt watch is exactly
- * a press with no confirmation read - the workable unverified-submission class. Not higher: the
- * CALLER chains up to three runs (discovery, option probe, fill) inside its own 300-second
- * function budget, so one run's ceiling has to leave room for the others. */
-const MANAGED_RUN_TIMEOUT_MS = 150_000;
+/* 240 seconds, raised from 150 on a measurement: Jump run 3586ce1e-7bbd-47f0-9072-845b2f66cabc
+ * completed discovery, then its 120-action Greenhouse preview reached the exact 150-second
+ * sandbox lifetime and was torn down before the terminal result could be read. The caller's
+ * discovery pass measured roughly 25 seconds, so 240 seconds leaves about 35 seconds inside its
+ * 300-second function budget for request overhead and result handling. The sandbox lifetime below
+ * has its own grace and is deliberately not equal to this wait budget. */
+const MANAGED_RUN_TIMEOUT_MS = 240_000;
 const CONTINUATION_TIMEOUT_MS = 60_000;
+const SANDBOX_FILE_POLL_CHUNK_MS = 5_000;
+const SANDBOX_FILE_POLL_COMMAND_GRACE_MS = 2_000;
+const SANDBOX_LIFETIME_GRACE_MS = 30_000;
 
 /**
  * Wait for whichever of `paths` appears first, and return its name.
@@ -15644,10 +15645,39 @@ const CONTINUATION_TIMEOUT_MS = 60_000;
 async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
   const wanted = Array.isArray(paths) ? paths : [paths];
   const script = "const fs=require('node:fs');const end=Date.now()+Number(process.argv[1]);const ps=process.argv.slice(2);(async()=>{for(;;){const hit=ps.find((p)=>fs.existsSync(p));if(hit){process.stdout.write(hit);process.exit(0)}if(Date.now()>=end)process.exit(3);await new Promise(r=>setTimeout(r,100))}})()";
-  const result = await sandbox.runCommand('node', ['-e', script, String(timeoutMs), ...wanted], { timeoutMs: timeoutMs + 5_000 });
-  if (result.exitCode !== 0) throw Object.assign(new Error(failure.message), { status: failure.status, code: failure.code });
-  const found = typeof result.stdout === 'function' ? String(await result.stdout()).trim() : String(result.stdout || '').trim();
-  return wanted.includes(found) ? found : wanted[0];
+  const timeoutError = () => Object.assign(new Error(failure.message), {
+    status: failure.status,
+    code: failure.code
+  });
+  const poll = async (chunkMs) => {
+    /* runCommand waits through the SDK's log stream. Keeping one command open for the whole run
+     * made the stream and the sandbox lifetime share one failure boundary. Short commands let the
+     * SDK close each stream normally while the detached browser continues in the same sandbox. */
+    const result = await sandbox.runCommand(
+      'node',
+      ['-e', script, String(chunkMs), ...wanted],
+      { timeoutMs: chunkMs + SANDBOX_FILE_POLL_COMMAND_GRACE_MS }
+    );
+    const found = typeof result.stdout === 'function'
+      ? String(await result.stdout()).trim()
+      : String(result.stdout || '').trim();
+    return { exitCode: result.exitCode, found };
+  };
+  let remainingMs = timeoutMs;
+  while (remainingMs > 0) {
+    const chunkMs = Math.min(remainingMs, SANDBOX_FILE_POLL_CHUNK_MS);
+    const result = await poll(chunkMs);
+    if (result.exitCode === 0) return wanted.includes(result.found) ? result.found : wanted[0];
+    if (result.exitCode !== 3) throw timeoutError();
+    remainingMs -= chunkMs;
+  }
+  /* The result can land after the last chunk's final existsSync and before that process exits.
+   * One zero-wait read closes that exact-boundary race without extending the run budget. */
+  const boundaryResult = await poll(0);
+  if (boundaryResult.exitCode === 0) {
+    return wanted.includes(boundaryResult.found) ? boundaryResult.found : wanted[0];
+  }
+  throw timeoutError();
 }
 
 /** Turn a crash the detached runner recorded into the error it would have thrown in-line. */
@@ -15810,8 +15840,9 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
          one continuation. The old sum omitted the middle term because the window used to overlap
          phase 0 rather than follow it, so a rebased window would have outlived its own sandbox. */
       timeout: context.requestContinuation
-        ? MANAGED_RUN_TIMEOUT_MS + context.continuationTtlSeconds * 1000 + CONTINUATION_TIMEOUT_MS + 30_000
-        : MANAGED_RUN_TIMEOUT_MS,
+        ? MANAGED_RUN_TIMEOUT_MS + context.continuationTtlSeconds * 1000
+          + CONTINUATION_TIMEOUT_MS + SANDBOX_LIFETIME_GRACE_MS
+        : MANAGED_RUN_TIMEOUT_MS + SANDBOX_LIFETIME_GRACE_MS,
       resources: { vcpus: 2 },
       persistent: false,
       networkPolicy: PUBLIC_EGRESS_NETWORK_POLICY
@@ -15834,22 +15865,16 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
       }))
     });
     await sandbox.writeFiles(files);
-    if (context.requestContinuation) {
-      await sandbox.runCommand({ cmd: 'node', args: ['stratus-runner.cjs'], detached: true });
-      /* THE SAME BUDGET THE RUN WOULD HAVE HAD WITHOUT A CONTINUATION, and a timeout here is named
-       * for what it is. `Managed browser continuation timed out` on a form with no challenge, no
-       * continuation and no phase 1 was a sentence about a feature that had not been used, and it
-       * is what the Skydio packet reported to its applicant. */
-      const produced = await waitForSandboxFile(sandbox, ['stratus-result-0.json', 'stratus-error.json'], MANAGED_RUN_TIMEOUT_MS, {
-        message: 'Managed browser run timed out before it produced a result', status: 504, code: 'RUN_TIMED_OUT'
-      });
-      if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
-    } else {
-      const command = await sandbox.runCommand('node', ['stratus-runner.cjs']);
-      if (command.exitCode !== 0) {
-        throw Object.assign(new Error((await command.stderr()).trim() || 'Sandbox browser run failed'), { status: 502, code: 'SANDBOX_RUN_FAILED' });
-      }
-    }
+    /* Every phase-0 run is detached. The ordinary path used to await the runner inline, which held
+     * one SDK stream open until the sandbox's exact lifetime boundary. Jump's 120-action preview
+     * reached that boundary and the provider closed the stream before Stratus could inspect a
+     * result or crash file. Both ordinary and continuation-capable runs now share the same bounded
+     * terminal-file polling and the same typed timeout. */
+    await sandbox.runCommand({ cmd: 'node', args: ['stratus-runner.cjs'], detached: true });
+    const produced = await waitForSandboxFile(sandbox, ['stratus-result-0.json', 'stratus-error.json'], MANAGED_RUN_TIMEOUT_MS, {
+      message: 'Managed browser run timed out before it produced a result', status: 504, code: 'RUN_TIMED_OUT'
+    });
+    if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
     const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-0.json' });
     if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
     const result = JSON.parse(resultBuffer.toString('utf8'));
