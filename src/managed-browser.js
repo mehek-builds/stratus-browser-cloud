@@ -7010,7 +7010,35 @@ const { chromium } = require('playwright');
       const paddedWholeName = (option) => new RegExp(
         '^[^\\p{L}]*' + escapeName(clean(option)) + '[^\\p{L}]*$', 'iu'
       );
-      const clickMatchingOption = async (target) => {
+      /* GREENHOUSE'S LOCATION GEOCODER CAN RETURN THE SAME PLACE TWICE.
+       *
+       * Measured on Jump Trading's Greenhouse form, 2026-08-26: the Location (City) search for
+       * "Los Angeles, California, United States" returned two role=option rows with that identical
+       * accessible name, one from each geocoder source. Picking either commits the same canonical
+       * place. This detector is intentionally provider- and question-specific: an id alone, a label
+       * alone, or an arbitrary location-looking question is not enough to relax the ambiguity rule.
+       */
+      const isGreenhouseLocationCityGeocoder = async (control) => await control.evaluate((element) => {
+        const labelName = (node) => String(node?.textContent || '')
+          .replace(/\s+/g, ' ')
+          .replace(/\s*\*+\s*$/, '')
+          .trim()
+          .toLowerCase();
+        const labels = element.labels ? [...element.labels] : [];
+        const labelledBy = String(element.getAttribute('aria-labelledby') || '')
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((id) => element.ownerDocument.getElementById(id))
+          .filter(Boolean);
+        const wrappingLabel = element.closest('label');
+        if (wrappingLabel) labels.push(wrappingLabel);
+        return element.id === 'candidate-location'
+          && String(element.getAttribute('role') || '').toLowerCase() === 'combobox'
+          && String(element.getAttribute('aria-autocomplete') || '').toLowerCase() === 'list'
+          && [...labels, ...labelledBy].some((label) => labelName(label) === 'location (city)');
+      }).catch(() => false);
+      const clickMatchingOption = async (target, allowIdenticalExactLocationRows = false) => {
         const took = (option) => { lastClickedOptionAnswer = clean(option); return true; };
         /* EXACT FIRST, ACROSS THE WHOLE LIST AND ACROSS EVERY ANSWER, before any widened tier runs.
          *
@@ -7034,20 +7062,34 @@ const { chromium } = require('playwright');
          * her name that nobody asked for.
          *
          * Both arms count offered rows before clicking, because even a declared menu can hold two
-         * rows of one name and .first() would pick between them by DOM order. Two rows named exactly
-         * the same thing inside ONE block is a different situation from two anywhere else, but it is
-         * refused in both places: inside one block it means the block holds two questions, which is
-         * the shape D-02 already refuses everywhere else in this file.
+         * rows of one name and .first() would pick between them by DOM order. Such rows stay refused
+         * everywhere except the one Greenhouse geocoder named above, whose duplicate rows must also
+         * pass a second literal accessible-name proof before one may be clicked.
          *
          * THREE VERDICTS AND NOT TWO, because "no row anywhere is named this" and "the rows named
          * this cannot be told apart" have to travel differently: the first moves on to the next
          * answer and then to the widened tiers, the second ends the whole attempt with a sentence,
          * exactly as the widened tiers below already end it. Returning a bare false conflated them
          * and would have let a refusal fall through into a looser rule. */
-        const takeNamed = async (name, option) => {
+        const takeNamed = async (name, option, allowIdenticalRows = false) => {
+          /* A literal Playwright role query is the accessible-name proof. The second query below is
+           * case-sensitive and exact, and its offered-row count must equal the whole ambiguous set.
+           * Therefore every row being collapsed has the identical requested accessible name. This
+           * arm is enabled only for the detector above and only from the literal tier below. */
+          const takeIdenticalLocationRow = async (root, ambiguousCount) => {
+            if (!allowIdenticalRows || ambiguousCount < 2) return false;
+            const identical = root.getByRole('option', { name: clean(option), exact: true });
+            const identicalOffers = await offeredRows(identical);
+            if (identicalOffers.length !== ambiguousCount) return false;
+            return await clickIfPresent(identical.nth(identicalOffers[0]));
+          };
           const own = widenRoot().getByRole('option', { name });
           const mine = await offeredRows(own);
-          if (mine.length > 1) { refuseChoice(nearMissChoiceReason(option, mine.length)); return 'refused'; }
+          if (mine.length > 1) {
+            if (await takeIdenticalLocationRow(widenRoot(), mine.length)) return 'took';
+            refuseChoice(nearMissChoiceReason(option, mine.length));
+            return 'refused';
+          }
           if (mine.length === 1) return await clickIfPresent(own.nth(mine[0])) ? 'took' : 'none';
           // No declared menu means there is nowhere wider this is allowed to look. See menuRoot.
           const wide = menuRoot();
@@ -7055,11 +7097,19 @@ const { chromium } = require('playwright');
           const anywhere = wide.getByRole('option', { name });
           const offers = await offeredRows(anywhere);
           if (offers.length === 0) return 'none';
-          if (offers.length > 1) { refuseChoice(nearMissChoiceReason(option, offers.length)); return 'refused'; }
+          if (offers.length > 1) {
+            if (await takeIdenticalLocationRow(wide, offers.length)) return 'took';
+            refuseChoice(nearMissChoiceReason(option, offers.length));
+            return 'refused';
+          }
           return await clickIfPresent(anywhere.nth(offers[0])) ? 'took' : 'none';
         };
         for (const option of answerOptions(target)) {
-          const verdict = await takeNamed(wholeName(option), option);
+          const verdict = await takeNamed(
+            wholeName(option),
+            option,
+            allowIdenticalExactLocationRows,
+          );
           if (verdict === 'took') return took(option);
           if (verdict === 'refused') return false;
         }
@@ -7165,6 +7215,41 @@ const { chromium } = require('playwright');
         ).catch(() => shown.map(() => false));
         return { rows, indices: shown.filter((_, position) => !isNotice[position]) };
       };
+      /* ONE SHORT REMOTE-RESULT GRACE, ONLY FOR THE GREENHOUSE LOCATION FIELD.
+       *
+       * The ordinary 1200ms settle remains untouched. Jump's live geocoder returned at roughly
+       * 1250ms, so after that settle this field alone re-reads the control's declared menu and portal
+       * for up to another 500ms. A visible result ends the wait. Greenhouse's exact visible
+       * no-options notice is remembered, and takeNarrowedGeocodeMatch can handle it after the grace,
+       * rather than trusted immediately:
+       * Greenhouse can leave the old query's empty notice visible while the new query is still in
+       * flight, and a later real row must supersede it. No other choice control pays or inherits
+      * this grace. */
+      const waitForGreenhouseLocationResults = async (control) => {
+        let sawExactNoOptions = false;
+        const startedAt = Date.now();
+        for (let poll = 0; poll <= 10; poll += 1) {
+          await readDeclaredMenu(control);
+          await readMenuPortal();
+          const root = menuRoot();
+          if (root) {
+            if ((await realOfferedRows(root)).indices.length > 0) return 'rows';
+            const notices = root.locator('[class*="select__menu-notice--no-options"]');
+            const noticeCount = await notices.count().catch(() => 0);
+            for (let index = 0; index < noticeCount; index += 1) {
+              const notice = notices.nth(index);
+              if (await notice.isVisible().catch(() => false)
+                && clean(await notice.textContent().catch(() => '')).toLowerCase() === 'no options') {
+                sawExactNoOptions = true;
+              }
+            }
+          }
+          const elapsed = Date.now() - startedAt;
+          if (poll === 10 || elapsed >= 500) return sawExactNoOptions ? 'empty' : 'timeout';
+          await page.waitForTimeout(Math.min(50, 500 - elapsed)).catch(() => undefined);
+        }
+        return 'timeout';
+      };
       /* HOW MANY ROWS THE MENU IS OFFERING RIGHT NOW, unfiltered by name - the same primitive
        * chooseFromOfferedRows uses, reused here for a narrower question: not "which row matches",
        * only "did the search return anything at all". Scoped to menuRoot() for the reason menuRoot
@@ -7234,6 +7319,7 @@ const { chromium } = require('playwright');
         lastChooserTierAnswer = clean(option);
         return true;
       };
+      let activeControlAllowsIdenticalExactLocationRows = false;
       const searchFor = async (control, target) => {
         for (const option of answerOptions(target)) {
           // Only blank the search box when the widget is holding nothing. See (1) above.
@@ -7252,11 +7338,15 @@ const { chromium } = require('playwright');
           // Typing is what makes some widgets render a menu at all, so where that menu landed is
           // re-read after the settle: a server-searched React Select that portals shows its first
           // rows only now, and the portal verdict taken before typing would still say false.
-          await readDeclaredMenu(control);
-          await readMenuPortal();
+          if (activeControlAllowsIdenticalExactLocationRows) {
+            await waitForGreenhouseLocationResults(control);
+          } else {
+            await readDeclaredMenu(control);
+            await readMenuPortal();
+          }
           if (await takeNarrowedGeocodeMatch(control, option)) return true;
           const refusalsBefore = choiceRefusals;
-          if (await clickMatchingOption(target)) return true;
+          if (await clickMatchingOption(target, activeControlAllowsIdenticalExactLocationRows)) return true;
           // And a refusal ends the search too, rather than being narrowed away by the next query.
           // See the control loop below for the shape this closes.
           if (choiceRefusals !== refusalsBefore) return false;
@@ -7327,6 +7417,7 @@ const { chromium } = require('playwright');
           return hay;
         }).catch(() => '');
         if (CLEAR_CONTROL_RE.test(clears)) continue;
+        activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder(control);
         lastChoiceControlOpened = true;
         /* A role-less Greenhouse input is probed by one real pointer click before this chooser is
          * called. Clicking the same input again can toggle its menu closed, which would discard the
@@ -7342,7 +7433,7 @@ const { chromium } = require('playwright');
         await readDeclaredMenu(control);
         await readMenuPortal();
         const refusalsBefore = choiceRefusals;
-        if (await clickMatchingOption(wanted)) return true;
+        if (await clickMatchingOption(wanted, activeControlAllowsIdenticalExactLocationRows)) return true;
         /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
          * into the widget and re-entered the whole tier stack against a menu the search had filtered,
          * and a filtered menu can offer one row where the full menu offered two: the ambiguity that
@@ -7375,6 +7466,7 @@ const { chromium } = require('playwright');
             if (!await control.isVisible().catch(() => false)) continue;
             await control.click().catch(() => undefined);
             await page.waitForTimeout(150).catch(() => undefined);
+            activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder(control);
             if (await searchFor(control, alreadyAnswered.value)) break;
             await page.keyboard.press('Escape').catch(() => undefined);
           }

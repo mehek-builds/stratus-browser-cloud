@@ -181,6 +181,112 @@ function fixture({ options, portalled = false, renderDelayMs = 400, roleless = f
   </script></body></html>`;
 }
 
+/* The Jump regression shape differs from fixture() in one important way: opening the remote
+ * location menu produces a visible No options notice, then typing starts a new server result that
+ * replaces that stale notice only after the runner's ordinary 1200ms settle. The location variant
+ * carries every part of Greenhouse's exact signature. The generic variant deliberately does not,
+ * while preserving the same portalled duplicate-row rendering. */
+function delayedDuplicateFixture({ locationCity, resultDelayMs }) {
+  const inputId = locationCity ? 'candidate-location' : 'combo';
+  const labelId = locationCity ? 'candidate-location-label' : 'q-label';
+  const label = locationCity ? 'Location (City)' : 'Assessment and proctoring';
+  const answer = locationCity
+    ? 'Los Angeles, California, United States'
+    : 'Computer Science';
+  return `<!doctype html><html><body>
+  <div id="question">
+    <label id="${labelId}" for="${inputId}">${label}<span aria-hidden="true">*</span></label>
+    <div class="select-shell remix-css-fixture-container">
+      <div class="select__control">
+        <div class="select__value-container">
+          <div class="select__placeholder">Select...</div>
+          <div class="select__input-container">
+            <input id="${inputId}" class="select__input" type="text" role="combobox"
+              aria-expanded="false" aria-autocomplete="list" aria-labelledby="${labelId}"
+              autocomplete="off">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    (() => {
+    window.__clicked = [];
+    window.__queryStartedAt = null;
+    window.__rowsRenderedAt = null;
+    const input = document.getElementById(${JSON.stringify(inputId)});
+    const valueBox = document.querySelector('.select__value-container');
+    const ANSWER = ${JSON.stringify(answer)};
+    const RESULT_DELAY = ${JSON.stringify(resultDelayMs)};
+    let menu = null;
+    let generation = 0;
+    function list() { return menu && menu.querySelector('[role="listbox"]'); }
+    function renderNotice() {
+      const target = list();
+      if (!target) return;
+      target.innerHTML = '<div class="select__menu-notice select__menu-notice--no-options">No options</div>';
+    }
+    function close() {
+      generation += 1;
+      if (menu) menu.remove();
+      menu = null;
+      input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-controls');
+      input.value = '';
+    }
+    function commit(text) {
+      window.__clicked.push(text);
+      document.querySelector('.select__placeholder')?.remove();
+      const single = document.createElement('div');
+      single.className = 'select__single-value';
+      single.textContent = text;
+      valueBox.insertBefore(single, document.querySelector('.select__input-container'));
+      close();
+    }
+    function renderDuplicateRows(expectedGeneration) {
+      if (!menu || expectedGeneration !== generation) return;
+      const target = list();
+      target.innerHTML = '';
+      for (let index = 0; index < 2; index += 1) {
+        const row = document.createElement('div');
+        row.className = 'select__option';
+        row.setAttribute('role', 'option');
+        row.textContent = ANSWER;
+        row.addEventListener('click', () => commit(ANSWER));
+        target.appendChild(row);
+      }
+      window.__rowsRenderedAt = performance.now();
+    }
+    function open() {
+      if (menu) return;
+      menu = document.createElement('div');
+      menu.className = 'select__menu-portal';
+      const target = document.createElement('div');
+      target.id = 'delayed-location-listbox';
+      target.className = 'select__menu-list';
+      target.setAttribute('role', 'listbox');
+      menu.appendChild(target);
+      document.body.appendChild(menu);
+      input.setAttribute('aria-expanded', 'true');
+      input.setAttribute('aria-controls', target.id);
+      renderNotice();
+    }
+    input.addEventListener('mousedown', open);
+    input.addEventListener('click', open);
+    input.addEventListener('input', () => {
+      open();
+      generation += 1;
+      const expectedGeneration = generation;
+      renderNotice();
+      if (!input.value) return;
+      window.__queryStartedAt = performance.now();
+      setTimeout(() => renderDuplicateRows(expectedGeneration), RESULT_DELAY);
+    });
+    input.addEventListener('keydown', (event) => { if (event.key === 'Escape') close(); });
+    })();
+  </script></body></html>`;
+}
+
 /* The single protected attempt, as the fillByLabelText combobox arm makes it: one fillCustomChoice
  * over the question's block, then the SAME verified read-back every call site goes through. */
 async function protectedAttempt(markup, answer) {
@@ -193,8 +299,11 @@ async function protectedAttempt(markup, answer) {
     clicked: window.__clicked,
     shown: document.querySelector('.select__single-value')?.textContent ?? null,
     placeholder: Boolean(document.querySelector('.select__placeholder')),
-    searchText: document.getElementById('combo').value,
-    menusLeftInBody: document.querySelectorAll('body > .select__menu-portal, body > .select__menu').length
+    searchText: document.querySelector('#combo, #candidate-location').value,
+    menusLeftInBody: document.querySelectorAll('body > .select__menu-portal, body > .select__menu').length,
+    resultDelayMs: Number.isFinite(window.__rowsRenderedAt) && Number.isFinite(window.__queryStartedAt)
+      ? window.__rowsRenderedAt - window.__queryStartedAt
+      : null,
   }));
   return { filled, landed, ...after, state: api.state() };
 }
@@ -211,6 +320,7 @@ test('a one-statement consent react-select is committed by the single protected 
   assert.equal(result.landed, true, 'and the committed value must be read back and verified in the same action');
   assert.deepEqual(result.clicked, ['I consent to the above.']);
   assert.equal(result.shown, 'I consent to the above.', 'the widget is holding the committed row');
+  assert.equal(result.resultDelayMs, null, 'fixtures with no remote timing marks report no delay, not NaN');
   assert.equal(result.state.lastChooserTierAnswer, 'Yes', 'the tier click carries its provenance for the verifier');
 });
 
@@ -226,6 +336,34 @@ test('the same commit works when the menu is portalled to <body> (the R-076 Remi
   assert.equal(result.landed, true);
   assert.deepEqual(result.clicked, ['I consent to the above.']);
   assert.equal(result.shown, 'I consent to the above.');
+});
+
+test('Greenhouse Location City commits one delayed duplicate portalled result after the ordinary settle', async () => {
+  const answer = 'Los Angeles, California, United States';
+  const result = await protectedAttempt(
+    delayedDuplicateFixture({ locationCity: true, resultDelayMs: 1250 }),
+    answer,
+  );
+  assert.ok(result.resultDelayMs >= 1200,
+    'the duplicate rows must arrive after the ordinary 1200ms settle, got ' + result.resultDelayMs);
+  assert.equal(result.filled, true, 'the exact Greenhouse location signature receives the bounded result grace');
+  assert.equal(result.landed, true, 'choiceLanded verifies the committed location after the duplicate-row click');
+  assert.deepEqual(result.clicked, [answer], 'two identical geocoder rows produce exactly one click');
+  assert.equal(result.shown, answer);
+  assert.equal(result.menusLeftInBody, 0, 'the portalled menu closes after the committed click');
+});
+
+test('a generic portalled control still refuses duplicate exact rows', async () => {
+  const answer = 'Computer Science';
+  const result = await protectedAttempt(
+    delayedDuplicateFixture({ locationCity: false, resultDelayMs: 1100 }),
+    answer,
+  );
+  assert.equal(result.filled, false, 'duplicate collapse is not available without the exact location signature');
+  assert.equal(result.landed, false);
+  assert.deepEqual(result.clicked, [], 'generic duplicate rows remain untouched');
+  assert.match(result.state.lastChoiceRefusal, /more than one of the options offered is a near match/);
+  assert.equal(result.shown, null);
 });
 
 test('an exact role-less Greenhouse input commits through its widget shell', async () => {
