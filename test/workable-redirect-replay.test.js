@@ -17,6 +17,15 @@ import {
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
+/* Production never hands the runner an input without this. normalizeProviderDeadline demands one
+ * under required correlation and synthesizes one under compat, and the result is then serialised
+ * unconditionally, unlike submissionAttempt beside it. These replays write the runner input by
+ * hand and skip that normalization, so they must supply what the host would have. A continuation
+ * gets a FRESH one because the runner re-applies it at the top of every phase, and phase zero's
+ * budget has already been partly spent by then. Same helper the author used in
+ * formless-submit-scope.test.js. */
+const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = '20e78cba92';
 const BARE_URL = `https://apply.workable.com/j/${TOKEN}/apply?source=litos`;
@@ -61,6 +70,7 @@ function inputFor(actions, expectedPageUrl = BARE_URL) {
       ...actions
     ],
     allowSubmit: true,
+    providerDeadlineAt: providerDeadlineAt(),
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
