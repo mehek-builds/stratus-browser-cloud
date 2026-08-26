@@ -144,6 +144,13 @@ const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', '
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
+export const STRATUS_SUBMISSION_QUIESCENCE_ENV = 'STRATUS_SUBMISSION_QUIESCED';
+export const STRATUS_SUBMISSION_CORRELATION_MODE_ENV = 'STRATUS_SUBMISSION_CORRELATION_MODE';
+export const PROVIDER_RESPONSE_MARGIN_MS = 10_000;
+const PROVIDER_RETURN_MARGIN_MS = 2_000;
+const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
+const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
+const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
 /* THE HELD SESSION, and what the two numbers on it now mean.
  *
  * A continuation exists for exactly one reason: some pages answer a submit with a challenge that
@@ -235,7 +242,35 @@ const { chromium } = require('playwright');
 
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
+  const sameSubmissionAttempt = (left, right) => (!left && !right) || Boolean(left && right
+    && left.runId === right.runId
+    && left.claimId === right.claimId
+    && left.executionId === right.executionId);
   const startedAt = Date.now();
+  const providerResponseMarginMs = 10_000;
+  const providerMinimumSubmitWindowMs = 2_000;
+  let providerActionDeadlineMs = 0;
+  let providerDeadlineExpired = false;
+  let providerDeadlineTimer = null;
+  let browser = null;
+  const applyProviderDeadline = (value) => {
+    const deadlineMs = Date.parse(value);
+    if (!Number.isFinite(deadlineMs)) throw new Error('Managed provider deadline is invalid');
+    providerActionDeadlineMs = deadlineMs - providerResponseMarginMs;
+    providerDeadlineExpired = Date.now() >= providerActionDeadlineMs;
+    if (providerDeadlineTimer) clearTimeout(providerDeadlineTimer);
+    providerDeadlineTimer = setTimeout(() => {
+      providerDeadlineExpired = true;
+      if (browser) void browser.close().catch(() => undefined);
+    }, Math.max(0, providerActionDeadlineMs - Date.now()));
+  };
+  const assertProviderActionWindow = (minimumMs = 0) => {
+    if (providerDeadlineExpired || Date.now() + minimumMs >= providerActionDeadlineMs) {
+      throw new Error('Managed provider deadline expired before employer submit');
+    }
+  };
+  applyProviderDeadline(input.providerDeadlineAt);
+  assertProviderActionWindow(providerMinimumSubmitWindowMs);
   let crashProgress = {
     version: 1,
     phase: 0,
@@ -244,7 +279,8 @@ const { chromium } = require('playwright');
     applicationSubmitPressed: false,
     verificationSubmitPressed: false,
     submitKind: null,
-    policyVersion: null
+    policyVersion: null,
+    ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {})
   };
   const recordCrashProgress = (patch = {}) => {
     crashProgress = { ...crashProgress, ...patch };
@@ -321,7 +357,7 @@ const { chromium } = require('playwright');
     protocolVersion: 4,
     capabilities: [extractAssertionsCapability, exactPageUrlCapability, atomicSubmitV4Capability]
   }));
-  const browser = await chromium.launch({
+  browser = await chromium.launch({
     headless: true,
     args: [
       '--no-sandbox',
@@ -333,6 +369,7 @@ const { chromium } = require('playwright');
       ] : [])
     ]
   });
+  assertProviderActionWindow(providerMinimumSubmitWindowMs);
   try {
     const browserContext = await browser.newContext({
       viewport: input.viewport || { width: 1440, height: 900 },
@@ -12651,6 +12688,7 @@ const { chromium } = require('playwright');
           }
         }
         if (!blocked) {
+          assertProviderActionWindow(providerMinimumSubmitWindowMs);
           armSubmitNetworkWatch();
           recordCrashProgress({
             phase,
@@ -12767,6 +12805,8 @@ const { chromium } = require('playwright');
     let currentInput = input;
     try {
     while (true) {
+    applyProviderDeadline(currentInput.providerDeadlineAt);
+    assertProviderActionWindow(providerMinimumSubmitWindowMs);
     const phaseSubmitAction = (currentInput.actions || []).find((action) => action.type === 'confirmAndSubmit');
     recordCrashProgress({
       phase,
@@ -12906,6 +12946,7 @@ const { chromium } = require('playwright');
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
     for (const action of currentInput.actions || []) {
+     assertProviderActionWindow();
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
@@ -13981,6 +14022,7 @@ const { chromium } = require('playwright');
         // response worth recording is the one the click itself causes, and a watch attached after
         // the click races the request it exists to see.
         if (isFinalSubmitAction(action)) {
+          assertProviderActionWindow(providerMinimumSubmitWindowMs);
           armSubmitNetworkWatch();
           recordCrashProgress({
             phase,
@@ -14058,6 +14100,7 @@ const { chromium } = require('playwright');
             // Resubmitting is the whole point: Greenhouse's own email says "After you enter the
             // code, resubmit your application." A code typed into a form nobody sends changes
             // nothing.
+            assertProviderActionWindow(providerMinimumSubmitWindowMs);
             await locator.click().catch(() => undefined);
             await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
             // The same verdict the atomic branch above makes, for the same measured reason: the
@@ -15237,6 +15280,32 @@ const { chromium } = require('playwright');
         }))),
       []
     );
+    /* Persist the employer fact before an optional artifact can stall. This object contains no
+     * applicant answers or page body. Its confirmed arm is available only after the atomic
+     * required-field pass and the runner's typed employer outcome agree. */
+    const employerOutcome = {
+      kind: submitOutcome.pressed === true
+        && submitOutcome.state === 'confirmed'
+        && requiredFieldConfirmation?.status === 'confirmed'
+        ? 'confirmed'
+        : submitOutcome.pressed === true
+          ? 'pressed'
+          : 'not_attempted',
+      state: submitOutcome.state,
+      source: submitOutcome.source,
+      evidence: typeof submitOutcome.evidence === 'string' ? submitOutcome.evidence.slice(0, 500) : null,
+      message: typeof submitOutcome.message === 'string' ? submitOutcome.message.slice(0, 500) : null,
+      formStillPresent: typeof submitOutcome.formStillPresent === 'boolean'
+        ? submitOutcome.formStillPresent
+        : null
+    };
+    recordCrashProgress({
+      phase,
+      stage: 'result_ready',
+      employerOutcome,
+      requiredFieldConfirmationStatus: requiredFieldConfirmation?.status ?? null,
+      securityCodeOutcome: securityCodeAttempt?.outcome ?? null
+    });
     if (currentInput.screenshot) {
       await observeForResult(
         () => page.screenshot({
@@ -15339,7 +15408,7 @@ const { chromium } = require('playwright');
       }
       fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, ...(finalSubmitChooser ? { finalSubmitChooser } : {}), blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), elapsedMs: Date.now() - startedAt }));
+    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, ...(finalSubmitChooser ? { finalSubmitChooser } : {}), blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}), elapsedMs: Date.now() - startedAt }));
     recordCrashProgress({ phase, stage: 'result_written' });
     if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
@@ -15347,7 +15416,11 @@ const { chromium } = require('playwright');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     if (!fs.existsSync('stratus-continuation-input.json')) break;
-    currentInput = JSON.parse(fs.readFileSync('stratus-continuation-input.json', 'utf8'));
+    const continuationInput = JSON.parse(fs.readFileSync('stratus-continuation-input.json', 'utf8'));
+    if (!sameSubmissionAttempt(input.submissionAttempt, continuationInput.submissionAttempt)) {
+      throw new Error('Submission attempt correlation changed during continuation');
+    }
+    currentInput = continuationInput;
     fs.unlinkSync('stratus-continuation-input.json');
     phase += 1;
     }
@@ -15363,7 +15436,8 @@ const { chromium } = require('playwright');
       await Promise.all(unsuccessfulChoices.splice(0).map(disposeUnsuccessfulChoice));
     }
   } finally {
-    await browser.close();
+    if (providerDeadlineTimer) clearTimeout(providerDeadlineTimer);
+    await browser?.close().catch(() => undefined);
   }
 })().catch((error) => {
   const detail = String(error?.stack || error?.message || error);
@@ -15383,6 +15457,113 @@ const { chromium } = require('playwright');
 
 function inputError(message, code = 'INVALID_REQUEST') {
   return Object.assign(new Error(message), { status: 400, code });
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function submissionReleasePolicy(env = process.env) {
+  const rawMode = env[STRATUS_SUBMISSION_CORRELATION_MODE_ENV]?.trim().toLowerCase();
+  if (rawMode && rawMode !== 'compat' && rawMode !== 'required') {
+    throw Object.assign(
+      new Error(`${STRATUS_SUBMISSION_CORRELATION_MODE_ENV} must be compat or required`),
+      { status: 503, code: 'SUBMISSION_RELEASE_POLICY_INVALID' }
+    );
+  }
+  return Object.freeze({
+    quiesced: env[STRATUS_SUBMISSION_QUIESCENCE_ENV]?.trim() === '1',
+    // A fresh installation refuses legacy uncorrelated submission calls. Compatibility is an
+    // explicit rollout state and must never be reached through a misspelling or missing variable.
+    correlationRequired: rawMode !== 'compat'
+  });
+}
+
+function requestCanReachEmployerBoundary(input) {
+  return input?.allowSubmit === true
+    || input?.requestContinuation === true
+    || input?.continuationToken != null;
+}
+
+export function assertSubmissionReleaseAllowed(input, policy = submissionReleasePolicy()) {
+  if (policy.quiesced && requestCanReachEmployerBoundary(input)) {
+    throw Object.assign(
+      new Error('Managed employer submissions are temporarily quiesced'),
+      { status: 503, code: 'SUBMISSION_QUIESCED' }
+    );
+  }
+}
+
+function normalizeProviderDeadline(value, {
+  required,
+  requestAcceptedAtMs,
+  compatibilityBudgetMs
+}) {
+  if (value == null) {
+    if (required) {
+      throw inputError(
+        'An absolute providerDeadlineAt is required for every submit-capable or continuable run',
+        'PROVIDER_DEADLINE_REQUIRED'
+      );
+    }
+    return new Date(requestAcceptedAtMs + compatibilityBudgetMs).toISOString();
+  }
+  const deadlineMs = typeof value === 'string' ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(deadlineMs) || value !== new Date(deadlineMs).toISOString()) {
+    throw inputError('providerDeadlineAt must be a canonical ISO timestamp', 'INVALID_PROVIDER_DEADLINE');
+  }
+  const remainingMs = deadlineMs - requestAcceptedAtMs;
+  if (remainingMs <= PROVIDER_RESPONSE_MARGIN_MS + PROVIDER_MINIMUM_SUBMIT_WINDOW_MS
+    || remainingMs > MAX_PROVIDER_DEADLINE_MS) {
+    throw inputError(
+      'providerDeadlineAt does not leave a bounded employer-action window',
+      'INVALID_PROVIDER_DEADLINE'
+    );
+  }
+  return value;
+}
+
+function normalizeSubmissionAttempt(value, { required = false } = {}) {
+  if (value == null) {
+    if (required) {
+      throw inputError(
+        'A durable submissionAttempt is required for every submit-capable or continuable run',
+        'SUBMISSION_ATTEMPT_REQUIRED'
+      );
+    }
+    return null;
+  }
+  const keys = value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.keys(value).sort().join(',')
+    : '';
+  if (keys !== 'claimId,executionId,runId'
+    || !UUID_PATTERN.test(value.runId)
+    || !UUID_PATTERN.test(value.claimId)
+    || !UUID_PATTERN.test(value.executionId)) {
+    throw inputError(
+      'submissionAttempt must contain only UUID runId, claimId, and executionId fields',
+      'INVALID_SUBMISSION_ATTEMPT'
+    );
+  }
+  return {
+    runId: value.runId.toLowerCase(),
+    claimId: value.claimId.toLowerCase(),
+    executionId: value.executionId.toLowerCase()
+  };
+}
+
+function sameSubmissionAttempt(left, right) {
+  return (!left && !right) || Boolean(left && right
+    && left.runId === right.runId
+    && left.claimId === right.claimId
+    && left.executionId === right.executionId);
+}
+
+function assertSubmissionAttemptEcho(result, expected) {
+  if (!sameSubmissionAttempt(result?.submissionAttempt, expected)) {
+    throw Object.assign(
+      new Error('Managed browser result did not match its durable submission attempt'),
+      { status: 502, code: 'SUBMISSION_ATTEMPT_MISMATCH' }
+    );
+  }
 }
 
 function validateSelector(selector) {
@@ -15613,8 +15794,13 @@ function assertV4Contract(actions) {
   }
 }
 
-export async function normalizeManagedRun(input = {}, { urlValidator = assertPublicUrl } = {}) {
+export async function normalizeManagedRun(input = {}, {
+  urlValidator = assertPublicUrl,
+  releasePolicy = submissionReleasePolicy(),
+  requestAcceptedAtMs = Date.now()
+} = {}) {
   if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
+  assertSubmissionReleaseAllowed(input, releasePolicy);
   if (input.continuationToken != null) throw inputError('A continuation request must not include a URL run payload', 'INVALID_CONTINUATION');
   const url = await urlValidator(input.url);
   const canonicalRunUrl = new URL(url.toString());
@@ -15635,6 +15821,16 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
     Math.max(Number(input.continuationTtlSeconds) || MANAGED_CONTINUATION_CONTRACT.defaultTtlSeconds, MANAGED_CONTINUATION_CONTRACT.minTtlSeconds),
     MANAGED_CONTINUATION_CONTRACT.maxTtlSeconds
   );
+  const allowSubmit = input.allowSubmit === true;
+  const providerBoundaryCapable = allowSubmit || requestContinuation;
+  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired
+  });
+  const providerDeadlineAt = normalizeProviderDeadline(input.providerDeadlineAt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired,
+    requestAcceptedAtMs,
+    compatibilityBudgetMs: MANAGED_RUN_TIMEOUT_MS
+  });
   return {
     url: url.toString(),
     actions,
@@ -15644,7 +15840,9 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
     // that says the word gets the ability to send a real application to a real employer. Written as
     // `=== true` rather than Boolean() so a truthy accident ('no', 0 vs '0', an object) cannot open
     // it: the one value that opens the gate is the literal true.
-    allowSubmit: input.allowSubmit === true,
+    allowSubmit,
+    ...(submissionAttempt ? { submissionAttempt } : {}),
+    providerDeadlineAt,
     fullPage: Boolean(input.fullPage),
     waitUntil: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'].includes(input.waitUntil) ? input.waitUntil : 'networkidle2',
     viewport: { width, height },
@@ -15655,8 +15853,12 @@ export async function normalizeManagedRun(input = {}, { urlValidator = assertPub
   };
 }
 
-export function normalizeManagedContinuation(input = {}) {
+export function normalizeManagedContinuation(input = {}, {
+  releasePolicy = submissionReleasePolicy(),
+  requestAcceptedAtMs = Date.now()
+} = {}) {
   if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
+  assertSubmissionReleaseAllowed(input, releasePolicy);
   if (typeof input.continuationToken !== 'string' || !/^[A-Za-z0-9_-]{32,200}$/.test(input.continuationToken)) {
     throw inputError('A valid continuationToken is required', 'INVALID_CONTINUATION');
   }
@@ -15664,6 +15866,14 @@ export function normalizeManagedContinuation(input = {}) {
   if (input.requestContinuation || input.continuationCheckpoint || input.continuationTtlSeconds != null) {
     throw inputError('A continuation cannot request another continuation', 'CONTINUATION_LIMIT_REACHED');
   }
+  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, {
+    required: releasePolicy.correlationRequired
+  });
+  const providerDeadlineAt = normalizeProviderDeadline(input.providerDeadlineAt, {
+    required: releasePolicy.correlationRequired,
+    requestAcceptedAtMs,
+    compatibilityBudgetMs: CONTINUATION_TIMEOUT_MS
+  });
   const actions = normalizeManagedActions(input.actions);
   assertV4Contract(actions);
   const v4ContinuationSubmit = actions.find((action) => (
@@ -15680,6 +15890,8 @@ export function normalizeManagedContinuation(input = {}) {
   }
   return {
     continuationToken: input.continuationToken,
+    ...(submissionAttempt ? { submissionAttempt } : {}),
+    providerDeadlineAt,
     actions,
     screenshot: input.screenshot !== false,
     fullPage: Boolean(input.fullPage)
@@ -15767,7 +15979,13 @@ const SANDBOX_LIFETIME_GRACE_MS = 30_000;
  * took too long" and "the continuation expired" are different facts and were being reported with
  * the same sentence.
  */
-async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
+async function waitForSandboxFile(
+  sandbox,
+  paths,
+  timeoutMs,
+  failure,
+  providerDeadlineAt = null
+) {
   const wanted = Array.isArray(paths) ? paths : [paths];
   const script = "const fs=require('node:fs');const end=Date.now()+Number(process.argv[1]);const ps=process.argv.slice(2);(async()=>{for(;;){const hit=ps.find((p)=>fs.existsSync(p));if(hit){process.stdout.write(hit);process.exit(0)}if(Date.now()>=end)process.exit(3);await new Promise(r=>setTimeout(r,100))}})()";
   const timeoutError = () => Object.assign(new Error(failure.message), {
@@ -15778,11 +15996,25 @@ async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
     /* runCommand waits through the SDK's log stream. Keeping one command open for the whole run
      * made the stream and the sandbox lifetime share one failure boundary. Short commands let the
      * SDK close each stream normally while the detached browser continues in the same sandbox. */
-    const result = await sandbox.runCommand(
-      'node',
-      ['-e', script, String(chunkMs), ...wanted],
-      { timeoutMs: chunkMs + SANDBOX_FILE_POLL_COMMAND_GRACE_MS }
-    );
+    let result;
+    try {
+      const commandTimeoutMs = providerDeadlineAt
+        ? Math.min(
+            chunkMs + SANDBOX_FILE_POLL_COMMAND_GRACE_MS,
+            providerHostRemainingMs(providerDeadlineAt)
+          )
+        : chunkMs + SANDBOX_FILE_POLL_COMMAND_GRACE_MS;
+      result = await sandbox.runCommand(
+        'node',
+        ['-e', script, String(chunkMs), ...wanted],
+        {
+          timeoutMs: commandTimeoutMs,
+          ...(providerDeadlineAt ? { signal: AbortSignal.timeout(commandTimeoutMs) } : {})
+        }
+      );
+    } catch {
+      throw timeoutError();
+    }
     const found = typeof result.stdout === 'function'
       ? String(await result.stdout()).trim()
       : String(result.stdout || '').trim();
@@ -15805,23 +16037,118 @@ async function waitForSandboxFile(sandbox, paths, timeoutMs, failure) {
   throw timeoutError();
 }
 
-/** Turn a crash the detached runner recorded into the error it would have thrown in-line. */
-async function throwSandboxRunnerError(sandbox) {
-  const buffer = await sandbox.readFileToBuffer({ path: 'stratus-error.json' }).catch(() => null);
-  const progressBuffer = await sandbox.readFileToBuffer({ path: 'stratus-progress.json' }).catch(() => null);
-  let message = 'Sandbox browser run failed';
-  try {
-    const parsed = JSON.parse(buffer.toString('utf8'));
-    if (parsed?.message) message = String(parsed.message).slice(0, 500);
-  } catch { /* a crash we cannot read is still a crash, and the generic message says so */ }
-  let runProgress = null;
+function normalizeProgressEmployerOutcome(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'evidence,formStillPresent,kind,message,source,state') return null;
+  const validKind = ['not_attempted', 'pressed', 'confirmed'].includes(value.kind);
+  const validState = ['confirmed', 'rejected', 'unknown', 'not_attempted'].includes(value.state);
+  const validSource = value.source === null || [
+    'ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text',
+    'unmatched_page_text', 'client_validation'
+  ].includes(value.source);
+  const boundedNullableString = (entry) => entry === null
+    || (typeof entry === 'string' && entry.length <= 500);
+  if (!validKind || !validState || !validSource
+    || !boundedNullableString(value.evidence)
+    || !boundedNullableString(value.message)
+    || (value.formStillPresent !== null && typeof value.formStillPresent !== 'boolean')) return null;
+  if ((value.kind === 'confirmed' && value.state !== 'confirmed')
+    || (value.kind === 'not_attempted' && value.state !== 'not_attempted')) return null;
+  return {
+    kind: value.kind,
+    state: value.state,
+    source: value.source,
+    evidence: value.evidence,
+    message: value.message,
+    formStillPresent: value.formStillPresent
+  };
+}
+
+function exactProgressNotAttemptedOutcome(outcome) {
+  return outcome.kind === 'not_attempted'
+    && outcome.state === 'not_attempted'
+    && outcome.source === null
+    && outcome.evidence === null
+    && outcome.message === null
+    && outcome.formStillPresent === null;
+}
+
+/* A progress file is one state-machine checkpoint, not a collection of independent fields. A
+ * provider crash must not be able to combine individually valid values into an impossible claim,
+ * such as a confirmation without a press or an accepted code without a verification submit. */
+function managedBrowserProgressStateIsConsistent(progress) {
+  const applicationPressed = progress.applicationSubmitPressed;
+  const verificationPressed = progress.verificationSubmitPressed;
+  const anyPressed = applicationPressed || verificationPressed;
+  const finalProgress = progress.stage === 'result_ready' || progress.stage === 'result_written';
+  const activationProgress = progress.stage === 'submit_activation_started'
+    || progress.stage === 'submit_blocked';
+  const currentKindPressed = progress.submitKind === 'application'
+    ? applicationPressed
+    : progress.submitKind === 'verification'
+      ? verificationPressed
+      : false;
+
+  if (progress.submitPressed !== anyPressed) return false;
+  if (anyPressed && progress.submitKind === null) return false;
+  if (progress.phase === 0
+    && (verificationPressed || progress.submitKind === 'verification')) return false;
+  if (verificationPressed
+    && (progress.phase !== 1 || progress.submitKind !== 'verification')) return false;
+  if (progress.phase === 1 && progress.submitKind === 'application'
+    && (activationProgress || progress.stage === 'submit_released')) return false;
+
+  if (progress.stage === 'launch') {
+    if (progress.phase !== 0 || progress.submitKind !== null || anyPressed
+      || progress.policyVersion !== null || progress.employerOutcome
+      || progress.requiredFieldConfirmationStatus || progress.securityCodeOutcome) return false;
+  } else if (progress.stage === 'phase_started') {
+    if (progress.phase === 0 && anyPressed) return false;
+  } else if (activationProgress) {
+    if (progress.submitKind === null || currentKindPressed || progress.securityCodeOutcome) return false;
+  } else if (progress.stage === 'submit_released') {
+    if (progress.submitKind === null || !currentKindPressed || progress.securityCodeOutcome) return false;
+  }
+
+  const outcome = progress.employerOutcome;
+  if (finalProgress && !outcome) return false;
+  if (!finalProgress && progress.phase === 0 && outcome
+    && !exactProgressNotAttemptedOutcome(outcome)) return false;
+  if (outcome) {
+    if (outcome.kind === 'not_attempted') {
+      if (!exactProgressNotAttemptedOutcome(outcome) || anyPressed) return false;
+    } else if (!anyPressed || outcome.state === 'not_attempted') {
+      return false;
+    }
+    if (outcome.kind === 'confirmed'
+      && progress.requiredFieldConfirmationStatus !== 'confirmed') return false;
+  }
+
+  if (progress.requiredFieldConfirmationStatus === 'confirmed' && !anyPressed) return false;
+
+  if (progress.securityCodeOutcome) {
+    if (!finalProgress || progress.phase !== 1 || progress.submitKind !== 'verification') return false;
+    const codeSubmitReachedEmployer = progress.securityCodeOutcome === 'accepted'
+      || progress.securityCodeOutcome === 'rejected';
+    if (codeSubmitReachedEmployer !== verificationPressed) return false;
+    if (progress.securityCodeOutcome === 'accepted' && outcome?.state === 'rejected') return false;
+  }
+
+  return true;
+}
+
+async function readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt = null) {
+  const progressBuffer = await sandbox.readFileToBuffer(
+    { path: 'stratus-progress.json' },
+    { signal: AbortSignal.timeout(OPTIONAL_ARTIFACT_TIMEOUT_MS) }
+  ).catch(() => null);
   // A false applicationSubmitPressed value proves no employer transmission only for chooser v4,
   // whose containment starts before applicant mutation. For v3 it is diagnostic state only.
   try {
     const parsed = JSON.parse(progressBuffer.toString('utf8'));
     const validStage = [
       'launch', 'phase_started', 'submit_activation_started',
-      'submit_blocked', 'submit_released', 'result_written'
+      'submit_blocked', 'submit_released', 'result_ready', 'result_written'
     ].includes(parsed?.stage);
     const validSubmitKind = parsed?.submitKind === null
       || parsed?.submitKind === 'application'
@@ -15829,13 +16156,30 @@ async function throwSandboxRunnerError(sandbox) {
     const validPolicyVersion = parsed?.policyVersion === null
       || parsed?.policyVersion === 3
       || parsed?.policyVersion === 4;
+    const progressAttempt = parsed?.submissionAttempt == null
+      ? null
+      : normalizeSubmissionAttempt(parsed.submissionAttempt);
+    const validAttempt = expectedSubmissionAttempt == null
+      ? progressAttempt == null
+      : sameSubmissionAttempt(progressAttempt, expectedSubmissionAttempt);
+    const employerOutcome = parsed?.employerOutcome == null
+      ? null
+      : normalizeProgressEmployerOutcome(parsed.employerOutcome);
+    const validRequiredStatus = parsed?.requiredFieldConfirmationStatus == null
+      || parsed.requiredFieldConfirmationStatus === 'confirmed'
+      || parsed.requiredFieldConfirmationStatus === 'blocked';
+    const validSecurityCodeOutcome = parsed?.securityCodeOutcome == null
+      || ['accepted', 'rejected', 'no_control', 'not_entered'].includes(parsed.securityCodeOutcome);
+    const finalProgress = parsed?.stage === 'result_ready' || parsed?.stage === 'result_written';
     if (parsed?.version === 1
       && Number.isInteger(parsed?.phase) && parsed.phase >= 0 && parsed.phase <= 1
       && validStage && typeof parsed?.submitPressed === 'boolean'
       && typeof parsed?.applicationSubmitPressed === 'boolean'
       && typeof parsed?.verificationSubmitPressed === 'boolean'
-      && validSubmitKind && validPolicyVersion) {
-      runProgress = {
+      && validSubmitKind && validPolicyVersion && validAttempt
+      && validRequiredStatus && validSecurityCodeOutcome
+      && (!finalProgress || employerOutcome)) {
+      const progress = {
         version: 1,
         phase: parsed.phase,
         stage: parsed.stage,
@@ -15843,10 +16187,37 @@ async function throwSandboxRunnerError(sandbox) {
         applicationSubmitPressed: parsed.applicationSubmitPressed,
         verificationSubmitPressed: parsed.verificationSubmitPressed,
         submitKind: parsed.submitKind,
-        policyVersion: parsed.policyVersion
+        policyVersion: parsed.policyVersion,
+        ...(employerOutcome ? { employerOutcome } : {}),
+        ...(parsed.requiredFieldConfirmationStatus != null
+          ? { requiredFieldConfirmationStatus: parsed.requiredFieldConfirmationStatus }
+          : {}),
+        ...(parsed.securityCodeOutcome != null ? { securityCodeOutcome: parsed.securityCodeOutcome } : {}),
+        ...(progressAttempt ? { submissionAttempt: progressAttempt } : {})
       };
+      return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
     }
   } catch { /* absent or malformed progress is simply unavailable */ }
+  return null;
+}
+
+async function errorWithSandboxRunnerProgress(error, sandbox, expectedSubmissionAttempt = null) {
+  const runProgress = await readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt);
+  return Object.assign(error, runProgress ? { runProgress } : {});
+}
+
+/** Turn a crash the detached runner recorded into the error it would have thrown in-line. */
+async function throwSandboxRunnerError(sandbox, expectedSubmissionAttempt = null) {
+  const buffer = await sandbox.readFileToBuffer(
+    { path: 'stratus-error.json' },
+    { signal: AbortSignal.timeout(OPTIONAL_ARTIFACT_TIMEOUT_MS) }
+  ).catch(() => null);
+  let message = 'Sandbox browser run failed';
+  try {
+    const parsed = JSON.parse(buffer.toString('utf8'));
+    if (parsed?.message) message = String(parsed.message).slice(0, 500);
+  } catch { /* a crash we cannot read is still a crash, and the generic message says so */ }
+  const runProgress = await readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt);
   throw Object.assign(new Error(message), {
     status: 502,
     code: 'SANDBOX_RUN_FAILED',
@@ -15854,7 +16225,7 @@ async function throwSandboxRunnerError(sandbox) {
   });
 }
 
-export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);const required=JSON.parse(requiredJson);const requiresV4=required.includes('atomic-submit-v4');if(requiresV4&&marker.continuationPolicy!=='v4-observation-or-security-code')process.exit(10);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);if(requiresV4){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
+export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation',runHash='',claimHash='',executionHash='']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);const markerBound=[marker.submissionRunHash,marker.submissionClaimHash,marker.submissionExecutionHash].every((value)=>typeof value==='string'&&value.length>0);const requestBound=[runHash,claimHash,executionHash].every((value)=>typeof value==='string'&&value.length>0);if(markerBound!==requestBound||(markerBound&&(marker.submissionRunHash!==runHash||marker.submissionClaimHash!==claimHash||marker.submissionExecutionHash!==executionHash)))process.exit(11);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);const required=JSON.parse(requiredJson);const requiresV4=required.includes('atomic-submit-v4');if(requiresV4&&marker.continuationPolicy!=='v4-observation-or-security-code')process.exit(10);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);if(requiresV4){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
@@ -15880,21 +16251,80 @@ async function ensureSandboxTemplate() {
   return template;
 }
 
-export async function executeSandboxRun(input, { urlValidator = assertPublicUrl, sandboxApi = Sandbox, projectBinding = 'stratus-managed' } = {}) {
+function providerHostRemainingMs(providerDeadlineAt, marginMs = PROVIDER_RETURN_MARGIN_MS) {
+  const remainingMs = Math.floor(Date.parse(providerDeadlineAt) - Date.now() - marginMs);
+  if (!Number.isSafeInteger(remainingMs) || remainingMs <= 0) {
+    throw Object.assign(
+      new Error('Managed provider deadline expired before remote execution'),
+      { status: 408, code: 'PROVIDER_DEADLINE_EXPIRED' }
+    );
+  }
+  return remainingMs;
+}
+
+function providerWaitTimeoutMs(providerDeadlineAt, maximumMs) {
+  return Math.min(maximumMs, providerHostRemainingMs(providerDeadlineAt));
+}
+
+function providerCommandOptions(providerDeadlineAt, maximumMs) {
+  const timeoutMs = providerWaitTimeoutMs(providerDeadlineAt, maximumMs);
+  return {
+    timeoutMs,
+    signal: AbortSignal.timeout(timeoutMs)
+  };
+}
+
+function providerReadOptions(providerDeadlineAt, maximumMs) {
+  const timeoutMs = providerWaitTimeoutMs(providerDeadlineAt, maximumMs);
+  return { signal: AbortSignal.timeout(timeoutMs) };
+}
+
+async function readOptionalSandboxArtifact(
+  sandbox,
+  path,
+  providerDeadlineAt,
+  maximumMs = OPTIONAL_ARTIFACT_TIMEOUT_MS
+) {
+  try {
+    return await sandbox.readFileToBuffer(
+      { path },
+      providerReadOptions(providerDeadlineAt, maximumMs)
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function executeSandboxRun(input, {
+  urlValidator = assertPublicUrl,
+  sandboxApi = Sandbox,
+  projectBinding = 'stratus-managed',
+  releasePolicy = submissionReleasePolicy(),
+  requestAcceptedAtMs = Date.now(),
+  optionalArtifactTimeoutMs = OPTIONAL_ARTIFACT_TIMEOUT_MS
+} = {}) {
+  assertSubmissionReleaseAllowed(input, releasePolicy);
   if (input?.continuationToken != null) {
-    const continuation = normalizeManagedContinuation(input);
+    const continuation = normalizeManagedContinuation(input, { releasePolicy, requestAcceptedAtMs });
     const sandboxName = continuationSandboxName(projectBinding, continuation.continuationToken);
     let sandbox;
     try {
+      providerHostRemainingMs(continuation.providerDeadlineAt);
       sandbox = await sandboxApi.get({ name: sandboxName, resume: true });
+      providerHostRemainingMs(continuation.providerDeadlineAt);
       const requiredCapabilities = continuation.actions
         .filter((action) => action.type === 'requireCapability')
         .map((action) => action.value);
       const continuationActionMode = managedContinuationActionMode(continuation.actions);
       const claim = await sandbox.runCommand('node', [
         '-e', CLAIM_CONTINUATION_SCRIPT, digest(continuation.continuationToken), digest(projectBinding),
-        JSON.stringify(requiredCapabilities), continuationActionMode
-      ]);
+        JSON.stringify(requiredCapabilities), continuationActionMode,
+        ...(continuation.submissionAttempt ? [
+          digest(continuation.submissionAttempt.runId),
+          digest(continuation.submissionAttempt.claimId),
+          digest(continuation.submissionAttempt.executionId)
+        ] : ['', '', ''])
+      ], providerCommandOptions(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS));
       if (claim.exitCode === 8) {
         throw Object.assign(
           new Error('The retained browser runner does not support the requested continuation contract'),
@@ -15913,19 +16343,80 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
           { status: 409, code: 'CONTINUATION_V4_UPGRADE_FORBIDDEN' }
         );
       }
+      if (claim.exitCode === 11) {
+        throw Object.assign(
+          new Error('The retained browser session belongs to a different submission attempt'),
+          { status: 409, code: 'CONTINUATION_ATTEMPT_MISMATCH' }
+        );
+      }
       if (claim.exitCode !== 0) {
         throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
       }
+      providerHostRemainingMs(continuation.providerDeadlineAt);
       await sandbox.writeFiles([{ path: 'stratus-continuation-input.json', content: Buffer.from(JSON.stringify(continuation)) }]);
-      const produced = await waitForSandboxFile(sandbox, ['stratus-result-1.json', 'stratus-error.json'], CONTINUATION_TIMEOUT_MS, {
-        message: 'Managed browser continuation timed out', status: 410, code: 'CONTINUATION_EXPIRED'
-      });
-      if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
-      const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-1.json' });
-      if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a continuation result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
-      const result = JSON.parse(resultBuffer.toString('utf8'));
+      let produced;
+      try {
+        produced = await waitForSandboxFile(
+          sandbox,
+          ['stratus-result-1.json', 'stratus-error.json'],
+          providerWaitTimeoutMs(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS),
+          { message: 'Managed browser continuation timed out', status: 410, code: 'CONTINUATION_EXPIRED' },
+          continuation.providerDeadlineAt
+        );
+      } catch (error) {
+        throw await errorWithSandboxRunnerProgress(error, sandbox, continuation.submissionAttempt ?? null);
+      }
+      if (produced === 'stratus-error.json') {
+        await throwSandboxRunnerError(sandbox, continuation.submissionAttempt);
+      }
+      let resultBuffer;
+      try {
+        resultBuffer = await sandbox.readFileToBuffer(
+          { path: 'stratus-result-1.json' },
+          providerReadOptions(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS)
+        );
+      } catch (error) {
+        const resultError = Object.assign(
+          new Error(`Sandbox continuation result could not be read: ${error?.message || error}`),
+          { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+        );
+        throw await errorWithSandboxRunnerProgress(
+          resultError,
+          sandbox,
+          continuation.submissionAttempt ?? null
+        );
+      }
+      if (!resultBuffer) {
+        throw await errorWithSandboxRunnerProgress(
+          Object.assign(
+            new Error('Sandbox browser did not produce a continuation result'),
+            { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+          ),
+          sandbox,
+          continuation.submissionAttempt ?? null
+        );
+      }
+      let result;
+      try {
+        result = JSON.parse(resultBuffer.toString('utf8'));
+      } catch (error) {
+        throw await errorWithSandboxRunnerProgress(
+          Object.assign(
+            new Error(`Sandbox continuation result was invalid: ${error?.message || error}`),
+            { status: 502, code: 'SANDBOX_RESULT_INVALID' }
+          ),
+          sandbox,
+          continuation.submissionAttempt ?? null
+        );
+      }
+      assertSubmissionAttemptEcho(result, continuation.submissionAttempt ?? null);
       if (continuation.screenshot) {
-        const screenshot = await sandbox.readFileToBuffer({ path: 'stratus-screenshot-1.png' });
+        const screenshot = await readOptionalSandboxArtifact(
+          sandbox,
+          'stratus-screenshot-1.png',
+          continuation.providerDeadlineAt,
+          optionalArtifactTimeoutMs
+        );
         result.screenshot = screenshot?.toString('base64') || null;
       }
       return result;
@@ -15937,13 +16428,15 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
     }
   }
 
-  const context = await normalizeManagedRun(input, { urlValidator });
+  const context = await normalizeManagedRun(input, { urlValidator, releasePolicy, requestAcceptedAtMs });
   let sandbox;
   let keepAlive = false;
   try {
+    providerHostRemainingMs(context.providerDeadlineAt);
     const template = sandboxApi === Sandbox
       ? await ensureSandboxTemplate()
       : await sandboxApi.get({ name: SANDBOX_NAME, resume: false });
+    providerHostRemainingMs(context.providerDeadlineAt);
     const continuationToken = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
     /* THE MARKER'S OPENING DEADLINE, and it is a floor rather than the answer.
      *
@@ -15972,6 +16465,7 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
       persistent: false,
       networkPolicy: PUBLIC_EGRESS_NETWORK_POLICY
     });
+    providerHostRemainingMs(context.providerDeadlineAt);
     const files = [
       { path: 'stratus-runner.cjs', content: Buffer.from(SANDBOX_RUNNER) },
       { path: 'stratus-input.json', content: Buffer.from(JSON.stringify(context)) }
@@ -15981,6 +16475,11 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
       content: Buffer.from(JSON.stringify({
         tokenHash: digest(continuationToken),
         projectHash: digest(projectBinding),
+        ...(context.submissionAttempt ? {
+          submissionRunHash: digest(context.submissionAttempt.runId),
+          submissionClaimHash: digest(context.submissionAttempt.claimId),
+          submissionExecutionHash: digest(context.submissionAttempt.executionId)
+        } : {}),
         host: context.allowedHost,
         expiresAt: continuationExpiresAt,
         used: false,
@@ -15995,16 +16494,92 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
      * reached that boundary and the provider closed the stream before Stratus could inspect a
      * result or crash file. Both ordinary and continuation-capable runs now share the same bounded
      * terminal-file polling and the same typed timeout. */
-    await sandbox.runCommand({ cmd: 'node', args: ['stratus-runner.cjs'], detached: true });
-    const produced = await waitForSandboxFile(sandbox, ['stratus-result-0.json', 'stratus-error.json'], MANAGED_RUN_TIMEOUT_MS, {
-      message: 'Managed browser run timed out before it produced a result', status: 504, code: 'RUN_TIMED_OUT'
-    });
-    if (produced === 'stratus-error.json') await throwSandboxRunnerError(sandbox);
-    const resultBuffer = await sandbox.readFileToBuffer({ path: 'stratus-result-0.json' });
-    if (!resultBuffer) throw Object.assign(new Error('Sandbox browser did not produce a result'), { status: 502, code: 'SANDBOX_RESULT_MISSING' });
-    const result = JSON.parse(resultBuffer.toString('utf8'));
+    providerHostRemainingMs(context.providerDeadlineAt);
+    try {
+      await sandbox.runCommand({
+        cmd: 'node',
+        args: ['stratus-runner.cjs'],
+        detached: true,
+        ...providerCommandOptions(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS)
+      });
+    } catch (error) {
+      const providerError = Object.assign(
+        new Error(`Sandbox browser command failed before detaching: ${error?.message || error}`),
+        { status: 502, code: 'SANDBOX_RUN_FAILED' }
+      );
+      throw await errorWithSandboxRunnerProgress(
+        providerError,
+        sandbox,
+        context.submissionAttempt ?? null
+      );
+    }
+    let produced;
+    try {
+      produced = await waitForSandboxFile(
+        sandbox,
+        ['stratus-result-0.json', 'stratus-error.json'],
+        providerWaitTimeoutMs(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS),
+        {
+          message: 'Managed browser run timed out before it produced a result',
+          status: 504,
+          code: 'RUN_TIMED_OUT'
+        },
+        context.providerDeadlineAt
+      );
+    } catch (error) {
+      throw await errorWithSandboxRunnerProgress(error, sandbox, context.submissionAttempt ?? null);
+    }
+    if (produced === 'stratus-error.json') {
+      await throwSandboxRunnerError(sandbox, context.submissionAttempt);
+    }
+    let resultBuffer;
+    try {
+      resultBuffer = await sandbox.readFileToBuffer(
+        { path: 'stratus-result-0.json' },
+        providerReadOptions(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS)
+      );
+    } catch (error) {
+      const resultError = Object.assign(
+        new Error(`Sandbox browser result could not be read: ${error?.message || error}`),
+        { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+      );
+      throw await errorWithSandboxRunnerProgress(
+        resultError,
+        sandbox,
+        context.submissionAttempt ?? null
+      );
+    }
+    if (!resultBuffer) {
+      throw await errorWithSandboxRunnerProgress(
+        Object.assign(
+          new Error('Sandbox browser did not produce a result'),
+          { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+        ),
+        sandbox,
+        context.submissionAttempt ?? null
+      );
+    }
+    let result;
+    try {
+      result = JSON.parse(resultBuffer.toString('utf8'));
+    } catch (error) {
+      throw await errorWithSandboxRunnerProgress(
+        Object.assign(
+          new Error(`Sandbox browser result was invalid: ${error?.message || error}`),
+          { status: 502, code: 'SANDBOX_RESULT_INVALID' }
+        ),
+        sandbox,
+        context.submissionAttempt ?? null
+      );
+    }
+    assertSubmissionAttemptEcho(result, context.submissionAttempt ?? null);
     if (context.screenshot) {
-      const screenshot = await sandbox.readFileToBuffer({ path: 'stratus-screenshot-0.png' });
+      const screenshot = await readOptionalSandboxArtifact(
+        sandbox,
+        'stratus-screenshot-0.png',
+        context.providerDeadlineAt,
+        optionalArtifactTimeoutMs
+      );
       result.screenshot = screenshot?.toString('base64') || null;
     }
     if (continuationToken && continuationEligible(result, context.continuationCheckpoint)) {
@@ -16029,6 +16604,14 @@ export async function executeSandboxRun(input, { urlValidator = assertPublicUrl,
   }
 }
 
-export async function executeManagedRun(input, { urlValidator = assertPublicUrl, sandboxExecutor = executeSandboxRun, projectBinding = 'stratus-managed' } = {}) {
-  return sandboxExecutor(input, { urlValidator, projectBinding });
+export async function executeManagedRun(input, {
+  urlValidator = assertPublicUrl,
+  sandboxExecutor = executeSandboxRun,
+  projectBinding = 'stratus-managed',
+  releasePolicy = submissionReleasePolicy()
+} = {}) {
+  // This check precedes even a custom executor so a quiesced deployment cannot create a sandbox,
+  // resume a continuation, or invoke any other provider adapter through this public boundary.
+  assertSubmissionReleaseAllowed(input, releasePolicy);
+  return sandboxExecutor(input, { urlValidator, projectBinding, releasePolicy });
 }

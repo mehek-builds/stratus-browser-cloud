@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorize, privateErrorDiagnostic, sendError } from '../api/_http.js';
+import { managedHealthPayload } from '../api/health.js';
+import { managedRunProgressLogSummary } from '../api/run.js';
 
 function responseRecorder() {
   const output = { statusCode: 200, body: null };
@@ -101,6 +103,68 @@ test('managed crash responses expose only the validated bounded run progress', (
     message: 'Sandbox browser run failed',
     runProgress,
   });
+});
+
+test('managed progress logs omit employer text, evidence, and attempt identifiers', () => {
+  const summary = managedRunProgressLogSummary({
+    version: 1,
+    phase: 0,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'page_text',
+      evidence: 'mehek@example.com',
+      message: 'Application received for Mehek Mandal',
+      formStillPresent: false,
+    },
+    submissionAttempt: {
+      runId: '11111111-1111-4111-8111-111111111111',
+      claimId: '22222222-2222-4222-8222-222222222222',
+      executionId: '33333333-3333-4333-8333-333333333333',
+    },
+  });
+  assert.deepEqual(summary, {
+    version: 1,
+    phase: 0,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'page_text',
+      formStillPresent: false,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /Mehek|example\.com|11111111/);
+});
+
+test('public health reports the live submission release gates without exposing environment values', () => {
+  const defaultPolicy = managedHealthPayload({
+    STRATUS_API_KEY: 'secret-api-key',
+    VERCEL_GIT_COMMIT_SHA: 'commit-sha',
+  });
+  assert.equal(defaultPolicy.submissionQuiesced, false);
+  assert.equal(defaultPolicy.submissionCorrelationRequired, true);
+  assert.equal(defaultPolicy.authenticationMode, 'api-key-or-vercel-oidc');
+  assert.equal(defaultPolicy.commit, 'commit-sha');
+  assert.doesNotMatch(JSON.stringify(defaultPolicy), /secret-api-key/);
+
+  const rolloutPolicy = managedHealthPayload({
+    STRATUS_SUBMISSION_CORRELATION_MODE: 'compat',
+    STRATUS_SUBMISSION_QUIESCED: '1',
+  });
+  assert.equal(rolloutPolicy.submissionQuiesced, true);
+  assert.equal(rolloutPolicy.submissionCorrelationRequired, false);
 });
 
 test('private crash diagnostics redact applicant contact data and opaque tokens', () => {

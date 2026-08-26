@@ -12,6 +12,33 @@ Vercel hosts a stateless Stratus control plane while Vercel Sandbox runs each bo
 
 Production authentication uses Vercel OIDC automatically, so no external browser provider or token is required. Preview deployments are also closed by default. A dedicated integration preview may set `STRATUS_ALLOW_LITOS_DEVELOPMENT_OIDC=1`; that accepts only the exact `student-outreach-backend` development OIDC subject. The flag is ignored in production, where the production subject remains the only accepted OIDC identity. The browser execution system is owned by Stratus: it provisions the Chromium runtime, maintains the template snapshot, validates declarative actions, forks isolated workers, collects results, and destroys workers after every task. The managed UI calls `POST /api/run`. Set optional `STRATUS_API_KEY` to require an `X-Stratus-API-Key` header.
 
+## Submission release controls
+
+Two production environment variables control whether managed work may reach an employer submission
+boundary:
+
+- Set `STRATUS_SUBMISSION_CORRELATION_MODE=compat` only while an old caller must finish work without
+  an attempt identity. Set `STRATUS_SUBMISSION_CORRELATION_MODE=required` for normal operation. If
+  the variable is missing, Stratus defaults to `required`. Do not use another value.
+- Set `STRATUS_SUBMISSION_QUIESCED=1` to refuse managed work that can reach an employer boundary.
+  Leave it unset for live operation. Every non-`1` value is also live, so a mistyped value such as
+  `true`, `yes`, or `quiesce` does not stop submissions and must be treated as a failed release
+  change.
+
+An environment change takes effect only after a redeploy. After every release-control redeploy,
+fetch `https://stratus-browser-cloud.vercel.app/api/health` and require the exact source commit plus
+the flags for the intended state:
+
+| Intended state | Correlation value | Quiesce value | `submissionQuiesced` | `submissionCorrelationRequired` |
+|---|---|---|---:|---:|
+| Compatibility, live | `compat` | unset or non-`1` | `false` | `false` |
+| Compatibility, quiesced | `compat` | `1` | `true` | `false` |
+| Required, quiesced | `required` | `1` | `true` | `true` |
+| Required, live | `required` or missing | unset or non-`1` | `false` | `true` |
+
+Never accept a health response whose `commit` is `null`, empty, or different from the commit being
+released. A correct pair of flags on the wrong build is not release evidence.
+
 ```json
 {
   "url": "https://example.com",

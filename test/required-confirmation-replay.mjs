@@ -13,6 +13,15 @@ import {
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
+/* Production never hands the runner an input without this. normalizeProviderDeadline demands one
+ * under required correlation and synthesizes one under compat, and the result is then serialised
+ * unconditionally, unlike submissionAttempt beside it. These replays write the runner input by
+ * hand and skip that normalization, so they must supply what the host would have. A continuation
+ * gets a FRESH one because the runner re-applies it at the top of every phase, and phase zero's
+ * budget has already been partly spent by then. Same helper the author used in
+ * formless-submit-scope.test.js. */
+const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmation replay</title>
 <style>.select2-offscreen { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }</style>
@@ -541,6 +550,7 @@ const confirmedSubmitActions = [
 
 async function replay(suffix = '', actions = confirmedSubmitActions) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: `http://127.0.0.1:${server.address().port}/${suffix}`,
     actions,
     allowSubmit: true,
@@ -595,6 +605,7 @@ async function replayV4(suffix = '') {
 
 async function replayFailure(suffix) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: `http://127.0.0.1:${server.address().port}/${suffix}`,
     actions: [confirmedSubmitActions[0]],
     allowSubmit: true,

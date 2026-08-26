@@ -35,6 +35,15 @@ import {
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
+/* Production never hands the runner an input without this. normalizeProviderDeadline demands one
+ * under required correlation and synthesizes one under compat, and the result is then serialised
+ * unconditionally, unlike submissionAttempt beside it. These replays write the runner input by
+ * hand and skip that normalization, so they must supply what the host would have. A continuation
+ * gets a FRESH one because the runner re-applies it at the top of every phase, and phase zero's
+ * budget has already been partly spent by then. Same helper the author used in
+ * formless-submit-scope.test.js. */
+const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODE = 'TPHJrFMJ';
 
@@ -501,6 +510,7 @@ async function replay(actions, options = {}) {
   delete runOptions.pathSuffix;
   delete runOptions.origin;
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: origin + pathSuffix,
     actions,
     screenshot: false,
@@ -660,6 +670,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(continuationInput, { force: true });
   fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: `${base}?challenge=1`,
     actions: [
       { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
@@ -697,6 +708,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(first, '#submitted'), 'no');
   assert.equal(valueOf(first, '#filed'), 'no');
   fs.writeFileSync(continuationInput, JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
       { type: 'extract', selector: '#submitted' },
@@ -910,6 +922,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(readyPath, { force: true });
   fs.rmSync(errorPath, { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: applicationPageUrl,
     actions: [
       ...applicationCapabilityActions,
@@ -973,6 +986,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(v4NativeSubmissions, [], 'phase zero must not reach the verification endpoint');
 
   fs.writeFileSync(continuationInput, JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       ...challengeCapabilityActions,
       {
@@ -1052,6 +1066,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(readyPath, { force: true });
   fs.rmSync(errorPath, { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: expectedPageUrl,
     actions: [
       {
@@ -1108,6 +1123,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(v4NativeSubmissions, []);
 
   fs.writeFileSync(continuationInput, JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       {
         type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,

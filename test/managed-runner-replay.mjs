@@ -31,6 +31,15 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
+/* Production never hands the runner an input without this. normalizeProviderDeadline demands one
+ * under required correlation and synthesizes one under compat, and the result is then serialised
+ * unconditionally, unlike submissionAttempt beside it. These replays write the runner input by
+ * hand and skip that normalization, so they must supply what the host would have. A continuation
+ * gets a FRESH one because the runner re-applies it at the top of every phase, and phase zero's
+ * budget has already been partly spent by then. Same helper the author used in
+ * formless-submit-scope.test.js. */
+const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Late enough that the pre-check's snapshot cannot see it, which is the point: without a declared
 // wait this control is skipped. Sized on the live measurement that motivated the dropped grace:
@@ -797,6 +806,7 @@ fs.writeFileSync(path.join(workDir, 'stratus-runner.cjs'), SANDBOX_RUNNER);
 // which is the shape of a real prepare run.
 async function replay(actions, options = {}, expectFailure = false) {
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: base,
     actions,
     screenshot: false,
@@ -1577,6 +1587,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(path.join(workDir, 'stratus-continuation-input.json'), { force: true });
   fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: base,
     actions: [{ type: 'fill', selector: '#plain', value: 'one-phase', label: 'proof' }],
     screenshot: false,
@@ -1624,6 +1635,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(result1, { force: true });
   fs.rmSync(path.join(workDir, 'stratus-continuation-input.json'), { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: base,
     actions: [{ type: 'fill', selector: '#plain', value: 'same-page-proof', label: 'proof' }],
     screenshot: false,
@@ -1649,6 +1661,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   await waitForFile(result0);
   assert.equal(JSON.parse(fs.readFileSync(result0, 'utf8')).filledFields[0], 'proof');
   fs.writeFileSync(path.join(workDir, 'stratus-continuation-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [{ type: 'extract', selector: '#plain-echo' }],
     screenshot: false,
     fullPage: false
@@ -1676,6 +1689,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   fs.rmSync(continuationInput, { force: true });
   fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
     url: `${base}?receipt=ashby`,
     actions: [
       { type: 'fill', selector: '#delayed-receipt-email', value: 'routing@example.test', label: 'email' },
@@ -1716,7 +1730,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.ok(remainingMs > 10_000 && remainingMs <= 15_000,
     'receipt observation must use its own short lifetime, got ' + remainingMs + 'ms');
   await new Promise((resolve) => setTimeout(resolve, 1000));
-  fs.writeFileSync(continuationInput, JSON.stringify({ actions: [], screenshot: false, fullPage: false }));
+  fs.writeFileSync(continuationInput, JSON.stringify({ providerDeadlineAt: providerDeadlineAt(), actions: [], screenshot: false, fullPage: false }));
   await waitForFile(result1);
   const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
   assert.equal(second.submitOutcome.pressed, true, 'empty phase one retains the phase-zero click fact');
