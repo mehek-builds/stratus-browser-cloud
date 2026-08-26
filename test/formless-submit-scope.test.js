@@ -53,6 +53,14 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+const SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333'
+});
+
+const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
 const HELPERS = `
   document.querySelectorAll('form input, form textarea, form select').forEach(function (control) {
     if (!control.name && control.id) control.name = control.id;
@@ -3508,6 +3516,8 @@ function writeInput(fixture, extras, overrides, before = []) {
     url: `http://127.0.0.1:${server.address().port}${fixture}`,
     actions: [...before, submitAction, { type: 'extract', selector: '#submitted' }, ...extras],
     allowSubmit: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
@@ -3828,6 +3838,7 @@ async function runV4(
       ...extras
     ],
     allowSubmit: true,
+    providerDeadlineAt: providerDeadlineAt(),
     screenshot: true,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
@@ -3867,6 +3878,7 @@ async function runV3Prepare(fixture, actions) {
       ...actions
     ],
     allowSubmit: false,
+    providerDeadlineAt: providerDeadlineAt(),
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 }
@@ -6866,6 +6878,8 @@ test('a shadow scope from an earlier pass cannot break the next pass on a retain
   assert.equal(first.requiredFieldConfirmation.passes[0].scope.scopeKind, 'container');
   assert.deepEqual(clicks, ['shadow'], 'phase zero presses the control inside the shadow root');
   fs.writeFileSync(continuationInput, JSON.stringify({
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       { type: 'click', selector: '#mutate' },
       submitAction,

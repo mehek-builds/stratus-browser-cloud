@@ -22,10 +22,20 @@ import {
   normalizeManagedRun,
   PUBLIC_EGRESS_NETWORK_POLICY,
   resolvedManagedExactPageUrl,
+  submissionReleasePolicy,
+  STRATUS_SUBMISSION_CORRELATION_MODE_ENV,
+  STRATUS_SUBMISSION_QUIESCENCE_ENV,
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
 const CURRENT_SANDBOX_TEMPLATE = 'stratus-browser-runtime-pw-1-61-1-v4';
+const SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333',
+});
+
+const providerDeadlineAt = (offsetMs = 240_000) => new Date(Date.now() + offsetMs).toISOString();
 
 test('exact URL proof allows only Workable short-link canonicalization', () => {
   const expected = 'https://apply.workable.com/j/20e78cba92/apply?source=litos#apply';
@@ -258,6 +268,128 @@ test('managed run rejects an unsupported required capability during request norm
   );
 });
 
+test('every submit-capable run is bound to one durable backend attempt', async () => {
+  await assert.rejects(
+    normalizeManagedRun({ url: 'https://example.com/apply', allowSubmit: true }, {
+      urlValidator: async (value) => new URL(value),
+    }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      submissionAttempt: { runId: SUBMISSION_ATTEMPT.runId },
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_SUBMISSION_ATTEMPT',
+  );
+  const normalized = await normalizeManagedRun({
+    url: 'https://example.com/apply',
+    allowSubmit: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { urlValidator: async (value) => new URL(value) });
+  assert.deepEqual(normalized.submissionAttempt, SUBMISSION_ATTEMPT);
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      submissionAttempt: { ...SUBMISSION_ATTEMPT, executionId: 'not-a-uuid' },
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'INVALID_SUBMISSION_ATTEMPT',
+  );
+});
+
+test('continuations require the same durable attempt correlation', () => {
+  const token = 'a'.repeat(43);
+  assert.throws(
+    () => normalizeManagedContinuation({ continuationToken: token, actions: [] }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  const normalized = normalizeManagedContinuation({
+    continuationToken: token,
+    actions: [],
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  });
+  assert.deepEqual(normalized.submissionAttempt, SUBMISSION_ATTEMPT);
+  assert.match(SANDBOX_RUNNER, /Submission attempt correlation changed during continuation/);
+  assert.match(SANDBOX_RUNNER, /submissionAttempt/);
+});
+
+test('submission release policy defaults closed and exposes an explicit compat stage', async () => {
+  assert.equal(STRATUS_SUBMISSION_CORRELATION_MODE_ENV, 'STRATUS_SUBMISSION_CORRELATION_MODE');
+  assert.equal(STRATUS_SUBMISSION_QUIESCENCE_ENV, 'STRATUS_SUBMISSION_QUIESCED');
+  assert.deepEqual(submissionReleasePolicy({}), {
+    quiesced: false,
+    correlationRequired: true,
+  });
+  assert.deepEqual(submissionReleasePolicy({
+    [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'compat',
+  }), {
+    quiesced: false,
+    correlationRequired: false,
+  });
+  assert.throws(
+    () => submissionReleasePolicy({ [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'optional' }),
+    (error) => error.code === 'SUBMISSION_RELEASE_POLICY_INVALID' && error.status === 503,
+  );
+
+  const acceptedAt = Date.parse('2026-08-26T10:00:00.000Z');
+  const legacy = await normalizeManagedRun({
+    url: 'https://example.com/apply',
+    allowSubmit: true,
+  }, {
+    urlValidator: async (value) => new URL(value),
+    releasePolicy: submissionReleasePolicy({
+      [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'compat',
+    }),
+    requestAcceptedAtMs: acceptedAt,
+  });
+  assert.equal('submissionAttempt' in legacy, false);
+  assert.equal(legacy.providerDeadlineAt, '2026-08-26T10:04:00.000Z');
+
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+    }, { urlValidator: async (value) => new URL(value) }),
+    (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
+  );
+});
+
+test('submission quiescence rejects before every provider or continuation adapter call', async () => {
+  const releasePolicy = submissionReleasePolicy({
+    [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'compat',
+    [STRATUS_SUBMISSION_QUIESCENCE_ENV]: '1',
+  });
+  let providerCalls = 0;
+  let validatorCalls = 0;
+  const options = {
+    releasePolicy,
+    urlValidator: async (value) => {
+      validatorCalls += 1;
+      return new URL(value);
+    },
+    sandboxExecutor: async () => {
+      providerCalls += 1;
+      return {};
+    },
+  };
+  for (const request of [
+    { url: 'https://example.com/apply', allowSubmit: true },
+    { continuationToken: 'q'.repeat(43), actions: [] },
+  ]) {
+    await assert.rejects(
+      executeManagedRun(request, options),
+      (error) => error.code === 'SUBMISSION_QUIESCED' && error.status === 503,
+    );
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal(validatorCalls, 0);
+});
+
 test('managed actions accept reviewed questions and bounded resume uploads', () => {
   assert.deepEqual(normalizeManagedActions([
     { type: 'fillByLabelText', text: 'Why this role?', value: 'I enjoy platform engineering.', label: 'question:Why this role?' },
@@ -386,12 +518,17 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     maxContinuations: 1
   });
   const token = 'a'.repeat(43);
+  const deadline = providerDeadlineAt();
   assert.deepEqual(normalizeManagedContinuation({
     continuationToken: token,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: deadline,
     actions: [{ type: 'click', selector: '#continue' }],
     screenshot: false
   }), {
     continuationToken: token,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: deadline,
     actions: [{ type: 'click', selector: '#continue' }],
     screenshot: false,
     fullPage: false
@@ -429,7 +566,10 @@ test('receipt-observation continuation rejects a second application submit', () 
     },
   ];
   assert.throws(
-    () => normalizeManagedContinuation({ continuationToken: 'r'.repeat(43), actions }),
+    () => normalizeManagedContinuation({
+      continuationToken: 'r'.repeat(43), submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(), actions,
+    }),
     (error) => error.code === 'CONTINUATION_ACTION_FORBIDDEN',
   );
 });
@@ -446,7 +586,13 @@ test('sandbox continuation is project-bound and single-use without exposing a se
     async writeFiles(files) {
       for (const file of files) this.files.set(file.path, Buffer.from(file.content));
       if (this.files.has('stratus-continuation-input.json')) {
-        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify({ title: 'Application received', url: 'https://example.com/thanks', text: 'received' })));
+        const continuation = JSON.parse(this.files.get('stratus-continuation-input.json').toString('utf8'));
+        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+          title: 'Application received',
+          url: 'https://example.com/thanks',
+          text: 'received',
+          submissionAttempt: continuation.submissionAttempt,
+        })));
       }
     }
     async runCommand(command, args) {
@@ -456,7 +602,8 @@ test('sandbox continuation is project-bound and single-use without exposing a se
           title: 'Continue',
           url: input.url,
           text: 'Check your inbox',
-          humanVerification: { kind: 'security_code', fieldCount: 8, sentTo: 'applicant@example.com' }
+          humanVerification: { kind: 'security_code', fieldCount: 8, sentTo: 'applicant@example.com' },
+          submissionAttempt: input.submissionAttempt,
         })));
         if (input.requestContinuation) this.files.set('stratus-continuation-ready.json', Buffer.from('{}'));
         return { exitCode: null };
@@ -492,21 +639,32 @@ test('sandbox continuation is project-bound and single-use without exposing a se
   };
   const urlValidator = async (value) => new URL(value);
   const first = await executeSandboxRun({
-    url: 'https://example.com/apply', actions: [], requestContinuation: true
+    url: 'https://example.com/apply', actions: [], requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
   }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
   assert.match(first.continuationToken, /^[A-Za-z0-9_-]+$/);
   assert.ok(first.continuationExpiresAt);
   assert.equal('sessionId' in first, false);
   const second = await executeSandboxRun({
-    continuationToken: first.continuationToken, actions: [{ type: 'click', selector: '#continue' }]
+    continuationToken: first.continuationToken,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+    actions: [{ type: 'click', selector: '#continue' }]
   }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
   assert.equal(second.title, 'Application received');
   await assert.rejects(
-    executeSandboxRun({ continuationToken: first.continuationToken, actions: [] }, { sandboxApi, urlValidator, projectBinding: 'project-a' }),
+    executeSandboxRun({
+      continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(), actions: [],
+    }, { sandboxApi, urlValidator, projectBinding: 'project-a' }),
     (error) => error.code === 'CONTINUATION_REJECTED'
   );
   await assert.rejects(
-    executeSandboxRun({ continuationToken: first.continuationToken, actions: [] }, { sandboxApi, urlValidator, projectBinding: 'project-b' }),
+    executeSandboxRun({
+      continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(), actions: [],
+    }, { sandboxApi, urlValidator, projectBinding: 'project-b' }),
     (error) => error.code === 'CONTINUATION_REJECTED'
   );
 });
@@ -564,7 +722,11 @@ test('v4 continuation refuses an incompatible retained runner before writing con
           if (file.path === 'stratus-continuation-input.json') continuationWrites += 1;
         }
         if (files.has('stratus-continuation-input.json')) {
-          files.set('stratus-result-1.json', Buffer.from(JSON.stringify({ title: 'Compatible continuation' })));
+          const continuation = JSON.parse(files.get('stratus-continuation-input.json').toString('utf8'));
+          files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+            title: 'Compatible continuation',
+            submissionAttempt: continuation.submissionAttempt,
+          })));
         }
       },
       async readFileToBuffer({ path: filePath }) { return files.get(filePath) || null; },
@@ -578,6 +740,8 @@ test('v4 continuation refuses an incompatible retained runner before writing con
   };
   const v4Input = {
     continuationToken: 'v'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [exactCapability, v4Capability, submit],
     screenshot: false,
   };
@@ -611,6 +775,8 @@ test('v4 continuation refuses an incompatible retained runner before writing con
   const v3Fake = harness(null);
   const v3Result = await executeSandboxRun({
     continuationToken: 'w'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [exactCapability, { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V3 }],
     screenshot: false,
   }, {
@@ -640,6 +806,9 @@ test('the continuation claim script allows one concurrent winner and rejects wro
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-claim-'));
   const tokenHash = digest('receipt-observation-token');
   const projectHash = digest('project-a');
+  const submissionRunHash = digest(SUBMISSION_ATTEMPT.runId);
+  const submissionClaimHash = digest(SUBMISSION_ATTEMPT.claimId);
+  const submissionExecutionHash = digest(SUBMISSION_ATTEMPT.executionId);
   const markerPath = path.join(workDir, 'stratus-continuation.json');
   const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
   const usedPath = path.join(workDir, 'stratus-continuation-used.json');
@@ -648,13 +817,20 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     fs.rmSync(usedPath, { force: true });
     fs.writeFileSync(markerPath, JSON.stringify({
       tokenHash, projectHash, expiresAt, used: false,
+      submissionRunHash, submissionClaimHash, submissionExecutionHash,
       ...(continuationPolicy ? { continuationPolicy } : {}),
     }));
     fs.writeFileSync(readyPath, '{}');
   };
-  const claim = (claimedProjectHash = projectHash, requiredCapabilities = [], actionMode = 'mutation') => new Promise((resolve) => {
+  const claim = (
+    claimedProjectHash = projectHash,
+    requiredCapabilities = [],
+    actionMode = 'mutation',
+    claimedExecutionHash = submissionExecutionHash,
+  ) => new Promise((resolve) => {
     const child = spawn(process.execPath, [
       '-e', CLAIM_CONTINUATION_SCRIPT, tokenHash, claimedProjectHash, JSON.stringify(requiredCapabilities), actionMode,
+      submissionRunHash, submissionClaimHash, claimedExecutionHash,
     ], {
       cwd: workDir,
       stdio: 'ignore',
@@ -664,6 +840,11 @@ test('the continuation claim script allows one concurrent winner and rejects wro
 
   writeMarker(new Date(Date.now() + 15_000).toISOString());
   assert.equal(await claim(digest('project-b')), 5, 'a token from another project must not be consumed');
+  assert.equal(fs.existsSync(markerPath), true);
+
+  writeMarker(new Date(Date.now() + 15_000).toISOString());
+  assert.equal(await claim(projectHash, [], 'mutation', digest('different-execution')), 11,
+    'a continuation from another execution must not be consumed');
   assert.equal(fs.existsSync(markerPath), true);
 
   writeMarker(new Date(Date.now() - 1).toISOString());
@@ -1817,6 +1998,8 @@ test('exact employer page URL capability is required before actions and at the a
   ]).length, 121, 'capability declarations do not consume the browser-action budget');
   const verification = normalizeManagedContinuation({
     continuationToken: 'a'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
       { ...submit, submitKind: 'verification' },
@@ -1895,6 +2078,8 @@ test('exact employer page URL capability is required before actions and at the a
   assert.equal(v4Run.actions[2].chooserPolicy.version, 4);
   const v4Continuation = normalizeManagedContinuation({
     continuationToken: 'c'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
     actions: [
       exactV4Capability,
       atomicV4Capability,
@@ -1944,6 +2129,8 @@ test('exact employer page URL capability is required before actions and at the a
   assert.throws(
     () => normalizeManagedContinuation({
       continuationToken: 'b'.repeat(43),
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
       actions: [v4Submit],
     }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
@@ -2675,9 +2862,14 @@ function silentSandboxApi({
   progress = null,
   terminalAfterPolls = 0,
   maxSdkStreamMs = Infinity,
+  resultSubmissionAttempt = null,
+  progressSubmissionAttempt = null,
+  resultReadError = null,
+  screenshotStall = false,
 } = {}) {
   const template = { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
   const calls = [];
+  const runnerCalls = [];
   const forkCalls = [];
   class Fake {
     constructor(name) {
@@ -2687,15 +2879,26 @@ function silentSandboxApi({
       this.polls = 0;
     }
     materializeTerminal() {
+      const inputBuffer = this.files.get('stratus-input.json');
+      const input = inputBuffer ? JSON.parse(inputBuffer.toString('utf8')) : {};
       if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
-      if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify(progress)));
-      if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(result)));
+      if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify({
+        ...progress,
+        ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
+        ...(progressSubmissionAttempt ? { submissionAttempt: progressSubmissionAttempt } : {}),
+      })));
+      if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify({
+        ...result,
+        ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
+        ...(resultSubmissionAttempt ? { submissionAttempt: resultSubmissionAttempt } : {}),
+      })));
     }
     async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
     async runCommand(command, args, options) {
       const startsRunner = typeof command === 'object'
         || (command === 'node' && args?.[0] === 'stratus-runner.cjs');
       if (startsRunner) {
+        if (typeof command === 'object') runnerCalls.push(command);
         if (terminalAfterPolls === 0) this.materializeTerminal();
         return typeof command === 'object'
           ? { exitCode: null }
@@ -2708,16 +2911,35 @@ function silentSandboxApi({
       const wanted = args.slice(3);
       this.polls += 1;
       if (this.polls > terminalAfterPolls) this.materializeTerminal();
-      calls.push({ timeoutMs, commandTimeoutMs: Number(options?.timeoutMs), wanted });
+      calls.push({
+        timeoutMs,
+        commandTimeoutMs: Number(options?.timeoutMs),
+        signal: options?.signal,
+        wanted
+      });
       const found = wanted.find((path) => this.files.has(path));
       return found ? { exitCode: 0, stdout: async () => found } : { exitCode: 3, stdout: async () => '' };
     }
-    async readFileToBuffer({ path }) { return this.files.get(path) || null; }
+    async readFileToBuffer({ path }, options = {}) {
+      if (path === 'stratus-result-0.json' && resultReadError) throw resultReadError;
+      if (path === 'stratus-screenshot-0.png' && screenshotStall) {
+        return new Promise((resolve, reject) => {
+          const signal = options.signal;
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      return this.files.get(path) || null;
+    }
     async stop() { this.stopped = true; }
   }
   const sandboxes = [];
   return {
     calls,
+    runnerCalls,
     forkCalls,
     sandboxes,
     api: {
@@ -2747,7 +2969,9 @@ test('the public-only policy is installed on the sandbox fork before Chromium st
   await executeSandboxRun({
     url: 'https://example.com/apply',
     actions: [],
-    requestContinuation: true
+    requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
   }, { sandboxApi: fake.api, urlValidator: urlOnly });
 
   assert.equal(fake.forkCalls.length, 1);
@@ -2755,10 +2979,74 @@ test('the public-only policy is installed on the sandbox fork before Chromium st
   assert.notEqual(fake.forkCalls[0].networkPolicy, 'allow-all');
 });
 
+test('setup delay consumes the original provider deadline and prevents sandbox launch', async () => {
+  const realNow = Date.now;
+  let now = Date.parse('2026-08-26T12:00:00.000Z');
+  let getCalls = 0;
+  let forkCalls = 0;
+  Date.now = () => now;
+  try {
+    await assert.rejects(
+      executeSandboxRun({
+        url: 'https://example.com/apply',
+        actions: [],
+        allowSubmit: true,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+        providerDeadlineAt: new Date(now + 13_000).toISOString(),
+      }, {
+        requestAcceptedAtMs: now,
+        urlValidator: urlOnly,
+        sandboxApi: {
+          async get() {
+            getCalls += 1;
+            now += 12_000;
+            return { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
+          },
+          async fork() {
+            forkCalls += 1;
+            throw new Error('must not fork after the deadline window closes');
+          },
+        },
+      }),
+      (error) => error.code === 'PROVIDER_DEADLINE_EXPIRED' && error.status === 408,
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(getCalls, 1);
+  assert.equal(forkCalls, 0);
+});
+
+test('blocking sandbox commands are provider-killed before the absolute response deadline', async () => {
+  const fake = silentSandboxApi({ result: { title: 'Application ready' } });
+  const deadline = providerDeadlineAt(20_000);
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+    allowSubmit: true,
+    screenshot: false,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: deadline,
+  }, {
+    urlValidator: urlOnly,
+    sandboxApi: fake.api,
+  });
+  const commandOptions = fake.runnerCalls[0];
+  assert.equal(result.title, 'Application ready');
+  assert.ok(commandOptions.timeoutMs > 0 && commandOptions.timeoutMs <= 18_000);
+  assert.equal(typeof commandOptions.signal?.addEventListener, 'function');
+  assert.ok(fake.calls[0].commandTimeoutMs > 0 && fake.calls[0].commandTimeoutMs <= 7_000);
+  assert.equal(typeof fake.calls[0].signal?.addEventListener, 'function');
+});
+
 test('a submit run that produces nothing is a RUN timeout, on the run\'s own budget', async () => {
   const fake = silentSandboxApi({ maxSdkStreamMs: 7_000 });
   await assert.rejects(
-    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true },
+    executeSandboxRun({
+      url: 'https://example.com/apply', actions: [], allowSubmit: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(250_000),
+    },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
     (error) => {
       // Not CONTINUATION_EXPIRED. The applicant was told her application had hit a continuation
@@ -2780,6 +3068,9 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
   assert.ok(fake.calls.every((call) => (
     JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-0.json', 'stratus-error.json'])
   )));
+  assert.equal(fake.runnerCalls[0].detached, true);
+  assert.equal(fake.runnerCalls[0].timeoutMs, 240_000);
+  assert.equal(typeof fake.runnerCalls[0].signal?.addEventListener, 'function');
 });
 
 test('sandbox lifetime leaves cleanup grace even when no continuation was requested', async () => {
@@ -2851,7 +3142,12 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
     async runCommand(command, args, options) {
       if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) return { exitCode: 0 };
       const timeoutMs = Number(args[2]);
-      calls.push({ timeoutMs, commandTimeoutMs: Number(options?.timeoutMs), wanted: args.slice(3) });
+      calls.push({
+        timeoutMs,
+        commandTimeoutMs: Number(options?.timeoutMs),
+        signal: options?.signal,
+        wanted: args.slice(3)
+      });
       return { exitCode: 3, stdout: async () => '' };
     },
     async writeFiles() {},
@@ -2860,7 +3156,12 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
   };
 
   await assert.rejects(
-    executeSandboxRun({ continuationToken: 'c'.repeat(43), actions: [] }, {
+    executeSandboxRun({
+      continuationToken: 'c'.repeat(43),
+      actions: [],
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(70_000),
+    }, {
       sandboxApi: { async get() { return sandbox; } },
       projectBinding: 'continuation-timeout',
     }),
@@ -2874,10 +3175,140 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
   assert.equal(calls.reduce((total, call) => total + call.timeoutMs, 0), 60_000);
   assert.ok(calls.length > 1);
   assert.ok(calls.every((call) => call.timeoutMs <= 5_000 && call.commandTimeoutMs <= 7_000));
+  assert.ok(calls.every((call) => typeof call.signal?.addEventListener === 'function'));
   assert.ok(calls.every((call) => (
     JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-1.json', 'stratus-error.json'])
   )));
   assert.equal(stopped, true);
+});
+
+test('a response timeout returns correlated press progress instead of exposing a blind retry', async () => {
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'submit_released',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  const fake = silentSandboxApi({ progress });
+  await assert.rejects(
+    executeSandboxRun({
+      url: 'https://example.com/apply',
+      actions: [],
+      allowSubmit: true,
+      requestContinuation: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
+    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => {
+      assert.equal(error.code, 'RUN_TIMED_OUT');
+      assert.deepEqual(error.runProgress, {
+        ...progress,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+      });
+      return true;
+    },
+  );
+});
+
+test('confirmation progress survives a lost result response and is written before screenshot work', async () => {
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+  };
+  const fake = silentSandboxApi({
+    progress,
+    result: {
+      title: 'Application received',
+      submitOutcome: { pressed: true, state: 'confirmed' },
+      continuationOffered: false,
+    },
+    resultReadError: new Error('provider response stream reset'),
+  });
+  await assert.rejects(
+    executeSandboxRun({
+      url: 'https://example.com/apply',
+      actions: [],
+      allowSubmit: true,
+      requestContinuation: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
+    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => {
+      assert.equal(error.code, 'SANDBOX_RESULT_MISSING');
+      assert.deepEqual(error.runProgress, {
+        ...progress,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+      });
+      return true;
+    },
+  );
+  const progressIndex = SANDBOX_RUNNER.indexOf("stage: 'result_ready'");
+  const screenshotIndex = SANDBOX_RUNNER.indexOf('if (currentInput.screenshot)', progressIndex);
+  assert.ok(progressIndex >= 0 && screenshotIndex > progressIndex);
+});
+
+test('a stalled optional screenshot cannot hide a confirmed provider result', async () => {
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+  };
+  const fake = silentSandboxApi({
+    progress,
+    result: {
+      title: 'Application received',
+      submitOutcome: { pressed: true, state: 'confirmed' },
+      continuationOffered: false,
+    },
+    screenshotStall: true,
+  });
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+    allowSubmit: true,
+    requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, {
+    sandboxApi: fake.api,
+    urlValidator: urlOnly,
+    optionalArtifactTimeoutMs: 5,
+  });
+  assert.equal(result.submitOutcome.state, 'confirmed');
+  assert.equal(result.screenshot, null);
 });
 
 test('a detached runner that crashes reports the crash, not a timeout', async () => {
@@ -2890,6 +3321,7 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
     verificationSubmitPressed: false,
     submitKind: 'application',
     policyVersion: 4,
+    submissionAttempt: SUBMISSION_ATTEMPT,
   };
   const fake = silentSandboxApi({
     crash: 'page.goto: net::ERR_CONNECTION_REFUSED',
@@ -2897,7 +3329,11 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
     terminalAfterPolls: 2,
   });
   await assert.rejects(
-    executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true },
+    executeSandboxRun({
+      url: 'https://example.com/apply', actions: [], allowSubmit: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
+    },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
     (error) => {
       // Detaching the run took stderr away from the caller, so every crash arrived as "the run took
@@ -2909,6 +3345,64 @@ test('a detached runner that crashes reports the crash, not a timeout', async ()
     }
   );
   assert.equal(fake.calls.length, 3, 'a crash written between chunks must end the wait immediately');
+});
+
+test('a stale sandbox result cannot cross into a newer execution', async () => {
+  const fake = silentSandboxApi({
+    result: {
+      title: 'Application',
+      url: 'https://example.com/apply',
+      text: 'Ready',
+      humanVerification: null,
+      continuationOffered: false,
+    },
+    resultSubmissionAttempt: {
+      ...SUBMISSION_ATTEMPT,
+      executionId: '44444444-4444-4444-8444-444444444444',
+    },
+  });
+  await assert.rejects(
+    executeSandboxRun({
+      url: 'https://example.com/apply',
+      actions: [],
+      allowSubmit: true,
+      requestContinuation: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
+    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_MISMATCH',
+  );
+});
+
+test('mismatched crash progress is never returned as retryable evidence', async () => {
+  const fake = silentSandboxApi({
+    crash: 'page crashed',
+    progress: {
+      version: 1,
+      phase: 0,
+      stage: 'phase_started',
+      submitPressed: false,
+      applicationSubmitPressed: false,
+      verificationSubmitPressed: false,
+      submitKind: 'application',
+      policyVersion: 4,
+    },
+    progressSubmissionAttempt: {
+      ...SUBMISSION_ATTEMPT,
+      executionId: '44444444-4444-4444-8444-444444444444',
+    },
+  });
+  await assert.rejects(
+    executeSandboxRun({
+      url: 'https://example.com/apply',
+      actions: [],
+      allowSubmit: true,
+      requestContinuation: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      providerDeadlineAt: providerDeadlineAt(),
+    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+    (error) => error.code === 'SANDBOX_RUN_FAILED' && !('runProgress' in error),
+  );
 });
 
 test('malformed crash progress is not returned as submit evidence', async () => {
@@ -2928,7 +3422,11 @@ test('malformed crash progress is not returned as submit evidence', async () => 
   });
   await assert.rejects(
     executeSandboxRun(
-      { url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+      {
+        url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+        providerDeadlineAt: providerDeadlineAt(),
+      },
       { sandboxApi: fake.api, urlValidator: urlOnly },
     ),
     (error) => {
@@ -2939,12 +3437,289 @@ test('malformed crash progress is not returned as submit evidence', async () => 
   );
 });
 
+test('contradictory crash progress is discarded at the Stratus boundary', async () => {
+  const exactNotAttempted = {
+    kind: 'not_attempted',
+    state: 'not_attempted',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: null,
+  };
+  const confirmed = {
+    kind: 'confirmed',
+    state: 'confirmed',
+    source: 'ats_state',
+    evidence: '.application-success',
+    message: 'Application received',
+    formStillPresent: false,
+  };
+  const pressedUnknown = {
+    kind: 'pressed',
+    state: 'unknown',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: true,
+  };
+  const base = {
+    version: 1,
+    phase: 0,
+    stage: 'submit_blocked',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  const cases = [
+    {
+      name: 'confirmation paired with a blocked no-press checkpoint',
+      progress: { ...base, employerOutcome: confirmed, requiredFieldConfirmationStatus: 'confirmed' },
+    },
+    {
+      name: 'confirmed required fields paired with no physical press',
+      progress: { ...base, requiredFieldConfirmationStatus: 'confirmed' },
+    },
+    {
+      name: 'confirmed employer outcome paired with blocked required fields',
+      progress: {
+        ...base,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        employerOutcome: confirmed,
+        requiredFieldConfirmationStatus: 'blocked',
+      },
+    },
+    {
+      name: 'pressed outcome paired with no aggregate or per-kind press',
+      progress: { ...base, employerOutcome: pressedUnknown },
+    },
+    {
+      name: 'aggregate no-press paired with an application press',
+      progress: {
+        ...base,
+        stage: 'submit_released',
+        applicationSubmitPressed: true,
+        employerOutcome: pressedUnknown,
+      },
+    },
+    {
+      name: 'physical press paired with no submit kind',
+      progress: {
+        ...base,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        submitKind: null,
+      },
+    },
+    {
+      name: 'activation stage paired with the current-kind press already set',
+      progress: {
+        ...base,
+        stage: 'submit_activation_started',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+      },
+    },
+    {
+      name: 'released stage paired with no current-kind press',
+      progress: { ...base, stage: 'submit_released', employerOutcome: exactNotAttempted },
+    },
+    {
+      name: 'phase zero paired with a verification submit',
+      progress: { ...base, submitKind: 'verification', employerOutcome: exactNotAttempted },
+    },
+    {
+      name: 'accepted security code paired with no verification press',
+      progress: {
+        ...base,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        submitKind: 'verification',
+        employerOutcome: pressedUnknown,
+        securityCodeOutcome: 'accepted',
+      },
+    },
+    {
+      name: 'no-control security code paired with a verification press',
+      progress: {
+        ...base,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        employerOutcome: pressedUnknown,
+        securityCodeOutcome: 'no_control',
+      },
+    },
+    {
+      name: 'accepted security code paired with a rejected employer outcome',
+      progress: {
+        ...base,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        employerOutcome: {
+          kind: 'pressed',
+          state: 'rejected',
+          source: 'client_validation',
+          evidence: 'Code rejected',
+          message: 'Code rejected',
+          formStillPresent: true,
+        },
+        securityCodeOutcome: 'accepted',
+      },
+    },
+    {
+      name: 'not-attempted outcome carrying employer evidence',
+      progress: {
+        ...base,
+        employerOutcome: { ...exactNotAttempted, source: 'page_text', evidence: 'Not sent' },
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    const fake = silentSandboxApi({ crash: 'page crashed', progress: entry.progress });
+    await assert.rejects(
+      executeSandboxRun({
+        url: 'https://example.com/apply',
+        actions: [],
+        allowSubmit: true,
+        requestContinuation: true,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+        providerDeadlineAt: providerDeadlineAt(),
+      }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+      (error) => {
+        assert.equal(error.code, 'SANDBOX_RUN_FAILED', entry.name);
+        assert.equal('runProgress' in error, false, entry.name);
+        return true;
+      },
+    );
+  }
+});
+
+test('consistent pre-submit and confirmation progress remains available', async () => {
+  const exactNotAttempted = {
+    kind: 'not_attempted',
+    state: 'not_attempted',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: null,
+  };
+  const confirmed = {
+    kind: 'confirmed',
+    state: 'confirmed',
+    source: 'ats_route',
+    evidence: '/complete',
+    message: 'Application received',
+    formStillPresent: false,
+  };
+  const cases = [
+    {
+      name: 'canonical not-attempted pre-submit checkpoint',
+      progress: {
+        version: 1,
+        phase: 0,
+        stage: 'submit_blocked',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: 4,
+        employerOutcome: exactNotAttempted,
+      },
+    },
+    {
+      name: 'application confirmation checkpoint',
+      progress: {
+        version: 1,
+        phase: 0,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: 4,
+        employerOutcome: confirmed,
+        requiredFieldConfirmationStatus: 'confirmed',
+      },
+    },
+    {
+      name: 'verification confirmation checkpoint',
+      progress: {
+        version: 1,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        policyVersion: 4,
+        employerOutcome: confirmed,
+        requiredFieldConfirmationStatus: 'confirmed',
+        securityCodeOutcome: 'accepted',
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    const fake = silentSandboxApi({ crash: 'page crashed', progress: entry.progress });
+    await assert.rejects(
+      executeSandboxRun({
+        url: 'https://example.com/apply',
+        actions: [],
+        allowSubmit: true,
+        requestContinuation: true,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+        providerDeadlineAt: providerDeadlineAt(),
+      }, { sandboxApi: fake.api, urlValidator: urlOnly }),
+      (error) => {
+        assert.equal(error.code, 'SANDBOX_RUN_FAILED', entry.name);
+        assert.deepEqual(error.runProgress, {
+          ...entry.progress,
+          submissionAttempt: SUBMISSION_ATTEMPT,
+        }, entry.name);
+        return true;
+      },
+    );
+  }
+});
+
 test('the runner checkpoints only bounded submit progress around activation and result writes', () => {
   assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
   assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
   assert.match(SANDBOX_RUNNER, /finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*applicationSubmitPressed: true/);
   assert.match(SANDBOX_RUNNER, /fs\.writeFileSync\('stratus-result-' \+ phase[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}\)/);
   assert.doesNotMatch(SANDBOX_RUNNER, /recordCrashProgress\([^)]*(?:value|text|file|email|phone|name):/i);
+});
+
+test('one provider deadline governs launch, continuation, and every physical submit', () => {
+  assert.ok(
+    SANDBOX_RUNNER.indexOf('applyProviderDeadline(input.providerDeadlineAt)')
+      < SANDBOX_RUNNER.indexOf('browser = await chromium.launch'),
+  );
+  assert.match(SANDBOX_RUNNER, /providerActionDeadlineMs = deadlineMs - providerResponseMarginMs/);
+  assert.match(SANDBOX_RUNNER, /providerDeadlineExpired = true;\n\s*if \(browser\) void browser\.close/);
+  assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
+  assert.match(
+    SANDBOX_RUNNER,
+    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+  );
+  assert.match(
+    SANDBOX_RUNNER,
+    /if \(action\.securityCode && isFinalSubmitAction\(action\)\)[\s\S]*assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*await locator\.click/,
+  );
 });
 
 test('the runner decides whether a continuation is held open, not the caller\'s text sweep', async () => {
@@ -2960,7 +3735,11 @@ test('the runner decides whether a continuation is held open, not the caller\'s 
       submitOutcome: { pressed: true, state: 'confirmed', source: 'ats_state', evidence: '.ashby-application-form-success-container' }
     }
   });
-  const result = await executeSandboxRun({ url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true },
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply', actions: [], allowSubmit: true, requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  },
     { sandboxApi: fake.api, urlValidator: urlOnly });
   assert.equal('continuationToken' in result, false, 'no challenge means no continuation to offer');
   assert.equal(fake.sandboxes[0].stopped, true, 'and the sandbox is released rather than left idling');
