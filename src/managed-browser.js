@@ -8820,6 +8820,26 @@ const { chromium } = require('playwright');
           if (!heading || heading.querySelector('input, textarea, select')) return '';
           return renderedText(heading);
         })();
+        /* A LEVER CARD QUESTION IS HEADED BY A DIV - div.application-label inside
+         * li.application-question - and no other candidate here can reach it for a native select,
+         * input or textarea. Measured on the live jobs.lever.co Mytos form, 2026-08-28
+         * (application 55de7c9e): the education card's degree-classification select carried
+         * nothing but name="cards[<uuid>][field5]", every candidate came back empty, and this gate
+         * told the applicant "A required field on the form has no label Litos can read, and is
+         * still empty" about a question that was on the screen. Same shape rules as
+         * groupedChoiceQuestion above, and as the atomic required scan's copy of this same arm:
+         * one control in the card, a heading that holds no control, or nothing. */
+        const leverCardQuestion = (() => {
+          if (!element || !element.closest) return '';
+          const container = element.closest('li.application-question');
+          if (!container) return '';
+          if (container.querySelectorAll(
+            'input:not([type="hidden"]), textarea, select, [role="combobox"]'
+          ).length !== 1) return '';
+          const heading = container.querySelector('.application-label');
+          if (!heading || heading.querySelector('input, textarea, select')) return '';
+          return renderedText(heading);
+        })();
         /* A COMBOBOX THAT SAYS ONLY WHAT IT IS, NEVER WHAT IT ASKS - the gate's copy of the rule
          * discovery already applies, so the blocker line and the question say the same words.
          * Measured on the live ats.rippling.com Easy Dynamics form, 2026-08-20: the required
@@ -8881,6 +8901,7 @@ const { chromium } = require('playwright');
         for (const candidate of [
           renderedText(referenced),
           groupedChoiceQuestion,
+          leverCardQuestion,
           renderedText(byFor),
           wrappingLabelTextOf(element),
           renderedText(proxyReferenced),
@@ -11183,9 +11204,39 @@ const { chromium } = require('playwright');
             if (!heading || heading.querySelector('input, textarea, select')) return '';
             return renderedText(heading);
           })();
+          /* A LEVER CARD QUESTION IS HEADED BY A DIV, and no candidate below can reach it.
+           *
+           * Measured on the live jobs.lever.co Mytos form, 2026-08-28 (application 55de7c9e,
+           * submission run a274b5c0): the education card renders "What was your degree
+           * classification?" as '<li class="application-question custom-question">' holding a
+           * div.application-label heading and one native '<select name="cards[<uuid>][field5]"
+           * required>' with no id, no aria, no <label> anywhere. Every candidate below came back
+           * empty, so the one unanswerable required select on that form was reported to the
+           * applicant twice, and namelessly: once as its naked name selector by this scan, once as
+           * "A required field on the form has no label Litos can read" by readSubmitReadiness. The
+           * question was on the screen the whole time. PR #116's fixture pinned this exact heading
+           * shape for DISCOVERY's questionLabel; this copy and readSubmitReadiness's were left
+           * behind, which is how the discovered question and the blocker disagreed about one field.
+           *
+           * Same shape rules as groupedChoiceQuestion above: the heading must hold no control of
+           * its own, and the card question must hold exactly ONE control - a card holding several
+           * (the Select2 university picker renders its backing select plus a span[role=combobox])
+           * keeps its existing naming paths, because a heading over two controls speaks for
+           * neither. */
+          const leverCardQuestion = (() => {
+            const container = element.closest && element.closest('li.application-question');
+            if (!container) return '';
+            if (container.querySelectorAll(
+              'input:not([type="hidden"]), textarea, select, [role="combobox"]'
+            ).length !== 1) return '';
+            const heading = container.querySelector('.application-label');
+            if (!heading || heading.querySelector('input, textarea, select')) return '';
+            return renderedText(heading);
+          })();
           return clean(
             renderedText(referenced)
             || groupedChoiceQuestion
+            || leverCardQuestion
             || renderedText(byFor)
             || renderedText(wrapping)
             || renderedText(proxyReferenced)
@@ -12311,7 +12362,19 @@ const { chromium } = require('playwright');
       // The same exhaustive detector used by prepare-time readiness is read again against this
       // exact bound form. No newsletter, search, or login form can contribute a blocker here.
       const scopedReadiness = await readSubmitReadiness(scopeTarget);
-      unresolved.push(...scopedReadiness.blocking, ...scopedReadiness.unmatched.map(
+      /* ONE UNANSWERED QUESTION IS ONE FAILURE, not two. The per-candidate loop above and this
+       * readiness pass both see the same empty required control, and before the Lever card
+       * heading was readable both reports were nameless, so the Mytos run's single unanswerable
+       * select was announced as "2 required field confirmations failed". The loop's entry is the
+       * question's own label; readiness wraps the same label in its blocker sentence. Dropping
+       * the readiness restatement of a field the loop already reported keeps the count honest and
+       * loses nothing - the field still blocks, once, under its name. Only the exact
+       * labelled-empty sentence is deduped; every other readiness blocker passes through. */
+      const alreadyReportedLabels = new Set(unresolved);
+      unresolved.push(...scopedReadiness.blocking.filter((message) => {
+        const restated = /^"(.*)" is required and is still empty$/.exec(String(message || ''));
+        return !(restated && alreadyReportedLabels.has(restated[1]));
+      }), ...scopedReadiness.unmatched.map(
         (text) => 'The bound application form still shows an unmatched validation error: ' + text
       ));
       if (chooserVersion === 4) {
