@@ -6929,6 +6929,78 @@ const { chromium } = require('playwright');
           && (await scopedMenu.locator(OPTION_NODES).count()) === 0
           && (await container.locator(OPTION_NODES).count()) > 0;
       };
+      /* THE LISTBOX A BARE OPENER NAMES AS ITS OWN, RESOLVED DOCUMENT-WIDE, when the opener is a
+       * plain listbox button rather than a React Select / Select2 shell.
+       *
+       * Measured live 2026-08-28 on cbsconsulting.recruitee.com (application cda445c1, the required
+       * "Allgemeine Anrede" salutation, options Herr / Frau / Kein/e, stored answer "Frau"): the
+       * opener is '<button id="input-candidate.salutation-2" aria-haspopup="listbox">' and the
+       * widget (downshift, popper-positioned) renders its '<ul role="listbox">' of role=option rows
+       * in a detached popper appended near <body>, OUTSIDE the question block. scopedMenu is unset
+       * (no select shell), so menuIsPortalled / menuIsBesideShell cannot fire, and menuRoot() /
+       * widenRoot() were left searching the container the popper had already left: the control
+       * opened, the rows were on the page, and every tier read zero. PR #118's replay passed only
+       * because its transcribed fixture nested the same listbox as a SIBLING inside the block, where
+       * the container search still reached it.
+       *
+       * The opener and its listbox declare their binding both ways, and this reads both so a body
+       * portal is reached whichever the widget sets in the state we catch it in:
+       *   - FORWARD: the opener's own aria-controls, falling back to aria-owns (ARIA 1.1), naming the
+       *     popup id. downshift sets this on the button while the popup is open;
+       *   - REVERSE: a listbox anywhere in the document whose aria-labelledby names THIS opener. The
+       *     live markup shows '<ul role="listbox" aria-labelledby="{opener-id}">', set in the closed
+       *     capture that carried no aria-controls at all, so the reverse link is the durable one.
+       * Both are the widget author's explicit statement of which listbox is this opener's, exactly as
+       * declaredMenu is for a React Select, so scoping to it is not a widening: another question's
+       * rows stay exactly as unreachable, and every ambiguity guard still runs on the resolved root.
+       *
+       * EXACTLY ONE LISTBOX MAY DONATE. Only nodes holding a visible role=option row count as
+       * candidates, so a closed sibling behind display:none never donates. If the two directions and
+       * a multi-id aria-controls resolve to ONE listbox, that listbox is the root; if they name TWO
+       * or more distinct listboxes the binding is ambiguous and the control refuses rather than guess
+       * which popup is its own; if they name none, nothing fires and the container search stands. */
+      let openerPortalMenu = null;
+      let openerNamesAmbiguousListboxes = false;
+      const readOpenerPortalListbox = async (control) => {
+        openerPortalMenu = null;
+        openerNamesAmbiguousListboxes = false;
+        // Shells are the declaredMenu / menuIsPortalled / menuIsBesideShell path's job; this tier is
+        // only for the bare listbox opener that has no recognised select shell around it.
+        if (scopedMenu) return;
+        const found = await control.evaluate((element) => {
+          const hasVisibleOption = (node) => Boolean(node)
+            && [...node.querySelectorAll('[role="option"]')]
+              .some((row) => row.getClientRects().length > 0);
+          const candidates = new Set();
+          // FORWARD: the opener names its own popup. aria-controls first, aria-owns for the older spelling.
+          const referenced = (element.getAttribute('aria-controls')
+            || element.getAttribute('aria-owns') || '').trim();
+          for (const id of referenced ? referenced.split(/\s+/) : []) {
+            const node = id && document.getElementById(id);
+            if (hasVisibleOption(node)) candidates.add(node);
+          }
+          // REVERSE: a listbox that names THIS opener through aria-labelledby, wherever it is mounted.
+          if (element.id) {
+            for (const listbox of document.querySelectorAll('[role="listbox"][aria-labelledby]')) {
+              const owners = (listbox.getAttribute('aria-labelledby') || '').trim().split(/\s+/);
+              if (owners.includes(element.id) && hasVisibleOption(listbox)) candidates.add(listbox);
+            }
+          }
+          const nodes = [...candidates];
+          if (nodes.length !== 1) return { count: nodes.length };
+          const only = nodes[0];
+          if (only.id) return { count: 1, selector: '[id="' + only.id.replace(/["\\]/g, '\\$&') + '"]' };
+          // An id-less listbox is tagged so it stays locatable; any prior tag is cleared first so a
+          // second call in the same fill can never leave two nodes wearing the marker.
+          for (const tagged of document.querySelectorAll('[data-litos-opener-menu]')) {
+            tagged.removeAttribute('data-litos-opener-menu');
+          }
+          only.setAttribute('data-litos-opener-menu', '1');
+          return { count: 1, selector: '[data-litos-opener-menu="1"]' };
+        }).catch(() => ({ count: 0 }));
+        if (found.count === 1 && found.selector) openerPortalMenu = page.locator(found.selector);
+        else if (found.count > 1) openerNamesAmbiguousListboxes = true;
+      };
       // Bounded, and only spent where it can buy something. With a recognisable widget the wait is
       // for THAT widget's own menu and ends the moment it renders. With no recognisable widget there
       // is nothing specific to wait for, so this keeps the old flat pause rather than charging every
@@ -6952,6 +7024,12 @@ const { chromium } = require('playwright');
             await readDeclaredMenu(control);
             if (declaredMenu
               && await declaredMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
+            // The third place a bare opener's menu can be: a listbox it names by aria-controls or
+            // that names it back by aria-labelledby, portalled out of the block. See
+            // readOpenerPortalListbox for the live Recruitee case this ends the wait for.
+            await readOpenerPortalListbox(control);
+            if (openerPortalMenu
+              && await openerPortalMenu.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
             if (await container.locator(OPTION_NODES).first().isVisible().catch(() => false)) return;
             if (Date.now() >= bareDeadline) return;
             await page.waitForTimeout(50).catch(() => undefined);
@@ -7078,7 +7156,9 @@ const { chromium } = require('playwright');
        */
       const menuRoot = () => (menuIsPortalled
         ? declaredMenu
-        : (menuIsBesideShell ? container : scopedMenu ?? declaredMenu));
+        : (openerPortalMenu
+          ? openerPortalMenu
+          : (menuIsBesideShell ? container : scopedMenu ?? declaredMenu)));
       /* THE SAME ROOT, BOUNDED, FOR ANYTHING THAT IS NOT AN EXACT MATCH.
        *
        * scopedMenu is only ever set for a React Select or a Select2, so menuRoot() falls back to the
@@ -7105,7 +7185,15 @@ const { chromium } = require('playwright');
        * The ambiguity guard on the wider arm is not sufficient on its own and is not what makes this
        * safe. Two questions sharing a "No" is routine, so a guard alone would refuse controls that
        * work today; the scoping is what makes the refusal rare and the answer right.
-       */
+       *
+       * openerPortalMenu is deliberately NOT read here, and that asymmetry with menuRoot is the whole
+       * point. A bare opener that portals its listbox out of the block gets the portal as menuRoot -
+       * the exact-name and list-shaped tiers may read it, because those are anchored on the answer and
+       * on the whole list. The SUBSTRING tiers may not: measured on the choice-parity portal fixture,
+       * a sponsorship button portalling "Maybe" / "Prefer not to say" for a stored "No" had its
+       * substring tier match "Prefer not to say", because "no" is a substring of "not". So the widened
+       * arm stays bounded to this question's own block exactly as before, where a portalled row cannot
+       * reach it; the portal is reachable only through the tiers that name the answer in full. */
       const widenRoot = () => (menuIsPortalled
         ? declaredMenu
         : (menuIsBesideShell ? container : scopedMenu ?? container));
@@ -7549,6 +7637,9 @@ const { chromium } = require('playwright');
           } else {
             await readDeclaredMenu(control);
             await readMenuPortal();
+            // A server-searched bare opener can render its portalled listbox only after typing, so
+            // its scope is re-resolved here too. See readOpenerPortalListbox.
+            await readOpenerPortalListbox(control);
           }
           if (await takeNarrowedGeocodeMatch(control, option)) return true;
           const refusalsBefore = choiceRefusals;
@@ -7661,10 +7752,23 @@ const { chromium } = require('playwright');
         // visible and react-select adds it from the same state that renders the menu.
         await readDeclaredMenu(control);
         await readMenuPortal();
+        // The bare opener's own listbox, resolved document-wide so a popper portalled out of the
+        // block is still the root the tiers below search. See readOpenerPortalListbox.
+        await readOpenerPortalListbox(control);
+        const refusalsBefore = choiceRefusals;
+        /* TWO LISTBOXES BOTH CLAIM THIS OPENER, so which one is its popup is a guess, and a guess is
+         * the one thing this chooser may not make. The same fail-closed verdict every ambiguous tier
+         * reaches, made before anything is clicked and before the evidence read, so the control ends
+         * here rather than donating rows from a listbox that may not be its own. */
+        if (openerNamesAmbiguousListboxes) {
+          refuseChoice('this control is bound to more than one options list and Litos could not tell'
+            + ' which one is its own, so choosing between them would be a guess, left for you to choose');
+          await page.keyboard.press('Escape').catch(() => undefined);
+          return false;
+        }
         // The unfiltered list this control is offering, recorded before any tier judges it, so a
         // refusal below can say what was actually on offer. See recordChoiceOffers.
         await recordChoiceOffers();
-        const refusalsBefore = choiceRefusals;
         if (await clickMatchingOption(wanted, activeControlAllowsIdenticalExactLocationRows)) return true;
         /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
          * into the widget and re-entered the whole tier stack against a menu the search had filtered,
