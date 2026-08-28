@@ -5576,6 +5576,44 @@ const { chromium } = require('playwright');
       if (input.getAttribute('aria-expanded') === 'true') return null;
       return String(input.value || '');
     }).catch(() => null);
+    /* A CHOICE THAT IS A BUTTON PUBLISHES ITS CHOICE AS ITS OWN RENDERED TEXT, and nothing above
+     * can read it. Measured on the live cbsconsulting.recruitee.com form (2026-08-28, the required
+     * salutation "Allgemeine Anrede *"): the control is '<button
+     * id="input-candidate.salutation-2" aria-haspopup="listbox">' with its role=listbox sibling in
+     * the same parent, offering Herr / Frau / Kein/e. Committing "Frau" leaves the BUTTON's
+     * rendered text reading "Frau" with the list closed - no select__* class, no input anywhere -
+     * while the question block's textContent still carries the label and every closed-menu row, so
+     * readChoiceState says 'unknown', the block-text equality can never hold, and a correct fill
+     * was refused as unreadable on every run.
+     *
+     * Same contract as readCommittedSearchInputValue above, one control shape over, and
+     * DELIBERATELY NOT AN ARM OF readChoiceState for the same reasons: this returns only
+     * EVIDENCE, and the one caller weighs it against the row that was clicked. What qualifies as
+     * the opener is bounded the way isBareOpener bounds it: haspopup/combobox shaped, not itself a
+     * native control, holding no native control - a shape whose only way to say what it holds IS
+     * its rendered text. Exactly ONE such opener may be in scope, because two openers are two
+     * questions and evidence that cannot be attributed proves nothing. Null while its menu is
+     * open, because an open menu means the interaction is unfinished and the text is whatever the
+     * widget renders mid-conversation. innerText rather than textContent, so a closed menu's
+     * still-mounted rows or a visually hidden caption inside the opener cannot leak into the
+     * committed reading. */
+    const readCommittedOpenerText = async (container) => await container.evaluate((element) => {
+      const OPENER = '[aria-haspopup="listbox"], [aria-haspopup="true"], [role="combobox"]';
+      const nativeTag = (node) => /^(?:INPUT|SELECT|TEXTAREA)$/.test(node.tagName);
+      const candidates = [];
+      if (element.matches && element.matches(OPENER)) candidates.push(element);
+      if (element.querySelectorAll) {
+        for (const node of element.querySelectorAll(OPENER)) candidates.push(node);
+      }
+      const openers = [...new Set(candidates)].filter((node) => !nativeTag(node)
+        && !node.closest('[role="listbox"], [role="option"]')
+        && !node.querySelector('input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select'));
+      if (openers.length !== 1) return null;
+      const opener = openers[0];
+      if (opener.getAttribute('aria-expanded') === 'true') return null;
+      const text = typeof opener.innerText === 'string' ? opener.innerText : (opener.textContent || '');
+      return String(text || '');
+    }).catch(() => null);
     // READS THE ANSWER THE EMPLOYER WOULD SEE, not the container the fill happened to be scoped to.
     // The container handed in by the 'fill' branch is resolved as the nearest ancestor holding a
     // combobox, and on a React Select that is '.select__input-container' - a div whose only child is
@@ -5866,6 +5904,26 @@ const { chromium } = require('playwright');
         const heldRow = clean(committed || '').toLowerCase();
         if (heldRow && heldRow === clean(clickedOptionText).toLowerCase()) {
           const rowIsTheAnswer = holdsAnswer(committed, expected) || declineMatches(committed, expected);
+          const listTier = Boolean(clean(chooserTierAnswer || '')) && holdsAnswer(chooserTierAnswer, expected);
+          if (rowIsTheAnswer || listTier) { lastChoiceUnreadable = false; return true; }
+        }
+      }
+      /* THE ROW THAT WAS CLICKED IS THE OPENER'S OWN RENDERED TEXT, on a control readChoiceState
+       * cannot read. The Recruitee salutation button (see readCommittedOpenerText) is the measured
+       * shape: the committed value is the closed button's rendered text and nowhere else, the
+       * question block's text can never equal it, and a correct fill was reported lost while
+       * sitting on the form. The gates are byte-for-byte the committed-search-input rule's, for
+       * the same anti-tautology reasons: the opener must hold the WHOLE row this call clicked (a
+       * placeholder, a label restatement or a truncated rendering never equals the clicked row),
+       * and the held row must itself be the answer, or be a list-shaped tier's recorded commit.
+       * typeof-guarded so the extracted verifier still executes in harnesses, and against
+       * runners, that carry no opener read. */
+      if (state.kind === 'unknown' && clean(clickedOptionText || '')
+        && typeof readCommittedOpenerText === 'function') {
+        const shownOnOpener = await readCommittedOpenerText(container);
+        const heldRow = clean(shownOnOpener || '').toLowerCase();
+        if (heldRow && heldRow === clean(clickedOptionText).toLowerCase()) {
+          const rowIsTheAnswer = holdsAnswer(shownOnOpener, expected) || declineMatches(shownOnOpener, expected);
           const listTier = Boolean(clean(chooserTierAnswer || '')) && holdsAnswer(chooserTierAnswer, expected);
           if (rowIsTheAnswer || listTier) { lastChoiceUnreadable = false; return true; }
         }
@@ -6893,7 +6951,53 @@ const { chromium } = require('playwright');
         if ((await first.count()) === 0) return false;
         if (!await first.isVisible().catch(() => false)) return false;
         lastClickedOptionText = clean(await first.textContent().catch(() => ''));
+        /* THE CLICK'S OWN MOUSEDOWN CAN CLOSE THE MENU IT IS CLICKING INTO, AND THE CLICK IS THEN
+         * SWALLOWED WITHOUT A WORD. Measured against the Recruitee salutation shape
+         * (cbsconsulting.recruitee.com, 2026-08-28): a document-level mousedown handler closes
+         * the list whenever the press lands outside the OPENER - and a row is outside the opener
+         * - so the widget unmounts its rows between the real click's mousedown and its click. The
+         * pointer sequence finishes over whatever now sits at those coordinates, the row's own
+         * click handler never runs, the runner records a clicked row, and the control is left
+         * holding nothing: 'choice value did not persist', with the answer never on the form.
+         * Playwright cannot see this happen - its actionability checks all ran before the
+         * mousedown, and nothing after it re-targets by element.
+         *
+         * So the exact row is retained as a HANDLE before the real click (a locator would
+         * re-resolve and find nothing), with a capture-phase witness for the two events that can
+         * commit a selection. The real click stays: it is the full trusted sequence every widget
+         * is owed. Only when the row provably never received its click is the missing TAIL of the
+         * sequence redelivered on the element itself, where detachment cannot re-target it - and
+         * mousedown is only redelivered if the row never saw one, so a widget that commits on
+         * mousedown (react-select's own options do) is never pressed twice. A row whose handlers
+         * were delegated to an ancestor that no longer contains it stays lost, correctly: the
+         * verifier still reads the committed value back, and a redelivery that committed nothing
+         * changes no verdict. */
+        const row = await first.elementHandle().catch(() => null);
+        if (row) {
+          await row.evaluate((element) => {
+            element.__litosRowSaw = { mousedown: false, click: false };
+            element.addEventListener('mousedown', () => { element.__litosRowSaw.mousedown = true; }, { once: true, capture: true });
+            element.addEventListener('click', () => { element.__litosRowSaw.click = true; }, { once: true, capture: true });
+          }).catch(() => undefined);
+        }
         await first.click();
+        if (row) {
+          const saw = await row.evaluate((element) => (
+            element.__litosRowSaw || { mousedown: true, click: true }
+          )).catch(() => ({ mousedown: true, click: true }));
+          if (!saw.click) {
+            await row.evaluate((element, sawMousedown) => {
+              const options = { bubbles: true, cancelable: true, view: window };
+              if (!sawMousedown) {
+                try { element.dispatchEvent(new PointerEvent('pointerdown', options)); } catch (error) { /* older engines */ }
+                element.dispatchEvent(new MouseEvent('mousedown', options));
+              }
+              element.dispatchEvent(new MouseEvent('mouseup', options));
+              element.click();
+            }, saw.mousedown).catch(() => undefined);
+          }
+          await row.evaluate((element) => { delete element.__litosRowSaw; }).catch(() => undefined);
+        }
         return true;
       };
       /* NEVER THE PAGE. The widest this can be is a menu the opened control DECLARED it owns.
