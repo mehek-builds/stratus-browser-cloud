@@ -1411,7 +1411,9 @@ test('choice matching is scoped to the question container, never the page', () =
   // rather than whatever container the anchor happened to land in; see D-02 and the test below.
   assert.match(SANDBOX_RUNNER, /const questionBlock = exactActionContext\n\s+\? exactBinding\.scope\n\s+: await questionOptionBlock\(label, container\);/);
   assert.match(SANDBOX_RUNNER, /const scope = questionBlock;/);
-  assert.match(SANDBOX_RUNNER, /const choices = scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
+  // 'directChoices' is the one sanctioned widening: the fill branch's durable-name arm hands in
+  // the exact inputs its SELECTOR named, so the scope is still the group and never the page.
+  assert.match(SANDBOX_RUNNER, /const choices = directChoices \|\| scope\.locator\('input\[type=checkbox\], input\[type=radio\]'\)/);
   // And an answer that matches no option leaves the control alone rather than guessing - and says
   // so, which it used to do silently.
   assert.match(SANDBOX_RUNNER, /skipped\.push\(action\.label \+ ': ' \+ unmatchedReason\(wanted\)\)/);

@@ -6577,9 +6577,14 @@ const { chromium } = require('playwright');
     /* Ashby paints the radio with a sibling span and leaves the input itself 24x24 and clickable, so
      * check() is enough there. The label click is the fallback for boards that clip the input out of
      * the layout, where check() cannot reach it but a person clicks the words. */
-    const pickRadioOption = async (scope, wanted) => {
+    /* 'directChoices' lets a caller that already holds the group's exact inputs - the fill
+     * branch's durable-name arm, where the SELECTOR is the group and there is no question block
+     * to search - reuse this same read-every-label-then-tick-then-read-back discipline instead of
+     * growing a second, unverified copy of it. Every existing call site passes a scope and is
+     * unchanged. */
+    const pickRadioOption = async (scope, wanted, directChoices = null) => {
       if (!clean(wanted)) return 'no-answer';
-      const choices = scope.locator('input[type=checkbox], input[type=radio]');
+      const choices = directChoices || scope.locator('input[type=checkbox], input[type=radio]');
       const total = await choices.count();
       // Same change as pickOptionPill, for the same reason and through the same function: every
       // option's label is read before any option is ticked. The old break-on-first-hit was
@@ -9969,11 +9974,13 @@ const { chromium } = require('playwright');
       }
       return false;
     };
-    const intendedFillByChoiceTarget = async (scope, wanted, kind) => {
-      if (!scope || !clean(wanted)) return null;
-      const candidates = kind === 'native'
+    /* 'directChoices': same contract as pickRadioOption's - a caller whose SELECTOR is the group
+     * hands the exact inputs in, so the witness this pins is the same input the pick will tick. */
+    const intendedFillByChoiceTarget = async (scope, wanted, kind, directChoices = null) => {
+      if ((!scope && !directChoices) || !clean(wanted)) return null;
+      const candidates = directChoices || (kind === 'native'
         ? scope.locator('input[type=checkbox], input[type=radio]')
-        : scope.locator('button');
+        : scope.locator('button'));
       const total = await candidates.count().catch(() => 0);
       if (total === 0 || total > 64) return null;
       const texts = [];
@@ -14263,6 +14270,88 @@ const { chromium } = require('playwright');
           : await fillTargetWithin(locator);
         const fillScope = exactActionContext ? exactBinding?.root || null : locator;
         if (!target) {
+          /* AN ANSWER WHOSE DURABLE SELECTOR NAMES ITS RADIO OR CHECKBOX GROUP, which is the only
+           * name Lever gives a multiple-choice question. Measured on the live jobs.lever.co DGA
+           * form, 2026-08-28 (application c3093dee): each required question is a bare label-wrapped
+           * group - '<li class="application-question custom-question">' holding
+           * '<input type="radio" name="cards[<uuid>][field0]" value="Yes" required>' rows with the
+           * option text in a sibling span - so discovery's durableSelectorOf correctly ships
+           * '[name="cards[<uuid>][field0]"]' and the fill action arrives aimed at the group itself.
+           * FILLABLE_WITHIN excludes radio and checkbox by design (a fill() on one throws), this
+           * branch had no choice arm at all, and fillTargetWithin therefore returned null: both
+           * answers sat resolved in the packet while every run skipped them here and the required
+           * gate then reported '"Are you authorized to work lawfully in the United States?" is
+           * required and is still empty' - and a run that reached its submit control held the
+           * press over the same unanswered groups.
+           *
+           * Routed through pickRadioOption, not a new chooser: the same read-every-option-first
+           * discipline, the same exact-match refusal, and the same settleVerified read-back that
+           * the fillByLabelText radio arm already earned, with the group's own inputs handed in
+           * because the selector IS the group. optionTextOf already reads a Lever option through
+           * its wrapping label and falls back to the input's value= attribute, so 'No' ticks the
+           * value="No" input even though the group's first input in DOM order is value="Yes".
+           *
+           * ONE GROUP, OR NOTHING. More than one name among the matched inputs means the selector
+           * spans several questions (the same doctrine radioGroupNames enforces for the label
+           * path), and ticking whichever input came first would answer somebody else's question. */
+          const nativeChoiceGroup = await (async () => {
+            const directChoice = await locator.evaluate((element) => (
+              element instanceof HTMLInputElement
+              && (element.type === 'radio' || element.type === 'checkbox')
+            )).catch(() => false);
+            const inputs = directChoice
+              ? matches
+              : locator.locator('input[type="radio"], input[type="checkbox"]');
+            const groups = await inputs.evaluateAll((elements) => {
+              const names = new Set();
+              for (const element of elements) {
+                if (!(element instanceof HTMLInputElement)
+                  || (element.type !== 'radio' && element.type !== 'checkbox')) return null;
+                names.add(element.type + ' ' + (element.name || ''));
+              }
+              return [...names];
+            }).catch(() => null);
+            if (!Array.isArray(groups) || groups.length === 0) return null;
+            return { inputs, groups };
+          })();
+          if (nativeChoiceGroup && nativeChoiceGroup.groups.length > 1) {
+            if (actionDiagnostic) actionDiagnostic.outcome = 'target_unresolved';
+            if (action.label) {
+              skipped.push(action.label + ': the selector ' + action.selector + ' names '
+                + nativeChoiceGroup.groups.length
+                + ' separate option groups, so an answer here could have landed on another question, left for you to choose');
+            }
+            continue;
+          }
+          if (nativeChoiceGroup) {
+            const wanted = String(action.value || '').trim();
+            const intendedChoice = await intendedFillByChoiceTarget(
+              null, wanted, 'native', nativeChoiceGroup.inputs
+            );
+            await pinSuccessfulAddressWitness(
+              intendedChoice || nativeChoiceGroup.inputs.first(),
+              exactBinding?.rootBinding?.formHandle || exactActionRootBinding?.formHandle || null
+            );
+            const outcome = await pickRadioOption(locator, wanted, nativeChoiceGroup.inputs);
+            if (outcome === 'checked') {
+              successfulMutation = true;
+              if (action.label) filledFields.push(action.label);
+              continue;
+            }
+            if (outcome === 'near-miss') {
+              if (action.label) skipped.push(action.label + ': ' + lastChoiceRefusal);
+              continue;
+            }
+            if (outcome === 'not-checked') {
+              if (action.label) skipped.push(action.label + ': the option was clicked and did not stay selected');
+              continue;
+            }
+            // 'no-option' and 'no-answer': the answer does not belong to this group. Leaving it
+            // unticked is correct - it surfaces as a required-field blocker for the applicant,
+            // which is far cheaper than guessing a declaration on her behalf.
+            if (action.label) skipped.push(action.label + ': ' + unmatchedReason(wanted));
+            continue;
+          }
           if (actionDiagnostic) actionDiagnostic.outcome = 'target_unresolved';
           const message = 'the selector ' + action.selector
             + ' does not name a control Litos can type into, and the block it names holds no single field';
