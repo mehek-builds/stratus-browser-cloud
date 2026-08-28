@@ -1103,7 +1103,10 @@ test('a choice option that is not on the list names the answer that went looking
   // The sentence now lives in one helper, so a chooser that DECLINED an ambiguous list can replace
   // it with what actually happened rather than claiming her answer was absent.
   assert.match(SANDBOX_RUNNER, /const unmatchedReason = \(value\) => lastChoiceRefusal/);
-  assert.match(SANDBOX_RUNNER, /no option matched "' \+ clean\(value\) \+ '", left for you to choose/);
+  // And it now carries what the option read actually saw, so the CBS Recruitee shape (a bare
+  // refusal recorded with no trace of the list it judged) diagnoses itself on the next failure.
+  assert.match(SANDBOX_RUNNER,
+    /no option matched "' \+ clean\(value\) \+ '"' \+ choiceOffersClause\(\) \+ ', left for you to choose/);
 });
 
 test('fillByLabelText handles Greenhouse Select2 controls before hidden native selects', () => {

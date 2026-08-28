@@ -1250,7 +1250,16 @@ const ambiguousReason = (value) => 'more than one of the options offered is a ne
   + ' left for you to choose';
 const oneNearMissReason = (value) => 'the closest option offered is a near match for "'
   + value + '" rather than exactly it, so it may be a different answer, left for you to choose';
-const unmatchedReason = (value) => `no option matched "${value}", left for you to choose`;
+/* The evidence clause the runner now appends to a bare unmatched verdict on any control that went
+ * through fillCustomChoice: the offered rows it read, clipped exactly as the runner clips them
+ * (eight rows of sixty characters). The radio and pill choosers are handed the list by their own
+ * paths and do not run the offers read, so their sentences stay bare; each call below passes the
+ * fixture's rows only for the rendering that reads them. */
+const offersClause = (rows) => ' (the list offered: '
+  + rows.slice(0, 8).map((text) => `"${text.slice(0, 60)}"`).join(', ')
+  + (rows.length > 8 ? `, plus ${rows.length - 8} more` : '')
+  + ')';
+const unmatchedReason = (value, offered = null) => `no option matched "${value}"${offered ? offersClause(offered) : ''}, left for you to choose`;
 
 /* ---------------------------------------------------------------------------------------------
  * 1. THE TRUTHFUL ANSWER IS LISTED SECOND, UNDER A SHORTER ROW THAT IS ITS PREFIX.
@@ -1397,10 +1406,12 @@ const unmatchedReason = (value) => `no option matched "${value}", left for you t
     'a stored refusal must never be able to state something about her');
   assert.equal(valueOf(result, '#native_not_above option:checked'), 'Select...');
   assert.deepEqual(result.filledFields, []);
-  assert.deepEqual(
-    result.skipped,
-    [...labels('not-above'), 'question:not-above:native'].map((label) => `${label}: ${unmatchedReason(stored)}`)
-  );
+  assert.deepEqual(result.skipped, [
+    `question:not-above:radio: ${unmatchedReason(stored)}`,
+    `question:not-above:pill: ${unmatchedReason(stored)}`,
+    `question:not-above:react: ${unmatchedReason(stored, [VETERAN_CLAIM, NOT_ABOVE])}`,
+    `question:not-above:native: ${unmatchedReason(stored)}`
+  ]);
 }
 
 /* And the opt-out path itself is untouched: a list that offers a real refusal, worded the
@@ -1449,8 +1460,11 @@ for (const entry of SELF_ID_CLAIMS) {
   assert.deepEqual(answers(result, entry.id), ['', '', ''],
     `a stored refusal must not select "${entry.row}", which is a claim about her`);
   assert.deepEqual(result.filledFields, []);
-  assert.deepEqual(result.skipped,
-    labels(entry.id).map((label) => `${label}: ${unmatchedReason(SELF_ID_STORED)}`));
+  assert.deepEqual(result.skipped, [
+    `question:${entry.id}:radio: ${unmatchedReason(SELF_ID_STORED)}`,
+    `question:${entry.id}:pill: ${unmatchedReason(SELF_ID_STORED)}`,
+    `question:${entry.id}:react: ${unmatchedReason(SELF_ID_STORED, [VETERAN_CLAIM, entry.row])}`
+  ]);
 }
 
 /* And the other direction, which fails closed and so was never noticed: three wordings that ARE
@@ -1604,7 +1618,7 @@ for (const entry of SELF_ID_REFUSALS) {
   assert.deepEqual(result.skipped, [
     `question:one-near-miss:radio: ${oneNearMissReason(SPONSOR_LONG)}`,
     `question:one-near-miss:pill: ${oneNearMissReason(SPONSOR_LONG)}`,
-    `question:one-near-miss:react: ${unmatchedReason(SPONSOR_LONG)}`
+    `question:one-near-miss:react: ${unmatchedReason(SPONSOR_LONG, [SPONSOR_SHORT, SPONSOR_YES])}`
   ]);
 }
 
@@ -1677,7 +1691,7 @@ for (const entry of SELF_ID_REFUSALS) {
   assert.deepEqual(result.skipped, [
     `question:prefix-only:radio: ${oneNearMissReason(SPONSOR_NO_LONG)}`,
     `question:prefix-only:pill: ${oneNearMissReason(SPONSOR_NO_LONG)}`,
-    `question:prefix-only:react: ${unmatchedReason(SPONSOR_NO_LONG)}`
+    `question:prefix-only:react: ${unmatchedReason(SPONSOR_NO_LONG, [SPONSOR_NO_SHORT, SPONSOR_NO_YES])}`
   ]);
 }
 
@@ -1975,7 +1989,7 @@ for (const entry of NEGATED) {
     consent: '',
     sponsorship: '',
     filled: [],
-    skipped: [`question:portal-sponsor: ${unmatchedReason('No')}`]
+    skipped: [`question:portal-sponsor: ${unmatchedReason('No', ['Maybe', 'Prefer not to say'])}`]
   });
 }
 

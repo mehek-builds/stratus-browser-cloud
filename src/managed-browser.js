@@ -5695,11 +5695,50 @@ const { chromium } = require('playwright');
     // "confirm this", not "this did not take". See verifyChoiceInContainer.
     const unreadableChoiceReason = 'the answer was entered but this control does not report what it'
       + ' is holding, so Litos could not read it back: please confirm it';
+    /* WHAT THE OPTION READ ACTUALLY SAW, carried on the bare refusal so the next failure arrives
+     * with its own diagnosis instead of a theory.
+     *
+     * Measured 2026-08-28 on cbsconsulting.recruitee.com (application cda445c1, "Allgemeine
+     * Anrede", stored options exactly Herr / Frau / Kein/e, stored answer "Frau"): the run ended
+     * with the bare sentence 'no option matched "Frau", left for you to choose', and NOTHING
+     * anywhere recorded what the chooser had been comparing against. The review-time snapshot holds
+     * the reviewed inventory, not the failing run's read; actionDiagnostics exist only for
+     * Greenhouse question_N ids; the Vercel runtime window had closed; and a replay of this exact
+     * chooser against the live control succeeded. So whether that run faced a menu that never
+     * opened, an empty list, or rows whose bytes differ from the snapshot is unrecoverable, and
+     * the fix for that is the same one backend PR #762 made for the Workable phone readback:
+     * bounded, redacted evidence riding the refusal itself.
+     *
+     * WHAT MAY BE RECORDED, said precisely. Offered row texts are the employer's own list labels,
+     * rendered to every visitor of a public form, so they may travel verbatim; they are read
+     * before searchFor types, so no text derived from the applicant's answer can appear as a row.
+     * The answer itself already rides the sentence, as it always has. Nothing else about the
+     * applicant exists in this scope to leak. Bounded at eight rows of sixty characters so a
+     * country picker cannot turn one skip line into a page.
+     *
+     * Cleared at the top of every action beside lastChoiceRefusal, and for the same reason: this
+     * may only ever describe the list read for THIS field. Rows beat rowlessness on overwrite,
+     * because a control loop that read rows on one control and nothing on the next has still seen
+     * the question's list, and "the list held these" is the fact the next engineer needs. */
+    let lastChoiceOffersEvidence = null;
+    const publishChoiceOffers = (record) => {
+      if (record.texts.length > 0 || !lastChoiceOffersEvidence) lastChoiceOffersEvidence = record;
+    };
+    const choiceOffersClause = () => {
+      if (!lastChoiceOffersEvidence) return '';
+      if (!lastChoiceOffersEvidence.opened) return ' (no options list could be opened to read)';
+      const rows = lastChoiceOffersEvidence.texts;
+      if (rows.length === 0) return ' (the control opened but never showed an options list to read)';
+      const overflow = lastChoiceOffersEvidence.total > rows.length
+        ? ', plus ' + (lastChoiceOffersEvidence.total - rows.length) + ' more'
+        : '';
+      return ' (the list offered: ' + rows.map((text) => '"' + text + '"').join(', ') + overflow + ')';
+    };
     // The sentence an unanswerable control comes back with, and the one place a chooser's own
     // refusal is allowed to replace it. lastChoiceRefusal is cleared at the top of every action, so
     // this can only ever report an attempt made for THIS field.
     const unmatchedReason = (value) => lastChoiceRefusal
-      || ('no option matched "' + clean(value) + '", left for you to choose');
+      || ('no option matched "' + clean(value) + '"' + choiceOffersClause() + ', left for you to choose');
     /* A VERIFICATION THAT CAN ONLY AGREE WITH THE CHOOSER IS NOT A VERIFICATION, and this one could
      * only agree. Its first rule was optionMatches - the same bidirectional containment predicate
      * that had just chosen the row - plus a second containment clause on top of it. So on exactly
@@ -7570,6 +7609,29 @@ const { chromium } = require('playwright');
         lastChooserTierAnswer = clean(wanted);
         return true;
       };
+      /* THE EVIDENCE READ, over exactly the roots the tiers above are allowed to search and no
+       * wider, so what it records is what the chooser could see and nothing it could not. It runs
+       * on the unfiltered menu, before searchFor types, so no row derived from the typed answer can
+       * enter the record; the one later call, after a failed search, can only replace a rowless
+       * record with rows a late-rendering menu produced. typeof-guarded like
+       * nextChoiceControlAlreadyOpen, because the focused suites extract this helper without the
+       * reporting scope around it, and their contracts are about choosing, not reporting. */
+      const recordChoiceOffers = async () => {
+        if (typeof publishChoiceOffers !== 'function') return;
+        for (const root of [menuRoot(), widenRoot()]) {
+          if (!root) continue;
+          const rows = root.locator(OPTION_NODES);
+          const offers = await offeredRows(rows);
+          if (offers.length === 0) continue;
+          const texts = [];
+          for (const index of offers.slice(0, 8)) {
+            texts.push(clean(await rows.nth(index).textContent().catch(() => '')).slice(0, 60));
+          }
+          publishChoiceOffers({ opened: true, total: offers.length, texts });
+          return;
+        }
+        publishChoiceOffers({ opened: true, total: 0, texts: [] });
+      };
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
         const control = controls.nth(index);
@@ -7599,6 +7661,9 @@ const { chromium } = require('playwright');
         // visible and react-select adds it from the same state that renders the menu.
         await readDeclaredMenu(control);
         await readMenuPortal();
+        // The unfiltered list this control is offering, recorded before any tier judges it, so a
+        // refusal below can say what was actually on offer. See recordChoiceOffers.
+        await recordChoiceOffers();
         const refusalsBefore = choiceRefusals;
         if (await clickMatchingOption(wanted, activeControlAllowsIdenticalExactLocationRows)) return true;
         /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
@@ -7620,7 +7685,18 @@ const { chromium } = require('playwright');
           await page.keyboard.press('Escape').catch(() => undefined);
           return false;
         }
+        // A server-searched widget can render its first rows only after searchFor typed, so a
+        // rowless pre-typing record is given one chance to become the rows the search surfaced.
+        // Rows already recorded are never replaced; see the overwrite rule on publishChoiceOffers.
+        await recordChoiceOffers();
         await page.keyboard.press('Escape').catch(() => undefined);
+      }
+      // A refusal reported with no evidence at all is the exact silence this run is closing, so a
+      // call that never got as far as a post-open read still says what it can prove: whether any
+      // drivable control was opened. Publishing only into an empty record keeps a real rows read
+      // from an earlier control of this same action untouched.
+      if (typeof publishChoiceOffers === 'function' && !lastChoiceControlOpened) {
+        publishChoiceOffers({ opened: false, total: 0, texts: [] });
       }
       // Belt and braces for anything the two rules above did not anticipate: if this control was
       // answered when we arrived and is not answered now, put the answer back. A candidate that
@@ -13137,6 +13213,9 @@ const { chromium } = require('playwright');
      // them keeps the refusal whichever one produced it, and no answer inherits a sentence from the
      // field before it. A chooser that succeeds never has its reason read.
      lastChoiceRefusal = '';
+     // And the offers evidence with it, under exactly the same contract: what unmatchedReason
+     // appends may only ever be the list read for THIS field, never the field before it.
+     lastChoiceOffersEvidence = null;
      try {
       if (finalSubmitPressed && submitTransportResponseUnavailable()) {
         markPostSubmitObservationFailed();
