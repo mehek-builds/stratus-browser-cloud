@@ -16062,13 +16062,25 @@ function continuationEligible(result, checkpoint) {
  * at 12:25:49.894. 67.4 seconds end to end, of which one 60-second wait, on a form with no
  * challenge and nothing to continue.
  */
-/* 240 seconds, raised from 150 on a measurement: Jump run 3586ce1e-7bbd-47f0-9072-845b2f66cabc
- * completed discovery, then its 120-action Greenhouse preview reached the exact 150-second
- * sandbox lifetime and was torn down before the terminal result could be read. The caller's
- * discovery pass measured roughly 25 seconds, so 240 seconds leaves about 35 seconds inside its
- * 300-second function budget for request overhead and result handling. The sandbox lifetime below
- * has its own grace and is deliberately not equal to this wait budget. */
-const MANAGED_RUN_TIMEOUT_MS = 240_000;
+/* 270 seconds, raised from 240 on a measurement, which was itself raised from 150 on one: Mercari
+ * run 09814b03-8d1a-4c0f-9fc8-73cc0c2ed9e1 (apply.workable.com, 23 employer questions, 2026-08-28)
+ * completed every question item and then hit "Managed provider deadline expired before employer
+ * submit" at roughly 235 seconds, twice, identically, with the final submit as the only remaining
+ * step. The caller sends no providerDeadlineAt, so the compat fallback below hands the sandbox this
+ * value minus the 10-second response margin: 240 gave a 230-second action window, which a large
+ * Workable form fills completely and then has nothing left to press submit with.
+ *
+ * WHY 270 AND NOT MORE. Both this function and the caller run under a 300-second maxDuration.
+ * The submission caller's pre-run work (packet audit plus the CAPTCHA probe page load) measures
+ * roughly 15 seconds and the Jump-measured discovery pass roughly 25, so 270 leaves the slowest
+ * measured caller about 5 seconds of result handling in the worst case and the submission path
+ * about 15. A run that needs more than the 260-second action window this yields does not fit one
+ * serverless invocation on this plan at all and needs a continuation split instead.
+ *
+ * The earlier Jump measurement stands: run 3586ce1e-7bbd-47f0-9072-845b2f66cabc reached the exact
+ * 150-second sandbox lifetime and was torn down before the terminal result could be read. The
+ * sandbox lifetime below has its own grace and is deliberately not equal to this wait budget. */
+const MANAGED_RUN_TIMEOUT_MS = 270_000;
 const CONTINUATION_TIMEOUT_MS = 60_000;
 const SANDBOX_FILE_POLL_CHUNK_MS = 5_000;
 const SANDBOX_FILE_POLL_COMMAND_GRACE_MS = 2_000;

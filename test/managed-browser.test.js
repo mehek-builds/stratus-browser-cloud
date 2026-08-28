@@ -347,7 +347,7 @@ test('submission release policy defaults closed and exposes an explicit compat s
     requestAcceptedAtMs: acceptedAt,
   });
   assert.equal('submissionAttempt' in legacy, false);
-  assert.equal(legacy.providerDeadlineAt, '2026-08-26T10:04:00.000Z');
+  assert.equal(legacy.providerDeadlineAt, '2026-08-26T10:04:30.000Z');
 
   await assert.rejects(
     normalizeManagedRun({
@@ -3045,7 +3045,7 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
     executeSandboxRun({
       url: 'https://example.com/apply', actions: [], allowSubmit: true,
       submissionAttempt: SUBMISSION_ATTEMPT,
-      providerDeadlineAt: providerDeadlineAt(250_000),
+      providerDeadlineAt: providerDeadlineAt(290_000),
     },
       { sandboxApi: fake.api, urlValidator: urlOnly }),
     (error) => {
@@ -3057,10 +3057,10 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
     }
   );
   // Jump run 3586ce1e used the old one-command 150-second wait and the SDK closed that command's
-  // stream at the exact budget boundary. The 240-second phase budget is split into short command
-  // streams, leaving 35 seconds inside the caller's 300-second function after its measured
-  // roughly 25-second discovery pass.
-  assert.equal(fake.calls.reduce((total, call) => total + call.timeoutMs, 0), 240_000,
+  // stream at the exact budget boundary. The 270-second phase budget (raised from 240 after
+  // Mercari run 09814b03 filled all 23 Workable questions and expired with only the submit left)
+  // is split into short command streams inside the caller's 300-second function.
+  assert.equal(fake.calls.reduce((total, call) => total + call.timeoutMs, 0), 270_000,
     'phase 0 gets the measured large-form budget: ' + JSON.stringify(fake.calls));
   assert.ok(fake.calls.length > 1, 'the full phase budget must never be one SDK command stream');
   assert.ok(fake.calls.every((call) => call.timeoutMs <= 5_000), JSON.stringify(fake.calls));
@@ -3069,7 +3069,7 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
     JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-0.json', 'stratus-error.json'])
   )));
   assert.equal(fake.runnerCalls[0].detached, true);
-  assert.equal(fake.runnerCalls[0].timeoutMs, 240_000);
+  assert.equal(fake.runnerCalls[0].timeoutMs, 270_000);
   assert.equal(typeof fake.runnerCalls[0].signal?.addEventListener, 'function');
 });
 
@@ -3088,8 +3088,8 @@ test('sandbox lifetime leaves cleanup grace even when no continuation was reques
     urlValidator: urlOnly,
   });
 
-  assert.equal(fake.forkCalls[0].timeout, 270_000,
-    'a 240-second run must retain a separate 30-second result-read and cleanup window');
+  assert.equal(fake.forkCalls[0].timeout, 300_000,
+    'a 270-second run must retain a separate 30-second result-read and cleanup window');
   assert.equal(fake.sandboxes[0].stopped, true);
 });
 
@@ -3116,7 +3116,7 @@ test('a result written between polling chunks is returned without spending the f
 
 test('a result written at the final polling boundary wins over the run timeout', async () => {
   const fake = silentSandboxApi({
-    terminalAfterPolls: 48,
+    terminalAfterPolls: 54,
     result: {
       title: 'Preview completed at boundary',
       url: 'https://example.com/apply',
@@ -3131,7 +3131,7 @@ test('a result written at the final polling boundary wins over the run timeout',
   }, { sandboxApi: fake.api, urlValidator: urlOnly });
 
   assert.equal(result.title, 'Preview completed at boundary');
-  assert.equal(fake.calls.length, 49);
+  assert.equal(fake.calls.length, 55);
   assert.equal(fake.calls.at(-1).timeoutMs, 0, 'the final result check must not extend the run budget');
 });
 
