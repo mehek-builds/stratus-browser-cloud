@@ -114,6 +114,13 @@ async function choose(rows, target, extra = '') {
        beside-shell arm is never the one under test, and declaring it keeps a runner that reads it
        executable while pinning that a shell-rendered menu does not depend on it. */
     let menuIsBesideShell = false;
+    /* The listbox a bare (no-shell) opener names as its own, resolved document-wide for a popper
+       portalled out of the block. Null / false here for the same reason as the two flags above: this
+       harness injects a scopedMenu, which menuRoot / widenRoot prefer over the bare-opener arm, so
+       that arm is never the one under test. Declaring them keeps a runner that reads them executable
+       while pinning that a shell-rendered menu does not depend on the opener-portal resolution. */
+    let openerPortalMenu = null;
+    let openerNamesAmbiguousListboxes = false;
     ${BASE}
     ${INNER}
     return async (target) => ({
