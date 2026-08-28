@@ -1840,10 +1840,11 @@ for (const entry of NEGATED) {
  * A consent nobody asked for, ticked under her name, is what this file calls the worst outcome
  * available to it.
  *
- * THE SPONSORSHIP CONTROL PUBLISHES NOTHING readChoiceState can read - it is a button, not a React
- * Select - so the right row lands and the run still asks her to confirm it. That is the existing
- * verdict for an unreadable control and it is asserted as it is rather than as anyone would like
- * it. What is not negotiable is the consent row.
+ * THE SPONSORSHIP CONTROL IS A BUTTON, NOT A REACT SELECT, and it used to be asserted here as
+ * unreadable: the right row landed and the run still asked her to confirm it. Since the
+ * committed-opener read (the Recruitee salutation fix, 2026-08-28) the closed button's own
+ * rendered text is read back against the whole clicked row, so the same commit is now a confirmed
+ * fill. The half that was never negotiable is unchanged either way: the consent row.
  * ------------------------------------------------------------------------------------------- */
 {
   const result = await replay([
@@ -1865,9 +1866,8 @@ for (const entry of NEGATED) {
   }, {
     consent: '',
     sponsorship: 'No',
-    filled: [],
-    skipped: ['question:sponsor-combobox: the answer was entered but this control does not report'
-      + ' what it is holding, so Litos could not read it back: please confirm it']
+    filled: ['question:sponsor-combobox'],
+    skipped: []
   });
 }
 
