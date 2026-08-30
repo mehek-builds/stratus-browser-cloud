@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { assertPublicUrl } from './security.js';
 import {
+  normalizeManagedBrowserProgress,
   normalizeManagedContinuation,
   normalizeManagedRun,
   SANDBOX_RUNNER,
@@ -41,12 +42,28 @@ async function waitForFile(directory, names, timeoutMs, child) {
   return null;
 }
 
-async function runnerError(directory, stderr) {
+async function runnerError(directory, stderr, expectedSubmissionAttempt = null) {
+  const runProgress = await readProgress(directory, expectedSubmissionAttempt);
   try {
     const parsed = JSON.parse(await fs.readFile(path.join(directory, 'stratus-error.json'), 'utf8'));
-    return managedError(parsed.message || 'Managed browser run failed', 502, 'SANDBOX_RUN_FAILED');
+    return Object.assign(
+      managedError(parsed.message || 'Managed browser run failed', 502, 'SANDBOX_RUN_FAILED'),
+      runProgress ? { runProgress } : {},
+    );
   } catch {
-    return managedError(stderr.trim().slice(0, 500) || 'Managed browser run failed', 502, 'SANDBOX_RUN_FAILED');
+    return Object.assign(
+      managedError(stderr.trim().slice(0, 500) || 'Managed browser run failed', 502, 'SANDBOX_RUN_FAILED'),
+      runProgress ? { runProgress } : {},
+    );
+  }
+}
+
+async function readProgress(directory, expectedSubmissionAttempt = null) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(directory, 'stratus-progress.json'), 'utf8'));
+    return normalizeManagedBrowserProgress(parsed, expectedSubmissionAttempt);
+  } catch {
+    return null;
   }
 }
 
@@ -91,10 +108,22 @@ async function startRun(input) {
   ]);
   const child = spawn(process.execPath, ['stratus-runner.cjs'], {
     cwd: directory,
-    env: process.env,
+    env: {
+      ...process.env,
+      NODE_PATH: [path.join(process.cwd(), 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
+    },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
-  const session = { id: crypto.randomUUID(), token, directory, child, expiresAt, used: false, stderr: '' };
+  const session = {
+    id: crypto.randomUUID(),
+    token,
+    directory,
+    child,
+    expiresAt,
+    used: false,
+    stderr: '',
+    submissionAttempt: context.submissionAttempt ?? null,
+  };
   active.add(session.id);
   child.stderr.on('data', (chunk) => {
     session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
@@ -102,11 +131,15 @@ async function startRun(input) {
 
   const produced = await waitForFile(directory, ['stratus-result-0.json', 'stratus-error.json'], RUN_TIMEOUT_MS, child);
   if (!produced) {
+    const runProgress = await readProgress(directory, session.submissionAttempt);
     await cleanup(session);
-    throw managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT');
+    throw Object.assign(
+      managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
+      runProgress ? { runProgress } : {},
+    );
   }
   if (produced === 'stratus-error.json') {
-    const error = await runnerError(directory, session.stderr);
+    const error = await runnerError(directory, session.stderr, session.submissionAttempt);
     await cleanup(session);
     throw error;
   }
@@ -138,11 +171,15 @@ async function continueRun(input) {
     session.child,
   );
   if (!produced) {
+    const runProgress = await readProgress(session.directory, session.submissionAttempt);
     await cleanup(session);
-    throw managedError('Managed browser continuation timed out', 410, 'CONTINUATION_EXPIRED');
+    throw Object.assign(
+      managedError('Managed browser continuation timed out', 410, 'CONTINUATION_EXPIRED'),
+      runProgress ? { runProgress } : {},
+    );
   }
   if (produced === 'stratus-error.json') {
-    const error = await runnerError(session.directory, session.stderr);
+    const error = await runnerError(session.directory, session.stderr, session.submissionAttempt);
     await cleanup(session);
     throw error;
   }

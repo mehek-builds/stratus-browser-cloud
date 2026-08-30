@@ -319,7 +319,7 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
     } catch (error) {
       const status = error.status || 500;
       console.error(JSON.stringify({ level: 'error', requestId, method: req.method, url: req.url, status, durationMs: Date.now() - started, error: redact(error.message) }));
-      return json(res, status, { error: { code: error.code || (status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'), message: status === 500 ? 'The request failed. Check server logs with the request ID.' : error.message, requestId, runId: error.runId } });
+      return json(res, status, { error: { code: error.code || (status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'), message: status === 500 ? 'The request failed. Check server logs with the request ID.' : error.message, requestId, runId: error.runId, runProgress: error.runProgress } });
     }
   });
 

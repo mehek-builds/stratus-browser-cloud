@@ -16528,7 +16528,7 @@ function exactProgressNotAttemptedOutcome(outcome) {
 /* A progress file is one state-machine checkpoint, not a collection of independent fields. A
  * provider crash must not be able to combine individually valid values into an impossible claim,
  * such as a confirmation without a press or an accepted code without a verification submit. */
-function managedBrowserProgressStateIsConsistent(progress) {
+export function managedBrowserProgressStateIsConsistent(progress) {
   const applicationPressed = progress.applicationSubmitPressed;
   const verificationPressed = progress.verificationSubmitPressed;
   const anyPressed = applicationPressed || verificationPressed;
@@ -16589,6 +16589,61 @@ function managedBrowserProgressStateIsConsistent(progress) {
   return true;
 }
 
+export function normalizeManagedBrowserProgress(parsed, expectedSubmissionAttempt = null) {
+  const validStage = [
+    'launch', 'phase_started', 'submit_activation_started',
+    'submit_blocked', 'submit_released', 'result_ready', 'result_written'
+  ].includes(parsed?.stage);
+  const validSubmitKind = parsed?.submitKind === null
+    || parsed?.submitKind === 'application'
+    || parsed?.submitKind === 'verification';
+  const validPolicyVersion = parsed?.policyVersion === null
+    || parsed?.policyVersion === 3
+    || parsed?.policyVersion === 4;
+  const progressAttempt = parsed?.submissionAttempt == null
+    ? null
+    : normalizeSubmissionAttempt(parsed.submissionAttempt);
+  const validAttempt = expectedSubmissionAttempt == null
+    ? progressAttempt == null
+    : sameSubmissionAttempt(progressAttempt, expectedSubmissionAttempt);
+  const employerOutcome = parsed?.employerOutcome == null
+    ? null
+    : normalizeProgressEmployerOutcome(parsed.employerOutcome);
+  const validRequiredStatus = parsed?.requiredFieldConfirmationStatus == null
+    || parsed.requiredFieldConfirmationStatus === 'confirmed'
+    || parsed.requiredFieldConfirmationStatus === 'blocked';
+  const validSecurityCodeOutcome = parsed?.securityCodeOutcome == null
+    || ['accepted', 'rejected', 'no_control', 'not_entered'].includes(parsed.securityCodeOutcome);
+  const finalProgress = parsed?.stage === 'result_ready' || parsed?.stage === 'result_written';
+  if (parsed?.version !== 1
+    || !Number.isInteger(parsed?.phase) || parsed.phase < 0 || parsed.phase > 1
+    || !validStage || typeof parsed?.submitPressed !== 'boolean'
+    || typeof parsed?.applicationSubmitPressed !== 'boolean'
+    || typeof parsed?.verificationSubmitPressed !== 'boolean'
+    || !validSubmitKind || !validPolicyVersion || !validAttempt
+    || !validRequiredStatus || !validSecurityCodeOutcome
+    || (parsed?.employerOutcome != null && !employerOutcome)
+    || (!finalProgress && parsed?.employerOutcome != null && !employerOutcome)
+    || (finalProgress && !employerOutcome)) return null;
+  const progress = {
+    version: 1,
+    phase: parsed.phase,
+    stage: parsed.stage,
+    submitPressed: parsed.submitPressed,
+    applicationSubmitPressed: parsed.applicationSubmitPressed,
+    verificationSubmitPressed: parsed.verificationSubmitPressed,
+    submitKind: parsed.submitKind,
+    policyVersion: parsed.policyVersion,
+    ...(employerOutcome ? { employerOutcome } : {}),
+    ...(parsed.requiredFieldConfirmationStatus != null
+      ? { requiredFieldConfirmationStatus: parsed.requiredFieldConfirmationStatus }
+      : {}),
+    ...(parsed.securityCodeOutcome != null ? { securityCodeOutcome: parsed.securityCodeOutcome } : {}),
+    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {})
+  };
+  return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
+}
+
 async function readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt = null) {
   const progressBuffer = await sandbox.readFileToBuffer(
     { path: 'stratus-progress.json' },
@@ -16598,57 +16653,7 @@ async function readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt = nu
   // whose containment starts before applicant mutation. For v3 it is diagnostic state only.
   try {
     const parsed = JSON.parse(progressBuffer.toString('utf8'));
-    const validStage = [
-      'launch', 'phase_started', 'submit_activation_started',
-      'submit_blocked', 'submit_released', 'result_ready', 'result_written'
-    ].includes(parsed?.stage);
-    const validSubmitKind = parsed?.submitKind === null
-      || parsed?.submitKind === 'application'
-      || parsed?.submitKind === 'verification';
-    const validPolicyVersion = parsed?.policyVersion === null
-      || parsed?.policyVersion === 3
-      || parsed?.policyVersion === 4;
-    const progressAttempt = parsed?.submissionAttempt == null
-      ? null
-      : normalizeSubmissionAttempt(parsed.submissionAttempt);
-    const validAttempt = expectedSubmissionAttempt == null
-      ? progressAttempt == null
-      : sameSubmissionAttempt(progressAttempt, expectedSubmissionAttempt);
-    const employerOutcome = parsed?.employerOutcome == null
-      ? null
-      : normalizeProgressEmployerOutcome(parsed.employerOutcome);
-    const validRequiredStatus = parsed?.requiredFieldConfirmationStatus == null
-      || parsed.requiredFieldConfirmationStatus === 'confirmed'
-      || parsed.requiredFieldConfirmationStatus === 'blocked';
-    const validSecurityCodeOutcome = parsed?.securityCodeOutcome == null
-      || ['accepted', 'rejected', 'no_control', 'not_entered'].includes(parsed.securityCodeOutcome);
-    const finalProgress = parsed?.stage === 'result_ready' || parsed?.stage === 'result_written';
-    if (parsed?.version === 1
-      && Number.isInteger(parsed?.phase) && parsed.phase >= 0 && parsed.phase <= 1
-      && validStage && typeof parsed?.submitPressed === 'boolean'
-      && typeof parsed?.applicationSubmitPressed === 'boolean'
-      && typeof parsed?.verificationSubmitPressed === 'boolean'
-      && validSubmitKind && validPolicyVersion && validAttempt
-      && validRequiredStatus && validSecurityCodeOutcome
-      && (!finalProgress || employerOutcome)) {
-      const progress = {
-        version: 1,
-        phase: parsed.phase,
-        stage: parsed.stage,
-        submitPressed: parsed.submitPressed,
-        applicationSubmitPressed: parsed.applicationSubmitPressed,
-        verificationSubmitPressed: parsed.verificationSubmitPressed,
-        submitKind: parsed.submitKind,
-        policyVersion: parsed.policyVersion,
-        ...(employerOutcome ? { employerOutcome } : {}),
-        ...(parsed.requiredFieldConfirmationStatus != null
-          ? { requiredFieldConfirmationStatus: parsed.requiredFieldConfirmationStatus }
-          : {}),
-        ...(parsed.securityCodeOutcome != null ? { securityCodeOutcome: parsed.securityCodeOutcome } : {}),
-        ...(progressAttempt ? { submissionAttempt: progressAttempt } : {})
-      };
-      return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
-    }
+    return normalizeManagedBrowserProgress(parsed, expectedSubmissionAttempt);
   } catch { /* absent or malformed progress is simply unavailable */ }
   return null;
 }

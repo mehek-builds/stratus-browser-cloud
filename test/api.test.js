@@ -20,6 +20,23 @@ test('API rejects missing credentials with an actionable error', async () => wit
   assert.match(body.error.message, /valid API key/i);
 }));
 
+test('Railway managed-run endpoint is authenticated and validates before opening Chromium', async () => withApp(async (base) => {
+  const unauthorized = await fetch(`${base}/api/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const wrongMethod = await request(base, '/api/run');
+  assert.equal(wrongMethod.status, 405);
+
+  const invalid = await request(base, '/api/run', { method: 'POST', body: '{}' });
+  const body = await invalid.json();
+  assert.equal(invalid.status, 400);
+  assert.equal(body.error.code, 'INVALID_URL');
+}));
+
 test('API covers project, context, function, model, and usage flows', async () => withApp(async (base) => {
   assert.equal((await request(base, '/v1/projects')).status, 200);
   const context = await (await request(base, '/v1/contexts', { method: 'POST', body: JSON.stringify({ name: 'API identity' }) })).json();
