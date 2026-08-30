@@ -359,6 +359,7 @@ const { chromium } = require('playwright');
   }));
   browser = await chromium.launch({
     headless: true,
+    ...(process.env.CHROME_EXECUTABLE_PATH ? { executablePath: process.env.CHROME_EXECUTABLE_PATH } : {}),
     args: [
       '--no-sandbox',
       ...(retainedAtomicV4Run ? [

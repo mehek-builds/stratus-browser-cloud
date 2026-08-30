@@ -10,6 +10,7 @@ import { FunctionRuntime } from './function-runtime.js';
 import { AgentRuntime } from './agent-runtime.js';
 import { assertPublicUrl, htmlToText, textToMarkdown } from './security.js';
 import { hmac, id, json, now, readJson, redact, sha256 } from './utils.js';
+import { executeLocalManagedRun } from './local-managed-runner.js';
 
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg' };
 
@@ -46,6 +47,18 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         const body = `stratus_sessions_running ${usage.concurrent}\nstratus_sessions_limit ${usage.concurrentLimit}\nstratus_browser_hours_used ${usage.browserHoursUsed}\nstratus_browser_hours_allowance ${usage.browserHoursAllowance}\n`;
         res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
         return res.end(body);
+      }
+      if (route === '/api/run') {
+        if (req.method !== 'POST') {
+          res.setHeader('allow', 'POST');
+          return json(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'Use POST' } });
+        }
+        const apiKey = req.headers['x-stratus-api-key']
+          || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (!store.authenticate(apiKey)) {
+          return json(res, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid Litos service identity is required' } });
+        }
+        return json(res, 200, { run: await executeLocalManagedRun(await readJson(req, 25_000_000)) });
       }
       if (route.startsWith('/artifacts/')) return serveArtifact(route, res);
       if (!route.startsWith('/v1') && !route.startsWith('/openapi')) return serveStatic(route, res);
