@@ -15,7 +15,6 @@ COPY . .
 ENV PORT=4100 \
     CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome \
     STRATUS_DATA_DIR=/data
-VOLUME ["/data"]
 EXPOSE 4100
 HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD curl -fsS http://localhost:4100/ready || exit 1
 CMD ["node", "src/server.js"]
