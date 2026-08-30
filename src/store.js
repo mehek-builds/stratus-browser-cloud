@@ -119,6 +119,9 @@ export class Store {
     if (!this.db.prepare('SELECT id FROM api_keys WHERE project_id=?').get(project.id)) {
       this.db.prepare('INSERT INTO api_keys (id,project_id,name,key_hash,prefix,created_at) VALUES (?,?,?,?,?,?)')
         .run('key_default', project.id, 'Development key', sha256(config.apiKey), config.apiKey.slice(0, 14), now());
+    } else {
+      this.db.prepare('UPDATE api_keys SET key_hash=?,prefix=?,revoked_at=NULL WHERE id=? AND project_id=?')
+        .run(sha256(config.apiKey), config.apiKey.slice(0, 14), 'key_default', project.id);
     }
     this.db.prepare(`INSERT OR IGNORE INTO project_settings
       (project_id,retention_days,zero_data_retention,record_sessions,record_logs,updated_at)
@@ -127,7 +130,10 @@ export class Store {
 
   ensureDefaultProject() {
     const existing = this.db.prepare('SELECT * FROM projects LIMIT 1').get();
-    if (existing) return existing;
+    if (existing) {
+      this.db.prepare('UPDATE projects SET api_key_hash=? WHERE id=?').run(sha256(config.apiKey), existing.id);
+      return { ...existing, api_key_hash: sha256(config.apiKey) };
+    }
     const project = {
       id: 'proj_stratus_demo',
       name: 'Stratus Demo',
