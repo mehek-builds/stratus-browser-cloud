@@ -389,6 +389,33 @@ test('native placeholders are structural and a valid Please label is preserved',
   });
 });
 
+test('native selects report incomplete while empty or loading and omit disabled choices', async () => {
+  const empty = await optionInventoryFor(`
+    <label for="empty-choice">Office</label>
+    <select id="empty-choice"></select>`, '#empty-choice');
+  assert.deepEqual(empty, { values: [], complete: false });
+
+  const loading = await optionInventoryFor(`
+    <label for="loading-choice">Office</label>
+    <select id="loading-choice" aria-busy="true">
+      <option value="">Loading offices</option>
+      <option value="dubai">Dubai</option>
+    </select>`, '#loading-choice');
+  assert.deepEqual(loading, { values: ['Dubai'], complete: false });
+
+  const disabled = await optionInventoryFor(`
+    <label for="enabled-choice">Office</label>
+    <select id="enabled-choice">
+      <option value="">Choose one</option>
+      <option value="dubai">Dubai</option>
+      <option value="closed" disabled>Closed office</option>
+      <optgroup label="Unavailable" disabled>
+        <option value="later">Opening later</option>
+      </optgroup>
+    </select>`, '#enabled-choice');
+  assert.deepEqual(disabled, { values: ['Dubai'], complete: true });
+});
+
 test('duplicate labels with distinct employer values make the inventory incomplete', async () => {
   const inventory = await optionInventoryFor(`
     <label for="region-choice">Region</label>

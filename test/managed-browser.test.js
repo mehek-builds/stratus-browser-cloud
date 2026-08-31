@@ -430,6 +430,14 @@ test('submission quiescence rejects before every provider or continuation adapte
   for (const request of [
     { url: 'https://example.com/apply', allowSubmit: true },
     { continuationToken: 'q'.repeat(43), actions: [] },
+    { url: 'https://example.com/apply', actions: [{ type: 'click' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'fill' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'fillByLabelText' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'upload' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'press' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'select' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'discover' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'confirmAndSubmit' }] },
   ]) {
     await assert.rejects(
       executeManagedRun(request, options),
@@ -438,6 +446,45 @@ test('submission quiescence rejects before every provider or continuation adapte
   }
   assert.equal(providerCalls, 0);
   assert.equal(validatorCalls, 0);
+});
+
+test('raw final action grammar requires explicit release and durable correlation before dispatch', async () => {
+  let providerCalls = 0;
+  let validatorCalls = 0;
+  const finalClick = { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' };
+  const options = {
+    urlValidator: async (value) => {
+      validatorCalls += 1;
+      return new URL(value);
+    },
+    sandboxExecutor: async () => {
+      providerCalls += 1;
+      return {};
+    },
+  };
+  await assert.rejects(
+    executeManagedRun({ url: 'https://example.com/apply', actions: [finalClick] }, options),
+    (error) => error.code === 'SUBMISSION_AUTHORIZATION_REQUIRED' && error.status === 400,
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      actions: [finalClick],
+    }, { urlValidator: options.urlValidator }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      actions: [finalClick],
+    }, { urlValidator: options.urlValidator }),
+    (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(validatorCalls, 2);
 });
 
 test('managed actions accept reviewed questions and bounded resume uploads', () => {
@@ -2264,19 +2311,21 @@ test('exact employer page URL capability is required before actions and at the a
     submitKind: 'application',
     expectedPageUrl,
   };
+  const normalizeReleased = (body) => normalizeManagedRun({
+    ...body,
+    allowSubmit: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { urlValidator: async (value) => new URL(value) });
   const actions = normalizeManagedActions([
     { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
     submit,
   ]);
   assert.equal(actions[1].expectedPageUrl, expectedPageUrl);
-  const run = await normalizeManagedRun({ url: expectedPageUrl, actions }, {
-    urlValidator: async (value) => new URL(value),
-  });
+  const run = await normalizeReleased({ url: expectedPageUrl, actions });
   assert.equal(run.actions[1].expectedPageUrl, expectedPageUrl);
   await assert.rejects(
-    normalizeManagedRun({ url: expectedPageUrl, actions: [actions[0], { ...submit, expectedPageUrl: 'https://jobs.example.com/postings/other' }] }, {
-      urlValidator: async (value) => new URL(value),
-    }),
+    normalizeReleased({ url: expectedPageUrl, actions: [actions[0], { ...submit, expectedPageUrl: 'https://jobs.example.com/postings/other' }] }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   assert.match(SANDBOX_RUNNER, /Employer page URL changed before the first application action/);
@@ -2323,57 +2372,55 @@ test('exact employer page URL capability is required before actions and at the a
     applicationScopeSelector: '#application',
   };
   await assert.rejects(
-    normalizeManagedRun({ url: expectedPageUrl, actions: [v4Submit] }, {
-      urlValidator: async (value) => new URL(value),
-    }),
+    normalizeReleased({ url: expectedPageUrl, actions: [v4Submit] }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, { ...atomicV4Capability, optional: true }, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         exactV4Capability,
         { type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false },
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, atomicV4Capability, atomicV4Capability, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
-  const v4Run = await normalizeManagedRun({
+  const v4Run = await normalizeReleased({
     url: expectedPageUrl,
     actions: [exactV4Capability, atomicV4Capability, v4Submit],
-  }, { urlValidator: async (value) => new URL(value) });
+  });
   assert.equal(v4Run.actions[1].value, ATOMIC_SUBMIT_V4_CAPABILITY);
   assert.equal(v4Run.actions[1].optional, false);
   assert.equal(v4Run.actions[2].chooserPolicy.version, 4);
@@ -2391,7 +2438,7 @@ test('exact employer page URL capability is required before actions and at the a
   assert.equal(v4Continuation.actions[1].optional, false);
   assert.equal(v4Continuation.actions[2].chooserPolicy.version, 4);
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
@@ -2399,22 +2446,22 @@ test('exact employer page URL capability is required before actions and at the a
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: true, expectedPageUrl },
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         {
@@ -2424,7 +2471,7 @@ test('exact employer page URL capability is required before actions and at the a
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   assert.throws(
@@ -3619,8 +3666,13 @@ test('durable confirmation survives a lost ordinary result response and precedes
   assert.equal(result.title, 'Application received');
   assert.match(result.terminalResult.resultId, /^[a-f0-9]{64}$/);
   const progressIndex = SANDBOX_RUNNER.indexOf("stage: 'result_ready'");
+  const terminalIndex = SANDBOX_RUNNER.indexOf(
+    'persistTerminalResult(currentInput, phase, publishedResult)',
+    progressIndex,
+  );
   const screenshotIndex = SANDBOX_RUNNER.indexOf('if (currentInput.screenshot)', progressIndex);
-  assert.ok(progressIndex >= 0 && screenshotIndex > progressIndex);
+  assert.ok(progressIndex >= 0 && terminalIndex > progressIndex);
+  assert.ok(screenshotIndex > terminalIndex);
 });
 
 test('a stalled optional screenshot cannot hide a confirmed provider result', async () => {
@@ -3666,6 +3718,65 @@ test('a stalled optional screenshot cannot hide a confirmed provider result', as
   });
   assert.equal(result.submitOutcome.state, 'confirmed');
   assert.equal(result.screenshot, null);
+});
+
+test('the shipped publication block commits terminal success before a throwing screenshot and preserves legacy fallback', async () => {
+  const start = SANDBOX_RUNNER.indexOf(
+    'if (currentInput.submissionAttempt) assertNoDurableTerminalAuthority();',
+  );
+  const end = SANDBOX_RUNNER.indexOf(
+    'if (phase > 0 || !continuationOffered) break;',
+    start,
+  );
+  assert.ok(start >= 0 && end > start);
+  const source = SANDBOX_RUNNER.slice(start, end);
+  const events = [];
+  const execute = new Function('events', 'Buffer', 'fs', 'durableAuthority', `
+    const currentInput = {
+      submissionAttempt: { runId: 'run', claimId: 'claim', executionId: 'execution' },
+      screenshot: true,
+      fullPage: false
+    };
+    const input = currentInput;
+    const phase = 0;
+    const continuationOffered = false;
+    const resultPayload = { employerOutcome: { kind: 'confirmed' } };
+    const activeTerminalAckPath = 'stratus-terminal-result-ack.json';
+    const hasDurableSubmissionAuthority = durableAuthority;
+    let terminalFailureInput = currentInput;
+    const assertNoDurableTerminalAuthority = () => {
+      if (hasDurableSubmissionAuthority) events.push('authority');
+    };
+    const persistTerminalResult = () => { events.push('terminal'); return true; };
+    const writeDurableJson = () => events.push('legacy-result');
+    const recordCrashProgress = (_patch, options) => events.push(
+      options?.persist === false ? 'progress-memory' : 'progress-file'
+    );
+    const releaseDispatchLock = () => events.push('unlock');
+    const page = { screenshot: async () => { events.push('screenshot'); throw new Error('optional'); } };
+    return (async () => {
+      ${source}
+      return { terminalFailureInput };
+    })();
+  `);
+  const state = await execute(
+    events,
+    Buffer,
+    { existsSync: () => false, unlinkSync: () => {} },
+    true,
+  );
+  assert.deepEqual(events, ['authority', 'terminal', 'progress-memory', 'unlock', 'screenshot']);
+  assert.equal(state.terminalFailureInput, null);
+
+  const legacyEvents = [];
+  const legacyState = await execute(
+    legacyEvents,
+    Buffer,
+    { existsSync: () => false, unlinkSync: () => {} },
+    false,
+  );
+  assert.deepEqual(legacyEvents, ['legacy-result', 'progress-memory', 'unlock', 'screenshot']);
+  assert.notEqual(legacyState.terminalFailureInput, null);
 });
 
 test('a detached runner that crashes reports the crash, not a timeout', async () => {
@@ -4057,7 +4168,7 @@ test('the runner checkpoints only bounded submit progress around activation and 
   assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
   assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
   assert.match(SANDBOX_RUNNER, /finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*applicationSubmitPressed: true/);
-  assert.match(SANDBOX_RUNNER, /recordCrashProgress\(\{ phase, stage: 'result_written' \}\)[\s\S]*assertNoDurableTerminalAuthority\(\)[\s\S]*persistTerminalResult\(currentInput, phase, resultPayload\)/);
+  assert.match(SANDBOX_RUNNER, /assertNoDurableTerminalAuthority\(\)[\s\S]*persistTerminalResult\(currentInput, phase, publishedResult\)[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}, \{ persist: false \}\)[\s\S]*if \(currentInput\.screenshot\)/);
   assert.doesNotMatch(SANDBOX_RUNNER, /recordCrashProgress\([^)]*(?:value|text|file|email|phone|name):/i);
 });
 
@@ -4110,7 +4221,7 @@ test('only a phase-zero pressed unknown outcome adds the short receipt observati
     /continuationOffered = input\.requestContinuation === true\s*&& \(Boolean\(humanVerification\) \|\| input\.continuationCheckpoint === true \|\| pressedUnknown\)/s,
   );
   assert.match(SANDBOX_RUNNER, /receiptObservationOnly\s*\? 15\s*: Math\.max/s);
-  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) \{/);
+  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) break;/);
 });
 
 test('the runner reads the submit outcome off the page and reports it', () => {

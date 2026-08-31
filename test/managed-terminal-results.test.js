@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   ACK_MANAGED_TERMINAL_RESULT_SCRIPT,
+  CLAIM_CONTINUATION_SCRIPT,
   FINALIZE_MANAGED_INDETERMINATE_SCRIPT,
   acknowledgeManagedTerminalResult,
   executeSandboxRun,
@@ -113,6 +114,9 @@ function acknowledgementBuffer({
   resultId,
   submissionAttempt = ATTEMPT,
   cleanupState = 'completed',
+  acknowledgementKind = 'consumer_acknowledged',
+  checkpoint = false,
+  phase = 0,
 }) {
   const acknowledgedAt = new Date().toISOString();
   return Buffer.from(JSON.stringify({
@@ -121,6 +125,9 @@ function acknowledgementBuffer({
     submissionAttempt,
     requestDigest,
     resultId,
+    acknowledgementKind,
+    checkpoint,
+    phase,
     acknowledgedAt,
     cleanupState,
     cleanupUpdatedAt: acknowledgedAt,
@@ -147,6 +154,7 @@ function fakeSandboxApi() {
   const template = { name: TEMPLATE_NAME, currentSnapshotId: 'snapshot' };
   const sandboxes = new Map();
   const calls = { forks: 0, runnerStarts: 0, acknowledgements: 0 };
+  let nextForkOptions = {};
 
   class FakeSandbox {
     constructor(name, {
@@ -155,6 +163,7 @@ function fakeSandboxApi() {
       reservationOnProbe = null,
       clock = null,
       operationDelayMs = 0,
+      writeFilesHook = null,
     } = {}) {
       this.name = name;
       this.files = new Map();
@@ -165,6 +174,7 @@ function fakeSandboxApi() {
       this.reservationOnProbe = reservationOnProbe;
       this.clock = clock;
       this.operationDelayMs = operationDelayMs;
+      this.writeFilesHook = writeFilesHook;
     }
 
     advance() {
@@ -173,6 +183,10 @@ function fakeSandboxApi() {
 
     async writeFiles(files) {
       this.advance();
+      if (this.writeFilesHook) {
+        await this.writeFilesHook(this, files);
+        return;
+      }
       for (const file of files) this.files.set(file.path, Buffer.from(file.content));
     }
 
@@ -229,6 +243,30 @@ function fakeSandboxApi() {
         return { exitCode: 0, stdout: async () => '' };
       }
 
+      if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) {
+        if (!this.activeRunner) return { exitCode: 13, stdout: async () => '' };
+        const candidate = JSON.parse(this.files.get(args[2]).toString('utf8'));
+        this.files.set(
+          MANAGED_CONTINUATION_RESERVATION_PATH,
+          Buffer.from(JSON.stringify(candidate.reservation)),
+        );
+        this.files.set(
+          'stratus-continuation-input.json',
+          Buffer.from(JSON.stringify(candidate.input)),
+        );
+        const run = {
+          title: 'Application received',
+          submitOutcome: { pressed: true, state: 'confirmed' },
+          continuationOffered: false,
+          submissionAttempt: candidate.input.submissionAttempt,
+        };
+        this.files.set(
+          MANAGED_CONTINUATION_TERMINAL_RESULT_PATH,
+          terminalBuffer(candidate.input, run, { phase: 1 }),
+        );
+        return { exitCode: 0, stdout: async () => '' };
+      }
+
       if (typeof command === 'object') {
         calls.runnerStarts += 1;
         const input = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
@@ -247,6 +285,14 @@ function fakeSandboxApi() {
       if (command === 'node' && args?.[1] === ACK_MANAGED_TERMINAL_RESULT_SCRIPT) {
         calls.acknowledgements += 1;
         const expected = JSON.parse(args[2]);
+        const privateArtifact = expected.terminalPath === MANAGED_TERMINAL_RESULT_PATH
+          ? /^(?:stratus-input\.json|stratus-result-0\.json|stratus-screenshot-0\.png|stratus-terminal-result\.json|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/
+          : /^(?:stratus-continuation-(?:input|candidate-[a-f0-9]+|claim|used|ready|terminal-result)\.json|stratus-continuation\.json|stratus-result-1\.json|stratus-screenshot-1\.png|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/;
+        const scrub = () => {
+          for (const path of [...this.files.keys()]) {
+            if (privateArtifact.test(path)) this.files.delete(path);
+          }
+        };
         const existing = this.files.get(expected.ackPath);
         if (existing) {
           const acknowledgement = JSON.parse(existing.toString('utf8'));
@@ -259,12 +305,7 @@ function fakeSandboxApi() {
             cleanupUpdatedAt: new Date().toISOString(),
           };
           this.files.set(expected.ackPath, Buffer.from(JSON.stringify(completed)));
-          this.files.delete(expected.terminalPath);
-          if (expected.terminalPath === MANAGED_TERMINAL_RESULT_PATH) {
-            this.files.delete('stratus-input.json');
-          } else {
-            this.files.delete('stratus-continuation-input.json');
-          }
+          scrub();
           return { exitCode: 0, stdout: async () => JSON.stringify(completed) };
         }
         const terminal = JSON.parse(this.files.get(expected.terminalPath).toString('utf8'));
@@ -276,13 +317,20 @@ function fakeSandboxApi() {
           submissionAttempt: expected.submissionAttempt,
           requestDigest: terminal.requestDigest,
           resultId: terminal.resultId,
+          acknowledgementKind: expected.acknowledgementKind,
+          checkpoint: expected.terminalPath === MANAGED_TERMINAL_RESULT_PATH
+            && terminal.state === 'completed'
+            && terminal.phase === 0
+            && terminal.run?.continuationOffered === true
+            && typeof terminal.run?.continuationToken === 'string',
+          phase: terminal.phase,
           acknowledgedAt,
           cleanupState: 'completed',
           cleanupUpdatedAt: acknowledgedAt,
           expiresAt: new Date(Date.parse(acknowledgedAt) + RETENTION_MS).toISOString(),
         };
         this.files.set(expected.ackPath, Buffer.from(JSON.stringify(acknowledgement)));
-        this.files.delete(expected.terminalPath);
+        scrub();
         return { exitCode: 0, stdout: async () => JSON.stringify(acknowledgement) };
       }
 
@@ -301,6 +349,7 @@ function fakeSandboxApi() {
     async stop() {
       this.advance();
       this.stopCalls += 1;
+      this.activeRunner = false;
     }
 
     async delete() {
@@ -325,10 +374,14 @@ function fakeSandboxApi() {
         if (sandboxes.has(options.name)) {
           throw Object.assign(new Error('sandbox name already exists'), { status: 409 });
         }
-        const sandbox = new FakeSandbox(options.name);
+        const sandbox = new FakeSandbox(options.name, nextForkOptions);
+        nextForkOptions = {};
         sandboxes.set(options.name, sandbox);
         return sandbox;
       },
+    },
+    configureNextFork(options) {
+      nextForkOptions = options;
     },
     seed(files, submissionAttempt = ATTEMPT, options = {}) {
       const name = managedTerminalResultSandboxName(PROJECT_BINDING, submissionAttempt);
@@ -392,7 +445,7 @@ test('a lost response is retrieved and the same execution never dispatches twice
   assert.deepEqual(fake.calls, { forks: 1, runnerStarts: 1, acknowledgements: 0 });
 });
 
-test('a lost initial challenge is retrieved before its exact continuation is acknowledged', async () => {
+test('ACK and GET preserve the phase-0 runner until its exact continuation completes', async () => {
   const fake = fakeSandboxApi();
   const initialDigest = '1'.repeat(64);
   const initialInput = {
@@ -411,7 +464,7 @@ test('a lost initial challenge is retrieved before its exact continuation is ack
   const sandbox = fake.seed([
     [MANAGED_SUBMISSION_RESERVATION_PATH, reservationBuffer(initialDigest)],
     [MANAGED_TERMINAL_RESULT_PATH, terminalBuffer(initialInput, challengeRun)],
-  ]);
+  ], ATTEMPT, { activeRunner: true });
 
   const recoveredChallenge = await retrieveManagedTerminalResult(
     { submissionAttempt: ATTEMPT },
@@ -425,38 +478,39 @@ test('a lost initial challenge is retrieved before its exact continuation is ack
     resultId: recoveredChallenge.resultId,
   }, { sandboxApi: fake.api, projectBinding: PROJECT_BINDING });
   assert.equal(initialAck.cleanupState, 'completed');
+  assert.equal(initialAck.checkpoint, true);
+  assert.equal(initialAck.phase, 0);
+  assert.equal(sandbox.stopCalls, 0);
+  assert.equal(sandbox.activeRunner, true);
 
-  const continuationDigest = '2'.repeat(64);
-  const continuationInput = {
-    submissionAttempt: CONTINUATION_ATTEMPT,
-    terminalResultProjectHash: projectHash(PROJECT_BINDING),
-    terminalResultRequestDigest: continuationDigest,
-  };
-  const continuationRun = {
-    title: 'Application received',
-    submitOutcome: { pressed: true, state: 'confirmed' },
-    continuationOffered: false,
-    submissionAttempt: CONTINUATION_ATTEMPT,
-  };
-  sandbox.files.set(
-    MANAGED_CONTINUATION_RESERVATION_PATH,
-    reservationBuffer(continuationDigest, { submissionAttempt: CONTINUATION_ATTEMPT }),
+  await assert.rejects(
+    retrieveManagedTerminalResult(
+      { submissionAttempt: ATTEMPT },
+      { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
+    ),
+    (error) => error.code === 'SUBMISSION_EXECUTION_GONE' && error.status === 410,
   );
-  sandbox.files.set(
-    MANAGED_CONTINUATION_TERMINAL_RESULT_PATH,
-    terminalBuffer(continuationInput, continuationRun, { phase: 1 }),
-  );
+  assert.equal(sandbox.stopCalls, 0);
+  assert.equal(sandbox.activeRunner, true);
 
-  const recoveredContinuation = await retrieveManagedTerminalResult(
-    { submissionAttempt: CONTINUATION_ATTEMPT },
-    { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
-  );
-  assert.equal(recoveredContinuation.run.submitOutcome.state, 'confirmed');
+  const recoveredContinuation = await executeSandboxRun({
+    continuationToken: challengeRun.continuationToken,
+    submissionAttempt: CONTINUATION_ATTEMPT,
+    providerDeadlineAt: deadline(),
+    actions: [],
+    screenshot: false,
+  }, { sandboxApi: fake.api, projectBinding: PROJECT_BINDING });
+  assert.equal(recoveredContinuation.submitOutcome.state, 'confirmed');
+  assert.equal(sandbox.stopCalls, 1);
+  assert.equal(sandbox.activeRunner, false);
+
   const continuationAck = await acknowledgeManagedTerminalResult({
     submissionAttempt: CONTINUATION_ATTEMPT,
-    resultId: recoveredContinuation.resultId,
+    resultId: recoveredContinuation.terminalResult.resultId,
   }, { sandboxApi: fake.api, projectBinding: PROJECT_BINDING });
-  assert.equal(continuationAck.resultId, recoveredContinuation.resultId);
+  assert.equal(continuationAck.resultId, recoveredContinuation.terminalResult.resultId);
+  assert.equal(continuationAck.checkpoint, false);
+  assert.equal(continuationAck.phase, 1);
   assert.ok(sandbox.files.has(MANAGED_TERMINAL_ACK_PATH));
   assert.ok(sandbox.files.has(MANAGED_CONTINUATION_TERMINAL_ACK_PATH));
 });
@@ -703,6 +757,46 @@ test('a stale artifact-bearing runner is quarantined once it becomes inactive', 
   );
   assert.ok(sandbox.files.has(MANAGED_PROVISIONING_QUARANTINE_PATH));
   assert.equal(fake.calls.runnerStarts, 0);
+});
+
+test('a quarantine interleaving fences a delayed provisioner before runner dispatch', async () => {
+  const fake = fakeSandboxApi();
+  let announcePartial;
+  let releaseWrite;
+  const partial = new Promise((resolve) => { announcePartial = resolve; });
+  const released = new Promise((resolve) => { releaseWrite = resolve; });
+  fake.configureNextFork({
+    createdAt: Date.now() - MANAGED_PROVISIONING_LEASE_MS - 1_000,
+    writeFilesHook: async (sandbox, files) => {
+      const inputFile = files.find((file) => file.path === 'stratus-input.json');
+      sandbox.files.set(inputFile.path, Buffer.from(inputFile.content));
+      announcePartial();
+      await released;
+      for (const file of files) sandbox.files.set(file.path, Buffer.from(file.content));
+    },
+  });
+  const options = {
+    sandboxApi: fake.api,
+    projectBinding: PROJECT_BINDING,
+    urlValidator: async (value) => new URL(value),
+  };
+  const first = executeSandboxRun(request(), options);
+  await partial;
+
+  await assert.rejects(
+    executeSandboxRun(request({ providerDeadlineAt: deadline(220_000) }), options),
+    (error) => error.code === 'TERMINAL_RESULT_STORE_CORRUPT' && error.status === 502,
+  );
+  releaseWrite();
+  await assert.rejects(
+    first,
+    (error) => error.code === 'TERMINAL_RESULT_STORE_CORRUPT' && error.status === 502,
+  );
+
+  const [sandbox] = [...fake.sandboxes.values()];
+  assert.ok(sandbox.files.has(MANAGED_PROVISIONING_QUARANTINE_PATH));
+  assert.equal(fake.calls.runnerStarts, 0);
+  assert.equal(fake.calls.forks, 1);
 });
 
 test('a reservation that appears during the stale probe is adopted and never redispatched', async () => {
@@ -964,6 +1058,37 @@ test('acknowledgement is idempotent and its tombstone prevents relaunch', async 
   assert.equal(fake.calls.forks, 1);
 });
 
+test('legacy v2 acknowledgement tombstones remain readable during rollout', async () => {
+  const fake = fakeSandboxApi();
+  const requestDigest = 'a'.repeat(64);
+  const acknowledgedAt = new Date().toISOString();
+  const legacyAck = Buffer.from(JSON.stringify({
+    schemaVersion: 'stratus-terminal-result-ack-v2',
+    projectBindingHash: projectHash(PROJECT_BINDING),
+    submissionAttempt: ATTEMPT,
+    requestDigest,
+    resultId: 'b'.repeat(64),
+    acknowledgedAt,
+    cleanupState: 'completed',
+    cleanupUpdatedAt: acknowledgedAt,
+    expiresAt: new Date(Date.parse(acknowledgedAt) + RETENTION_MS).toISOString(),
+  }));
+  const sandbox = fake.seed([
+    [MANAGED_SUBMISSION_RESERVATION_PATH, reservationBuffer(requestDigest)],
+    [MANAGED_TERMINAL_ACK_PATH, legacyAck],
+  ]);
+
+  await assert.rejects(
+    retrieveManagedTerminalResult(
+      { submissionAttempt: ATTEMPT },
+      { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
+    ),
+    (error) => error.code === 'SUBMISSION_EXECUTION_GONE'
+      && error.terminalResult.schemaVersion === 'stratus-terminal-result-ack-v2',
+  );
+  assert.equal(sandbox.stopCalls, 1);
+});
+
 test('acknowledgement is bound to the exact immutable result identifier', async () => {
   const fake = fakeSandboxApi();
   const submitted = await executeSandboxRun(request(), {
@@ -1115,18 +1240,37 @@ test('unknown and expired attempt tuples have distinct recovery outcomes', async
     terminalResultRequestDigest: requestDigest,
   };
   const completedAt = new Date(Date.now() - RETENTION_MS - 1_000).toISOString();
-  expired.seed([
+  const expiredSandbox = expired.seed([
     [MANAGED_SUBMISSION_RESERVATION_PATH, reservationBuffer(requestDigest)],
     [MANAGED_TERMINAL_RESULT_PATH, terminalBuffer(
       input,
       { title: 'Expired', submissionAttempt: ATTEMPT },
       { completedAt },
     )],
+    ['stratus-input.json', '{"applicant":"private"}'],
+    ['stratus-progress.json', '{"employer":"private"}'],
+    ['stratus-error.json', '{"detail":"private"}'],
+    ['stratus-screenshot-0.png', 'private'],
   ]);
 
   await assert.rejects(
     retrieveManagedTerminalResult(
       { submissionAttempt: ATTEMPT },
+      { sandboxApi: expired.api, projectBinding: PROJECT_BINDING },
+    ),
+    (error) => error.code === 'SUBMISSION_EXECUTION_GONE' && error.status === 410,
+  );
+  const retired = JSON.parse(expiredSandbox.files.get(MANAGED_TERMINAL_ACK_PATH).toString('utf8'));
+  assert.equal(retired.acknowledgementKind, 'retention_expired');
+  assert.equal(retired.cleanupState, 'completed');
+  assert.equal(expiredSandbox.files.has(MANAGED_TERMINAL_RESULT_PATH), false);
+  assert.equal(expiredSandbox.files.has('stratus-input.json'), false);
+  assert.equal(expiredSandbox.files.has('stratus-progress.json'), false);
+  assert.equal(expiredSandbox.files.has('stratus-error.json'), false);
+  assert.equal(expiredSandbox.files.has('stratus-screenshot-0.png'), false);
+  await assert.rejects(
+    acknowledgeManagedTerminalResult(
+      { submissionAttempt: ATTEMPT, resultId: retired.resultId },
       { sandboxApi: expired.api, projectBinding: PROJECT_BINDING },
     ),
     (error) => error.code === 'SUBMISSION_EXECUTION_GONE' && error.status === 410,
@@ -1162,11 +1306,22 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
       '{"terminal":"private temporary"}',
     );
     fs.writeFileSync(path.join(directory, 'stratus-screenshot-0.png'), 'private');
+    fs.writeFileSync(path.join(directory, 'stratus-progress.json'), '{"employer":"private"}');
+    fs.writeFileSync(path.join(directory, 'stratus-error.json'), '{"detail":"private"}');
+    fs.writeFileSync(
+      path.join(directory, 'stratus-progress.json.tmp-987-private'),
+      '{"employer":"private temporary"}',
+    );
+    fs.writeFileSync(
+      path.join(directory, 'stratus-error.json.tmp-987-private'),
+      '{"detail":"private temporary"}',
+    );
 
     const expected = JSON.stringify({
       projectBindingHash: projectHash(PROJECT_BINDING),
       submissionAttempt: ATTEMPT,
       resultId: JSON.parse(terminal.toString('utf8')).resultId,
+      acknowledgementKind: 'consumer_acknowledged',
       reservationPath: MANAGED_SUBMISSION_RESERVATION_PATH,
       terminalPath: MANAGED_TERMINAL_RESULT_PATH,
       ackPath: MANAGED_TERMINAL_ACK_PATH,
@@ -1180,6 +1335,9 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
     const firstAck = JSON.parse(first.stdout);
     assert.equal(firstAck.requestDigest, requestDigest);
     assert.equal(firstAck.cleanupState, 'completed');
+    assert.equal(firstAck.acknowledgementKind, 'consumer_acknowledged');
+    assert.equal(firstAck.phase, 0);
+    assert.equal(firstAck.checkpoint, false);
     assert.ok(fs.existsSync(path.join(directory, MANAGED_SUBMISSION_RESERVATION_PATH)));
     assert.ok(fs.existsSync(path.join(directory, MANAGED_TERMINAL_ACK_PATH)));
     assert.equal(fs.existsSync(path.join(directory, MANAGED_TERMINAL_RESULT_PATH)), false);
@@ -1187,6 +1345,16 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
     assert.equal(fs.existsSync(path.join(directory, 'stratus-input.json.tmp-987-private')), false);
     assert.equal(fs.existsSync(path.join(directory, 'stratus-result-0.json')), false);
     assert.equal(fs.existsSync(path.join(directory, 'stratus-screenshot-0.png')), false);
+    assert.equal(fs.existsSync(path.join(directory, 'stratus-progress.json')), false);
+    assert.equal(fs.existsSync(path.join(directory, 'stratus-error.json')), false);
+    assert.equal(
+      fs.existsSync(path.join(directory, 'stratus-progress.json.tmp-987-private')),
+      false,
+    );
+    assert.equal(
+      fs.existsSync(path.join(directory, 'stratus-error.json.tmp-987-private')),
+      false,
+    );
     assert.equal(
       fs.existsSync(path.join(directory, 'stratus-terminal-result.json.tmp-987-private')),
       false,
@@ -1234,6 +1402,7 @@ test('acknowledgement fails when any applicant artifact cannot be unlinked', () 
       projectBindingHash: projectHash(PROJECT_BINDING),
       submissionAttempt: ATTEMPT,
       resultId: JSON.parse(terminal.toString('utf8')).resultId,
+      acknowledgementKind: 'consumer_acknowledged',
       reservationPath: MANAGED_SUBMISSION_RESERVATION_PATH,
       terminalPath: MANAGED_TERMINAL_RESULT_PATH,
       ackPath: MANAGED_TERMINAL_ACK_PATH,
@@ -1285,6 +1454,31 @@ test('an ACK tombstone kills a late runner before Chromium launch even when inpu
     assert.equal(fs.existsSync(path.join(directory, 'chromium-launched')), false);
     assert.ok(fs.existsSync(path.join(directory, MANAGED_TERMINAL_ACK_PATH)));
     assert.ok(fs.existsSync(path.join(directory, 'stratus-input.json')));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a provisioning quarantine kills a late runner before Chromium launch', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-late-runner-quarantine-'));
+  try {
+    const moduleDirectory = path.join(directory, 'node_modules', 'playwright');
+    fs.mkdirSync(moduleDirectory, { recursive: true });
+    fs.writeFileSync(path.join(moduleDirectory, 'index.js'), [
+      "const fs = require('node:fs');",
+      "exports.chromium = { launch: async () => { fs.writeFileSync('chromium-launched', '1'); throw new Error('must not launch'); } };",
+    ].join('\n'));
+    fs.writeFileSync(path.join(directory, 'stratus-runner.cjs'), SANDBOX_RUNNER);
+    fs.writeFileSync(path.join(directory, 'stratus-input.json'), '{"applicant":"private"}');
+    fs.writeFileSync(path.join(directory, MANAGED_PROVISIONING_QUARANTINE_PATH), '{}');
+
+    const runner = spawnSync(process.execPath, ['stratus-runner.cjs'], {
+      cwd: directory,
+      encoding: 'utf8',
+    });
+    assert.equal(runner.status, 0, runner.stderr);
+    assert.equal(fs.existsSync(path.join(directory, 'chromium-launched')), false);
+    assert.ok(fs.existsSync(path.join(directory, MANAGED_PROVISIONING_QUARANTINE_PATH)));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

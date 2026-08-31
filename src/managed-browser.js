@@ -141,6 +141,8 @@ if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
 }
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
+const READ_ONLY_ACTIONS = new Set(['waitForSelector', 'extract', 'requireCapability']);
+const RAW_FINAL_CLICK_SELECTOR = /\[\s*type\s*[~^$*|]?=\s*["']?submit/i;
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
@@ -148,7 +150,7 @@ export const STRATUS_SUBMISSION_QUIESCENCE_ENV = 'STRATUS_SUBMISSION_QUIESCED';
 export const STRATUS_SUBMISSION_CORRELATION_MODE_ENV = 'STRATUS_SUBMISSION_CORRELATION_MODE';
 export const MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION = 'stratus-submission-reservation-v2';
 export const MANAGED_TERMINAL_RESULT_SCHEMA_VERSION = 'stratus-terminal-result-v1';
-export const MANAGED_TERMINAL_ACK_SCHEMA_VERSION = 'stratus-terminal-result-ack-v2';
+export const MANAGED_TERMINAL_ACK_SCHEMA_VERSION = 'stratus-terminal-result-ack-v3';
 export const MANAGED_SUBMISSION_RESERVATION_PATH = 'stratus-submission-reservation.json';
 export const MANAGED_TERMINAL_RESULT_PATH = 'stratus-terminal-result.json';
 export const MANAGED_TERMINAL_ACK_PATH = 'stratus-terminal-result-ack.json';
@@ -373,6 +375,7 @@ function persistTerminalFailure(input) {
 
 let terminalFailureInput = null;
 (async () => {
+  if (fs.existsSync('stratus-provisioning-quarantine.json')) return;
   if (fs.existsSync('stratus-terminal-result-ack.json')) return;
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
   terminalFailureInput = input;
@@ -394,7 +397,8 @@ let terminalFailureInput = null;
     if (!hasDurableSubmissionAuthority) return;
     if (fs.existsSync(activeTerminalAckPath)
       || fs.existsSync(activeTerminalResultPath)
-      || fs.existsSync(activeFinalizationFencePath)) {
+      || fs.existsSync(activeFinalizationFencePath)
+      || fs.existsSync('stratus-provisioning-quarantine.json')) {
       terminalFailureInput = null;
       throw Object.assign(
         new Error('Durable managed result authority already closed this execution'),
@@ -471,8 +475,9 @@ let terminalFailureInput = null;
     policyVersion: null,
     ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {})
   };
-  const recordCrashProgress = (patch = {}) => {
+  const recordCrashProgress = (patch = {}, { persist = true } = {}) => {
     crashProgress = { ...crashProgress, ...patch };
+    if (!persist) return;
     try {
       writeDurableJson('stratus-progress.json', crashProgress);
     } catch { /* failure telemetry must never change the employer action */ }
@@ -14271,12 +14276,20 @@ let terminalFailureInput = null;
               globalBudget.entries += 1;
             };
             if (el.tagName === 'SELECT') {
+              let eligibleNativeOptions = 0;
               for (const [index, option] of [...el.options].entries()) {
                 const structuralPlaceholder = option.value === ''
                   && (index === 0 || option.disabled || option.hidden
                     || option.getAttribute('aria-disabled') === 'true');
-                if (structuralPlaceholder) continue;
+                const disabled = option.disabled
+                  || option.getAttribute('aria-disabled') === 'true'
+                  || Boolean(option.closest('optgroup')?.disabled);
+                if (structuralPlaceholder || disabled) continue;
+                eligibleNativeOptions += 1;
                 add(option.textContent || option.value, 'value:' + option.value);
+              }
+              if (eligibleNativeOptions === 0 || el.getAttribute('aria-busy') === 'true') {
+                complete = false;
               }
               return { values, complete };
             }
@@ -16098,15 +16111,6 @@ let terminalFailureInput = null;
       requiredFieldConfirmationStatus: requiredFieldConfirmation?.status ?? null,
       securityCodeOutcome: securityCodeAttempt?.outcome ?? null
     });
-    if (currentInput.screenshot) {
-      await observeForResult(
-        () => page.screenshot({
-          path: 'stratus-screenshot-' + phase + '.png',
-          fullPage: Boolean(currentInput.fullPage)
-        }),
-        null
-      );
-    }
     if (postSubmitObservationDisposition) {
       submitOutcome.observationDisposition = postSubmitObservationDisposition;
     }
@@ -16229,27 +16233,45 @@ let terminalFailureInput = null;
     if (Buffer.byteLength(JSON.stringify(resultPayload), 'utf8') > 12 * 1024 * 1024) {
       throw new Error('Managed result exceeded its durable terminal result budget');
     }
-    recordCrashProgress({ phase, stage: 'result_written' });
     if (currentInput.submissionAttempt) assertNoDurableTerminalAuthority();
-    if (phase > 0 || !continuationOffered) {
-      if (currentInput.submissionAttempt && persistTerminalResult(currentInput, phase, resultPayload)) {
-        terminalFailureInput = null;
-      } else {
-        writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
-      }
-      releaseDispatchLock();
-      break;
-    }
-    if (input.submissionAttempt && typeof input.continuationToken === 'string') {
-      persistTerminalResult(input, phase, {
+    const publishedResult = phase === 0 && continuationOffered
+      && input.submissionAttempt && typeof input.continuationToken === 'string'
+      ? {
         ...resultPayload,
         continuationToken: input.continuationToken
-      });
+      }
+      : resultPayload;
+    if (currentInput.submissionAttempt && hasDurableSubmissionAuthority) {
+      if (!persistTerminalResult(currentInput, phase, publishedResult)) {
+        terminalFailureInput = null;
+        throw Object.assign(
+          new Error('Durable managed result authority already closed this execution'),
+          { code: 'DURABLE_TERMINAL_AUTHORITY_EXISTS' }
+        );
+      }
       terminalFailureInput = null;
     } else {
-      writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
+      writeDurableJson('stratus-result-' + phase + '.json', publishedResult);
     }
+    /* The immutable employer result is authority. Updating the in-memory progress afterward keeps
+     * result_written truthful without recreating a private progress artifact after an ACK raced
+     * the publication. */
+    recordCrashProgress({ phase, stage: 'result_written' }, { persist: false });
     releaseDispatchLock();
+    if (currentInput.screenshot) {
+      const screenshotPath = 'stratus-screenshot-' + phase + '.png';
+      try {
+        await page.screenshot({
+          path: screenshotPath,
+          fullPage: Boolean(currentInput.fullPage),
+          timeout: 1_000
+        });
+      } catch { /* screenshots are optional and cannot change terminal employer authority */ }
+      if (currentInput.submissionAttempt && fs.existsSync(activeTerminalAckPath)) {
+        try { fs.unlinkSync(screenshotPath); } catch {}
+      }
+    }
+    if (phase > 0 || !continuationOffered) break;
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -16296,6 +16318,7 @@ let terminalFailureInput = null;
   }
 })().catch((error) => {
   if (error?.code === 'DURABLE_TERMINAL_AUTHORITY_EXISTS') process.exit(0);
+  if (!terminalFailureInput) process.exit(0);
   const detail = String(error?.stack || error?.message || error);
   /* WRITTEN TO A FILE, not only to stderr, because on a continuation run this process is DETACHED
    * and nobody is holding its stderr. Before this, a runner that died on its first action and a
@@ -16337,17 +16360,56 @@ export function submissionReleasePolicy(env = process.env) {
   });
 }
 
-function requestCanReachEmployerBoundary(input) {
-  return input?.allowSubmit === true
-    || input?.requestContinuation === true
-    || input?.continuationToken != null;
+function classifyRawManagedRequest(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw inputError('Request body must be a JSON object');
+  }
+  if (input.actions != null && !Array.isArray(input.actions)) {
+    throw inputError('actions must be an array');
+  }
+  let mutation = false;
+  let finalAction = false;
+  for (const [index, action] of (input.actions || []).entries()) {
+    if (!action || typeof action !== 'object' || Array.isArray(action)
+      || !ALLOWED_ACTIONS.has(action.type)) {
+      throw inputError(`Action ${index + 1} has an unsupported type`, 'INVALID_ACTION');
+    }
+    if (READ_ONLY_ACTIONS.has(action.type)) continue;
+    mutation = true;
+    if (action.type === 'confirmAndSubmit'
+      || (action.type === 'click' && (
+        action.label === 'final_submit' || RAW_FINAL_CLICK_SELECTOR.test(String(action.selector || ''))
+      ))
+      || (action.type === 'press' && /^enter$/i.test(String(action.value || '')))) {
+      finalAction = true;
+    }
+  }
+  return {
+    mutation,
+    finalAction,
+    continuation: input.continuationToken != null,
+    continuationRequested: input.requestContinuation === true,
+    submitReleased: input.allowSubmit === true
+  };
 }
 
 export function assertSubmissionReleaseAllowed(input, policy = submissionReleasePolicy()) {
-  if (policy.quiesced && requestCanReachEmployerBoundary(input)) {
+  const authority = classifyRawManagedRequest(input);
+  if (policy.quiesced && (
+    authority.mutation
+    || authority.continuation
+    || authority.continuationRequested
+    || authority.submitReleased
+  )) {
     throw Object.assign(
       new Error('Managed employer submissions are temporarily quiesced'),
       { status: 503, code: 'SUBMISSION_QUIESCED' }
+    );
+  }
+  if (authority.finalAction && !authority.submitReleased && !authority.continuation) {
+    throw inputError(
+      'A final employer action requires allowSubmit to be literal true',
+      'SUBMISSION_AUTHORIZATION_REQUIRED'
     );
   }
 }
@@ -16688,7 +16750,8 @@ export async function normalizeManagedRun(input = {}, {
     MANAGED_CONTINUATION_CONTRACT.maxTtlSeconds
   );
   const allowSubmit = input.allowSubmit === true;
-  const providerBoundaryCapable = allowSubmit || requestContinuation;
+  const actionAuthority = classifyRawManagedRequest(input);
+  const providerBoundaryCapable = allowSubmit || requestContinuation || actionAuthority.finalAction;
   const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, {
     required: providerBoundaryCapable && releasePolicy.correlationRequired
   });
@@ -17057,8 +17120,12 @@ function parseManagedTerminalAck(buffer, {
   const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? Object.keys(parsed).sort().join(',')
     : '';
-  if (keys !== 'acknowledgedAt,cleanupState,cleanupUpdatedAt,expiresAt,projectBindingHash,requestDigest,resultId,schemaVersion,submissionAttempt'
-    || parsed.schemaVersion !== MANAGED_TERMINAL_ACK_SCHEMA_VERSION
+  const legacy = parsed?.schemaVersion === 'stratus-terminal-result-ack-v2';
+  const expectedKeys = legacy
+    ? 'acknowledgedAt,cleanupState,cleanupUpdatedAt,expiresAt,projectBindingHash,requestDigest,resultId,schemaVersion,submissionAttempt'
+    : 'acknowledgedAt,acknowledgementKind,checkpoint,cleanupState,cleanupUpdatedAt,expiresAt,phase,projectBindingHash,requestDigest,resultId,schemaVersion,submissionAttempt';
+  if (keys !== expectedKeys
+    || (!legacy && parsed.schemaVersion !== MANAGED_TERMINAL_ACK_SCHEMA_VERSION)
     || parsed.projectBindingHash !== digest(projectBinding)
     || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
     || !/^[a-f0-9]{64}$/.test(parsed.resultId)
@@ -17067,7 +17134,13 @@ function parseManagedTerminalAck(buffer, {
     || !canonicalTimestamp(parsed.cleanupUpdatedAt)
     || !canonicalTimestamp(parsed.expiresAt)
     || Date.parse(parsed.expiresAt) - Date.parse(parsed.acknowledgedAt)
-      !== MANAGED_TERMINAL_RESULT_RETENTION_MS) return null;
+      !== MANAGED_TERMINAL_RESULT_RETENTION_MS
+    || (!legacy && (
+      !['consumer_acknowledged', 'retention_expired'].includes(parsed.acknowledgementKind)
+      || typeof parsed.checkpoint !== 'boolean'
+      || !Number.isInteger(parsed.phase) || parsed.phase < 0 || parsed.phase > 1
+      || (parsed.checkpoint && parsed.phase !== 0)
+    ))) return null;
   let parsedAttempt;
   try {
     parsedAttempt = normalizeSubmissionAttempt(parsed.submissionAttempt, { required: true });
@@ -17084,7 +17157,10 @@ function parseManagedTerminalAck(buffer, {
     acknowledgedAt: parsed.acknowledgedAt,
     cleanupState: parsed.cleanupState,
     cleanupUpdatedAt: parsed.cleanupUpdatedAt,
-    expiresAt: parsed.expiresAt
+    expiresAt: parsed.expiresAt,
+    acknowledgementKind: legacy ? 'consumer_acknowledged' : parsed.acknowledgementKind,
+    checkpoint: legacy ? false : parsed.checkpoint,
+    phase: legacy ? null : parsed.phase
   };
 }
 
@@ -17921,6 +17997,9 @@ function publishDurableJsonOnce(path, value) {
 }
 
 const expected = JSON.parse(process.argv[1]);
+if (!['consumer_acknowledged', 'retention_expired'].includes(expected.acknowledgementKind)) {
+  process.exit(11);
+}
 const sameAttempt = (left, right) => Boolean(left && right
   && left.runId === right.runId
   && left.claimId === right.claimId
@@ -17941,8 +18020,8 @@ if (!['stratus-submission-reservation.json', 'stratus-continuation-reservation.j
   || expected.ackPath !== paths.ackPath
   || !/^[a-f0-9]{64}$/.test(expected.resultId || '')) process.exit(11);
 const privateArtifact = continuation
-  ? /^(?:stratus-continuation-(?:input|candidate-[a-f0-9]+|claim|used|ready|terminal-result)\.json|stratus-continuation\.json|stratus-result-1\.json|stratus-screenshot-1\.png|stratus-error\.json)(?:\.tmp-[^/]+)?$/
-  : /^(?:stratus-input\.json|stratus-result-0\.json|stratus-screenshot-0\.png|stratus-terminal-result\.json)(?:\.tmp-[^/]+)?$/;
+  ? /^(?:stratus-continuation-(?:input|candidate-[a-f0-9]+|claim|used|ready|terminal-result)\.json|stratus-continuation\.json|stratus-result-1\.json|stratus-screenshot-1\.png|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/
+  : /^(?:stratus-input\.json|stratus-result-0\.json|stratus-screenshot-0\.png|stratus-terminal-result\.json|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/;
 const scrubTerminalArtifacts = () => {
   const targets = fs.readdirSync('.').filter((path) => privateArtifact.test(path));
   const failures = [];
@@ -17968,11 +18047,17 @@ try {
   let ack = null;
   if (fs.existsSync(paths.ackPath)) {
     ack = JSON.parse(fs.readFileSync(paths.ackPath, 'utf8'));
-    if (ack.schemaVersion !== 'stratus-terminal-result-ack-v2'
+    const legacy = ack.schemaVersion === 'stratus-terminal-result-ack-v2';
+    if ((!legacy && ack.schemaVersion !== 'stratus-terminal-result-ack-v3')
       || ack.projectBindingHash !== expected.projectBindingHash
       || !/^[a-f0-9]{64}$/.test(ack.requestDigest || '')
       || ack.resultId !== expected.resultId
       || !['pending', 'completed'].includes(ack.cleanupState)
+      || (!legacy && (
+        !['consumer_acknowledged', 'retention_expired'].includes(ack.acknowledgementKind)
+        || typeof ack.checkpoint !== 'boolean'
+        || !Number.isInteger(ack.phase) || ack.phase < 0 || ack.phase > 1
+      ))
       || !sameAttempt(ack.submissionAttempt, expected.submissionAttempt)) process.exit(11);
   }
   if (!ack) {
@@ -17999,12 +18084,20 @@ try {
       || !sameAttempt(terminal.submissionAttempt, expected.submissionAttempt)) process.exit(12);
     const acknowledgedAt = new Date().toISOString();
     const cleanupUpdatedAt = acknowledgedAt;
+    const checkpoint = !continuation
+      && terminal.state === 'completed'
+      && terminal.phase === 0
+      && terminal.run?.continuationOffered === true
+      && typeof terminal.run?.continuationToken === 'string';
     publishDurableJsonOnce(paths.ackPath, {
-      schemaVersion: 'stratus-terminal-result-ack-v2',
+      schemaVersion: 'stratus-terminal-result-ack-v3',
       projectBindingHash: expected.projectBindingHash,
       submissionAttempt: expected.submissionAttempt,
       requestDigest: terminal.requestDigest,
       resultId: terminal.resultId,
+      acknowledgementKind: expected.acknowledgementKind,
+      phase: terminal.phase,
+      checkpoint,
       acknowledgedAt,
       cleanupState: 'pending',
       cleanupUpdatedAt,
@@ -18374,6 +18467,10 @@ function terminalResultIdMismatch() {
   );
 }
 
+function acknowledgementKeepsContinuationAlive(ack) {
+  return ack?.checkpoint === true && ack.acknowledgementKind === 'consumer_acknowledged';
+}
+
 function managedAttemptScopePaths(continuationScope) {
   return continuationScope
     ? {
@@ -18441,10 +18538,10 @@ async function managedTerminalState(sandbox, {
     && sameSubmissionAttempt(initialReservation.submissionAttempt, submissionAttempt);
   const continuationMatches = continuationReservation
     && sameSubmissionAttempt(continuationReservation.submissionAttempt, submissionAttempt);
+  if (quarantine && sameSubmissionAttempt(quarantine.submissionAttempt, submissionAttempt)) {
+    return { kind: 'corrupted', quarantine };
+  }
   if (!initialMatches && !continuationMatches) {
-    if (quarantine && sameSubmissionAttempt(quarantine.submissionAttempt, submissionAttempt)) {
-      return { kind: 'corrupted', quarantine };
-    }
     if (initialReservation || continuationReservation || quarantine) {
       return {
         kind: 'related',
@@ -18514,7 +18611,21 @@ async function managedTerminalState(sandbox, {
       );
     }
     if (Date.now() >= Date.parse(envelope.expiresAt)) {
-      return { kind: 'gone', expiresAt: envelope.expiresAt, continuationScope, scopePaths };
+      const ack = await completeManagedTerminalAcknowledgement(sandbox, {
+        projectBinding,
+        submissionAttempt,
+        resultId: envelope.resultId,
+        acknowledgementKind: 'retention_expired',
+        scopePaths,
+        storeBudget
+      });
+      return {
+        kind: 'gone',
+        expiresAt: envelope.expiresAt,
+        ack,
+        continuationScope,
+        scopePaths
+      };
     }
     const checkpoint = !continuationScope
       && envelope.state === 'completed'
@@ -18639,7 +18750,8 @@ async function recoverExistingManagedAttempt(sandboxApi, name, options) {
       return null;
     }
     terminal = state.kind === 'terminal'
-      || state.kind === 'acknowledged'
+      || (state.kind === 'acknowledged'
+        && !acknowledgementKeepsContinuationAlive(state.ack))
       || state.kind === 'gone'
       || state.kind === 'corrupted';
     if (state.kind === 'related') {
@@ -18676,7 +18788,8 @@ export async function retrieveManagedTerminalResult(input = {}, {
       storeBudget
     });
     terminal = state.kind === 'terminal'
-      || state.kind === 'acknowledged'
+      || (state.kind === 'acknowledged'
+        && !acknowledgementKeepsContinuationAlive(state.ack))
       || state.kind === 'gone'
       || state.kind === 'corrupted';
     if (state.kind === 'acknowledged' && state.ack.cleanupState === 'pending') {
@@ -18684,6 +18797,7 @@ export async function retrieveManagedTerminalResult(input = {}, {
         projectBinding,
         submissionAttempt,
         resultId: state.ack.resultId,
+        acknowledgementKind: state.ack.acknowledgementKind,
         scopePaths: state.scopePaths,
         storeBudget
       });
@@ -18728,6 +18842,7 @@ async function completeManagedTerminalAcknowledgement(sandbox, {
   projectBinding,
   submissionAttempt,
   resultId,
+  acknowledgementKind = 'consumer_acknowledged',
   scopePaths,
   storeBudget = null
 }) {
@@ -18735,6 +18850,7 @@ async function completeManagedTerminalAcknowledgement(sandbox, {
     projectBindingHash: digest(projectBinding),
     submissionAttempt,
     resultId,
+    acknowledgementKind,
     ...scopePaths
   };
   const timeoutMs = managedTerminalStoreTimeoutMs(storeBudget);
@@ -18781,7 +18897,8 @@ async function completeManagedTerminalAcknowledgement(sandbox, {
     storeBudget
   );
   const ack = parseManagedTerminalAck(ackBuffer, { projectBinding, submissionAttempt });
-  if (!ack || ack.resultId !== resultId || ack.cleanupState !== 'completed') {
+  if (!ack || ack.resultId !== resultId || ack.cleanupState !== 'completed'
+    || ack.acknowledgementKind !== acknowledgementKind) {
     throw Object.assign(
       new Error('The durable terminal acknowledgement cleanup could not be verified'),
       { status: 503, code: 'TERMINAL_RESULT_CLEANUP_PENDING' }
@@ -18817,10 +18934,14 @@ export async function acknowledgeManagedTerminalResult(input = {}, {
       storeBudget
     });
     terminal = state.kind === 'terminal'
-      || state.kind === 'checkpoint'
-      || state.kind === 'acknowledged'
+      || (state.kind === 'acknowledged'
+        && !acknowledgementKeepsContinuationAlive(state.ack))
       || state.kind === 'gone';
     if (state.kind === 'gone') throw terminalResultAcknowledged(state);
+    if (state.kind === 'acknowledged'
+      && state.ack.acknowledgementKind === 'retention_expired') {
+      throw terminalResultAcknowledged(state.ack);
+    }
     const durableResultId = state.kind === 'acknowledged'
       ? state.ack.resultId
       : state.envelope?.resultId;
@@ -18837,7 +18958,7 @@ export async function acknowledgeManagedTerminalResult(input = {}, {
       scopePaths: state.scopePaths,
       storeBudget
     });
-    terminal = true;
+    terminal = !acknowledgementKeepsContinuationAlive(ack);
     return ack;
   } finally {
     if (terminal) await stopManagedTerminalSandbox(sandbox, { storeBudget });
@@ -18904,7 +19025,11 @@ export async function executeSandboxRun(input, {
             projectBinding,
             submissionAttempt: parentSubmissionAttempt
           });
-          if (!['checkpoint', 'acknowledged'].includes(parentState.kind)) {
+          const retainedCheckpoint = parentState.kind === 'checkpoint'
+            || (parentState.kind === 'acknowledged'
+              && parentState.ack.checkpoint
+              && parentState.ack.acknowledgementKind === 'consumer_acknowledged');
+          if (!retainedCheckpoint) {
             throw Object.assign(
               new Error('The retained browser session has no durable continuation checkpoint'),
               { status: 409, code: 'CONTINUATION_CHECKPOINT_MISSING' }
@@ -19211,6 +19336,24 @@ export async function executeSandboxRun(input, {
       }))
     });
     await sandbox.writeFiles(files);
+    if (correlated) {
+      const dispatchState = await managedTerminalState(sandbox, {
+        projectBinding,
+        submissionAttempt: context.submissionAttempt,
+        requestDigest
+      });
+      if (dispatchState.kind === 'corrupted') {
+        throw terminalResultStoreCorrupt(
+          'The managed execution was quarantined before browser dispatch'
+        );
+      }
+      if (dispatchState.kind !== 'pending') {
+        throw Object.assign(
+          new Error('Durable managed result authority changed before browser dispatch'),
+          { status: 409, code: 'SUBMISSION_EXECUTION_CONFLICT' }
+        );
+      }
+    }
     /* Every phase-0 run is detached. The ordinary path used to await the runner inline, which held
      * one SDK stream open until the sandbox's exact lifetime boundary. Jump's 120-action preview
      * reached that boundary and the provider closed the stream before Stratus could inspect a
