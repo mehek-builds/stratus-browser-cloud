@@ -141,7 +141,18 @@ if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
 }
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
-const READ_ONLY_ACTIONS = new Set(['waitForSelector', 'extract', 'requireCapability']);
+/* 'discover' belongs here and its absence broke a real product path (2026-09-01). The release
+ * hardening enumerated this set narrowly on the sound principle that nothing becomes submit
+ * capable by omission, and put 'discover' on the strict side. But discover is one page.evaluate
+ * DOM walk: it fills nothing, clicks nothing, uploads nothing, and cannot reach a submit control,
+ * which is exactly the footprint of waitForSelector and extract, both already read-only. Gating it
+ * on a durable submissionAttempt meant every posting-question pre-scan (a read of the employer's
+ * form that exists precisely so nothing is touched before the applicant decides) answered 400
+ * SUBMISSION_ATTEMPT_REQUIRED the moment correlation became required, and onboarding step 3 died
+ * on every portal whose scan had no fresh cache. Option PROBES (click a listbox open, read it,
+ * Escape) stay mutation-classified on purpose: a click is raw page authority however read the
+ * intent, and the correlation model is right to demand an attempt for it. */
+const READ_ONLY_ACTIONS = new Set(['waitForSelector', 'extract', 'requireCapability', 'discover']);
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;

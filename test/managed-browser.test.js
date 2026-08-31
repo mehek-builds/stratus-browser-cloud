@@ -436,7 +436,6 @@ test('submission quiescence rejects before every provider or continuation adapte
     { url: 'https://example.com/apply', actions: [{ type: 'upload' }] },
     { url: 'https://example.com/apply', actions: [{ type: 'press' }] },
     { url: 'https://example.com/apply', actions: [{ type: 'select' }] },
-    { url: 'https://example.com/apply', actions: [{ type: 'discover' }] },
     { url: 'https://example.com/apply', actions: [{ type: 'confirmAndSubmit' }] },
   ]) {
     await assert.rejects(
@@ -487,6 +486,29 @@ test('raw final action grammar requires explicit release and durable correlation
   assert.equal(validatorCalls, 0);
 });
 
+test('a bare discover run is read-only: no correlation demanded, and it survives a quiesce', async () => {
+  /* The pre-scan path (2026-09-01). 'discover' is one page.evaluate DOM walk with the same
+     footprint as waitForSelector and extract: it fills nothing, clicks nothing, and cannot reach a
+     submit control. Classifying it as raw mutation made every posting-question pre-scan demand a
+     durable submissionAttempt it can never have, and the product's step 3 died on every portal
+     without a fresh cache. The probes around it (real clicks) stay gated; this pins only the walk. */
+  const normalized = await normalizeManagedRun({
+    url: 'https://example.com/apply',
+    actions: [{ type: 'discover' }],
+  }, { urlValidator: async (value) => new URL(value) });
+  assert.ok(normalized.submissionAttempt == null, 'a bare discover run must not carry a submission attempt');
+
+  await assert.doesNotReject(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      actions: [{ type: 'discover' }],
+    }, {
+      urlValidator: async (value) => new URL(value),
+      releasePolicy: { quiesced: true, correlationRequired: true },
+    }),
+  );
+});
+
 test('every raw mutation requires exact attempt and deadline before URL validation or provider work', async () => {
   const mutations = [
     { type: 'click' },
@@ -495,7 +517,6 @@ test('every raw mutation requires exact attempt and deadline before URL validati
     { type: 'upload' },
     { type: 'press', value: 'Tab' },
     { type: 'select' },
-    { type: 'discover' },
     { type: 'confirmAndSubmit', allowSubmit: true },
   ];
   let validatorCalls = 0;
