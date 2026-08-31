@@ -333,8 +333,11 @@ test('discovery reports choice questions, one entry per question, with their opt
   // required and options now travel with the field, so the backend stops having to infer required
   // from a literal "*" in the label text - which Ashby never puts there.
   assert.match(discover, /required: marksRequired\(el, block\)/);
-  assert.match(discover, /options: options\.length > 0 \? options : null/);
-  assert.match(discover, /durableSelector: durableSelectorOf\(el, block\)/);
+  assert.match(discover, /options: optionInventory\.values\.length > 0 \? optionInventory\.values : null/);
+  assert.match(discover, /optionsComplete: optionInventory\.complete/);
+  assert.match(discover, /const durableSelector = durableSelectorOf\(el, block\)/);
+  assert.match(discover, /durableSelector: typeof durableSelector === 'string'/);
+  assert.match(discover, /durableSelector\.length <= 10000/);
   // inputType alone reports React-selects as text. Preserve the live DOM role on the result wire so
   // the backend can probe only role=combobox controls and leave ordinary text inputs open.
   assert.match(discover, /el\.getAttribute\('aria-haspopup'\) === 'listbox' \? 'combobox' : null/);

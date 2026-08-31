@@ -6848,11 +6848,10 @@ test('the container scope bounds the required-field scan to its own fields', asy
   assert.doesNotMatch(JSON.stringify(pass.attempts), /Newsletter/i);
 });
 
-test('a shadow scope from an earlier pass cannot break the next pass on a retained page', async () => {
-  /* Phase zero binds a scope inside the shadow root and clicks it. Phase one runs against the same
-   * Page after the shadow submit is gone, so candidate index 0 now belongs to the light DOM. The
-   * marker clearing has to cross the shadow boundary, because the read-back locator does: if it
-   * does not, index 0 matches two nodes and every later pass on this session throws. */
+test('a retained page cannot use a second application mutation after a shadow submit', async () => {
+  /* Phase zero binds a scope inside the shadow root and clicks it. A retained phase may now carry
+   * only the exact verification-code mutation, so the former light-DOM application submit must be
+   * rejected before it can mutate the retained page. */
   clicks.length = 0;
   fs.rmSync(resultPath(0), { force: true });
   fs.rmSync(resultPath(1), { force: true });
@@ -6878,7 +6877,11 @@ test('a shadow scope from an earlier pass cannot break the next pass on a retain
   assert.equal(first.requiredFieldConfirmation.passes[0].scope.scopeKind, 'container');
   assert.deepEqual(clicks, ['shadow'], 'phase zero presses the control inside the shadow root');
   fs.writeFileSync(continuationInput, JSON.stringify({
-    submissionAttempt: SUBMISSION_ATTEMPT,
+    parentSubmissionAttempt: SUBMISSION_ATTEMPT,
+    submissionAttempt: {
+      ...SUBMISSION_ATTEMPT,
+      executionId: '44444444-4444-4444-8444-444444444444'
+    },
     providerDeadlineAt: providerDeadlineAt(),
     actions: [
       { type: 'click', selector: '#mutate' },
@@ -6888,10 +6891,11 @@ test('a shadow scope from an earlier pass cannot break the next pass on a retain
     ],
     screenshot: false
   }));
-  assert.ok(await waitFor(resultPath(1)), 'the second pass on the retained page must not throw');
-  const second = readResult(1);
-  assert.equal(second.requiredFieldConfirmation.status, 'confirmed');
-  assert.equal(valueOf(second, '#light'), '0', 'the light-DOM container is the only node carrying index 0');
-  assert.deepEqual(clicks, ['shadow', 'light'], 'exactly one click per pass, on the current control');
-  assert.equal(await closed, 0);
+  const errorPath = path.join(workDir, 'stratus-error.json');
+  assert.ok(await waitFor(errorPath), 'the forbidden retained mutation must fail closed');
+  const failure = JSON.parse(fs.readFileSync(errorPath, 'utf8'));
+  assert.match(failure.message, /retained continuation attempted a forbidden mutation path/);
+  assert.deepEqual(clicks, ['shadow'], 'the retained phase performs no employer action');
+  assert.equal(await closed, 1);
+  assert.equal(fs.existsSync(resultPath(1)), false);
 });

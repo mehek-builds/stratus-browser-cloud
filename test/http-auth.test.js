@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorize, privateErrorDiagnostic, sendError } from '../api/_http.js';
-import { managedHealthPayload } from '../api/health.js';
+import healthHandler, { managedHealthPayload } from '../api/health.js';
 import { managedRunProgressLogSummary } from '../api/run.js';
 
 function responseRecorder() {
@@ -9,6 +9,7 @@ function responseRecorder() {
   return {
     output,
     response: {
+      setHeader() { return this; },
       status(code) { output.statusCode = code; return this; },
       json(body) { output.body = body; return this; }
     }
@@ -149,22 +150,77 @@ test('managed progress logs omit employer text, evidence, and attempt identifier
 });
 
 test('public health reports the live submission release gates without exposing environment values', () => {
+  const providerSha = 'a'.repeat(40);
   const defaultPolicy = managedHealthPayload({
     STRATUS_API_KEY: 'secret-api-key',
-    VERCEL_GIT_COMMIT_SHA: 'commit-sha',
+    VERCEL_GIT_COMMIT_SHA: providerSha,
   });
+  assert.equal(defaultPolicy.ok, true);
   assert.equal(defaultPolicy.submissionQuiesced, false);
   assert.equal(defaultPolicy.submissionCorrelationRequired, true);
   assert.equal(defaultPolicy.authenticationMode, 'api-key-or-vercel-oidc');
-  assert.equal(defaultPolicy.commit, 'commit-sha');
+  assert.equal(defaultPolicy.commit, providerSha);
+  assert.equal(defaultPolicy.declaredCommit, null);
+  assert.equal(defaultPolicy.providerCommit, providerSha);
+  assert.equal(defaultPolicy.revisionStatus, 'verified');
   assert.doesNotMatch(JSON.stringify(defaultPolicy), /secret-api-key/);
+
+  const sharedSha = 'b'.repeat(40);
+  const explicitBuildCommit = managedHealthPayload({
+    GIT_SHA: sharedSha.toUpperCase(),
+    VERCEL_GIT_COMMIT_SHA: sharedSha,
+  });
+  assert.equal(explicitBuildCommit.ok, true);
+  assert.equal(explicitBuildCommit.commit, sharedSha);
+  assert.equal(explicitBuildCommit.declaredCommit, sharedSha);
+  assert.equal(explicitBuildCommit.providerCommit, sharedSha);
+
+  const mismatch = managedHealthPayload({
+    GIT_SHA: 'c'.repeat(40),
+    VERCEL_GIT_COMMIT_SHA: 'd'.repeat(40),
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.commit, null);
+  assert.equal(mismatch.declaredCommit, 'c'.repeat(40));
+  assert.equal(mismatch.providerCommit, 'd'.repeat(40));
+  assert.equal(mismatch.revisionStatus, 'mismatch');
+
+  const malformed = managedHealthPayload({ GIT_SHA: 'not-a-commit' });
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.commit, null);
+  assert.equal(malformed.declaredCommit, null);
+  assert.equal(malformed.declaredCommitValid, false);
+  assert.equal(malformed.revisionStatus, 'invalid');
 
   const rolloutPolicy = managedHealthPayload({
     STRATUS_SUBMISSION_CORRELATION_MODE: 'compat',
     STRATUS_SUBMISSION_QUIESCED: '1',
+    GIT_SHA: sharedSha,
   });
   assert.equal(rolloutPolicy.submissionQuiesced, true);
   assert.equal(rolloutPolicy.submissionCorrelationRequired, false);
+});
+
+test('public health fails closed when declared and provider revisions conflict', () => {
+  const previousDeclared = process.env.GIT_SHA;
+  const previousProvider = process.env.VERCEL_GIT_COMMIT_SHA;
+  try {
+    process.env.GIT_SHA = 'e'.repeat(40);
+    process.env.VERCEL_GIT_COMMIT_SHA = 'f'.repeat(40);
+    const { output, response } = responseRecorder();
+    healthHandler({ method: 'GET' }, response);
+    assert.equal(output.statusCode, 503);
+    assert.equal(output.body.ok, false);
+    assert.equal(output.body.commit, null);
+    assert.equal(output.body.declaredCommit, 'e'.repeat(40));
+    assert.equal(output.body.providerCommit, 'f'.repeat(40));
+    assert.equal(output.body.revisionStatus, 'mismatch');
+  } finally {
+    if (previousDeclared == null) delete process.env.GIT_SHA;
+    else process.env.GIT_SHA = previousDeclared;
+    if (previousProvider == null) delete process.env.VERCEL_GIT_COMMIT_SHA;
+    else process.env.VERCEL_GIT_COMMIT_SHA = previousProvider;
+  }
 });
 
 test('private crash diagnostics redact applicant contact data and opaque tokens', () => {

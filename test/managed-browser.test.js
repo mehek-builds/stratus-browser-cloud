@@ -16,7 +16,14 @@ import {
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
+  MANAGED_SUBMISSION_RESERVATION_PATH,
+  MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+  MANAGED_CONTINUATION_RESERVATION_PATH,
+  MANAGED_CONTINUATION_TERMINAL_RESULT_PATH,
+  MANAGED_TERMINAL_RESULT_PATH,
+  MANAGED_TERMINAL_RESULT_SCHEMA_VERSION,
   MANAGED_CONTINUATION_CONTRACT,
+  managedContinuationExecutionId,
   normalizeManagedActions,
   normalizeManagedContinuation,
   normalizeManagedRun,
@@ -36,6 +43,44 @@ const SUBMISSION_ATTEMPT = Object.freeze({
 });
 
 const providerDeadlineAt = (offsetMs = 240_000) => new Date(Date.now() + offsetMs).toISOString();
+
+function managedTerminalEnvelope(run, input, { state = 'completed', phase = 0 } = {}) {
+  const completedAt = new Date().toISOString();
+  const common = {
+    schemaVersion: MANAGED_TERMINAL_RESULT_SCHEMA_VERSION,
+    projectBindingHash: input.terminalResultProjectHash,
+    submissionAttempt: input.submissionAttempt,
+    requestDigest: input.terminalResultRequestDigest,
+    state,
+    completedAt,
+    expiresAt: new Date(Date.parse(completedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    phase,
+  };
+  const core = state === 'completed'
+    ? { ...common, run }
+    : {
+        ...common,
+        error: { code: 'SANDBOX_RUN_FAILED', message: 'Managed browser run failed' },
+      };
+  return Buffer.from(JSON.stringify({
+    ...core,
+    resultId: crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex'),
+    persistedAt: new Date().toISOString(),
+  }));
+}
+
+function managedReservation(projectBinding, submissionAttempt = SUBMISSION_ATTEMPT, requestDigest = 'a'.repeat(64)) {
+  const reservedAt = new Date().toISOString();
+  return Buffer.from(JSON.stringify({
+    schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+    projectBindingHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
+    submissionAttempt,
+    requestDigest,
+    providerDeadlineAt: providerDeadlineAt(),
+    reservedAt,
+    expiresAt: new Date(Date.parse(reservedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  }));
+}
 
 test('exact URL proof allows only Workable short-link canonicalization', () => {
   const expected = 'https://apply.workable.com/j/20e78cba92/apply?source=litos#apply';
@@ -164,6 +209,10 @@ test('managed actions accept bounded declarative operations', () => {
   ]);
   assert.throws(() => normalizeManagedActions([{ type: 'evaluate', value: 'process.exit()' }]), (error) => error.code === 'INVALID_ACTION');
   assert.throws(() => normalizeManagedActions(Array.from({ length: 121 }, () => ({ type: 'click', selector: 'button' }))), (error) => error.code === 'TOO_MANY_ACTIONS');
+  assert.throws(
+    () => normalizeManagedActions([{ type: 'discover' }, { type: 'discover' }]),
+    (error) => error.code === 'MULTIPLE_DISCOVERY_ACTIONS',
+  );
 });
 
 test('managed actions preserve unique-match and live extract assertions', () => {
@@ -315,6 +364,7 @@ test('continuations require the same durable attempt correlation', () => {
   assert.deepEqual(normalized.submissionAttempt, SUBMISSION_ATTEMPT);
   assert.match(SANDBOX_RUNNER, /Submission attempt correlation changed during continuation/);
   assert.match(SANDBOX_RUNNER, /submissionAttempt/);
+  assert.match(SANDBOX_RUNNER, /submissionAttempt: currentInput\.submissionAttempt/);
 });
 
 test('submission release policy defaults closed and exposes an explicit compat stage', async () => {
@@ -380,6 +430,14 @@ test('submission quiescence rejects before every provider or continuation adapte
   for (const request of [
     { url: 'https://example.com/apply', allowSubmit: true },
     { continuationToken: 'q'.repeat(43), actions: [] },
+    { url: 'https://example.com/apply', actions: [{ type: 'click' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'fill' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'fillByLabelText' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'upload' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'press' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'select' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'discover' }] },
+    { url: 'https://example.com/apply', actions: [{ type: 'confirmAndSubmit' }] },
   ]) {
     await assert.rejects(
       executeManagedRun(request, options),
@@ -388,6 +446,118 @@ test('submission quiescence rejects before every provider or continuation adapte
   }
   assert.equal(providerCalls, 0);
   assert.equal(validatorCalls, 0);
+});
+
+test('raw final action grammar requires explicit release and durable correlation before dispatch', async () => {
+  let providerCalls = 0;
+  let validatorCalls = 0;
+  const finalClick = { type: 'click', selector: 'button[type="submit"]', label: 'final_submit' };
+  const options = {
+    urlValidator: async (value) => {
+      validatorCalls += 1;
+      return new URL(value);
+    },
+    sandboxExecutor: async () => {
+      providerCalls += 1;
+      return {};
+    },
+  };
+  await assert.rejects(
+    executeManagedRun({ url: 'https://example.com/apply', actions: [finalClick] }, options),
+    (error) => error.code === 'SUBMISSION_AUTHORIZATION_REQUIRED' && error.status === 400,
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      actions: [finalClick],
+    }, { urlValidator: options.urlValidator }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  await assert.rejects(
+    normalizeManagedRun({
+      url: 'https://example.com/apply',
+      allowSubmit: true,
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      actions: [finalClick],
+    }, { urlValidator: options.urlValidator }),
+    (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
+  );
+  assert.equal(providerCalls, 0);
+  assert.equal(validatorCalls, 0);
+});
+
+test('every raw mutation requires exact attempt and deadline before URL validation or provider work', async () => {
+  const mutations = [
+    { type: 'click' },
+    { type: 'fill' },
+    { type: 'fillByLabelText' },
+    { type: 'upload' },
+    { type: 'press', value: 'Tab' },
+    { type: 'select' },
+    { type: 'discover' },
+    { type: 'confirmAndSubmit', allowSubmit: true },
+  ];
+  let validatorCalls = 0;
+  let providerCalls = 0;
+  for (const mutation of mutations) {
+    const { allowSubmit = false, ...action } = mutation;
+    await assert.rejects(
+      normalizeManagedRun({
+        url: 'https://example.com/apply',
+        allowSubmit,
+        actions: [action],
+      }, {
+        urlValidator: async (value) => {
+          validatorCalls += 1;
+          return new URL(value);
+        },
+      }),
+      (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+      action.type,
+    );
+    await assert.rejects(
+      normalizeManagedRun({
+        url: 'https://example.com/apply',
+        allowSubmit,
+        actions: [action],
+        submissionAttempt: SUBMISSION_ATTEMPT,
+      }, {
+        urlValidator: async (value) => {
+          validatorCalls += 1;
+          return new URL(value);
+        },
+      }),
+      (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
+      action.type,
+    );
+  }
+  await assert.rejects(
+    executeManagedRun({
+      url: 'https://example.com/apply',
+      actions: [{ type: 'fill' }],
+    }, {
+      sandboxExecutor: async () => {
+        providerCalls += 1;
+        return {};
+      },
+    }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  assert.equal(validatorCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test('selector spelling never grants final action authority', async () => {
+  const normalized = await normalizeManagedRun({
+    url: 'https://example.com/apply',
+    actions: [{ type: 'click', selector: 'button[type="submit"]' }],
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { urlValidator: async (value) => new URL(value) });
+  assert.equal(normalized.allowSubmit, false);
+  assert.equal(normalized.exactMutationAuthority, true);
+  assert.equal(normalized.exactFinalActionAuthority, false);
 });
 
 test('managed actions accept reviewed questions and bounded resume uploads', () => {
@@ -418,7 +588,46 @@ test('managed actions accept reviewed questions and bounded resume uploads', () 
 
 test('sandbox runner is syntactically valid and returns labelled extracts', () => {
   assert.doesNotThrow(() => new Function(SANDBOX_RUNNER));
-  assert.match(SANDBOX_RUNNER, /extracted\.push\(\{[\s\S]*selector: action\.selector,[\s\S]*expectedValueDigits/);
+  assert.match(SANDBOX_RUNNER, /appendExtracted\(\{[\s\S]*selector: action\.selector,[\s\S]*expectedValueDigits/);
+});
+
+test('the shipped runner bounds one oversized extract and cumulative extract output', () => {
+  const start = SANDBOX_RUNNER.indexOf('    const extracted = [];');
+  const end = SANDBOX_RUNNER.indexOf('    const filledFields = [];', start);
+  assert.ok(start >= 0 && end > start, 'the extraction budget must remain extractable');
+  const budgetSource = SANDBOX_RUNNER.slice(start, end);
+  const createBudget = new Function(
+    `${budgetSource}\nreturn { appendExtracted, extracted, extractedTotalBytes: () => extractedTotalBytes };`,
+  );
+
+  const oversized = createBudget();
+  assert.throws(
+    () => oversized.appendExtracted({ selector: '#one', value: 'x'.repeat(65 * 1024) }),
+    /bounded result budget/,
+  );
+  assert.deepEqual(oversized.extracted, []);
+  assert.equal(oversized.extractedTotalBytes(), 0);
+
+  const cumulative = createBudget();
+  const value = 'x'.repeat(63 * 1024);
+  let accepted = 0;
+  while (accepted < 256) {
+    try {
+      cumulative.appendExtracted({ selector: `#value-${accepted}`, value });
+      accepted += 1;
+    } catch (error) {
+      assert.match(String(error?.message || error), /bounded result budget/);
+      break;
+    }
+  }
+  assert.ok(accepted > 1 && accepted < 256);
+  assert.ok(cumulative.extractedTotalBytes() <= 4 * 1024 * 1024);
+  assert.equal(cumulative.extracted.length, accepted);
+});
+
+test('managed browser source contains no literal NUL byte', () => {
+  const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url));
+  assert.equal(source.includes(0), false);
 });
 
 test('atomic v4 source retains its final native containment boundaries', () => {
@@ -523,15 +732,19 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     continuationToken: token,
     submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: deadline,
-    actions: [{ type: 'click', selector: '#continue' }],
+    actions: [{ type: 'extract', selector: '#status' }],
     screenshot: false
   }), {
     continuationToken: token,
     submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: deadline,
-    actions: [{ type: 'click', selector: '#continue' }],
+    actions: [{ type: 'extract', selector: '#status' }],
     screenshot: false,
-    fullPage: false
+    fullPage: false,
+    // A read-only continuation carries both authority flags explicitly false so a downstream
+    // reader can never infer mutation or final-action authority from their absence.
+    exactFinalActionAuthority: false,
+    exactMutationAuthority: false
   });
   assert.throws(
     () => normalizeManagedContinuation({ continuationToken: token, url: 'https://example.com', actions: [] }),
@@ -541,6 +754,115 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     () => normalizeManagedContinuation({ continuationToken: token, requestContinuation: true, actions: [] }),
     (error) => error.code === 'CONTINUATION_LIMIT_REACHED'
   );
+});
+
+test('managed continuations reject every mutation action, including v3 application submit', () => {
+  const continuation = {
+    continuationToken: 'm'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  };
+  const submitBase = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    chooserPolicy: ATOMIC_SUBMIT_POLICY_V3,
+    label: 'final_submit',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+  };
+  const mutationActions = [
+    ['discover', { type: 'discover' }],
+    ['click', { type: 'click', selector: '#continue' }],
+    ['fill', { type: 'fill', selector: '#name', value: 'Mehek' }],
+    ['fillByLabelText', { type: 'fillByLabelText', text: 'Name', value: 'Mehek' }],
+    ['upload', {
+      type: 'upload', selector: '#resume', file: {
+        name: 'resume.pdf', mimeType: 'application/pdf', base64: 'cGRm',
+      },
+    }],
+    ['press', { type: 'press', value: 'Enter' }],
+    ['select', { type: 'select', selector: '#country', value: 'AE' }],
+    ['v3 application confirmAndSubmit', { ...submitBase, submitKind: 'application' }],
+  ];
+  for (const [label, action] of mutationActions) {
+    assert.throws(
+      () => normalizeManagedContinuation({ ...continuation, actions: [action] }),
+      (error) => error.code === 'CONTINUATION_ACTION_FORBIDDEN',
+      label,
+    );
+  }
+});
+
+test('managed continuation execution ids are deterministic UUID v5 values scoped to the claim and purpose', () => {
+  const securityCode = managedContinuationExecutionId(SUBMISSION_ATTEMPT.claimId, 'security_code');
+  const receiptObservation = managedContinuationExecutionId(
+    SUBMISSION_ATTEMPT.claimId,
+    'receipt_observation',
+  );
+  assert.equal(securityCode, '8c3e3582-f4c8-5df6-ab4f-38ee12b9c542');
+  assert.equal(
+    managedContinuationExecutionId(SUBMISSION_ATTEMPT.claimId, 'security_code'),
+    securityCode,
+  );
+  assert.notEqual(securityCode, receiptObservation);
+  const securityAttempt = { ...SUBMISSION_ATTEMPT, executionId: securityCode };
+  const receiptAttempt = { ...SUBMISSION_ATTEMPT, executionId: receiptObservation };
+  assert.equal(securityAttempt.runId, receiptAttempt.runId);
+  assert.equal(securityAttempt.claimId, receiptAttempt.claimId);
+  assert.notEqual(securityAttempt.executionId, receiptAttempt.executionId);
+  assert.notEqual(
+    securityCode,
+    managedContinuationExecutionId('44444444-4444-4444-8444-444444444444', 'security_code'),
+  );
+  assert.notEqual(securityCode, SUBMISSION_ATTEMPT.executionId);
+});
+
+test('exact v3 and v4 verification-code continuations remain allowed', () => {
+  const expectedPageUrl = 'https://jobs.example.com/postings/verification';
+  const exactCapability = {
+    type: 'requireCapability',
+    value: EXACT_PAGE_URL_CAPABILITY,
+    optional: false,
+    expectedPageUrl,
+  };
+  const submit = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    label: 'verification_submit',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'verification',
+    securityCode: 'ABC12345',
+    expectedPageUrl,
+  };
+  const common = {
+    continuationToken: 'v'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+    actions: [exactCapability, { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V3 }],
+  };
+  const v3 = normalizeManagedContinuation(common);
+  assert.equal(v3.actions[1].chooserPolicy.version, 3);
+  assert.equal(v3.actions[1].securityCode, 'ABC12345');
+
+  const v4 = normalizeManagedContinuation({
+    ...common,
+    continuationToken: 'w'.repeat(43),
+    actions: [
+      exactCapability,
+      {
+        type: 'requireCapability',
+        value: ATOMIC_SUBMIT_V4_CAPABILITY,
+        optional: false,
+        applicationScopeSelector: '#application',
+      },
+      { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V4 },
+    ],
+  });
+  assert.equal(v4.actions[2].chooserPolicy.version, 4);
+  assert.equal(v4.actions[2].securityCode, 'ABC12345');
 });
 
 test('receipt-observation continuation rejects a second application submit', () => {
@@ -587,12 +909,17 @@ test('sandbox continuation is project-bound and single-use without exposing a se
       for (const file of files) this.files.set(file.path, Buffer.from(file.content));
       if (this.files.has('stratus-continuation-input.json')) {
         const continuation = JSON.parse(this.files.get('stratus-continuation-input.json').toString('utf8'));
-        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+        const original = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
+        const result = {
           title: 'Application received',
           url: 'https://example.com/thanks',
           text: 'received',
           submissionAttempt: continuation.submissionAttempt,
-        })));
+        };
+        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify(result)));
+        this.files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(result, original, {
+          phase: 1,
+        }));
       }
     }
     async runCommand(command, args) {
@@ -638,33 +965,33 @@ test('sandbox continuation is project-bound and single-use without exposing a se
     }
   };
   const urlValidator = async (value) => new URL(value);
+  const releasePolicy = submissionReleasePolicy({
+    [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'compat',
+  });
   const first = await executeSandboxRun({
     url: 'https://example.com/apply', actions: [], requestContinuation: true,
-    submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
-  }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a', releasePolicy });
   assert.match(first.continuationToken, /^[A-Za-z0-9_-]+$/);
   assert.ok(first.continuationExpiresAt);
   assert.equal('sessionId' in first, false);
   const second = await executeSandboxRun({
     continuationToken: first.continuationToken,
-    submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
-    actions: [{ type: 'click', selector: '#continue' }]
-  }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
+    actions: []
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a', releasePolicy });
   assert.equal(second.title, 'Application received');
-  await assert.rejects(
-    executeSandboxRun({
-      continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
-      providerDeadlineAt: providerDeadlineAt(), actions: [],
-    }, { sandboxApi, urlValidator, projectBinding: 'project-a' }),
-    (error) => error.code === 'CONTINUATION_REJECTED'
+  await assert.rejects(executeSandboxRun({
+    continuationToken: first.continuationToken,
+    providerDeadlineAt: providerDeadlineAt(), actions: [],
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a', releasePolicy }),
+    (error) => error.code === 'CONTINUATION_REJECTED',
   );
   await assert.rejects(
     executeSandboxRun({
-      continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
+      continuationToken: first.continuationToken,
       providerDeadlineAt: providerDeadlineAt(), actions: [],
-    }, { sandboxApi, urlValidator, projectBinding: 'project-b' }),
+    }, { sandboxApi, urlValidator, projectBinding: 'project-b', releasePolicy }),
     (error) => error.code === 'CONTINUATION_REJECTED'
   );
 });
@@ -695,15 +1022,29 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     securityCode: 'ABC12345',
     expectedPageUrl,
   };
-  const harness = (manifest) => {
-    const files = new Map();
+  const harness = (manifest, projectBinding) => {
+    const requestDigest = 'a'.repeat(64);
+    const terminalInput = {
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      terminalResultProjectHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
+      terminalResultRequestDigest: requestDigest,
+    };
+    const files = new Map([
+      [MANAGED_SUBMISSION_RESERVATION_PATH, managedReservation(
+        projectBinding,
+        SUBMISSION_ATTEMPT,
+        requestDigest,
+      )],
+    ]);
     let continuationWrites = 0;
     let claimedCapabilities = null;
     let claimedActionMode = null;
     let stopped = false;
     const sandbox = {
       async runCommand(command, args) {
-        if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) {
+        if (command === 'node'
+          && typeof args?.[1] === 'string'
+          && args[1].includes('const [tokenHash, projectHash, requiredJson')) {
           claimedCapabilities = JSON.parse(args[4] || '[]');
           claimedActionMode = args[5] || null;
           const needsV4 = claimedCapabilities.includes(ATOMIC_SUBMIT_V4_CAPABILITY);
@@ -723,10 +1064,14 @@ test('v4 continuation refuses an incompatible retained runner before writing con
         }
         if (files.has('stratus-continuation-input.json')) {
           const continuation = JSON.parse(files.get('stratus-continuation-input.json').toString('utf8'));
-          files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+          const result = {
             title: 'Compatible continuation',
             submissionAttempt: continuation.submissionAttempt,
-          })));
+          };
+          files.set('stratus-result-1.json', Buffer.from(JSON.stringify(result)));
+          files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(result, terminalInput, {
+            phase: 1,
+          }));
         }
       },
       async readFileToBuffer({ path: filePath }) { return files.get(filePath) || null; },
@@ -740,11 +1085,13 @@ test('v4 continuation refuses an incompatible retained runner before writing con
   };
   const v4Input = {
     continuationToken: 'v'.repeat(43),
-    submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
     actions: [exactCapability, v4Capability, submit],
     screenshot: false,
   };
+  const compatibilityPolicy = submissionReleasePolicy({
+    [STRATUS_SUBMISSION_CORRELATION_MODE_ENV]: 'compat',
+  });
   const incompatibleManifests = [
     ['missing manifest', null],
     ['protocol 3 manifest', {
@@ -753,11 +1100,13 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     }],
   ];
   for (const [label, manifest] of incompatibleManifests) {
-    const fake = harness(manifest);
+    const projectBinding = `project-${label}`;
+    const fake = harness(manifest, projectBinding);
     await assert.rejects(
       executeSandboxRun(v4Input, {
         sandboxApi: fake.sandboxApi,
-        projectBinding: `project-${label}`,
+        projectBinding,
+        releasePolicy: compatibilityPolicy,
       }),
       (error) => error.code === 'CONTINUATION_RUNNER_INCOMPATIBLE' && error.status === 409,
       label,
@@ -769,19 +1118,20 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     );
     assert.equal(fake.state().claimedActionMode, 'security-code');
     assert.equal(fake.state().continuationWrites, 0, `${label} must fail before continuation input is written`);
-    assert.equal(fake.state().stopped, true);
+    assert.equal(fake.state().stopped, true,
+      'a rejected compatibility continuation closes its uncorrelated retained session');
   }
 
-  const v3Fake = harness(null);
+  const v3Fake = harness(null, 'project-v3');
   const v3Result = await executeSandboxRun({
     continuationToken: 'w'.repeat(43),
-    submissionAttempt: SUBMISSION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
     actions: [exactCapability, { ...submit, chooserPolicy: ATOMIC_SUBMIT_POLICY_V3 }],
     screenshot: false,
   }, {
     sandboxApi: v3Fake.sandboxApi,
     projectBinding: 'project-v3',
+    releasePolicy: compatibilityPolicy,
   });
   assert.equal(v3Result.title, 'Compatible continuation');
   assert.deepEqual(v3Fake.state().claimedCapabilities, [EXACT_PAGE_URL_CAPABILITY]);
@@ -801,7 +1151,7 @@ test('retained v4 adapts the exported v3 code action only on its original bound 
   assert.match(SANDBOX_RUNNER, /applicationScopeProofHandle = retainedScopeHandle;/);
 });
 
-test('the continuation claim script allows one concurrent winner and rejects wrong-project and expired claims', async () => {
+test('the continuation claim durably commits exact input and resumes an interrupted claim', async () => {
   const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-claim-'));
   const tokenHash = digest('receipt-observation-token');
@@ -809,27 +1159,85 @@ test('the continuation claim script allows one concurrent winner and rejects wro
   const submissionRunHash = digest(SUBMISSION_ATTEMPT.runId);
   const submissionClaimHash = digest(SUBMISSION_ATTEMPT.claimId);
   const submissionExecutionHash = digest(SUBMISSION_ATTEMPT.executionId);
+  const receiptExecutionHash = digest(managedContinuationExecutionId(
+    SUBMISSION_ATTEMPT.claimId,
+    'receipt_observation',
+  ));
+  const securityExecutionHash = digest(managedContinuationExecutionId(
+    SUBMISSION_ATTEMPT.claimId,
+    'security_code',
+  ));
   const markerPath = path.join(workDir, 'stratus-continuation.json');
   const readyPath = path.join(workDir, 'stratus-continuation-ready.json');
   const usedPath = path.join(workDir, 'stratus-continuation-used.json');
   const manifestPath = path.join(workDir, 'stratus-runner-capabilities.json');
+  const claimPath = path.join(workDir, 'stratus-continuation-claim.json');
+  const reservationPath = path.join(workDir, MANAGED_CONTINUATION_RESERVATION_PATH);
+  const inputPath = path.join(workDir, 'stratus-continuation-input.json');
   const writeMarker = (expiresAt, continuationPolicy = null) => {
-    fs.rmSync(usedPath, { force: true });
+    for (const artifact of [usedPath, claimPath, reservationPath, inputPath]) {
+      fs.rmSync(artifact, { force: true });
+    }
+    for (const artifact of fs.readdirSync(workDir)) {
+      if (artifact.startsWith('stratus-continuation-candidate-')) {
+        fs.rmSync(path.join(workDir, artifact), { force: true });
+      }
+    }
     fs.writeFileSync(markerPath, JSON.stringify({
       tokenHash, projectHash, expiresAt, used: false,
       submissionRunHash, submissionClaimHash, submissionExecutionHash,
+      continuationReceiptObservationExecutionHash: receiptExecutionHash,
+      continuationSecurityCodeExecutionHash: securityExecutionHash,
       ...(continuationPolicy ? { continuationPolicy } : {}),
     }));
     fs.writeFileSync(readyPath, '{}');
   };
-  const claim = (
-    claimedProjectHash = projectHash,
+  const candidate = ({
+    requestDigest = digest('exact-request'),
+    actionMode = 'observation',
     requiredCapabilities = [],
-    actionMode = 'mutation',
-    claimedExecutionHash = submissionExecutionHash,
-  ) => new Promise((resolve) => {
+  } = {}) => {
+    const value = {
+      schemaVersion: 'stratus-continuation-claim-v1',
+      projectHash,
+      actionMode,
+      requestDigest,
+      requiredCapabilities,
+      input: {
+        continuationToken: 'private-token',
+        actions: [],
+        submissionAttempt: {
+          ...SUBMISSION_ATTEMPT,
+          executionId: actionMode === 'security-code'
+            ? managedContinuationExecutionId(SUBMISSION_ATTEMPT.claimId, 'security_code')
+            : managedContinuationExecutionId(SUBMISSION_ATTEMPT.claimId, 'receipt_observation'),
+        },
+      },
+      reservation: {
+        schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+        submissionAttempt: SUBMISSION_ATTEMPT,
+      },
+    };
+    const content = Buffer.from(JSON.stringify(value));
+    const candidateDigest = digest(content);
+    const candidatePath = `stratus-continuation-candidate-${candidateDigest}.json`;
+    fs.writeFileSync(path.join(workDir, candidatePath), content);
+    return { candidatePath, candidateDigest, value };
+  };
+  const claim = ({
+    candidateValue = candidate(),
+    claimedProjectHash = projectHash,
+    claimedExecutionHash = receiptExecutionHash,
+    preload = null,
+  } = {}) => new Promise((resolve) => {
     const child = spawn(process.execPath, [
-      '-e', CLAIM_CONTINUATION_SCRIPT, tokenHash, claimedProjectHash, JSON.stringify(requiredCapabilities), actionMode,
+      ...(preload ? ['--require', preload] : []),
+      '-e', CLAIM_CONTINUATION_SCRIPT,
+      candidateValue.candidatePath,
+      candidateValue.candidateDigest,
+      tokenHash,
+      claimedProjectHash,
+      candidateValue.value.actionMode,
       submissionRunHash, submissionClaimHash, claimedExecutionHash,
     ], {
       cwd: workDir,
@@ -839,11 +1247,12 @@ test('the continuation claim script allows one concurrent winner and rejects wro
   });
 
   writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(digest('project-b')), 5, 'a token from another project must not be consumed');
+  assert.equal(await claim({ claimedProjectHash: digest('project-b') }), 13,
+    'a candidate bound to another project must not be consumed');
   assert.equal(fs.existsSync(markerPath), true);
 
   writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(projectHash, [], 'mutation', digest('different-execution')), 11,
+  assert.equal(await claim({ claimedExecutionHash: digest('different-execution') }), 11,
     'a continuation from another execution must not be consumed');
   assert.equal(fs.existsSync(markerPath), true);
 
@@ -855,18 +1264,18 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     new Date(Date.now() + 15_000).toISOString(),
     'v4-observation-or-security-code',
   );
-  assert.equal(await claim(projectHash, [], 'mutation'), 9,
+  assert.equal(await claim({ candidateValue: candidate({ actionMode: 'mutation' }) }), 9,
     'a retained v4 receipt session must reject another mutation path');
   assert.equal(fs.existsSync(markerPath), true, 'a refused mutation must not consume the receipt session');
-  assert.equal(await claim(projectHash, [], 'observation'), 0,
-    'read-only receipt observation remains permitted');
 
   fs.rmSync(manifestPath, { force: true });
   writeMarker(
     new Date(Date.now() + 15_000).toISOString(),
     'v4-observation-or-security-code',
   );
-  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY], 'observation'), 8);
+  assert.equal(await claim({ candidateValue: candidate({
+    requiredCapabilities: [ATOMIC_SUBMIT_V4_CAPABILITY],
+  }) }), 8);
   assert.equal(fs.existsSync(markerPath), true, 'a missing runner manifest must not consume the marker');
   assert.equal(fs.existsSync(usedPath), false);
 
@@ -878,7 +1287,9 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     new Date(Date.now() + 15_000).toISOString(),
     'v4-observation-or-security-code',
   );
-  assert.equal(await claim(projectHash, [ATOMIC_SUBMIT_V4_CAPABILITY], 'observation'), 8);
+  assert.equal(await claim({ candidateValue: candidate({
+    requiredCapabilities: [ATOMIC_SUBMIT_V4_CAPABILITY],
+  }) }), 8);
   assert.equal(fs.existsSync(markerPath), true, 'a protocol 3 manifest must not consume the marker');
   assert.equal(fs.existsSync(usedPath), false);
 
@@ -887,43 +1298,52 @@ test('the continuation claim script allows one concurrent winner and rejects wro
     capabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
   }));
   writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(
-    projectHash,
-    [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
-    'observation',
-  ), 10,
+  assert.equal(await claim({ candidateValue: candidate({
+    requiredCapabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+  }) }), 10,
     'a v3 retained marker must refuse a v4 upgrade before it is consumed');
   assert.equal(fs.existsSync(markerPath), true, 'a refused v4 upgrade preserves the v3 marker');
   assert.equal(fs.existsSync(usedPath), false);
-  assert.equal(await claim(projectHash, [], 'mutation'), 0,
-    'the preserved marker remains usable by its original v3 contract');
-  assert.equal(fs.existsSync(markerPath), false);
-  assert.equal(fs.existsSync(usedPath), true);
-
   writeMarker(
     new Date(Date.now() + 15_000).toISOString(),
     'v4-observation-or-security-code',
   );
-  assert.equal(await claim(
-    projectHash,
-    [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
-    'observation',
-  ), 0);
+  const v4Candidate = candidate({
+    requiredCapabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+  });
+  assert.equal(await claim({ candidateValue: v4Candidate }), 0);
   assert.equal(fs.existsSync(markerPath), false);
   assert.equal(fs.existsSync(usedPath), true);
+
+  const replayCandidate = candidate({
+    requiredCapabilities: [EXACT_PAGE_URL_CAPABILITY, ATOMIC_SUBMIT_V4_CAPABILITY],
+  });
+  assert.equal(await claim({ candidateValue: replayCandidate }), 0,
+    'an identical committed claim is idempotent');
 
   fs.rmSync(manifestPath, { force: true });
   writeMarker(new Date(Date.now() + 15_000).toISOString());
-  assert.equal(await claim(projectHash, [EXACT_PAGE_URL_CAPABILITY]), 0, 'v3 does not require a runner manifest');
-  assert.equal(fs.existsSync(markerPath), false);
-  assert.equal(fs.existsSync(usedPath), true);
+  const interruptedCandidate = candidate();
+  const shimPath = path.join(workDir, 'fail-before-input.cjs');
+  fs.writeFileSync(shimPath, [
+    "const fs = require('node:fs');",
+    'const renameSync = fs.renameSync;',
+    "fs.renameSync = (from, to) => { if (to === 'stratus-continuation-input.json') throw new Error('forced'); return renameSync(from, to); };",
+  ].join('\n'));
+  assert.equal(await claim({ candidateValue: interruptedCandidate, preload: shimPath }), 7);
+  assert.ok(fs.existsSync(claimPath));
+  assert.ok(fs.existsSync(reservationPath));
+  assert.equal(fs.existsSync(inputPath), false);
+  assert.equal(fs.existsSync(usedPath), false);
 
-  writeMarker(new Date(Date.now() + 15_000).toISOString());
-  const outcomes = await Promise.all([claim(), claim()]);
-  assert.equal(outcomes.filter((code) => code === 0).length, 1, `exactly one claim may win: ${outcomes}`);
-  assert.equal(outcomes.filter((code) => code !== 0).length, 1, `the racing claim must fail: ${outcomes}`);
-  assert.equal(fs.existsSync(markerPath), false, 'the winner atomically consumes the only marker');
-  assert.equal(fs.existsSync(usedPath), true);
+  const divergent = candidate({ requestDigest: digest('divergent-request') });
+  assert.equal(await claim({ candidateValue: divergent }), 12,
+    'a divergent retry cannot take over the durable claim');
+  assert.equal(await claim({ candidateValue: interruptedCandidate }), 0,
+    'the exact interrupted claim resumes and durably writes provider input');
+  assert.ok(fs.existsSync(inputPath));
+  assert.ok(fs.existsSync(usedPath));
+  assert.equal(fs.existsSync(claimPath), false);
 });
 
 // The runner ships to the sandbox as a string, so nothing type-checks it and a regression only
@@ -1968,19 +2388,21 @@ test('exact employer page URL capability is required before actions and at the a
     submitKind: 'application',
     expectedPageUrl,
   };
+  const normalizeReleased = (body) => normalizeManagedRun({
+    ...body,
+    allowSubmit: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { urlValidator: async (value) => new URL(value) });
   const actions = normalizeManagedActions([
     { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
     submit,
   ]);
   assert.equal(actions[1].expectedPageUrl, expectedPageUrl);
-  const run = await normalizeManagedRun({ url: expectedPageUrl, actions }, {
-    urlValidator: async (value) => new URL(value),
-  });
+  const run = await normalizeReleased({ url: expectedPageUrl, actions });
   assert.equal(run.actions[1].expectedPageUrl, expectedPageUrl);
   await assert.rejects(
-    normalizeManagedRun({ url: expectedPageUrl, actions: [actions[0], { ...submit, expectedPageUrl: 'https://jobs.example.com/postings/other' }] }, {
-      urlValidator: async (value) => new URL(value),
-    }),
+    normalizeReleased({ url: expectedPageUrl, actions: [actions[0], { ...submit, expectedPageUrl: 'https://jobs.example.com/postings/other' }] }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   assert.match(SANDBOX_RUNNER, /Employer page URL changed before the first application action/);
@@ -1993,7 +2415,14 @@ test('exact employer page URL capability is required before actions and at the a
     { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
     { type: 'fill', selector: '#email', value: 'person@example.com' },
   ]);
-  const fillRun = await normalizeManagedRun({ url: expectedPageUrl, actions: fillOnly }, {
+  // A fill is a mutation, so it now needs a durable attempt even though it never presses submit.
+  // Authority is no longer inferred from whether a selector happens to spell "submit".
+  const fillRun = await normalizeManagedRun({
+    url: expectedPageUrl,
+    actions: fillOnly,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, {
     urlValidator: async (value) => new URL(value),
   });
   assert.equal(fillRun.actions[0].expectedPageUrl, expectedPageUrl);
@@ -2007,7 +2436,7 @@ test('exact employer page URL capability is required before actions and at the a
     providerDeadlineAt: providerDeadlineAt(),
     actions: [
       { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
-      { ...submit, submitKind: 'verification' },
+      { ...submit, submitKind: 'verification', securityCode: 'ABC12345' },
     ],
   });
   assert.equal(verification.actions[0].expectedPageUrl, expectedPageUrl);
@@ -2027,57 +2456,55 @@ test('exact employer page URL capability is required before actions and at the a
     applicationScopeSelector: '#application',
   };
   await assert.rejects(
-    normalizeManagedRun({ url: expectedPageUrl, actions: [v4Submit] }, {
-      urlValidator: async (value) => new URL(value),
-    }),
+    normalizeReleased({ url: expectedPageUrl, actions: [v4Submit] }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false },
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, { ...atomicV4Capability, optional: true }, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         exactV4Capability,
         { type: 'requireCapability', value: ATOMIC_SUBMIT_V4_CAPABILITY, optional: false },
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [exactV4Capability, atomicV4Capability, atomicV4Capability, v4Submit],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_ATOMIC_SUBMIT_V4_CAPABILITY',
   );
-  const v4Run = await normalizeManagedRun({
+  const v4Run = await normalizeReleased({
     url: expectedPageUrl,
     actions: [exactV4Capability, atomicV4Capability, v4Submit],
-  }, { urlValidator: async (value) => new URL(value) });
+  });
   assert.equal(v4Run.actions[1].value, ATOMIC_SUBMIT_V4_CAPABILITY);
   assert.equal(v4Run.actions[1].optional, false);
   assert.equal(v4Run.actions[2].chooserPolicy.version, 4);
@@ -2095,7 +2522,7 @@ test('exact employer page URL capability is required before actions and at the a
   assert.equal(v4Continuation.actions[1].optional, false);
   assert.equal(v4Continuation.actions[2].chooserPolicy.version, 4);
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
@@ -2103,22 +2530,22 @@ test('exact employer page URL capability is required before actions and at the a
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: true, expectedPageUrl },
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   await assert.rejects(
-    normalizeManagedRun({
+    normalizeReleased({
       url: expectedPageUrl,
       actions: [
         {
@@ -2128,7 +2555,7 @@ test('exact employer page URL capability is required before actions and at the a
         atomicV4Capability,
         v4Submit,
       ],
-    }, { urlValidator: async (value) => new URL(value) }),
+    }),
     (error) => error.code === 'INVALID_EXPECTED_PAGE_URL',
   );
   assert.throws(
@@ -2788,14 +3215,12 @@ test('the pre-submit gate runs before the final click and can stop it', () => {
   assert.match(SANDBOX_RUNNER, /const blockers = \[\.\.\.submitGateBlockers\]/);
 });
 
-test('the final submit is recognised by intent and by target, not one or the other', () => {
+test('the final submit is recognised only by explicit intent', () => {
   const { isFinalSubmitAction } = sandboxScope(['isFinalSubmitAction']);
-  // What the backend actually appends today.
-  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' }), true);
-  assert.equal(isFinalSubmitAction({ type: 'click', selector: "button[type='submit']" }), true);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' }), false);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: "button[type='submit']" }), false);
   assert.equal(isFinalSubmitAction({ type: 'click', selector: '#send', label: 'final_submit' }), true);
-  // A gate that can be walked around by omitting the label is not a gate; one that fires on every
-  // click is not usable. Ordinary clicks pass through.
+  // Ordinary clicks pass through the final-action classifier and are contained at runtime.
   assert.equal(isFinalSubmitAction({ type: 'click', selector: '#onetrust-accept-btn-handler' }), false);
   assert.equal(isFinalSubmitAction({ type: 'click', selector: 'a:has-text("Apply for this job")' }), false);
   assert.equal(isFinalSubmitAction({ type: 'fill', selector: 'button[type="submit"]' }), false);
@@ -2886,17 +3311,33 @@ function silentSandboxApi({
     materializeTerminal() {
       const inputBuffer = this.files.get('stratus-input.json');
       const input = inputBuffer ? JSON.parse(inputBuffer.toString('utf8')) : {};
-      if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+      if (crash) {
+        this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+        if (input.submissionAttempt) {
+          this.files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(null, input, {
+            state: 'failed',
+          }));
+        }
+      }
       if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify({
         ...progress,
         ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
         ...(progressSubmissionAttempt ? { submissionAttempt: progressSubmissionAttempt } : {}),
       })));
-      if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify({
-        ...result,
-        ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
-        ...(resultSubmissionAttempt ? { submissionAttempt: resultSubmissionAttempt } : {}),
-      })));
+      if (result) {
+        const resultPayload = {
+          ...result,
+          ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
+          ...(resultSubmissionAttempt ? { submissionAttempt: resultSubmissionAttempt } : {}),
+        };
+        this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(resultPayload)));
+        if (input.submissionAttempt && resultPayload.continuationOffered !== true) {
+          this.files.set(
+            MANAGED_TERMINAL_RESULT_PATH,
+            managedTerminalEnvelope(resultPayload, input),
+          );
+        }
+      }
     }
     async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
     async runCommand(command, args, options) {
@@ -2987,7 +3428,8 @@ test('the public-only policy is installed on the sandbox fork before Chromium st
 test('setup delay consumes the original provider deadline and prevents sandbox launch', async () => {
   const realNow = Date.now;
   let now = Date.parse('2026-08-26T12:00:00.000Z');
-  let getCalls = 0;
+  let attemptGetCalls = 0;
+  let templateGetCalls = 0;
   let forkCalls = 0;
   Date.now = () => now;
   try {
@@ -3002,8 +3444,12 @@ test('setup delay consumes the original provider deadline and prevents sandbox l
         requestAcceptedAtMs: now,
         urlValidator: urlOnly,
         sandboxApi: {
-          async get() {
-            getCalls += 1;
+          async get({ name }) {
+            if (name !== CURRENT_SANDBOX_TEMPLATE) {
+              attemptGetCalls += 1;
+              return null;
+            }
+            templateGetCalls += 1;
             now += 12_000;
             return { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
           },
@@ -3018,7 +3464,8 @@ test('setup delay consumes the original provider deadline and prevents sandbox l
   } finally {
     Date.now = realNow;
   }
-  assert.equal(getCalls, 1);
+  assert.equal(attemptGetCalls, 1);
+  assert.equal(templateGetCalls, 1);
   assert.equal(forkCalls, 0);
 });
 
@@ -3071,7 +3518,11 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
   assert.ok(fake.calls.every((call) => call.timeoutMs <= 5_000), JSON.stringify(fake.calls));
   assert.ok(fake.calls.every((call) => call.commandTimeoutMs <= 7_000), JSON.stringify(fake.calls));
   assert.ok(fake.calls.every((call) => (
-    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-0.json', 'stratus-error.json'])
+    JSON.stringify(call.wanted) === JSON.stringify([
+      MANAGED_TERMINAL_RESULT_PATH,
+      'stratus-result-0.json',
+      'stratus-error.json',
+    ])
   )));
   assert.equal(fake.runnerCalls[0].detached, true);
   assert.equal(fake.runnerCalls[0].timeoutMs, 270_000);
@@ -3143,9 +3594,37 @@ test('a result written at the final polling boundary wins over the run timeout',
 test('a continuation timeout keeps its own identity across bounded polling chunks', async () => {
   const calls = [];
   let stopped = false;
+  const projectBinding = 'continuation-timeout';
+  const continuationAttempt = {
+    ...SUBMISSION_ATTEMPT,
+    executionId: managedContinuationExecutionId(SUBMISSION_ATTEMPT.claimId, 'security_code'),
+  };
+  const requestDigest = 'a'.repeat(64);
+  const reservation = managedReservation(projectBinding, SUBMISSION_ATTEMPT, requestDigest);
+  const initialTerminalInput = {
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    terminalResultProjectHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
+    terminalResultRequestDigest: requestDigest,
+  };
+  const initialTerminal = managedTerminalEnvelope({
+    title: 'Security code required',
+    continuationOffered: true,
+    continuationToken: 'c'.repeat(43),
+    submissionAttempt: SUBMISSION_ATTEMPT,
+  }, initialTerminalInput);
+  const files = new Map([
+    [MANAGED_SUBMISSION_RESERVATION_PATH, reservation],
+    [MANAGED_TERMINAL_RESULT_PATH, initialTerminal],
+  ]);
   const sandbox = {
     async runCommand(command, args, options) {
-      if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) return { exitCode: 0 };
+      if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) {
+        files.set(
+          MANAGED_CONTINUATION_RESERVATION_PATH,
+          managedReservation(projectBinding, continuationAttempt, 'b'.repeat(64)),
+        );
+        return { exitCode: 0 };
+      }
       const timeoutMs = Number(args[2]);
       calls.push({
         timeoutMs,
@@ -3155,8 +3634,12 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
       });
       return { exitCode: 3, stdout: async () => '' };
     },
-    async writeFiles() {},
-    async readFileToBuffer() { return null; },
+    async writeFiles(batch) {
+      for (const file of batch) files.set(file.path, Buffer.from(file.content));
+    },
+    async readFileToBuffer({ path: filePath }) {
+      return files.get(filePath) || null;
+    },
     async stop() { stopped = true; },
   };
 
@@ -3164,11 +3647,11 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
     executeSandboxRun({
       continuationToken: 'c'.repeat(43),
       actions: [],
-      submissionAttempt: SUBMISSION_ATTEMPT,
+      submissionAttempt: continuationAttempt,
       providerDeadlineAt: providerDeadlineAt(70_000),
     }, {
       sandboxApi: { async get() { return sandbox; } },
-      projectBinding: 'continuation-timeout',
+      projectBinding,
     }),
     (error) => {
       assert.equal(error.code, 'CONTINUATION_EXPIRED');
@@ -3182,9 +3665,13 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
   assert.ok(calls.every((call) => call.timeoutMs <= 5_000 && call.commandTimeoutMs <= 7_000));
   assert.ok(calls.every((call) => typeof call.signal?.addEventListener === 'function'));
   assert.ok(calls.every((call) => (
-    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-1.json', 'stratus-error.json'])
+    JSON.stringify(call.wanted) === JSON.stringify([
+      MANAGED_CONTINUATION_TERMINAL_RESULT_PATH,
+      'stratus-error.json',
+    ])
   )));
-  assert.equal(stopped, true);
+  assert.equal(stopped, false,
+    'a response timeout must leave the retained runner free to persist its terminal result');
 });
 
 test('a response timeout returns correlated press progress instead of exposing a blind retry', async () => {
@@ -3217,9 +3704,11 @@ test('a response timeout returns correlated press progress instead of exposing a
       return true;
     },
   );
+  assert.equal(fake.sandboxes[0].stopped, false,
+    'the lost response must not stop a runner after employer submission');
 });
 
-test('confirmation progress survives a lost result response and is written before screenshot work', async () => {
+test('durable confirmation survives a lost ordinary result response and precedes screenshot work', async () => {
   const progress = {
     version: 1,
     phase: 0,
@@ -3248,27 +3737,24 @@ test('confirmation progress survives a lost result response and is written befor
     },
     resultReadError: new Error('provider response stream reset'),
   });
-  await assert.rejects(
-    executeSandboxRun({
-      url: 'https://example.com/apply',
-      actions: [],
-      allowSubmit: true,
-      requestContinuation: true,
-      submissionAttempt: SUBMISSION_ATTEMPT,
-      providerDeadlineAt: providerDeadlineAt(),
-    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
-    (error) => {
-      assert.equal(error.code, 'SANDBOX_RESULT_MISSING');
-      assert.deepEqual(error.runProgress, {
-        ...progress,
-        submissionAttempt: SUBMISSION_ATTEMPT,
-      });
-      return true;
-    },
-  );
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+    allowSubmit: true,
+    requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { sandboxApi: fake.api, urlValidator: urlOnly });
+  assert.equal(result.title, 'Application received');
+  assert.match(result.terminalResult.resultId, /^[a-f0-9]{64}$/);
   const progressIndex = SANDBOX_RUNNER.indexOf("stage: 'result_ready'");
+  const terminalIndex = SANDBOX_RUNNER.indexOf(
+    'persistTerminalResult(currentInput, phase, publishedResult)',
+    progressIndex,
+  );
   const screenshotIndex = SANDBOX_RUNNER.indexOf('if (currentInput.screenshot)', progressIndex);
-  assert.ok(progressIndex >= 0 && screenshotIndex > progressIndex);
+  assert.ok(progressIndex >= 0 && terminalIndex > progressIndex);
+  assert.ok(screenshotIndex > terminalIndex);
 });
 
 test('a stalled optional screenshot cannot hide a confirmed provider result', async () => {
@@ -3314,6 +3800,65 @@ test('a stalled optional screenshot cannot hide a confirmed provider result', as
   });
   assert.equal(result.submitOutcome.state, 'confirmed');
   assert.equal(result.screenshot, null);
+});
+
+test('the shipped publication block commits terminal success before a throwing screenshot and preserves legacy fallback', async () => {
+  const start = SANDBOX_RUNNER.indexOf(
+    'if (currentInput.submissionAttempt) assertNoDurableTerminalAuthority();',
+  );
+  const end = SANDBOX_RUNNER.indexOf(
+    'if (phase > 0 || !continuationOffered) break;',
+    start,
+  );
+  assert.ok(start >= 0 && end > start);
+  const source = SANDBOX_RUNNER.slice(start, end);
+  const events = [];
+  const execute = new Function('events', 'Buffer', 'fs', 'durableAuthority', `
+    const currentInput = {
+      submissionAttempt: { runId: 'run', claimId: 'claim', executionId: 'execution' },
+      screenshot: true,
+      fullPage: false
+    };
+    const input = currentInput;
+    const phase = 0;
+    const continuationOffered = false;
+    const resultPayload = { employerOutcome: { kind: 'confirmed' } };
+    const activeTerminalAckPath = 'stratus-terminal-result-ack.json';
+    const hasDurableSubmissionAuthority = durableAuthority;
+    let terminalFailureInput = currentInput;
+    const assertNoDurableTerminalAuthority = () => {
+      if (hasDurableSubmissionAuthority) events.push('authority');
+    };
+    const persistTerminalResult = () => { events.push('terminal'); return true; };
+    const writeDurableJson = () => events.push('legacy-result');
+    const recordCrashProgress = (_patch, options) => events.push(
+      options?.persist === false ? 'progress-memory' : 'progress-file'
+    );
+    const releaseDispatchLock = () => events.push('unlock');
+    const page = { screenshot: async () => { events.push('screenshot'); throw new Error('optional'); } };
+    return (async () => {
+      ${source}
+      return { terminalFailureInput };
+    })();
+  `);
+  const state = await execute(
+    events,
+    Buffer,
+    { existsSync: () => false, unlinkSync: () => {} },
+    true,
+  );
+  assert.deepEqual(events, ['authority', 'terminal', 'progress-memory', 'unlock', 'screenshot']);
+  assert.equal(state.terminalFailureInput, null);
+
+  const legacyEvents = [];
+  const legacyState = await execute(
+    legacyEvents,
+    Buffer,
+    { existsSync: () => false, unlinkSync: () => {} },
+    false,
+  );
+  assert.deepEqual(legacyEvents, ['legacy-result', 'progress-memory', 'unlock', 'screenshot']);
+  assert.notEqual(legacyState.terminalFailureInput, null);
 });
 
 test('a detached runner that crashes reports the crash, not a timeout', async () => {
@@ -3705,7 +4250,7 @@ test('the runner checkpoints only bounded submit progress around activation and 
   assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
   assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
   assert.match(SANDBOX_RUNNER, /finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*applicationSubmitPressed: true/);
-  assert.match(SANDBOX_RUNNER, /fs\.writeFileSync\('stratus-result-' \+ phase[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}\)/);
+  assert.match(SANDBOX_RUNNER, /assertNoDurableTerminalAuthority\(\)[\s\S]*persistTerminalResult\(currentInput, phase, publishedResult\)[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}, \{ persist: false \}\)[\s\S]*if \(currentInput\.screenshot\)/);
   assert.doesNotMatch(SANDBOX_RUNNER, /recordCrashProgress\([^)]*(?:value|text|file|email|phone|name):/i);
 });
 
@@ -3719,7 +4264,9 @@ test('one provider deadline governs launch, continuation, and every physical sub
   assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
   assert.match(
     SANDBOX_RUNNER,
-    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+    // An exact-mutation transport authorization may sit inside the same critical section between
+    // the window check and the network watch. The ordering is what this pins, not adjacency.
+    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n(?:\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n)?\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
   );
   assert.match(
     SANDBOX_RUNNER,
@@ -3758,7 +4305,7 @@ test('only a phase-zero pressed unknown outcome adds the short receipt observati
     /continuationOffered = input\.requestContinuation === true\s*&& \(Boolean\(humanVerification\) \|\| input\.continuationCheckpoint === true \|\| pressedUnknown\)/s,
   );
   assert.match(SANDBOX_RUNNER, /receiptObservationOnly\s*\? 15\s*: Math\.max/s);
-  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) break/);
+  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) break;/);
 });
 
 test('the runner reads the submit outcome off the page and reports it', () => {

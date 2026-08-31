@@ -154,9 +154,10 @@ async function choiceDetailsFor(html) {
       const key = helpers.choiceQuestionKey(input, block);
       if (keys.has(key)) continue;
       keys.add(key);
+      const inventory = helpers.optionsOf(input, block);
       labels.push({
         label: helpers.questionLabel(input),
-        options: helpers.optionsOf(input, block),
+        options: inventory.values,
       });
     }
     return labels;
@@ -170,12 +171,43 @@ async function closedChoiceDetailsFor(html, selector) {
     const helpers = new Function(`${source}\nreturn { blockOf, marksRequired, optionsOf, questionLabel };`)();
     const control = document.querySelector(target);
     const block = helpers.blockOf(control);
+    const inventory = helpers.optionsOf(control, block);
     return {
       label: helpers.questionLabel(control),
-      options: helpers.optionsOf(control, block),
+      options: inventory.values,
       required: helpers.marksRequired(control, block),
     };
   }, [CLOSED_CHOICE_SOURCE, selector]);
+}
+
+async function optionInventoryFor(html, selector) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate(([source, target]) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, optionsOf };`)();
+    const control = document.querySelector(target);
+    return helpers.optionsOf(control, helpers.blockOf(control));
+  }, [CHOICE_SOURCE, selector]);
+}
+
+async function optionBudgetSummaryFor(html, selector) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate(([source, target]) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, optionsOf };`)();
+    const inventories = [...document.querySelectorAll(target)].map((control) => (
+      helpers.optionsOf(control, helpers.blockOf(control))
+    ));
+    return {
+      inventories: inventories.map((inventory) => ({
+        complete: inventory.complete,
+        count: inventory.values.length,
+      })),
+      serializedBytes: new TextEncoder().encode(JSON.stringify(
+        inventories.flatMap((inventory) => inventory.values),
+      )).byteLength,
+    };
+  }, [CHOICE_SOURCE, selector]);
 }
 
 /* THE DEFECT, AND THE FIX, ON THE MARKUP THAT CAUSED IT.
@@ -310,6 +342,200 @@ test('a Lever yes/no group reports both options', async () => {
 
   assert.equal(details.length, 1);
   assert.deepEqual(details[0].options, ['Yes', 'No']);
+});
+
+test('a mixed short and long employer choice inventory is retained in full', async () => {
+  const longChoice = 'This employer option includes detailed eligibility terms '.repeat(7).trim();
+  const inventory = await optionInventoryFor(`
+    <fieldset>
+      <legend>Which eligibility statement applies?</legend>
+      <label><input type="radio" name="eligibility" value="short">Yes</label>
+      <label><input type="radio" name="eligibility" value="long">${longChoice}</label>
+    </fieldset>`, 'input[type="radio"]');
+
+  assert.deepEqual(inventory, {
+    values: ['Yes', longChoice],
+    complete: true,
+  });
+});
+
+test('an unsafe employer choice marks the whole option inventory incomplete', async () => {
+  const unsafeChoice = 'x'.repeat(10_001);
+  const inventory = await optionInventoryFor(`
+    <fieldset>
+      <legend>Choose one statement</legend>
+      <label><input type="radio" name="statement" value="short">Short choice</label>
+      <label><input type="radio" name="statement" value="unsafe">${unsafeChoice}</label>
+    </fieldset>`, 'input[type="radio"]');
+
+  assert.deepEqual(inventory, {
+    values: ['Short choice'],
+    complete: false,
+  });
+});
+
+test('native placeholders are structural and a valid Please label is preserved', async () => {
+  const inventory = await optionInventoryFor(`
+    <label for="contact-choice">Contact preference</label>
+    <select id="contact-choice">
+      <option value="">Select one</option>
+      <option value="email">Please contact me by email</option>
+      <option value="none">No contact</option>
+    </select>`, '#contact-choice');
+
+  assert.deepEqual(inventory, {
+    values: ['Please contact me by email', 'No contact'],
+    complete: true,
+  });
+});
+
+test('native selects report incomplete while empty or loading and omit disabled choices', async () => {
+  const empty = await optionInventoryFor(`
+    <label for="empty-choice">Office</label>
+    <select id="empty-choice"></select>`, '#empty-choice');
+  assert.deepEqual(empty, { values: [], complete: false });
+
+  const loading = await optionInventoryFor(`
+    <label for="loading-choice">Office</label>
+    <select id="loading-choice" aria-busy="true">
+      <option value="">Loading offices</option>
+      <option value="dubai">Dubai</option>
+    </select>`, '#loading-choice');
+  assert.deepEqual(loading, { values: ['Dubai'], complete: false });
+
+  const disabled = await optionInventoryFor(`
+    <label for="enabled-choice">Office</label>
+    <select id="enabled-choice">
+      <option value="">Choose one</option>
+      <option value="dubai">Dubai</option>
+      <option value="closed" disabled>Closed office</option>
+      <optgroup label="Unavailable" disabled>
+        <option value="later">Opening later</option>
+      </optgroup>
+    </select>`, '#enabled-choice');
+  assert.deepEqual(disabled, { values: ['Dubai'], complete: true });
+});
+
+test('duplicate labels with distinct employer values make the inventory incomplete', async () => {
+  const inventory = await optionInventoryFor(`
+    <label for="region-choice">Region</label>
+    <select id="region-choice">
+      <option value="">Choose one</option>
+      <option value="north-america">Americas</option>
+      <option value="south-america">Americas</option>
+    </select>`, '#region-choice');
+
+  assert.deepEqual(inventory, {
+    values: ['Americas'],
+    complete: false,
+  });
+});
+
+test('a virtualized custom list stays incomplete unless full enumeration is proven', async () => {
+  const incomplete = await optionInventoryFor(`
+    <div class="field">
+      <button id="virtual-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="virtual-choice" data-virtualized="true">
+        <div role="option" aria-setsize="100" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="100" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#virtual-choice');
+  assert.deepEqual(incomplete, { values: ['One', 'Two'], complete: false });
+
+  const complete = await optionInventoryFor(`
+    <div class="field">
+      <button id="full-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="full-choice" data-virtualized="true">
+        <div role="option" aria-setsize="2" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="2" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#full-choice');
+  assert.deepEqual(complete, { values: ['One', 'Two'], complete: true });
+});
+
+test('custom list completeness distinguishes static, empty, and unproven virtual inventories', async () => {
+  const staticList = await optionInventoryFor(`
+    <div class="field">
+      <button id="static-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="static-choice">
+        <div role="option" data-value="one">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#static-choice');
+  assert.deepEqual(staticList, { values: ['One', 'Two'], complete: true });
+
+  const emptyList = await optionInventoryFor(`
+    <div class="field">
+      <button id="empty-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="empty-choice"></div>
+    </div>`, '#empty-choice');
+  assert.deepEqual(emptyList, { values: [], complete: false });
+
+  const missingCount = await optionInventoryFor(`
+    <div class="field">
+      <button id="missing-count-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="missing-count-choice" data-virtualized="true">
+        <div role="option" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#missing-count-choice');
+  assert.deepEqual(missingCount, { values: ['One', 'Two'], complete: false });
+
+  const conflictingCounts = await optionInventoryFor(`
+    <div class="field">
+      <button id="conflicting-count-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="conflicting-count-choice" aria-rowcount="2">
+        <div role="option" aria-setsize="3" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="3" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#conflicting-count-choice');
+  assert.deepEqual(conflictingCounts, { values: ['One', 'Two'], complete: false });
+});
+
+test('custom list completeness detects windowing evidence on ancestors and option children', async () => {
+  const ancestorWindow = await optionInventoryFor(`
+    <div class="field react-window__viewport">
+      <button id="ancestor-window-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="ancestor-window-choice">
+        <div role="option" data-value="one">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#ancestor-window-choice');
+  assert.deepEqual(ancestorWindow, { values: ['One', 'Two'], complete: false });
+
+  const childWindow = await optionInventoryFor(`
+    <div class="field">
+      <button id="child-window-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="child-window-choice">
+        <div role="option" data-value="one" data-has-more="true">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#child-window-choice');
+  assert.deepEqual(childWindow, { values: ['One', 'Two'], complete: false });
+
+  const lazyEmpty = await optionInventoryFor(`
+    <div class="field">
+      <button id="lazy-empty-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="lazy-empty-choice" data-lazy="true"></div>
+    </div>`, '#lazy-empty-choice');
+  assert.deepEqual(lazyEmpty, { values: [], complete: false });
+});
+
+test('the global serialized option budget truncates safely below the terminal limit', async () => {
+  const optionText = 'x'.repeat(9_000);
+  const lists = Array.from({ length: 5 }, (_, listIndex) => `
+    <label for="budget-${listIndex}">Budget ${listIndex}</label>
+    <select id="budget-${listIndex}">
+      <option value="">Select one</option>
+      ${Array.from({ length: 100 }, (_, optionIndex) => (
+        `<option value="${listIndex}-${optionIndex}">${listIndex}-${optionIndex}-${optionText}</option>`
+      )).join('')}
+    </select>`).join('');
+  const summary = await optionBudgetSummaryFor(lists, 'select');
+
+  assert.ok(summary.serializedBytes < 4 * 1024 * 1024);
+  assert.ok(summary.inventories.some((inventory) => inventory.complete === false));
+  assert.ok(summary.inventories.reduce((sum, inventory) => sum + inventory.count, 0) < 500);
 });
 
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {

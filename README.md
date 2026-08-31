@@ -20,7 +20,8 @@ boundary:
 - Set `STRATUS_SUBMISSION_CORRELATION_MODE=compat` only while an old caller must finish work without
   an attempt identity. Set `STRATUS_SUBMISSION_CORRELATION_MODE=required` for normal operation. If
   the variable is missing, Stratus defaults to `required`. Do not use another value.
-- Set `STRATUS_SUBMISSION_QUIESCED=1` to refuse managed work that can reach an employer boundary.
+- Set `STRATUS_SUBMISSION_QUIESCED=1` to refuse every mutating managed action before any provider
+  adapter runs. Read-only extraction, selector waits, and capability checks remain available.
   Leave it unset for live operation. Every non-`1` value is also live, so a mistyped value such as
   `true`, `yes`, or `quiesce` does not stop submissions and must be treated as a failed release
   change.
@@ -36,8 +37,11 @@ the flags for the intended state:
 | Required, quiesced | `required` | `1` | `true` | `true` |
 | Required, live | `required` or missing | unset or non-`1` | `false` | `true` |
 
-Never accept a health response whose `commit` is `null`, empty, or different from the commit being
-released. A correct pair of flags on the wrong build is not release evidence.
+Never accept a health response unless `ok` is `true`, `revisionStatus` is `verified`, and `commit`
+is the exact 40-character source commit being released. Health reports `declaredCommit` from
+`GIT_SHA` and `providerCommit` from `VERCEL_GIT_COMMIT_SHA` separately. If both exist they must be
+valid and identical. A malformed, missing, or conflicting revision makes health return HTTP 503.
+A correct pair of flags on the wrong build is not release evidence.
 
 ```json
 {
@@ -49,6 +53,11 @@ released. A correct pair of flags on the wrong build is not release evidence.
 ```
 
 Supported actions are `click`, `fill`, `fillByLabelText`, `upload`, `waitForSelector`, `press`, `select`, `extract`, `discover`, and `confirmAndSubmit`. Arbitrary caller-supplied JavaScript is rejected.
+
+A submit-shaped click, Enter press, or `confirmAndSubmit` action requires `allowSubmit: true` plus
+the exact durable `submissionAttempt` and absolute `providerDeadlineAt` when correlation is
+required. Those requirements are derived from the raw action grammar before URL validation or a
+sandbox adapter can run, so omitting the top-level release flag cannot bypass them.
 
 Any action may carry `optional: true`, which means "step over this rather than fail the run". Whether the element is there is decided by a single instantaneous check, with one exception: an optional `waitForSelector` is exempt and honours its own `timeout`, which is clamped to between 100 and 20000 ms. That exception matters because `waitForSelector` is the one action whose entire job is to wait, and a check that can answer "not there" before its timeout starts cancels it outright. If a control renders asynchronously, declare a `waitForSelector` for it; the runner will not guess a wait on your behalf, because measured against two live Greenhouse forms a blanket grace changed no outcome and cost about 4.3 seconds a run. Every optional action that is stepped over is reported in the run's `skipped` array.
 
