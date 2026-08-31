@@ -51,6 +51,7 @@ test('run result lookup preserves pending and terminal response envelopes', asyn
   };
   const result = await lookupManagedRunResult(ATTEMPT, {
     projectBinding: 'project-binding',
+    requestAcceptedAtMs: 1234,
     retrieve: async (input, options) => {
       seen = { input, options };
       return pending;
@@ -59,29 +60,43 @@ test('run result lookup preserves pending and terminal response envelopes', asyn
   assert.equal(result, pending);
   assert.deepEqual(seen, {
     input: { submissionAttempt: ATTEMPT },
-    options: { projectBinding: 'project-binding' },
+    options: { projectBinding: 'project-binding', requestAcceptedAtMs: 1234 },
   });
 });
 
-test('acknowledgement accepts no caller-selected result identifier and returns the public shape', async () => {
+test('acknowledgement requires the exact immutable result identifier and returns cleanup state', async () => {
+  const resultId = 'a'.repeat(64);
   assert.deepEqual(
-    submissionAttemptFromAcknowledgementBody({ submissionAttempt: ATTEMPT }),
-    ATTEMPT,
+    submissionAttemptFromAcknowledgementBody({ submissionAttempt: ATTEMPT, resultId }),
+    { submissionAttempt: ATTEMPT, resultId },
   );
   assert.throws(
-    () => submissionAttemptFromAcknowledgementBody({
-      submissionAttempt: ATTEMPT,
-      resultId: 'a'.repeat(64),
-    }),
+    () => submissionAttemptFromAcknowledgementBody({ submissionAttempt: ATTEMPT }),
     (error) => error.code === 'INVALID_RUN_RESULT_ACKNOWLEDGEMENT' && error.status === 400,
   );
 
   const acknowledgedAt = '2026-08-31T00:00:00.000Z';
-  const result = await acknowledgeManagedRunResult({ submissionAttempt: ATTEMPT }, {
+  const result = await acknowledgeManagedRunResult({ submissionAttempt: ATTEMPT, resultId }, {
     projectBinding: 'project-binding',
-    acknowledge: async () => ({ submissionAttempt: ATTEMPT, acknowledgedAt }),
+    requestAcceptedAtMs: 1234,
+    acknowledge: async (input, options) => {
+      assert.deepEqual(input, { submissionAttempt: ATTEMPT, resultId });
+      assert.deepEqual(options, { projectBinding: 'project-binding', requestAcceptedAtMs: 1234 });
+      return {
+        submissionAttempt: ATTEMPT,
+        resultId,
+        acknowledgedAt,
+        cleanupState: 'completed',
+      };
+    },
   });
-  assert.deepEqual(result, { acknowledged: true, submissionAttempt: ATTEMPT, acknowledgedAt });
+  assert.deepEqual(result, {
+    acknowledged: true,
+    submissionAttempt: ATTEMPT,
+    resultId,
+    acknowledgedAt,
+    cleanupState: 'completed',
+  });
 });
 
 test('both terminal result endpoints authenticate before touching retained state', async () => {

@@ -335,7 +335,9 @@ test('discovery reports choice questions, one entry per question, with their opt
   assert.match(discover, /required: marksRequired\(el, block\)/);
   assert.match(discover, /options: optionInventory\.values\.length > 0 \? optionInventory\.values : null/);
   assert.match(discover, /optionsComplete: optionInventory\.complete/);
-  assert.match(discover, /durableSelector: durableSelectorOf\(el, block\)/);
+  assert.match(discover, /const durableSelector = durableSelectorOf\(el, block\)/);
+  assert.match(discover, /durableSelector: typeof durableSelector === 'string'/);
+  assert.match(discover, /durableSelector\.length <= 10000/);
   // inputType alone reports React-selects as text. Preserve the live DOM role on the result wire so
   // the backend can probe only role=combobox controls and leave ordinary text inputs open.
   assert.match(discover, /el\.getAttribute\('aria-haspopup'\) === 'listbox' \? 'combobox' : null/);

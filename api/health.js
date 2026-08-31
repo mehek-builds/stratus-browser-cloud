@@ -10,7 +10,7 @@ export function managedHealthPayload(env = process.env) {
     providerConfigured: true,
     authenticationMode: env.STRATUS_API_KEY?.trim() ? 'api-key-or-vercel-oidc' : 'vercel-oidc',
     runtime: process.version,
-    commit: env.VERCEL_GIT_COMMIT_SHA || null,
+    commit: env.GIT_SHA || env.VERCEL_GIT_COMMIT_SHA || null,
     submissionQuiesced: releasePolicy.quiesced,
     submissionCorrelationRequired: releasePolicy.correlationRequired
   };

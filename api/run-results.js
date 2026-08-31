@@ -33,13 +33,15 @@ export function submissionAttemptFromRunResultQuery(query) {
 
 export async function lookupManagedRunResult(query, {
   projectBinding = 'stratus-managed',
-  retrieve = retrieveManagedTerminalResult
+  retrieve = retrieveManagedTerminalResult,
+  requestAcceptedAtMs = Date.now()
 } = {}) {
   const submissionAttempt = submissionAttemptFromRunResultQuery(query);
-  return retrieve({ submissionAttempt }, { projectBinding });
+  return retrieve({ submissionAttempt }, { projectBinding, requestAcceptedAtMs });
 }
 
 export default async function handler(request, response) {
+  const requestAcceptedAtMs = Date.now();
   applyApiHeaders(response);
   if (!requireMethod(request, response, ['GET'])) return;
   if (!await authorize(request, response)) return;
@@ -47,7 +49,10 @@ export default async function handler(request, response) {
     const projectBinding = process.env.VERCEL_PROJECT_ID
       || process.env.VERCEL_PROJECT_NAME
       || 'stratus-managed';
-    const result = await lookupManagedRunResult(request.query, { projectBinding });
+    const result = await lookupManagedRunResult(request.query, {
+      projectBinding,
+      requestAcceptedAtMs
+    });
     response.status(result.state === 'pending' ? 202 : 200).json(result);
   } catch (error) {
     console.error(JSON.stringify({

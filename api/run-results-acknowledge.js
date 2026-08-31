@@ -20,26 +20,35 @@ export function submissionAttemptFromAcknowledgementBody(body) {
   const keys = body && typeof body === 'object' && !Array.isArray(body)
     ? Object.keys(body).sort().join(',')
     : '';
-  if (keys !== 'submissionAttempt') {
-    throw invalidRequest('The request body must contain only submissionAttempt');
+  if (keys !== 'resultId,submissionAttempt'
+    || typeof body.resultId !== 'string'
+    || !/^[a-f0-9]{64}$/.test(body.resultId)) {
+    throw invalidRequest('The request body must contain only submissionAttempt and a lowercase 64-character resultId');
   }
-  return body.submissionAttempt;
+  return { submissionAttempt: body.submissionAttempt, resultId: body.resultId };
 }
 
 export async function acknowledgeManagedRunResult(body, {
   projectBinding = 'stratus-managed',
-  acknowledge = acknowledgeManagedTerminalResult
+  acknowledge = acknowledgeManagedTerminalResult,
+  requestAcceptedAtMs = Date.now()
 } = {}) {
-  const submissionAttempt = submissionAttemptFromAcknowledgementBody(body);
-  const acknowledgement = await acknowledge({ submissionAttempt }, { projectBinding });
+  const { submissionAttempt, resultId } = submissionAttemptFromAcknowledgementBody(body);
+  const acknowledgement = await acknowledge(
+    { submissionAttempt, resultId },
+    { projectBinding, requestAcceptedAtMs }
+  );
   return {
     acknowledged: true,
     submissionAttempt: acknowledgement.submissionAttempt,
-    acknowledgedAt: acknowledgement.acknowledgedAt
+    resultId: acknowledgement.resultId,
+    acknowledgedAt: acknowledgement.acknowledgedAt,
+    cleanupState: acknowledgement.cleanupState
   };
 }
 
 export default async function handler(request, response) {
+  const requestAcceptedAtMs = Date.now();
   applyApiHeaders(response);
   if (!requireMethod(request, response, ['POST'])) return;
   if (!await authorize(request, response)) return;
@@ -47,7 +56,10 @@ export default async function handler(request, response) {
     const projectBinding = process.env.VERCEL_PROJECT_ID
       || process.env.VERCEL_PROJECT_NAME
       || 'stratus-managed';
-    response.status(200).json(await acknowledgeManagedRunResult(request.body, { projectBinding }));
+    response.status(200).json(await acknowledgeManagedRunResult(request.body, {
+      projectBinding,
+      requestAcceptedAtMs
+    }));
   } catch (error) {
     console.error(JSON.stringify({
       event: 'managed_run_result_acknowledgement_failed',

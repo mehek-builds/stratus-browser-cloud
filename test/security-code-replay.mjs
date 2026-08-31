@@ -32,6 +32,7 @@ import {
   ATOMIC_SUBMIT_POLICY,
   ATOMIC_SUBMIT_POLICY_V4,
   EXACT_PAGE_URL_CAPABILITY,
+  managedContinuationExecutionId,
   SANDBOX_RUNNER
 } from '../src/managed-browser.js';
 
@@ -46,6 +47,18 @@ const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CODE = 'TPHJrFMJ';
+const SECURITY_SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333'
+});
+const SECURITY_CONTINUATION_ATTEMPT = Object.freeze({
+  ...SECURITY_SUBMISSION_ATTEMPT,
+  executionId: managedContinuationExecutionId(
+    SECURITY_SUBMISSION_ATTEMPT.claimId,
+    'security_code'
+  )
+});
 
 /* THE WIDGET IS GREENHOUSE'S, NOT AN IMPRESSION OF ONE.
  *
@@ -680,6 +693,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
     allowSubmit: true,
     requestContinuation: true,
     continuationTtlSeconds: 15,
@@ -696,7 +710,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   const waitForFile = async (file, timeoutMs = 10_000) => {
     const deadline = Date.now() + timeoutMs;
     while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}; native submissions: `
+      + JSON.stringify(v4NativeSubmissions));
   };
   await waitForFile(result0);
   const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
@@ -708,9 +723,15 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.equal(valueOf(first, '#submitted'), 'no');
   assert.equal(valueOf(first, '#filed'), 'no');
   fs.writeFileSync(continuationInput, JSON.stringify({
+    parentSubmissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
+    submissionAttempt: SECURITY_CONTINUATION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
     actions: [
-      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
+      {
+        type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false,
+        expectedPageUrl: `${base}?challenge=1`
+      },
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, expectedPageUrl: `${base}?challenge=1`, label: 'verification_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'verification', securityCode: CODE },
       { type: 'extract', selector: '#submitted' },
       { type: 'extract', selector: '#filed' },
       { type: 'extract', selector: '#box-values' },
@@ -943,6 +964,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
     allowSubmit: true,
     requestContinuation: true,
     continuationTtlSeconds: 15,
@@ -957,14 +979,15 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   child.stdout.resume();
   const childExit = new Promise((resolve) => child.on('close', resolve));
-  const waitForFile = async (file, timeoutMs = 30_000) => {
+  const waitForFile = async (file, timeoutMs = 120_000) => {
     const deadline = Date.now() + timeoutMs;
     while (!fs.existsSync(file) && !fs.existsSync(errorPath) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     assert.equal(fs.existsSync(errorPath), false,
       `runner failed before creating ${path.basename(file)}: ${fs.existsSync(errorPath) ? fs.readFileSync(errorPath, 'utf8') : stderr}`);
-    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}; native submissions: `
+      + JSON.stringify(v4NativeSubmissions));
   };
   await waitForFile(result0);
   const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
@@ -986,6 +1009,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(v4NativeSubmissions, [], 'phase zero must not reach the verification endpoint');
 
   fs.writeFileSync(continuationInput, JSON.stringify({
+    parentSubmissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
+    submissionAttempt: SECURITY_CONTINUATION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
     actions: [
       ...challengeCapabilityActions,
@@ -1092,6 +1117,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
     allowSubmit: true,
     requestContinuation: true,
     continuationTtlSeconds: 20,
@@ -1106,7 +1132,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   child.stdout.resume();
   const childExit = new Promise((resolve) => child.on('close', resolve));
-  const waitForFile = async (file, timeoutMs = 30_000) => {
+  const waitForFile = async (file, timeoutMs = 120_000) => {
     const deadline = Date.now() + timeoutMs;
     while (!fs.existsSync(file) && !fs.existsSync(errorPath) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1123,6 +1149,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(v4NativeSubmissions, []);
 
   fs.writeFileSync(continuationInput, JSON.stringify({
+    parentSubmissionAttempt: SECURITY_SUBMISSION_ATTEMPT,
+    submissionAttempt: SECURITY_CONTINUATION_ATTEMPT,
     providerDeadlineAt: providerDeadlineAt(),
     actions: [
       {

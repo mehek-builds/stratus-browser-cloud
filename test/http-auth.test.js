@@ -159,6 +159,12 @@ test('public health reports the live submission release gates without exposing e
   assert.equal(defaultPolicy.commit, 'commit-sha');
   assert.doesNotMatch(JSON.stringify(defaultPolicy), /secret-api-key/);
 
+  const explicitBuildCommit = managedHealthPayload({
+    GIT_SHA: 'guarded-cli-sha',
+    VERCEL_GIT_COMMIT_SHA: 'provider-sha',
+  });
+  assert.equal(explicitBuildCommit.commit, 'guarded-cli-sha');
+
   const rolloutPolicy = managedHealthPayload({
     STRATUS_SUBMISSION_CORRELATION_MODE: 'compat',
     STRATUS_SUBMISSION_QUIESCED: '1',

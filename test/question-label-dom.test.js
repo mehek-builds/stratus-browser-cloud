@@ -426,6 +426,74 @@ test('a virtualized custom list stays incomplete unless full enumeration is prov
   assert.deepEqual(complete, { values: ['One', 'Two'], complete: true });
 });
 
+test('custom list completeness distinguishes static, empty, and unproven virtual inventories', async () => {
+  const staticList = await optionInventoryFor(`
+    <div class="field">
+      <button id="static-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="static-choice">
+        <div role="option" data-value="one">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#static-choice');
+  assert.deepEqual(staticList, { values: ['One', 'Two'], complete: true });
+
+  const emptyList = await optionInventoryFor(`
+    <div class="field">
+      <button id="empty-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="empty-choice"></div>
+    </div>`, '#empty-choice');
+  assert.deepEqual(emptyList, { values: [], complete: false });
+
+  const missingCount = await optionInventoryFor(`
+    <div class="field">
+      <button id="missing-count-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="missing-count-choice" data-virtualized="true">
+        <div role="option" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#missing-count-choice');
+  assert.deepEqual(missingCount, { values: ['One', 'Two'], complete: false });
+
+  const conflictingCounts = await optionInventoryFor(`
+    <div class="field">
+      <button id="conflicting-count-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="conflicting-count-choice" aria-rowcount="2">
+        <div role="option" aria-setsize="3" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="3" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#conflicting-count-choice');
+  assert.deepEqual(conflictingCounts, { values: ['One', 'Two'], complete: false });
+});
+
+test('custom list completeness detects windowing evidence on ancestors and option children', async () => {
+  const ancestorWindow = await optionInventoryFor(`
+    <div class="field react-window__viewport">
+      <button id="ancestor-window-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="ancestor-window-choice">
+        <div role="option" data-value="one">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#ancestor-window-choice');
+  assert.deepEqual(ancestorWindow, { values: ['One', 'Two'], complete: false });
+
+  const childWindow = await optionInventoryFor(`
+    <div class="field">
+      <button id="child-window-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="child-window-choice">
+        <div role="option" data-value="one" data-has-more="true">One</div>
+        <div role="option" data-value="two">Two</div>
+      </div>
+    </div>`, '#child-window-choice');
+  assert.deepEqual(childWindow, { values: ['One', 'Two'], complete: false });
+
+  const lazyEmpty = await optionInventoryFor(`
+    <div class="field">
+      <button id="lazy-empty-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="lazy-empty-choice" data-lazy="true"></div>
+    </div>`, '#lazy-empty-choice');
+  assert.deepEqual(lazyEmpty, { values: [], complete: false });
+});
+
 test('the global serialized option budget truncates safely below the terminal limit', async () => {
   const optionText = 'x'.repeat(9_000);
   const lists = Array.from({ length: 5 }, (_, listIndex) => `

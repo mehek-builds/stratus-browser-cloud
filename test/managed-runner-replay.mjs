@@ -39,6 +39,11 @@ import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js'
  * budget has already been partly spent by then. Same helper the author used in
  * formless-submit-scope.test.js. */
 const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+const REPLAY_SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333'
+});
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Late enough that the pre-check's snapshot cannot see it, which is the point: without a declared
@@ -1593,6 +1598,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
     requestContinuation: true,
     continuationExpiresAt: new Date(Date.now() + 20_000).toISOString(),
     allowedHost: new URL(base).hostname
@@ -1641,6 +1647,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
     requestContinuation: true,
     continuationCheckpoint: true,
     continuationExpiresAt: new Date(Date.now() + 15_000).toISOString(),
@@ -1661,6 +1668,11 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   await waitForFile(result0);
   assert.equal(JSON.parse(fs.readFileSync(result0, 'utf8')).filledFields[0], 'proof');
   fs.writeFileSync(path.join(workDir, 'stratus-continuation-input.json'), JSON.stringify({
+    parentSubmissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
+    submissionAttempt: {
+      ...REPLAY_SUBMISSION_ATTEMPT,
+      executionId: '44444444-4444-4444-8444-444444444444'
+    },
     providerDeadlineAt: providerDeadlineAt(),
     actions: [{ type: 'extract', selector: '#plain-echo' }],
     screenshot: false,
@@ -1698,6 +1710,7 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     screenshot: false,
     waitUntil: 'networkidle',
     viewport: { width: 1440, height: 900 },
+    submissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
     allowSubmit: true,
     requestContinuation: true,
     continuationTtlSeconds: 120,
@@ -1730,7 +1743,17 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.ok(remainingMs > 10_000 && remainingMs <= 15_000,
     'receipt observation must use its own short lifetime, got ' + remainingMs + 'ms');
   await new Promise((resolve) => setTimeout(resolve, 1000));
-  fs.writeFileSync(continuationInput, JSON.stringify({ providerDeadlineAt: providerDeadlineAt(), actions: [], screenshot: false, fullPage: false }));
+  fs.writeFileSync(continuationInput, JSON.stringify({
+    parentSubmissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
+    submissionAttempt: {
+      ...REPLAY_SUBMISSION_ATTEMPT,
+      executionId: '55555555-5555-4555-8555-555555555555'
+    },
+    providerDeadlineAt: providerDeadlineAt(),
+    actions: [],
+    screenshot: false,
+    fullPage: false
+  }));
   await waitForFile(result1);
   const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
   assert.equal(second.submitOutcome.pressed, true, 'empty phase one retains the phase-zero click fact');
