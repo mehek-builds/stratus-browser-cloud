@@ -146,7 +146,7 @@ const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
 export const STRATUS_SUBMISSION_QUIESCENCE_ENV = 'STRATUS_SUBMISSION_QUIESCED';
 export const STRATUS_SUBMISSION_CORRELATION_MODE_ENV = 'STRATUS_SUBMISSION_CORRELATION_MODE';
-export const MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION = 'stratus-submission-reservation-v1';
+export const MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION = 'stratus-submission-reservation-v2';
 export const MANAGED_TERMINAL_RESULT_SCHEMA_VERSION = 'stratus-terminal-result-v1';
 export const MANAGED_TERMINAL_ACK_SCHEMA_VERSION = 'stratus-terminal-result-ack-v1';
 export const MANAGED_SUBMISSION_RESERVATION_PATH = 'stratus-submission-reservation.json';
@@ -156,6 +156,7 @@ export const PROVIDER_RESPONSE_MARGIN_MS = 10_000;
 const PROVIDER_RETURN_MARGIN_MS = 2_000;
 const MANAGED_TERMINAL_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MANAGED_TERMINAL_STORE_TIMEOUT_MS = 10_000;
+export const MANAGED_PROVISIONING_LEASE_MS = 60_000;
 const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
 const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
 const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
@@ -275,7 +276,7 @@ function terminalExpiresAt(completedAt) {
 function persistTerminalResult(input, phase, run) {
   const hasTerminalBinding = Boolean(input.terminalResultProjectHash
     || input.terminalResultRequestDigest);
-  if (!hasTerminalBinding) return;
+  if (!hasTerminalBinding) return false;
   if (!input.submissionAttempt
     || !/^[a-f0-9]{64}$/.test(input.terminalResultProjectHash || '')
     || !/^[a-f0-9]{64}$/.test(input.terminalResultRequestDigest || '')) {
@@ -301,6 +302,7 @@ function persistTerminalResult(input, phase, run) {
     resultId,
     persistedAt: new Date().toISOString()
   });
+  return true;
 }
 
 function persistTerminalFailure(input) {
@@ -336,6 +338,16 @@ let terminalFailureInput = null;
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
   terminalFailureInput = input;
+  /* A deadline recovery may have terminalized a detached dispatch whose process never started.
+   * Once that result exists, a late process must exit before it can open or mutate an employer
+   * page. The exact attempt reservation remains the only authority for starting the first run. */
+  if (input.submissionAttempt
+    && /^[a-f0-9]{64}$/.test(input.terminalResultProjectHash || '')
+    && /^[a-f0-9]{64}$/.test(input.terminalResultRequestDigest || '')
+    && fs.existsSync('stratus-terminal-result.json')) {
+    terminalFailureInput = null;
+    return;
+  }
   const sameSubmissionAttempt = (left, right) => (!left && !right) || Boolean(left && right
     && left.runId === right.runId
     && left.claimId === right.claimId
@@ -14105,27 +14117,58 @@ let terminalFailureInput = null;
             const maxOptionTextLength = 10000;
             const maxOptionCount = 4096;
             const maxInventoryTextLength = 1000000;
+            const globalBudget = optionsOf.serializedBudget || (optionsOf.serializedBudget = {
+              remaining: 4 * 1024 * 1024 - 2,
+              entries: 0
+            });
             const values = [];
-            const seen = new Set();
+            const seen = new Map();
             let totalTextLength = 0;
             let complete = true;
-            const add = (candidate) => {
+            const serializedBytes = (value) => {
+              /* Six bytes per UTF-16 unit bounds JSON escaping without trusting page-realm
+               * encoders. It deliberately underfills the global budget rather than risking a
+               * terminal payload that cannot be durably retained. */
+              return value.length * 6 + 2;
+            };
+            const identityOf = (option, index) => {
+              for (const attribute of ['value', 'data-value', 'data-key', 'id']) {
+                const value = option.getAttribute && option.getAttribute(attribute);
+                if (value != null && value !== '') return attribute + ':' + value;
+              }
+              return 'position:' + index;
+            };
+            const add = (candidate, identity) => {
               const text = clean(candidate);
-              if (!text || seen.has(text)) return;
-              if (text.length > maxOptionTextLength
-                || values.length >= maxOptionCount
-                || totalTextLength + text.length > maxInventoryTextLength) {
+              if (!text) {
                 complete = false;
                 return;
               }
-              seen.add(text);
+              if (seen.has(text)) {
+                if (seen.get(text) !== identity) complete = false;
+                return;
+              }
+              const bytes = serializedBytes(text) + (globalBudget.entries > 0 ? 1 : 0);
+              if (text.length > maxOptionTextLength
+                || values.length >= maxOptionCount
+                || totalTextLength + text.length > maxInventoryTextLength
+                || bytes > globalBudget.remaining) {
+                complete = false;
+                return;
+              }
+              seen.set(text, identity);
               values.push(text);
               totalTextLength += text.length;
+              globalBudget.remaining -= bytes;
+              globalBudget.entries += 1;
             };
             if (el.tagName === 'SELECT') {
-              for (const option of el.options) {
-                const text = clean(option.textContent || option.value);
-                if (text && !/^(?:select|choose|please|--|auswählen$)/i.test(text)) add(text);
+              for (const [index, option] of [...el.options].entries()) {
+                const structuralPlaceholder = option.value === ''
+                  && (index === 0 || option.disabled || option.hidden
+                    || option.getAttribute('aria-disabled') === 'true');
+                if (structuralPlaceholder) continue;
+                add(option.textContent || option.value, 'value:' + option.value);
               }
               return { values, complete };
             }
@@ -14138,25 +14181,66 @@ let terminalFailureInput = null;
              * are ambiguous and an unrelated page list is ignored. textContent is deliberate:
              * the bound popup may be display:none while closed, but its option nodes are still the
              * employer's declared closed vocabulary. */
+            const customLists = [];
+            if (el.getAttribute('role') === 'listbox') customLists.push(el);
             if (el.id && (el.getAttribute('role') === 'combobox'
               || el.getAttribute('aria-haspopup') === 'listbox')) {
-              const bound = [...document.querySelectorAll('[role="listbox"][aria-labelledby]')]
-                .filter((listbox) => listbox.parentElement === el.parentElement
-                  && clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id));
-              if (bound.length === 1) {
-                for (const option of bound[0].querySelectorAll('[role="option"]')) {
-                  add(option.getAttribute('aria-label') || option.textContent || '');
-                }
-                return { values, complete };
-              }
-              if (bound.length > 1) return { values, complete: false };
+              customLists.push(
+                ...[...document.querySelectorAll('[role="listbox"][aria-labelledby]')]
+                  .filter((listbox) => listbox.parentElement === el.parentElement
+                    && clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id))
+              );
             }
+            for (const id of clean(el.getAttribute('aria-controls')).split(/\s+/).filter(Boolean)) {
+              const controlled = document.getElementById(id);
+              if (controlled?.getAttribute('role') === 'listbox') customLists.push(controlled);
+            }
+            const bound = [...new Set(customLists)];
+            if (bound.length === 1) {
+              const listbox = bound[0];
+              const options = [...listbox.querySelectorAll('[role="option"]')];
+              const evidence = [...listbox.attributes]
+                .map((attribute) => attribute.name + '=' + attribute.value).join(' ');
+              const declaredValues = [listbox.getAttribute('aria-rowcount')]
+                .concat(options.map((option) => option.getAttribute('aria-setsize')))
+                .filter((value) => value != null && /^\d+$/.test(value))
+                .map(Number);
+              const declared = declaredValues.length > 0
+                && declaredValues.every((value) => value === declaredValues[0])
+                ? declaredValues[0]
+                : null;
+              const positions = options.map((option) => Number(option.getAttribute('aria-posinset')));
+              const virtualized = /virtual|windowed|react-window|virtuoso/i.test(evidence)
+                || declaredValues.length > 0
+                || positions.some(Number.isFinite);
+              const fullEnumerationProven = declared === options.length
+                && positions.length === declared
+                && positions.every((position) => Number.isInteger(position)
+                  && position >= 1 && position <= declared)
+                && new Set(positions).size === declared;
+              if (virtualized && !fullEnumerationProven) complete = false;
+              for (const [index, option] of options.entries()) {
+                const explicitEmptyValue = ['value', 'data-value'].some((attribute) => (
+                  option.hasAttribute(attribute) && option.getAttribute(attribute) === ''
+                ));
+                const structuralPlaceholder = explicitEmptyValue
+                  && (index === 0 || option.hidden
+                    || option.getAttribute('aria-disabled') === 'true');
+                if (structuralPlaceholder) continue;
+                add(
+                  option.getAttribute('aria-label') || option.textContent || '',
+                  identityOf(option, index)
+                );
+              }
+              return { values, complete };
+            }
+            if (bound.length > 1) return { values, complete: false };
             const closedChoice = el.type === 'radio' || el.type === 'checkbox'
               || el.getAttribute('role') === 'combobox'
               || el.getAttribute('role') === 'listbox'
               || el.getAttribute('aria-haspopup') === 'listbox';
             if (!block) return { values, complete: closedChoice ? false : null };
-            for (const input of block.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+            for (const [index, input] of [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')].entries()) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');
               const text = clean(
@@ -14166,20 +14250,36 @@ let terminalFailureInput = null;
               const question = clean(questionLabel(input));
               // Ashby labels its hidden mirror input with the QUESTION, so a single "option" whose
               // text is the question is not an option list at all.
-              if (text && text.toLowerCase() !== question.toLowerCase()) add(text);
+              if (text && text.toLowerCase() !== question.toLowerCase()) {
+                add(text, identityOf(input, index));
+              } else if (text) {
+                complete = false;
+              } else if (!text) {
+                complete = false;
+              }
             }
-            for (const button of block.querySelectorAll('button')) {
+            for (const [index, button] of [...block.querySelectorAll('button')].entries()) {
               // The control under discovery can itself be a button-shaped or div-shaped combobox
               // opener now that non-form tags are scanned; its own furniture text ("Select") is
               // what it looks like closed, not one of the choices it offers.
               if (button === el || button.getAttribute('role') === 'combobox'
                 || button.getAttribute('aria-haspopup') === 'listbox') continue;
               const text = clean(renderedText(button));
-              if (!text) continue;
-              if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) continue;
-              add(text);
+              if (!text) {
+                complete = false;
+                continue;
+              }
+              if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) {
+                complete = false;
+                continue;
+              }
+              add(text, identityOf(button, index));
             }
-            return { values, complete: closedChoice ? complete : null };
+            const nativeChoiceGroup = el.type === 'radio' || el.type === 'checkbox';
+            return {
+              values,
+              complete: nativeChoiceGroup ? complete : (closedChoice ? false : null)
+            };
           }
           /* D-01 AGAIN, ONE TAG FAMILY OVER: A COMBOBOX THAT IS NOT AN INPUT WAS NEVER SCANNED.
            *
@@ -15999,11 +16099,11 @@ let terminalFailureInput = null;
     };
     recordCrashProgress({ phase, stage: 'result_written' });
     if (phase > 0 || !continuationOffered) {
-      if (input.submissionAttempt) {
-        persistTerminalResult(input, phase, resultPayload);
+      if (input.submissionAttempt && persistTerminalResult(input, phase, resultPayload)) {
         terminalFailureInput = null;
+      } else {
+        writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
       }
-      writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
       break;
     }
     writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
@@ -16551,13 +16651,19 @@ export function managedSubmissionRequestDigest(normalizedRequest) {
   return digest(JSON.stringify(request));
 }
 
-function managedSubmissionReservation({ projectBinding, submissionAttempt, requestDigest }) {
+function managedSubmissionReservation({
+  projectBinding,
+  submissionAttempt,
+  requestDigest,
+  providerDeadlineAt
+}) {
   const reservedAt = new Date().toISOString();
   return {
     schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
     projectBindingHash: digest(projectBinding),
     submissionAttempt,
     requestDigest,
+    providerDeadlineAt,
     reservedAt,
     expiresAt: new Date(Date.parse(reservedAt) + MANAGED_TERMINAL_RESULT_RETENTION_MS).toISOString()
   };
@@ -16577,12 +16683,15 @@ function parseManagedSubmissionReservation(buffer, {
   const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? Object.keys(parsed).sort().join(',')
     : '';
-  if (keys !== 'expiresAt,projectBindingHash,requestDigest,reservedAt,schemaVersion,submissionAttempt'
+  if (keys !== 'expiresAt,projectBindingHash,providerDeadlineAt,requestDigest,reservedAt,schemaVersion,submissionAttempt'
     || parsed.schemaVersion !== MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION
     || parsed.projectBindingHash !== digest(projectBinding)
     || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
+    || !canonicalTimestamp(parsed.providerDeadlineAt)
     || !canonicalTimestamp(parsed.reservedAt)
     || !canonicalTimestamp(parsed.expiresAt)
+    || Date.parse(parsed.providerDeadlineAt) <= Date.parse(parsed.reservedAt)
+    || Date.parse(parsed.providerDeadlineAt) >= Date.parse(parsed.expiresAt)
     || Date.parse(parsed.expiresAt) - Date.parse(parsed.reservedAt)
       !== MANAGED_TERMINAL_RESULT_RETENTION_MS) return null;
   let parsedAttempt;
@@ -16651,7 +16760,7 @@ function parseManagedTerminalResult(buffer, {
     || parsed.projectBindingHash !== digest(projectBinding)
     || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
     || (requestDigest != null && parsed.requestDigest !== requestDigest)
-    || !['completed', 'failed'].includes(parsed.state)
+    || !['completed', 'failed', 'indeterminate'].includes(parsed.state)
     || !canonicalTimestamp(parsed.completedAt)
     || !canonicalTimestamp(parsed.expiresAt)
     || Date.parse(parsed.expiresAt) - Date.parse(parsed.completedAt)
@@ -16666,6 +16775,13 @@ function parseManagedTerminalResult(buffer, {
       || Object.keys(parsed.error).sort().join(',') !== 'code,message'
       || parsed.error.code !== 'SANDBOX_RUN_FAILED'
       || parsed.error.message !== 'Managed browser run failed')) return null;
+  if (parsed.state === 'indeterminate'
+    && (!parsed.error || typeof parsed.error !== 'object' || Array.isArray(parsed.error)
+      || Object.keys(parsed.error).sort().join(',') !== 'code,message'
+      || parsed.error.code !== 'SUBMISSION_EXECUTION_INDETERMINATE'
+      || parsed.error.message !== 'Managed browser execution ended without a terminal employer result')) {
+    return null;
+  }
   let parsedAttempt;
   try {
     parsedAttempt = normalizeSubmissionAttempt(parsed.submissionAttempt, { required: true });
@@ -16749,12 +16865,13 @@ function resultWithTerminalReference(envelope) {
   };
 }
 
-function publicManagedTerminalEnvelope(envelope) {
+function publicManagedTerminalEnvelope(envelope, runProgress = null) {
   const common = {
     state: envelope.state,
     submissionAttempt: envelope.submissionAttempt,
     completedAt: envelope.completedAt,
-    expiresAt: envelope.expiresAt
+    expiresAt: envelope.expiresAt,
+    ...(runProgress ? { runProgress } : {})
   };
   return envelope.state === 'completed'
     ? { ...common, run: resultWithTerminalReference(envelope) }
@@ -17085,6 +17202,127 @@ async function throwSandboxRunnerError(sandbox, expectedSubmissionAttempt = null
 
 export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation',runHash='',claimHash='',executionHash='']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);const markerBound=[marker.submissionRunHash,marker.submissionClaimHash,marker.submissionExecutionHash].every((value)=>typeof value==='string'&&value.length>0);const requestBound=[runHash,claimHash,executionHash].every((value)=>typeof value==='string'&&value.length>0);if(markerBound!==requestBound||(markerBound&&(marker.submissionRunHash!==runHash||marker.submissionClaimHash!==claimHash||marker.submissionExecutionHash!==executionHash)))process.exit(11);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);const required=JSON.parse(requiredJson);const requiresV4=required.includes('atomic-submit-v4');if(requiresV4&&marker.continuationPolicy!=='v4-observation-or-security-code')process.exit(10);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);if(requiresV4){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
+export const PROBE_MANAGED_EXECUTION_SCRIPT = String.raw`
+const fs = require('node:fs');
+
+function runnerActive() {
+  let entries = [];
+  try { entries = fs.readdirSync('/proc'); } catch { return true; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+    try {
+      const args = fs.readFileSync('/proc/' + entry + '/cmdline', 'utf8').split('\0').filter(Boolean);
+      if (args.some((arg) => arg === 'stratus-runner.cjs' || arg.endsWith('/stratus-runner.cjs'))) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+process.stdout.write(JSON.stringify({
+  reservation: fs.existsSync('stratus-submission-reservation.json'),
+  input: fs.existsSync('stratus-input.json'),
+  progress: fs.existsSync('stratus-progress.json'),
+  activeRunner: runnerActive()
+}));
+`;
+
+export const FINALIZE_MANAGED_INDETERMINATE_SCRIPT = String.raw`
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const retentionMs = 30 * 24 * 60 * 60 * 1000;
+
+function writeDurableJson(path, value) {
+  const temporary = path + '.tmp-' + process.pid + '-' + crypto.randomBytes(8).toString('hex');
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(value), 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporary, path);
+  let directory = null;
+  try {
+    directory = fs.openSync('.', 'r');
+    fs.fsyncSync(directory);
+  } finally {
+    if (directory !== null) fs.closeSync(directory);
+  }
+}
+
+function runnerActive() {
+  let entries = [];
+  try { entries = fs.readdirSync('/proc'); } catch { return true; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
+    try {
+      const args = fs.readFileSync('/proc/' + entry + '/cmdline', 'utf8').split('\0').filter(Boolean);
+      if (args.some((arg) => arg === 'stratus-runner.cjs' || arg.endsWith('/stratus-runner.cjs'))) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+const sameAttempt = (left, right) => Boolean(left && right
+  && left.runId === right.runId
+  && left.claimId === right.claimId
+  && left.executionId === right.executionId);
+const canonicalTimestamp = (value) => {
+  const timestamp = typeof value === 'string' ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(timestamp) && value === new Date(timestamp).toISOString();
+};
+
+try {
+  const expected = JSON.parse(process.argv[1]);
+  const terminalPath = 'stratus-terminal-result.json';
+  if (fs.existsSync(terminalPath)) process.exit(0);
+  const reservation = JSON.parse(fs.readFileSync('stratus-submission-reservation.json', 'utf8'));
+  if (reservation.schemaVersion !== 'stratus-submission-reservation-v2'
+    || reservation.projectBindingHash !== expected.projectBindingHash
+    || reservation.requestDigest !== expected.requestDigest
+    || !sameAttempt(reservation.submissionAttempt, expected.submissionAttempt)
+    || !canonicalTimestamp(reservation.providerDeadlineAt)) process.exit(18);
+  if (Date.now() < Date.parse(reservation.providerDeadlineAt)) process.exit(16);
+  if (runnerActive()) process.exit(17);
+  let phase = 0;
+  try {
+    const progress = JSON.parse(fs.readFileSync('stratus-progress.json', 'utf8'));
+    if (sameAttempt(progress.submissionAttempt, expected.submissionAttempt)
+      && Number.isInteger(progress.phase) && progress.phase >= 0 && progress.phase <= 1) {
+      phase = progress.phase;
+    }
+  } catch {}
+  const completedAt = new Date().toISOString();
+  const core = {
+    schemaVersion: 'stratus-terminal-result-v1',
+    projectBindingHash: expected.projectBindingHash,
+    submissionAttempt: expected.submissionAttempt,
+    requestDigest: expected.requestDigest,
+    state: 'indeterminate',
+    completedAt,
+    expiresAt: new Date(Date.parse(completedAt) + retentionMs).toISOString(),
+    phase,
+    error: {
+      code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+      message: 'Managed browser execution ended without a terminal employer result'
+    }
+  };
+  writeDurableJson(terminalPath, {
+    ...core,
+    resultId: crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex'),
+    persistedAt: new Date().toISOString()
+  });
+  process.exit(0);
+} catch {
+  process.exit(18);
+}
+`;
+
 export const ACK_MANAGED_TERMINAL_RESULT_SCRIPT = String.raw`
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -17117,12 +17355,25 @@ const sameAttempt = (left, right) => Boolean(left && right
   && left.executionId === right.executionId);
 const ackPath = 'stratus-terminal-result-ack.json';
 const terminalPath = 'stratus-terminal-result.json';
+const privateArtifact = /^(?:stratus-(?:input|continuation-input|continuation|continuation-used|continuation-ready|result-[01]|screenshot-[01]|progress|error)\.(?:json|png)|stratus-terminal-result\.json)(?:\.tmp-[^/]+)?$/;
 const scrubTerminalArtifacts = () => {
-  for (const path of fs.readdirSync('.')) {
-    if (path === ackPath || path === 'stratus-submission-reservation.json') continue;
-    if (/^stratus-(?:input|continuation-input|continuation|continuation-used|continuation-ready|result-[01]|screenshot-[01]|progress|error)\.(?:json|png)$/.test(path)) {
-      try { fs.unlinkSync(path); } catch {}
-    }
+  const targets = fs.readdirSync('.').filter((path) => privateArtifact.test(path));
+  const failures = [];
+  for (const path of targets) {
+    try { fs.unlinkSync(path); } catch { failures.push(path); }
+  }
+  const remaining = fs.readdirSync('.').filter((path) => privateArtifact.test(path));
+  if (failures.length > 0 || remaining.length > 0) {
+    throw new Error('Applicant artifact scrub could not be verified');
+  }
+};
+const fsyncDirectory = () => {
+  let directory = null;
+  try {
+    directory = fs.openSync('.', 'r');
+    fs.fsyncSync(directory);
+  } finally {
+    if (directory !== null) fs.closeSync(directory);
   }
 };
 
@@ -17134,8 +17385,8 @@ try {
       || !/^[a-f0-9]{64}$/.test(ack.requestDigest || '')
       || !/^[a-f0-9]{64}$/.test(ack.resultId || '')
       || !sameAttempt(ack.submissionAttempt, expected.submissionAttempt)) process.exit(11);
-    if (fs.existsSync(terminalPath)) fs.unlinkSync(terminalPath);
     scrubTerminalArtifacts();
+    fsyncDirectory();
     process.stdout.write(JSON.stringify(ack));
     process.exit(0);
   }
@@ -17155,7 +17406,7 @@ try {
   const recomputedId = crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex');
   if (terminal.schemaVersion !== 'stratus-terminal-result-v1'
     || terminal.projectBindingHash !== expected.projectBindingHash
-    || !['completed', 'failed'].includes(terminal.state)
+    || !['completed', 'failed', 'indeterminate'].includes(terminal.state)
     || recomputedId !== terminal.resultId
     || !/^[a-f0-9]{64}$/.test(terminal.requestDigest || '')
     || !sameAttempt(terminal.submissionAttempt, expected.submissionAttempt)) process.exit(12);
@@ -17170,15 +17421,8 @@ try {
     expiresAt: new Date(Date.parse(acknowledgedAt) + retentionMs).toISOString()
   };
   writeDurableJson(ackPath, ack);
-  fs.unlinkSync(terminalPath);
   scrubTerminalArtifacts();
-  let directory = null;
-  try {
-    directory = fs.openSync('.', 'r');
-    fs.fsyncSync(directory);
-  } finally {
-    if (directory !== null) fs.closeSync(directory);
-  }
+  fsyncDirectory();
   process.stdout.write(JSON.stringify(ack));
   process.exit(0);
 } catch {
@@ -17303,6 +17547,112 @@ async function stopManagedTerminalSandbox(sandbox, { required = true } = {}) {
   }
 }
 
+async function deleteManagedTerminalSandbox(sandbox) {
+  if (!sandbox?.delete) {
+    throw Object.assign(
+      new Error('Managed terminal result storage cannot reclaim an abandoned sandbox'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+    );
+  }
+  try {
+    await sandbox.delete({ signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS) });
+  } catch (error) {
+    if (sandboxNotFound(error)) return;
+    throw Object.assign(
+      new Error('Managed terminal result storage could not reclaim an abandoned sandbox'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE', cause: error }
+    );
+  }
+}
+
+async function probeManagedExecution(sandbox) {
+  let command;
+  try {
+    command = await sandbox.runCommand(
+      'node',
+      ['-e', PROBE_MANAGED_EXECUTION_SCRIPT],
+      {
+        timeoutMs: MANAGED_TERMINAL_STORE_TIMEOUT_MS,
+        signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS)
+      }
+    );
+  } catch (error) {
+    throw Object.assign(
+      new Error('Managed execution activity could not be inspected'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE', cause: error }
+    );
+  }
+  if (command.exitCode !== 0) {
+    throw Object.assign(
+      new Error('Managed execution activity could not be inspected'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+    );
+  }
+  let parsed;
+  try {
+    const stdout = typeof command.stdout === 'function'
+      ? await command.stdout()
+      : command.stdout;
+    parsed = JSON.parse(String(stdout || ''));
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || Object.keys(parsed).sort().join(',') !== 'activeRunner,input,progress,reservation'
+    || typeof parsed.activeRunner !== 'boolean'
+    || typeof parsed.input !== 'boolean'
+    || typeof parsed.progress !== 'boolean'
+    || typeof parsed.reservation !== 'boolean') {
+    throw Object.assign(
+      new Error('Managed execution activity report was invalid'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+    );
+  }
+  return parsed;
+}
+
+function managedSandboxCreatedAtMs(sandbox) {
+  const value = sandbox?.createdAt;
+  const timestamp = value instanceof Date
+    ? value.getTime()
+    : (typeof value === 'number' ? value : Date.parse(value));
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+async function finalizeManagedIndeterminate(sandbox, {
+  projectBinding,
+  submissionAttempt,
+  requestDigest
+}) {
+  const expected = {
+    projectBindingHash: digest(projectBinding),
+    submissionAttempt,
+    requestDigest
+  };
+  let command;
+  try {
+    command = await sandbox.runCommand(
+      'node',
+      ['-e', FINALIZE_MANAGED_INDETERMINATE_SCRIPT, JSON.stringify(expected)],
+      {
+        timeoutMs: MANAGED_TERMINAL_STORE_TIMEOUT_MS,
+        signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS)
+      }
+    );
+  } catch (error) {
+    throw Object.assign(
+      new Error('Managed execution could not be terminalized after its provider deadline'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE', cause: error }
+    );
+  }
+  if (command.exitCode === 17) return false;
+  if (command.exitCode !== 0) {
+    throw terminalResultStoreCorrupt(
+      'The expired managed execution could not be durably terminalized'
+    );
+  }
+  return true;
+}
+
 function terminalResultNotFound() {
   return Object.assign(
     new Error('No durable terminal result exists for this submission attempt'),
@@ -17329,10 +17679,11 @@ async function managedTerminalState(sandbox, {
   submissionAttempt,
   requestDigest = null
 }) {
-  const reservationBuffer = await readManagedTerminalArtifact(
-    sandbox,
-    MANAGED_SUBMISSION_RESERVATION_PATH
-  );
+  const [reservationBuffer, ackBuffer, terminalBuffer] = await Promise.all([
+    readManagedTerminalArtifact(sandbox, MANAGED_SUBMISSION_RESERVATION_PATH),
+    readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_ACK_PATH),
+    readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_RESULT_PATH)
+  ]);
   const reservation = reservationBuffer
     ? parseManagedSubmissionReservation(reservationBuffer, { projectBinding, submissionAttempt })
     : null;
@@ -17345,7 +17696,6 @@ async function managedTerminalState(sandbox, {
       { status: 409, code: 'SUBMISSION_EXECUTION_CONFLICT' }
     );
   }
-  const ackBuffer = await readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_ACK_PATH);
   if (ackBuffer) {
     const ack = parseManagedTerminalAck(ackBuffer, {
       projectBinding,
@@ -17357,7 +17707,6 @@ async function managedTerminalState(sandbox, {
     }
     return { kind: 'acknowledged', ack };
   }
-  const terminalBuffer = await readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_RESULT_PATH);
   if (terminalBuffer) {
     const envelope = parseManagedTerminalResult(terminalBuffer, {
       projectBinding,
@@ -17377,9 +17726,43 @@ async function managedTerminalState(sandbox, {
     }
     return { kind: 'terminal', envelope };
   }
-  if (!reservation) return { kind: 'provisioning' };
+  if (!reservation) {
+    const createdAtMs = managedSandboxCreatedAtMs(sandbox);
+    if (createdAtMs != null && Date.now() - createdAtMs >= MANAGED_PROVISIONING_LEASE_MS) {
+      const activity = await probeManagedExecution(sandbox);
+      if (!activity.reservation && !activity.input
+        && !activity.progress && !activity.activeRunner) {
+        return { kind: 'reclaimable' };
+      }
+      return { kind: 'provisioning', activity };
+    }
+    return { kind: 'provisioning' };
+  }
   if (Date.now() >= Date.parse(reservation.expiresAt)) {
     return { kind: 'gone', expiresAt: reservation.expiresAt };
+  }
+  if (Date.now() >= Date.parse(reservation.providerDeadlineAt)) {
+    const finalized = await finalizeManagedIndeterminate(sandbox, {
+      projectBinding,
+      submissionAttempt,
+      requestDigest: reservation.requestDigest
+    });
+    if (!finalized) return { kind: 'pending', reservation };
+    const finalizedBuffer = await readManagedTerminalArtifact(
+      sandbox,
+      MANAGED_TERMINAL_RESULT_PATH
+    );
+    const envelope = parseManagedTerminalResult(finalizedBuffer, {
+      projectBinding,
+      submissionAttempt,
+      requestDigest: reservation.requestDigest
+    });
+    if (!envelope) {
+      throw terminalResultStoreCorrupt(
+        'The expired managed execution terminal result is invalid'
+      );
+    }
+    return { kind: 'terminal', envelope };
   }
   return { kind: 'pending', reservation };
 }
@@ -17390,7 +17773,8 @@ async function resultFromManagedTerminalState(state, sandbox, {
 } = {}) {
   if (state.kind === 'acknowledged') throw terminalResultAcknowledged(state.ack);
   if (state.kind === 'gone') throw terminalResultAcknowledged(state);
-  if (state.kind === 'terminal' && state.envelope.state === 'failed') {
+  if (state.kind === 'terminal'
+    && (state.envelope.state === 'failed' || state.envelope.state === 'indeterminate')) {
     let message = state.envelope.error.message;
     const errorBuffer = await readManagedTerminalArtifact(
       sandbox,
@@ -17403,7 +17787,7 @@ async function resultFromManagedTerminalState(state, sandbox, {
     } catch { /* persisted public failure remains available when private detail is absent */ }
     const runProgress = await readSandboxRunnerProgress(sandbox, state.envelope.submissionAttempt);
     throw Object.assign(new Error(message), {
-      status: 502,
+      status: state.envelope.state === 'indeterminate' ? 409 : 502,
       code: state.envelope.error.code,
       ...(runProgress ? { runProgress } : {})
     });
@@ -17434,6 +17818,10 @@ async function recoverExistingManagedAttempt(sandboxApi, name, options) {
   let terminal = false;
   try {
     const state = await managedTerminalState(sandbox, options);
+    if (state.kind === 'reclaimable') {
+      await deleteManagedTerminalSandbox(sandbox);
+      return null;
+    }
     terminal = state.kind === 'terminal'
       || state.kind === 'acknowledged'
       || state.kind === 'gone';
@@ -17465,7 +17853,7 @@ export async function retrieveManagedTerminalResult(input = {}, {
     if (state.kind === 'acknowledged' || state.kind === 'gone') {
       throw terminalResultAcknowledged(state.ack || state);
     }
-    if (state.kind === 'provisioning') {
+    if (state.kind === 'provisioning' || state.kind === 'reclaimable') {
       throw Object.assign(
         new Error('The durable submission reservation is still being created'),
         { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
@@ -17478,7 +17866,10 @@ export async function retrieveManagedTerminalResult(input = {}, {
         expiresAt: state.reservation.expiresAt
       };
     }
-    return publicManagedTerminalEnvelope(state.envelope);
+    const runProgress = state.envelope.state === 'completed'
+      ? null
+      : await readSandboxRunnerProgress(sandbox, state.envelope.submissionAttempt);
+    return publicManagedTerminalEnvelope(state.envelope, runProgress);
   } finally {
     if (terminal) await stopManagedTerminalSandbox(sandbox);
   }
@@ -17505,9 +17896,8 @@ export async function acknowledgeManagedTerminalResult(input = {}, {
     terminal = state.kind === 'terminal'
       || state.kind === 'acknowledged'
       || state.kind === 'gone';
-    if (state.kind === 'acknowledged') return state.ack;
     if (state.kind === 'gone') throw terminalResultAcknowledged(state);
-    if (state.kind !== 'terminal') {
+    if (state.kind !== 'terminal' && state.kind !== 'acknowledged') {
       throw submissionAttemptInProgress();
     }
     const command = await sandbox.runCommand(
@@ -17582,7 +17972,7 @@ export async function executeSandboxRun(input, {
             optionalArtifactTimeoutMs
           });
         }
-        if (existingState.kind === 'provisioning') {
+        if (existingState.kind === 'provisioning' || existingState.kind === 'reclaimable') {
           throw Object.assign(
             new Error('The durable submission reservation is still being created'),
             { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
@@ -17799,7 +18189,8 @@ export async function executeSandboxRun(input, {
       content: Buffer.from(JSON.stringify(managedSubmissionReservation({
         projectBinding,
         submissionAttempt: context.submissionAttempt,
-        requestDigest
+        requestDigest,
+        providerDeadlineAt: context.providerDeadlineAt
       })))
     });
     if (continuationToken) files.push({

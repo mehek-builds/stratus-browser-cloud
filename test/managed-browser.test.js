@@ -73,6 +73,7 @@ function managedReservation(projectBinding, submissionAttempt = SUBMISSION_ATTEM
     projectBindingHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
     submissionAttempt,
     requestDigest,
+    providerDeadlineAt: providerDeadlineAt(),
     reservedAt,
     expiresAt: new Date(Date.parse(reservedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
   }));

@@ -7,10 +7,13 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   ACK_MANAGED_TERMINAL_RESULT_SCRIPT,
+  FINALIZE_MANAGED_INDETERMINATE_SCRIPT,
   acknowledgeManagedTerminalResult,
   executeSandboxRun,
   managedSubmissionRequestDigest,
   managedTerminalResultSandboxName,
+  MANAGED_PROVISIONING_LEASE_MS,
+  PROBE_MANAGED_EXECUTION_SCRIPT,
   MANAGED_SUBMISSION_RESERVATION_PATH,
   MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
   MANAGED_TERMINAL_ACK_PATH,
@@ -45,12 +48,14 @@ function reservationBuffer(requestDigest, {
   projectBinding = PROJECT_BINDING,
   submissionAttempt = ATTEMPT,
   reservedAt = new Date().toISOString(),
+  providerDeadlineAt = deadline(),
 } = {}) {
   return Buffer.from(JSON.stringify({
     schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
     projectBindingHash: projectHash(projectBinding),
     submissionAttempt,
     requestDigest,
+    providerDeadlineAt,
     reservedAt,
     expiresAt: new Date(Date.parse(reservedAt) + RETENTION_MS).toISOString(),
   }));
@@ -75,12 +80,32 @@ function terminalBuffer(input, run = null, {
     ? { ...common, run }
     : {
         ...common,
-        error: { code: 'SANDBOX_RUN_FAILED', message: 'Managed browser run failed' },
+        error: state === 'indeterminate'
+          ? {
+              code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+              message: 'Managed browser execution ended without a terminal employer result',
+            }
+          : { code: 'SANDBOX_RUN_FAILED', message: 'Managed browser run failed' },
       };
   return Buffer.from(JSON.stringify({
     ...core,
     resultId: projectHash(JSON.stringify(core)),
     persistedAt: new Date().toISOString(),
+  }));
+}
+
+function progressBuffer({ submissionAttempt = ATTEMPT, ...overrides } = {}) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    phase: 0,
+    stage: 'submit_released',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    submissionAttempt,
+    ...overrides,
   }));
 }
 
@@ -90,10 +115,18 @@ function fakeSandboxApi() {
   const calls = { forks: 0, runnerStarts: 0, acknowledgements: 0 };
 
   class FakeSandbox {
-    constructor(name) {
+    constructor(name, {
+      createdAt = Date.now(),
+      activeRunner = false,
+      reservationOnProbe = null,
+    } = {}) {
       this.name = name;
       this.files = new Map();
       this.stopCalls = 0;
+      this.deleteCalls = 0;
+      this.createdAt = new Date(createdAt);
+      this.activeRunner = activeRunner;
+      this.reservationOnProbe = reservationOnProbe;
     }
 
     async writeFiles(files) {
@@ -101,6 +134,43 @@ function fakeSandboxApi() {
     }
 
     async runCommand(command, args) {
+      if (command === 'node' && args?.[1] === PROBE_MANAGED_EXECUTION_SCRIPT) {
+        if (this.reservationOnProbe) {
+          this.files.set(MANAGED_SUBMISSION_RESERVATION_PATH, this.reservationOnProbe);
+        }
+        return {
+          exitCode: 0,
+          stdout: async () => JSON.stringify({
+            reservation: this.files.has(MANAGED_SUBMISSION_RESERVATION_PATH),
+            input: this.files.has('stratus-input.json'),
+            progress: this.files.has('stratus-progress.json'),
+            activeRunner: this.activeRunner,
+          }),
+        };
+      }
+
+      if (command === 'node' && args?.[1] === FINALIZE_MANAGED_INDETERMINATE_SCRIPT) {
+        if (this.activeRunner) return { exitCode: 17, stdout: async () => '' };
+        if (!this.files.has(MANAGED_TERMINAL_RESULT_PATH)) {
+          const expected = JSON.parse(args[2]);
+          let phase = 0;
+          try {
+            const progress = JSON.parse(this.files.get('stratus-progress.json').toString('utf8'));
+            if (Number.isInteger(progress.phase)) phase = progress.phase;
+          } catch {}
+          const input = {
+            submissionAttempt: expected.submissionAttempt,
+            terminalResultProjectHash: expected.projectBindingHash,
+            terminalResultRequestDigest: expected.requestDigest,
+          };
+          this.files.set(
+            MANAGED_TERMINAL_RESULT_PATH,
+            terminalBuffer(input, null, { state: 'indeterminate', phase }),
+          );
+        }
+        return { exitCode: 0, stdout: async () => '' };
+      }
+
       if (typeof command === 'object') {
         calls.runnerStarts += 1;
         const input = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
@@ -151,6 +221,11 @@ function fakeSandboxApi() {
     async stop() {
       this.stopCalls += 1;
     }
+
+    async delete() {
+      this.deleteCalls += 1;
+      sandboxes.delete(this.name);
+    }
   }
 
   return {
@@ -171,9 +246,9 @@ function fakeSandboxApi() {
         return sandbox;
       },
     },
-    seed(files, submissionAttempt = ATTEMPT) {
+    seed(files, submissionAttempt = ATTEMPT, options = {}) {
       const name = managedTerminalResultSandboxName(PROJECT_BINDING, submissionAttempt);
-      const sandbox = new FakeSandbox(name);
+      const sandbox = new FakeSandbox(name, options);
       for (const [path, value] of files) sandbox.files.set(path, Buffer.from(value));
       sandboxes.set(name, sandbox);
       return sandbox;
@@ -267,6 +342,53 @@ test('pending reservation blocks acknowledgement and any second dispatch', async
   assert.equal(fake.calls.forks, 0);
 });
 
+test('only a stale and completely empty provisioning sandbox can be reclaimed', async () => {
+  const fake = fakeSandboxApi();
+  const abandoned = fake.seed([], ATTEMPT, {
+    createdAt: Date.now() - MANAGED_PROVISIONING_LEASE_MS - 1_000,
+  });
+  const result = await executeSandboxRun(request(), {
+    sandboxApi: fake.api,
+    projectBinding: PROJECT_BINDING,
+    urlValidator: async (value) => new URL(value),
+  });
+
+  assert.equal(abandoned.deleteCalls, 1);
+  assert.equal(result.submitOutcome.state, 'confirmed');
+  assert.equal(fake.calls.forks, 1);
+  assert.equal(fake.calls.runnerStarts, 1);
+});
+
+test('active or artifact-bearing stale provisioning remains blocked', async () => {
+  const cases = [
+    { files: [], options: { activeRunner: true } },
+    { files: [['stratus-input.json', '{}']], options: {} },
+    { files: [['stratus-progress.json', '{}']], options: {} },
+    {
+      files: [],
+      options: { reservationOnProbe: reservationBuffer('7'.repeat(64)) },
+    },
+  ];
+  for (const candidate of cases) {
+    const fake = fakeSandboxApi();
+    const existing = fake.seed(candidate.files, ATTEMPT, {
+      createdAt: Date.now() - MANAGED_PROVISIONING_LEASE_MS - 1_000,
+      ...candidate.options,
+    });
+    await assert.rejects(
+      executeSandboxRun(request(), {
+        sandboxApi: fake.api,
+        projectBinding: PROJECT_BINDING,
+        urlValidator: async (value) => new URL(value),
+      }),
+      (error) => error.code === 'SUBMISSION_EXECUTION_IN_PROGRESS' && error.status === 409,
+    );
+    assert.equal(existing.deleteCalls, 0);
+    assert.equal(fake.calls.forks, 0);
+    assert.equal(fake.calls.runnerStarts, 0);
+  }
+});
+
 test('failed terminal results remain readable as a correlated terminal outcome', async () => {
   const fake = fakeSandboxApi();
   const requestDigest = 'b'.repeat(64);
@@ -291,6 +413,128 @@ test('failed terminal results remain readable as a correlated terminal outcome',
   assert.equal(recovered.state, 'failed');
 });
 
+test('failed recovery returns only normalized progress bound to the exact attempt', async () => {
+  const requestDigest = 'e'.repeat(64);
+  const input = {
+    submissionAttempt: ATTEMPT,
+    terminalResultProjectHash: projectHash(PROJECT_BINDING),
+    terminalResultRequestDigest: requestDigest,
+  };
+  const mismatchedAttempt = {
+    ...ATTEMPT,
+    executionId: '44444444-4444-4444-8444-444444444444',
+  };
+  const cases = [
+    { progress: progressBuffer(), expected: true },
+    { progress: Buffer.from('{"submitPressed":true}'), expected: false },
+    { progress: progressBuffer({ submissionAttempt: mismatchedAttempt }), expected: false },
+  ];
+
+  for (const candidate of cases) {
+    const fake = fakeSandboxApi();
+    fake.seed([
+      [MANAGED_SUBMISSION_RESERVATION_PATH, reservationBuffer(requestDigest)],
+      [MANAGED_TERMINAL_RESULT_PATH, terminalBuffer(input, null, { state: 'failed' })],
+      ['stratus-progress.json', candidate.progress],
+    ]);
+    const recovered = await retrieveManagedTerminalResult(
+      { submissionAttempt: ATTEMPT },
+      { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
+    );
+    assert.equal(Object.hasOwn(recovered, 'runProgress'), candidate.expected);
+    if (candidate.expected) {
+      assert.equal(recovered.runProgress.submitPressed, true);
+      assert.deepEqual(recovered.runProgress.submissionAttempt, ATTEMPT);
+    }
+  }
+});
+
+test('a dead expired reservation becomes indeterminate and can never dispatch again', async () => {
+  const fake = fakeSandboxApi();
+  const normalized = await normalizeManagedRun(request(), {
+    urlValidator: async (value) => new URL(value),
+  });
+  const requestDigest = managedSubmissionRequestDigest(normalized);
+  const reservedAt = new Date(Date.now() - 120_000).toISOString();
+  const providerDeadlineAt = new Date(Date.now() - 1_000).toISOString();
+  fake.seed([
+    [MANAGED_SUBMISSION_RESERVATION_PATH, reservationBuffer(requestDigest, {
+      reservedAt,
+      providerDeadlineAt,
+    })],
+    ['stratus-progress.json', progressBuffer()],
+  ]);
+
+  const recovered = await retrieveManagedTerminalResult(
+    { submissionAttempt: ATTEMPT },
+    { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
+  );
+  assert.equal(recovered.state, 'indeterminate');
+  assert.equal(recovered.error.code, 'SUBMISSION_EXECUTION_INDETERMINATE');
+  assert.equal(recovered.runProgress.stage, 'submit_released');
+  assert.equal(recovered.runProgress.submitPressed, true);
+
+  await assert.rejects(
+    executeSandboxRun(request({ providerDeadlineAt: deadline(210_000) }), {
+      sandboxApi: fake.api,
+      projectBinding: PROJECT_BINDING,
+      urlValidator: async (value) => new URL(value),
+    }),
+    (error) => error.code === 'SUBMISSION_EXECUTION_INDETERMINATE'
+      && error.status === 409
+      && error.runProgress?.submitPressed === true,
+  );
+  assert.equal(fake.calls.forks, 0);
+  assert.equal(fake.calls.runnerStarts, 0);
+});
+
+test('the indeterminate finalizer durably binds the terminal envelope and progress phase', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-terminal-indeterminate-'));
+  try {
+    const requestDigest = '9'.repeat(64);
+    const reservedAt = new Date(Date.now() - 120_000).toISOString();
+    const providerDeadlineAt = new Date(Date.now() - 1_000).toISOString();
+    fs.writeFileSync(
+      path.join(directory, MANAGED_SUBMISSION_RESERVATION_PATH),
+      reservationBuffer(requestDigest, { reservedAt, providerDeadlineAt }),
+    );
+    fs.writeFileSync(path.join(directory, 'stratus-progress.json'), progressBuffer({
+      phase: 1,
+      verificationSubmitPressed: true,
+      submitKind: 'verification',
+    }));
+    const expected = JSON.stringify({
+      projectBindingHash: projectHash(PROJECT_BINDING),
+      submissionAttempt: ATTEMPT,
+      requestDigest,
+    });
+    const procShimPath = path.join(directory, 'empty-proc.cjs');
+    fs.writeFileSync(procShimPath, [
+      "const fs = require('node:fs');",
+      'const readdirSync = fs.readdirSync;',
+      "fs.readdirSync = (target, ...args) => target === '/proc' ? [] : readdirSync(target, ...args);",
+    ].join('\n'));
+
+    const finalized = spawnSync(
+      process.execPath,
+      ['--require', procShimPath, '-e', FINALIZE_MANAGED_INDETERMINATE_SCRIPT, expected],
+      { cwd: directory, encoding: 'utf8' },
+    );
+    assert.equal(finalized.status, 0, finalized.stderr);
+    const terminal = JSON.parse(fs.readFileSync(
+      path.join(directory, MANAGED_TERMINAL_RESULT_PATH),
+      'utf8',
+    ));
+    assert.equal(terminal.state, 'indeterminate');
+    assert.equal(terminal.phase, 1);
+    assert.deepEqual(terminal.submissionAttempt, ATTEMPT);
+    assert.equal(terminal.requestDigest, requestDigest);
+    assert.equal(terminal.error.code, 'SUBMISSION_EXECUTION_INDETERMINATE');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('acknowledgement is idempotent and its tombstone prevents relaunch', async () => {
   const fake = fakeSandboxApi();
   const options = {
@@ -309,7 +553,7 @@ test('acknowledgement is idempotent and its tombstone prevents relaunch', async 
     { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
   );
   assert.equal(second.acknowledgedAt, first.acknowledgedAt);
-  assert.equal(fake.calls.acknowledgements, 1);
+  assert.equal(fake.calls.acknowledgements, 2);
 
   await assert.rejects(
     retrieveManagedTerminalResult(
@@ -380,7 +624,15 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
       terminalBuffer(input, { title: 'Application received' }),
     );
     fs.writeFileSync(path.join(directory, 'stratus-input.json'), '{"applicant":"private"}');
+    fs.writeFileSync(
+      path.join(directory, 'stratus-input.json.tmp-987-private'),
+      '{"applicant":"private temporary"}',
+    );
     fs.writeFileSync(path.join(directory, 'stratus-result-0.json'), '{"page":"private"}');
+    fs.writeFileSync(
+      path.join(directory, 'stratus-terminal-result.json.tmp-987-private'),
+      '{"terminal":"private temporary"}',
+    );
     fs.writeFileSync(path.join(directory, 'stratus-screenshot-0.png'), 'private');
 
     const expected = JSON.stringify({
@@ -399,8 +651,13 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
     assert.ok(fs.existsSync(path.join(directory, MANAGED_TERMINAL_ACK_PATH)));
     assert.equal(fs.existsSync(path.join(directory, MANAGED_TERMINAL_RESULT_PATH)), false);
     assert.equal(fs.existsSync(path.join(directory, 'stratus-input.json')), false);
+    assert.equal(fs.existsSync(path.join(directory, 'stratus-input.json.tmp-987-private')), false);
     assert.equal(fs.existsSync(path.join(directory, 'stratus-result-0.json')), false);
     assert.equal(fs.existsSync(path.join(directory, 'stratus-screenshot-0.png')), false);
+    assert.equal(
+      fs.existsSync(path.join(directory, 'stratus-terminal-result.json.tmp-987-private')),
+      false,
+    );
 
     const replay = spawnSync(
       process.execPath,
@@ -409,6 +666,56 @@ test('acknowledgement script durably tombstones and scrubs applicant artifacts',
     );
     assert.equal(replay.status, 0, replay.stderr);
     assert.equal(JSON.parse(replay.stdout).acknowledgedAt, firstAck.acknowledgedAt);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('acknowledgement fails when any applicant artifact cannot be unlinked', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-terminal-ack-failure-'));
+  try {
+    const requestDigest = 'f'.repeat(64);
+    const input = {
+      submissionAttempt: ATTEMPT,
+      terminalResultProjectHash: projectHash(PROJECT_BINDING),
+      terminalResultRequestDigest: requestDigest,
+    };
+    fs.writeFileSync(
+      path.join(directory, MANAGED_SUBMISSION_RESERVATION_PATH),
+      reservationBuffer(requestDigest),
+    );
+    fs.writeFileSync(
+      path.join(directory, MANAGED_TERMINAL_RESULT_PATH),
+      terminalBuffer(input, { title: 'Application received' }),
+    );
+    fs.writeFileSync(path.join(directory, 'stratus-input.json'), '{"applicant":"private"}');
+    const shimPath = path.join(directory, 'unlink-failure.cjs');
+    fs.writeFileSync(shimPath, [
+      "const fs = require('node:fs');",
+      'const unlinkSync = fs.unlinkSync;',
+      "fs.unlinkSync = (target) => { if (target === 'stratus-input.json') throw new Error('forced'); return unlinkSync(target); };",
+    ].join('\n'));
+
+    const expected = JSON.stringify({
+      projectBindingHash: projectHash(PROJECT_BINDING),
+      submissionAttempt: ATTEMPT,
+    });
+    const failed = spawnSync(
+      process.execPath,
+      ['--require', shimPath, '-e', ACK_MANAGED_TERMINAL_RESULT_SCRIPT, expected],
+      { cwd: directory, encoding: 'utf8' },
+    );
+    assert.equal(failed.status, 14, failed.stderr);
+    assert.ok(fs.existsSync(path.join(directory, MANAGED_TERMINAL_ACK_PATH)));
+    assert.ok(fs.existsSync(path.join(directory, 'stratus-input.json')));
+
+    const retry = spawnSync(
+      process.execPath,
+      ['-e', ACK_MANAGED_TERMINAL_RESULT_SCRIPT, expected],
+      { cwd: directory, encoding: 'utf8' },
+    );
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.equal(fs.existsSync(path.join(directory, 'stratus-input.json')), false);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

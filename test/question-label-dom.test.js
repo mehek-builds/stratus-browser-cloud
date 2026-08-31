@@ -190,6 +190,26 @@ async function optionInventoryFor(html, selector) {
   }, [CHOICE_SOURCE, selector]);
 }
 
+async function optionBudgetSummaryFor(html, selector) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate(([source, target]) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, optionsOf };`)();
+    const inventories = [...document.querySelectorAll(target)].map((control) => (
+      helpers.optionsOf(control, helpers.blockOf(control))
+    ));
+    return {
+      inventories: inventories.map((inventory) => ({
+        complete: inventory.complete,
+        count: inventory.values.length,
+      })),
+      serializedBytes: new TextEncoder().encode(JSON.stringify(
+        inventories.flatMap((inventory) => inventory.values),
+      )).byteLength,
+    };
+  }, [CHOICE_SOURCE, selector]);
+}
+
 /* THE DEFECT, AND THE FIX, ON THE MARKUP THAT CAUSED IT.
  *
  * Before the fall-through, all seven of these returned their own name attribute. The backend's
@@ -352,6 +372,75 @@ test('an unsafe employer choice marks the whole option inventory incomplete', as
     values: ['Short choice'],
     complete: false,
   });
+});
+
+test('native placeholders are structural and a valid Please label is preserved', async () => {
+  const inventory = await optionInventoryFor(`
+    <label for="contact-choice">Contact preference</label>
+    <select id="contact-choice">
+      <option value="">Select one</option>
+      <option value="email">Please contact me by email</option>
+      <option value="none">No contact</option>
+    </select>`, '#contact-choice');
+
+  assert.deepEqual(inventory, {
+    values: ['Please contact me by email', 'No contact'],
+    complete: true,
+  });
+});
+
+test('duplicate labels with distinct employer values make the inventory incomplete', async () => {
+  const inventory = await optionInventoryFor(`
+    <label for="region-choice">Region</label>
+    <select id="region-choice">
+      <option value="">Choose one</option>
+      <option value="north-america">Americas</option>
+      <option value="south-america">Americas</option>
+    </select>`, '#region-choice');
+
+  assert.deepEqual(inventory, {
+    values: ['Americas'],
+    complete: false,
+  });
+});
+
+test('a virtualized custom list stays incomplete unless full enumeration is proven', async () => {
+  const incomplete = await optionInventoryFor(`
+    <div class="field">
+      <button id="virtual-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="virtual-choice" data-virtualized="true">
+        <div role="option" aria-setsize="100" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="100" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#virtual-choice');
+  assert.deepEqual(incomplete, { values: ['One', 'Two'], complete: false });
+
+  const complete = await optionInventoryFor(`
+    <div class="field">
+      <button id="full-choice" type="button" aria-haspopup="listbox">Choose</button>
+      <div role="listbox" aria-labelledby="full-choice" data-virtualized="true">
+        <div role="option" aria-setsize="2" aria-posinset="1" data-value="one">One</div>
+        <div role="option" aria-setsize="2" aria-posinset="2" data-value="two">Two</div>
+      </div>
+    </div>`, '#full-choice');
+  assert.deepEqual(complete, { values: ['One', 'Two'], complete: true });
+});
+
+test('the global serialized option budget truncates safely below the terminal limit', async () => {
+  const optionText = 'x'.repeat(9_000);
+  const lists = Array.from({ length: 5 }, (_, listIndex) => `
+    <label for="budget-${listIndex}">Budget ${listIndex}</label>
+    <select id="budget-${listIndex}">
+      <option value="">Select one</option>
+      ${Array.from({ length: 100 }, (_, optionIndex) => (
+        `<option value="${listIndex}-${optionIndex}">${listIndex}-${optionIndex}-${optionText}</option>`
+      )).join('')}
+    </select>`).join('');
+  const summary = await optionBudgetSummaryFor(lists, 'select');
+
+  assert.ok(summary.serializedBytes < 4 * 1024 * 1024);
+  assert.ok(summary.inventories.some((inventory) => inventory.complete === false));
+  assert.ok(summary.inventories.reduce((sum, inventory) => sum + inventory.count, 0) < 500);
 });
 
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {
