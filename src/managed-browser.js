@@ -146,8 +146,16 @@ const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
 export const STRATUS_SUBMISSION_QUIESCENCE_ENV = 'STRATUS_SUBMISSION_QUIESCED';
 export const STRATUS_SUBMISSION_CORRELATION_MODE_ENV = 'STRATUS_SUBMISSION_CORRELATION_MODE';
+export const MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION = 'stratus-submission-reservation-v1';
+export const MANAGED_TERMINAL_RESULT_SCHEMA_VERSION = 'stratus-terminal-result-v1';
+export const MANAGED_TERMINAL_ACK_SCHEMA_VERSION = 'stratus-terminal-result-ack-v1';
+export const MANAGED_SUBMISSION_RESERVATION_PATH = 'stratus-submission-reservation.json';
+export const MANAGED_TERMINAL_RESULT_PATH = 'stratus-terminal-result.json';
+export const MANAGED_TERMINAL_ACK_PATH = 'stratus-terminal-result-ack.json';
 export const PROVIDER_RESPONSE_MARGIN_MS = 10_000;
 const PROVIDER_RETURN_MARGIN_MS = 2_000;
+const MANAGED_TERMINAL_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const MANAGED_TERMINAL_STORE_TIMEOUT_MS = 10_000;
 const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
 const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
 const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
@@ -240,8 +248,94 @@ const https = require('node:https');
 const net = require('node:net');
 const { chromium } = require('playwright');
 
+function writeDurableJson(path, value) {
+  const temporary = path + '.tmp-' + process.pid + '-' + crypto.randomBytes(8).toString('hex');
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(value), 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporary, path);
+  let directory = null;
+  try {
+    directory = fs.openSync('.', 'r');
+    fs.fsyncSync(directory);
+  } finally {
+    if (directory !== null) fs.closeSync(directory);
+  }
+}
+
+function terminalExpiresAt(completedAt) {
+  return new Date(Date.parse(completedAt) + 30 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function persistTerminalResult(input, phase, run) {
+  const hasTerminalBinding = Boolean(input.terminalResultProjectHash
+    || input.terminalResultRequestDigest);
+  if (!hasTerminalBinding) return;
+  if (!input.submissionAttempt
+    || !/^[a-f0-9]{64}$/.test(input.terminalResultProjectHash || '')
+    || !/^[a-f0-9]{64}$/.test(input.terminalResultRequestDigest || '')) {
+    throw new Error('Terminal result persistence requires exact project and attempt binding');
+  }
+  const completedAt = new Date().toISOString();
+  const core = {
+    schemaVersion: 'stratus-terminal-result-v1',
+    projectBindingHash: input.terminalResultProjectHash,
+    submissionAttempt: input.submissionAttempt,
+    requestDigest: input.terminalResultRequestDigest,
+    state: 'completed',
+    completedAt,
+    expiresAt: terminalExpiresAt(completedAt),
+    phase,
+    run
+  };
+  const resultId = crypto.createHash('sha256')
+    .update(JSON.stringify(core))
+    .digest('hex');
+  writeDurableJson('stratus-terminal-result.json', {
+    ...core,
+    resultId,
+    persistedAt: new Date().toISOString()
+  });
+}
+
+function persistTerminalFailure(input) {
+  if (!input?.submissionAttempt
+    || !/^[a-f0-9]{64}$/.test(input.terminalResultProjectHash || '')
+    || !/^[a-f0-9]{64}$/.test(input.terminalResultRequestDigest || '')) return;
+  const completedAt = new Date().toISOString();
+  const core = {
+    schemaVersion: 'stratus-terminal-result-v1',
+    projectBindingHash: input.terminalResultProjectHash,
+    submissionAttempt: input.submissionAttempt,
+    requestDigest: input.terminalResultRequestDigest,
+    state: 'failed',
+    completedAt,
+    expiresAt: terminalExpiresAt(completedAt),
+    phase: Number.isInteger(input.terminalResultPhase) ? input.terminalResultPhase : 0,
+    error: {
+      code: 'SANDBOX_RUN_FAILED',
+      message: 'Managed browser run failed'
+    }
+  };
+  const resultId = crypto.createHash('sha256')
+    .update(JSON.stringify(core))
+    .digest('hex');
+  writeDurableJson('stratus-terminal-result.json', {
+    ...core,
+    resultId,
+    persistedAt: new Date().toISOString()
+  });
+}
+
+let terminalFailureInput = null;
 (async () => {
   const input = JSON.parse(fs.readFileSync('stratus-input.json', 'utf8'));
+  terminalFailureInput = input;
   const sameSubmissionAttempt = (left, right) => (!left && !right) || Boolean(left && right
     && left.runId === right.runId
     && left.claimId === right.claimId
@@ -285,7 +379,7 @@ const { chromium } = require('playwright');
   const recordCrashProgress = (patch = {}) => {
     crashProgress = { ...crashProgress, ...patch };
     try {
-      fs.writeFileSync('stratus-progress.json', JSON.stringify(crashProgress));
+      writeDurableJson('stratus-progress.json', crashProgress);
     } catch { /* failure telemetry must never change the employer action */ }
   };
   recordCrashProgress();
@@ -14008,10 +14102,32 @@ const { chromium } = require('playwright');
           // The choices a closed list actually offers, so the resolver can snap a stored answer onto
           // one of them instead of typing its own phrasing at a control that does not contain it.
           function optionsOf(el, block) {
+            const maxOptionTextLength = 10000;
+            const maxOptionCount = 4096;
+            const maxInventoryTextLength = 1000000;
+            const values = [];
+            const seen = new Set();
+            let totalTextLength = 0;
+            let complete = true;
+            const add = (candidate) => {
+              const text = clean(candidate);
+              if (!text || seen.has(text)) return;
+              if (text.length > maxOptionTextLength
+                || values.length >= maxOptionCount
+                || totalTextLength + text.length > maxInventoryTextLength) {
+                complete = false;
+                return;
+              }
+              seen.add(text);
+              values.push(text);
+              totalTextLength += text.length;
+            };
             if (el.tagName === 'SELECT') {
-              return [...el.options]
-                .map((option) => clean(option.textContent || option.value))
-                .filter((text) => text && !/^(?:select|choose|please|--|auswählen$)/i.test(text));
+              for (const option of el.options) {
+                const text = clean(option.textContent || option.value);
+                if (text && !/^(?:select|choose|please|--|auswählen$)/i.test(text)) add(text);
+              }
+              return { values, complete };
             }
             /* A CLOSED CUSTOM LIST WHOSE POPUP NAMES THIS EXACT OPENER.
              *
@@ -14028,14 +14144,18 @@ const { chromium } = require('playwright');
                 .filter((listbox) => listbox.parentElement === el.parentElement
                   && clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id));
               if (bound.length === 1) {
-                return [...new Set([...bound[0].querySelectorAll('[role="option"]')]
-                  .map((option) => clean(option.getAttribute('aria-label') || option.textContent || ''))
-                  .filter((text) => text && text.length <= 120))];
+                for (const option of bound[0].querySelectorAll('[role="option"]')) {
+                  add(option.getAttribute('aria-label') || option.textContent || '');
+                }
+                return { values, complete };
               }
-              if (bound.length > 1) return [];
+              if (bound.length > 1) return { values, complete: false };
             }
-            if (!block) return [];
-            const texts = [];
+            const closedChoice = el.type === 'radio' || el.type === 'checkbox'
+              || el.getAttribute('role') === 'combobox'
+              || el.getAttribute('role') === 'listbox'
+              || el.getAttribute('aria-haspopup') === 'listbox';
+            if (!block) return { values, complete: closedChoice ? false : null };
             for (const input of block.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');
@@ -14046,7 +14166,7 @@ const { chromium } = require('playwright');
               const question = clean(questionLabel(input));
               // Ashby labels its hidden mirror input with the QUESTION, so a single "option" whose
               // text is the question is not an option list at all.
-              if (text && text.length <= 80 && text.toLowerCase() !== question.toLowerCase()) texts.push(text);
+              if (text && text.toLowerCase() !== question.toLowerCase()) add(text);
             }
             for (const button of block.querySelectorAll('button')) {
               // The control under discovery can itself be a button-shaped or div-shaped combobox
@@ -14055,11 +14175,11 @@ const { chromium } = require('playwright');
               if (button === el || button.getAttribute('role') === 'combobox'
                 || button.getAttribute('aria-haspopup') === 'listbox') continue;
               const text = clean(renderedText(button));
-              if (!text || text.length > 40) continue;
+              if (!text) continue;
               if (/upload|replace|drag|drop|submit|browse|remove|delete|\bsave\b|cancel|\+\s*add/i.test(text)) continue;
-              texts.push(text);
+              add(text);
             }
-            return [...new Set(texts)];
+            return { values, complete: closedChoice ? complete : null };
           }
           /* D-01 AGAIN, ONE TAG FAMILY OVER: A COMBOBOX THAT IS NOT AN INPUT WAS NEVER SCANNED.
            *
@@ -14141,7 +14261,7 @@ const { chromium } = require('playwright');
             counter += 1;
             const marker = 'data-litos-discovered-' + counter;
             el.setAttribute(marker, '1');
-            const options = optionsOf(el, block);
+            const optionInventory = optionsOf(el, block);
             out.push({
               label: label,
               selector: '[' + marker + ']',
@@ -14158,7 +14278,10 @@ const { chromium } = require('playwright');
               role: el.getAttribute('role')
                 || (el.getAttribute('aria-haspopup') === 'listbox' ? 'combobox' : null),
               required: marksRequired(el, block),
-              options: options.length > 0 ? options : null,
+              options: optionInventory.values.length > 0 ? optionInventory.values : null,
+              ...(typeof optionInventory.complete === 'boolean'
+                ? { optionsComplete: optionInventory.complete }
+                : {}),
               maxLength: el.maxLength > 0 ? el.maxLength : null
             });
           }
@@ -15839,28 +15962,68 @@ const { chromium } = require('playwright');
     if (continuationOffered) {
       try {
         const marker = JSON.parse(fs.readFileSync('stratus-continuation.json', 'utf8'));
-        fs.writeFileSync('stratus-continuation-next.json', JSON.stringify({ ...marker, expiresAt: continuationExpiresAt }));
-        fs.renameSync('stratus-continuation-next.json', 'stratus-continuation.json');
+        writeDurableJson('stratus-continuation.json', { ...marker, expiresAt: continuationExpiresAt });
       } catch {
         /* No marker means no continuation was ever authorized, and the idle below simply ends. The
          * run's own result is written either way: a page we cannot offer to continue is still a
          * page we have to report. */
       }
-      fs.writeFileSync('stratus-continuation-ready.json', JSON.stringify({ expiresAt: continuationExpiresAt, host: input.allowedHost }));
+      writeDurableJson('stratus-continuation-ready.json', {
+        expiresAt: continuationExpiresAt,
+        host: input.allowedHost
+      });
     }
-    fs.writeFileSync('stratus-result-' + phase + '.json', JSON.stringify({ title, url, text, links, extracted, discovered, ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}), ...(exactPageUrlProof ? { exactPageUrlProof } : {}), filledFields: [...new Set(filledFields)], blockers: [...new Set(blockers)], skipped: [...new Set(skipped)], ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}), humanVerification, securityCodeAttempt, submitOutcome, requiredFieldConfirmation, ...(finalSubmitChooser ? { finalSubmitChooser } : {}), blockedSubmits, continuationOffered, ...(continuationExpiresAt ? { continuationExpiresAt } : {}), ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}), elapsedMs: Date.now() - startedAt }));
+    const resultPayload = {
+      title,
+      url,
+      text,
+      links,
+      extracted,
+      discovered,
+      ...(runnerCapabilities.length > 0 ? { capabilities: runnerCapabilities } : {}),
+      ...(exactPageUrlProof ? { exactPageUrlProof } : {}),
+      filledFields: [...new Set(filledFields)],
+      blockers: [...new Set(blockers)],
+      skipped: [...new Set(skipped)],
+      ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}),
+      humanVerification,
+      securityCodeAttempt,
+      submitOutcome,
+      requiredFieldConfirmation,
+      ...(finalSubmitChooser ? { finalSubmitChooser } : {}),
+      blockedSubmits,
+      continuationOffered,
+      ...(continuationExpiresAt ? { continuationExpiresAt } : {}),
+      ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
+      elapsedMs: Date.now() - startedAt
+    };
     recordCrashProgress({ phase, stage: 'result_written' });
-    if (phase > 0 || !continuationOffered) break;
+    if (phase > 0 || !continuationOffered) {
+      if (input.submissionAttempt) {
+        persistTerminalResult(input, phase, resultPayload);
+        terminalFailureInput = null;
+      }
+      writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
+      break;
+    }
+    writeDurableJson('stratus-result-' + phase + '.json', resultPayload);
     const expiresAt = Date.parse(continuationExpiresAt);
     while (!fs.existsSync('stratus-continuation-input.json') && Date.now() < expiresAt) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (!fs.existsSync('stratus-continuation-input.json')) break;
+    if (!fs.existsSync('stratus-continuation-input.json')) {
+      if (input.submissionAttempt) {
+        persistTerminalResult(input, phase, resultPayload);
+        terminalFailureInput = null;
+      }
+      break;
+    }
     const continuationInput = JSON.parse(fs.readFileSync('stratus-continuation-input.json', 'utf8'));
     if (!sameSubmissionAttempt(input.submissionAttempt, continuationInput.submissionAttempt)) {
       throw new Error('Submission attempt correlation changed during continuation');
     }
     currentInput = continuationInput;
+    terminalFailureInput = { ...input, terminalResultPhase: phase + 1 };
     fs.unlinkSync('stratus-continuation-input.json');
     phase += 1;
     }
@@ -15888,7 +16051,11 @@ const { chromium } = require('playwright');
    * message was sitting right there went unread. The caller watches for this file alongside the
    * result and reports whichever arrives. */
   try {
-    fs.writeFileSync('stratus-error.json', JSON.stringify({ message: detail.split('\n')[0].slice(0, 500), detail: detail.slice(0, 4000) }));
+    persistTerminalFailure(terminalFailureInput);
+    writeDurableJson('stratus-error.json', {
+      message: detail.split('\n')[0].slice(0, 500),
+      detail: detail.slice(0, 4000)
+    });
   } catch { /* the result of the run matters more than the record of why there is none */ }
   console.error(detail);
   process.exit(1);
@@ -16368,6 +16535,240 @@ function continuationSandboxName(projectBinding, token) {
   return `stratus-c-${digest(`${projectBinding}:${token}`).slice(0, 40)}`;
 }
 
+export function managedTerminalResultSandboxName(projectBinding, submissionAttempt) {
+  const attempt = normalizeSubmissionAttempt(submissionAttempt, { required: true });
+  return `stratus-r-${digest([
+    'stratus-terminal-result-sandbox-v2',
+    String(projectBinding),
+    attempt.runId,
+    attempt.claimId,
+    attempt.executionId
+  ].join('\0')).slice(0, 40)}`;
+}
+
+export function managedSubmissionRequestDigest(normalizedRequest) {
+  const { providerDeadlineAt: ignoredProviderDeadline, ...request } = normalizedRequest;
+  return digest(JSON.stringify(request));
+}
+
+function managedSubmissionReservation({ projectBinding, submissionAttempt, requestDigest }) {
+  const reservedAt = new Date().toISOString();
+  return {
+    schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+    projectBindingHash: digest(projectBinding),
+    submissionAttempt,
+    requestDigest,
+    reservedAt,
+    expiresAt: new Date(Date.parse(reservedAt) + MANAGED_TERMINAL_RESULT_RETENTION_MS).toISOString()
+  };
+}
+
+function parseManagedSubmissionReservation(buffer, {
+  projectBinding,
+  submissionAttempt
+}) {
+  if (!buffer || buffer.length > 16 * 1024) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(buffer.toString('utf8'));
+  } catch {
+    return null;
+  }
+  const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? Object.keys(parsed).sort().join(',')
+    : '';
+  if (keys !== 'expiresAt,projectBindingHash,requestDigest,reservedAt,schemaVersion,submissionAttempt'
+    || parsed.schemaVersion !== MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION
+    || parsed.projectBindingHash !== digest(projectBinding)
+    || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
+    || !canonicalTimestamp(parsed.reservedAt)
+    || !canonicalTimestamp(parsed.expiresAt)
+    || Date.parse(parsed.expiresAt) - Date.parse(parsed.reservedAt)
+      !== MANAGED_TERMINAL_RESULT_RETENTION_MS) return null;
+  let parsedAttempt;
+  try {
+    parsedAttempt = normalizeSubmissionAttempt(parsed.submissionAttempt, { required: true });
+  } catch {
+    return null;
+  }
+  if (!sameSubmissionAttempt(parsedAttempt, submissionAttempt)) return null;
+  return { ...parsed, submissionAttempt: parsedAttempt };
+}
+
+function terminalResultCore({
+  projectBindingHash,
+  submissionAttempt,
+  requestDigest,
+  state,
+  completedAt,
+  expiresAt,
+  phase,
+  run,
+  error
+}) {
+  return {
+    schemaVersion: MANAGED_TERMINAL_RESULT_SCHEMA_VERSION,
+    projectBindingHash,
+    submissionAttempt,
+    requestDigest,
+    state,
+    completedAt,
+    expiresAt,
+    phase,
+    ...(state === 'completed' ? { run } : { error })
+  };
+}
+
+function terminalResultId(core) {
+  return digest(JSON.stringify(core));
+}
+
+function canonicalTimestamp(value) {
+  const timestamp = typeof value === 'string' ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(timestamp) && value === new Date(timestamp).toISOString();
+}
+
+function parseManagedTerminalResult(buffer, {
+  projectBinding,
+  submissionAttempt,
+  requestDigest = null
+}) {
+  if (!buffer || buffer.length > 16 * 1024 * 1024) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(buffer.toString('utf8'));
+  } catch {
+    return null;
+  }
+  const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? Object.keys(parsed).sort().join(',')
+    : '';
+  const completedKeys = 'completedAt,expiresAt,persistedAt,phase,projectBindingHash,requestDigest,resultId,run,schemaVersion,state,submissionAttempt';
+  const failedKeys = 'completedAt,error,expiresAt,persistedAt,phase,projectBindingHash,requestDigest,resultId,schemaVersion,state,submissionAttempt';
+  if ((parsed?.state === 'completed' ? keys !== completedKeys : keys !== failedKeys)
+    || parsed.schemaVersion !== MANAGED_TERMINAL_RESULT_SCHEMA_VERSION
+    || !/^[a-f0-9]{64}$/.test(parsed.projectBindingHash)
+    || parsed.projectBindingHash !== digest(projectBinding)
+    || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
+    || (requestDigest != null && parsed.requestDigest !== requestDigest)
+    || !['completed', 'failed'].includes(parsed.state)
+    || !canonicalTimestamp(parsed.completedAt)
+    || !canonicalTimestamp(parsed.expiresAt)
+    || Date.parse(parsed.expiresAt) - Date.parse(parsed.completedAt)
+      !== MANAGED_TERMINAL_RESULT_RETENTION_MS
+    || !Number.isInteger(parsed.phase) || parsed.phase < 0 || parsed.phase > 1
+    || !/^[a-f0-9]{64}$/.test(parsed.resultId)
+    || !canonicalTimestamp(parsed.persistedAt)) return null;
+  if (parsed.state === 'completed'
+    && (!parsed.run || typeof parsed.run !== 'object' || Array.isArray(parsed.run))) return null;
+  if (parsed.state === 'failed'
+    && (!parsed.error || typeof parsed.error !== 'object' || Array.isArray(parsed.error)
+      || Object.keys(parsed.error).sort().join(',') !== 'code,message'
+      || parsed.error.code !== 'SANDBOX_RUN_FAILED'
+      || parsed.error.message !== 'Managed browser run failed')) return null;
+  let parsedAttempt;
+  try {
+    parsedAttempt = normalizeSubmissionAttempt(parsed.submissionAttempt, { required: true });
+  } catch {
+    return null;
+  }
+  assertSubmissionAttemptEcho({ submissionAttempt: parsedAttempt }, submissionAttempt);
+  if (parsed.state === 'completed') {
+    assertSubmissionAttemptEcho(parsed.run, parsedAttempt);
+  }
+  const core = terminalResultCore({
+    projectBindingHash: parsed.projectBindingHash,
+    submissionAttempt: parsedAttempt,
+    requestDigest: parsed.requestDigest,
+    state: parsed.state,
+    completedAt: parsed.completedAt,
+    expiresAt: parsed.expiresAt,
+    phase: parsed.phase,
+    ...(parsed.state === 'completed' ? { run: parsed.run } : { error: parsed.error })
+  });
+  if (terminalResultId(core) !== parsed.resultId) return null;
+  return {
+    ...core,
+    resultId: parsed.resultId,
+    persistedAt: parsed.persistedAt
+  };
+}
+
+function parseManagedTerminalAck(buffer, {
+  projectBinding,
+  submissionAttempt
+}) {
+  if (!buffer || buffer.length > 16 * 1024) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(buffer.toString('utf8'));
+  } catch {
+    return null;
+  }
+  const keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? Object.keys(parsed).sort().join(',')
+    : '';
+  if (keys !== 'acknowledgedAt,expiresAt,projectBindingHash,requestDigest,resultId,schemaVersion,submissionAttempt'
+    || parsed.schemaVersion !== MANAGED_TERMINAL_ACK_SCHEMA_VERSION
+    || parsed.projectBindingHash !== digest(projectBinding)
+    || !/^[a-f0-9]{64}$/.test(parsed.requestDigest)
+    || !/^[a-f0-9]{64}$/.test(parsed.resultId)
+    || !canonicalTimestamp(parsed.acknowledgedAt)
+    || !canonicalTimestamp(parsed.expiresAt)
+    || Date.parse(parsed.expiresAt) - Date.parse(parsed.acknowledgedAt)
+      !== MANAGED_TERMINAL_RESULT_RETENTION_MS) return null;
+  let parsedAttempt;
+  try {
+    parsedAttempt = normalizeSubmissionAttempt(parsed.submissionAttempt, { required: true });
+  } catch {
+    return null;
+  }
+  if (!sameSubmissionAttempt(parsedAttempt, submissionAttempt)) return null;
+  return {
+    schemaVersion: parsed.schemaVersion,
+    projectBindingHash: parsed.projectBindingHash,
+    submissionAttempt: parsedAttempt,
+    requestDigest: parsed.requestDigest,
+    resultId: parsed.resultId,
+    acknowledgedAt: parsed.acknowledgedAt,
+    expiresAt: parsed.expiresAt
+  };
+}
+
+function resultWithTerminalReference(envelope) {
+  return {
+    ...envelope.run,
+    terminalResult: {
+      schemaVersion: envelope.schemaVersion,
+      resultId: envelope.resultId,
+      phase: envelope.phase,
+      completedAt: envelope.completedAt,
+      expiresAt: envelope.expiresAt,
+      submissionAttempt: envelope.submissionAttempt
+    }
+  };
+}
+
+function publicManagedTerminalEnvelope(envelope) {
+  const common = {
+    state: envelope.state,
+    submissionAttempt: envelope.submissionAttempt,
+    completedAt: envelope.completedAt,
+    expiresAt: envelope.expiresAt
+  };
+  return envelope.state === 'completed'
+    ? { ...common, run: resultWithTerminalReference(envelope) }
+    : { ...common, error: envelope.error };
+}
+
+function sandboxNotFound(error) {
+  return error?.status === 404
+    || error?.response?.status === 404
+    || error?.json?.error?.code === 'not_found'
+    || error?.code === 'SANDBOX_NOT_FOUND'
+    || /not found/i.test(String(error?.message || ''));
+}
+
 /* THE RUNNER DECIDES, and this is now only the fallback for a runner that predates it.
  *
  * `continuationOffered` is written by the run itself, which is the only party that has ever seen
@@ -16684,6 +17085,107 @@ async function throwSandboxRunnerError(sandbox, expectedSubmissionAttempt = null
 
 export const CLAIM_CONTINUATION_SCRIPT = "const fs=require('node:fs');const [tokenHash,projectHash,requiredJson='[]',actionMode='mutation',runHash='',claimHash='',executionHash='']=process.argv.slice(1);try{const marker=JSON.parse(fs.readFileSync('stratus-continuation.json','utf8'));if(!fs.existsSync('stratus-continuation-ready.json'))process.exit(4);if(marker.tokenHash!==tokenHash||marker.projectHash!==projectHash)process.exit(5);const markerBound=[marker.submissionRunHash,marker.submissionClaimHash,marker.submissionExecutionHash].every((value)=>typeof value==='string'&&value.length>0);const requestBound=[runHash,claimHash,executionHash].every((value)=>typeof value==='string'&&value.length>0);if(markerBound!==requestBound||(markerBound&&(marker.submissionRunHash!==runHash||marker.submissionClaimHash!==claimHash||marker.submissionExecutionHash!==executionHash)))process.exit(11);if(marker.used||Date.now()>Date.parse(marker.expiresAt))process.exit(6);const required=JSON.parse(requiredJson);const requiresV4=required.includes('atomic-submit-v4');if(requiresV4&&marker.continuationPolicy!=='v4-observation-or-security-code')process.exit(10);if(marker.continuationPolicy==='v4-observation-or-security-code'&&!['observation','security-code'].includes(actionMode))process.exit(9);if(requiresV4){let runner;try{runner=JSON.parse(fs.readFileSync('stratus-runner-capabilities.json','utf8'))}catch{process.exit(8)}if(runner.protocolVersion<4||!Array.isArray(runner.capabilities)||!required.every((capability)=>runner.capabilities.includes(capability)))process.exit(8)}fs.renameSync('stratus-continuation.json','stratus-continuation-used.json');process.exit(0)}catch{process.exit(7)}";
 
+export const ACK_MANAGED_TERMINAL_RESULT_SCRIPT = String.raw`
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const retentionMs = 30 * 24 * 60 * 60 * 1000;
+
+function writeDurableJson(path, value) {
+  const temporary = path + '.tmp-' + process.pid + '-' + crypto.randomBytes(8).toString('hex');
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(value), 'utf8');
+    fs.fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+  fs.renameSync(temporary, path);
+  let directory = null;
+  try {
+    directory = fs.openSync('.', 'r');
+    fs.fsyncSync(directory);
+  } finally {
+    if (directory !== null) fs.closeSync(directory);
+  }
+}
+
+const expected = JSON.parse(process.argv[1]);
+const sameAttempt = (left, right) => Boolean(left && right
+  && left.runId === right.runId
+  && left.claimId === right.claimId
+  && left.executionId === right.executionId);
+const ackPath = 'stratus-terminal-result-ack.json';
+const terminalPath = 'stratus-terminal-result.json';
+const scrubTerminalArtifacts = () => {
+  for (const path of fs.readdirSync('.')) {
+    if (path === ackPath || path === 'stratus-submission-reservation.json') continue;
+    if (/^stratus-(?:input|continuation-input|continuation|continuation-used|continuation-ready|result-[01]|screenshot-[01]|progress|error)\.(?:json|png)$/.test(path)) {
+      try { fs.unlinkSync(path); } catch {}
+    }
+  }
+};
+
+try {
+  if (fs.existsSync(ackPath)) {
+    const ack = JSON.parse(fs.readFileSync(ackPath, 'utf8'));
+    if (ack.schemaVersion !== 'stratus-terminal-result-ack-v1'
+      || ack.projectBindingHash !== expected.projectBindingHash
+      || !/^[a-f0-9]{64}$/.test(ack.requestDigest || '')
+      || !/^[a-f0-9]{64}$/.test(ack.resultId || '')
+      || !sameAttempt(ack.submissionAttempt, expected.submissionAttempt)) process.exit(11);
+    if (fs.existsSync(terminalPath)) fs.unlinkSync(terminalPath);
+    scrubTerminalArtifacts();
+    process.stdout.write(JSON.stringify(ack));
+    process.exit(0);
+  }
+  if (!fs.existsSync(terminalPath)) process.exit(13);
+  const terminal = JSON.parse(fs.readFileSync(terminalPath, 'utf8'));
+  const core = {
+    schemaVersion: terminal.schemaVersion,
+    projectBindingHash: terminal.projectBindingHash,
+    submissionAttempt: terminal.submissionAttempt,
+    requestDigest: terminal.requestDigest,
+    state: terminal.state,
+    completedAt: terminal.completedAt,
+    expiresAt: terminal.expiresAt,
+    phase: terminal.phase,
+    ...(terminal.state === 'completed' ? { run: terminal.run } : { error: terminal.error })
+  };
+  const recomputedId = crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex');
+  if (terminal.schemaVersion !== 'stratus-terminal-result-v1'
+    || terminal.projectBindingHash !== expected.projectBindingHash
+    || !['completed', 'failed'].includes(terminal.state)
+    || recomputedId !== terminal.resultId
+    || !/^[a-f0-9]{64}$/.test(terminal.requestDigest || '')
+    || !sameAttempt(terminal.submissionAttempt, expected.submissionAttempt)) process.exit(12);
+  const acknowledgedAt = new Date().toISOString();
+  const ack = {
+    schemaVersion: 'stratus-terminal-result-ack-v1',
+    projectBindingHash: expected.projectBindingHash,
+    submissionAttempt: expected.submissionAttempt,
+    requestDigest: terminal.requestDigest,
+    resultId: terminal.resultId,
+    acknowledgedAt,
+    expiresAt: new Date(Date.parse(acknowledgedAt) + retentionMs).toISOString()
+  };
+  writeDurableJson(ackPath, ack);
+  fs.unlinkSync(terminalPath);
+  scrubTerminalArtifacts();
+  let directory = null;
+  try {
+    directory = fs.openSync('.', 'r');
+    fs.fsyncSync(directory);
+  } finally {
+    if (directory !== null) fs.closeSync(directory);
+  }
+  process.stdout.write(JSON.stringify(ack));
+  process.exit(0);
+} catch {
+  process.exit(14);
+}
+`;
+
 async function ensureSandboxTemplate() {
   const template = await Sandbox.getOrCreate({
     name: SANDBOX_NAME,
@@ -16752,6 +17254,299 @@ async function readOptionalSandboxArtifact(
   }
 }
 
+async function getManagedTerminalSandbox(sandboxApi, name) {
+  try {
+    const sandbox = await sandboxApi.get({
+      name,
+      resume: true,
+      signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS)
+    });
+    return sandbox || null;
+  } catch (error) {
+    if (sandboxNotFound(error)) return null;
+    throw Object.assign(
+      new Error('Managed terminal result storage could not be reached'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+    );
+  }
+}
+
+async function readManagedTerminalArtifact(
+  sandbox,
+  path,
+  timeoutMs = MANAGED_TERMINAL_STORE_TIMEOUT_MS
+) {
+  try {
+    return await sandbox.readFileToBuffer(
+      { path },
+      { signal: AbortSignal.timeout(timeoutMs) }
+    );
+  } catch (error) {
+    if (sandboxNotFound(error)) return null;
+    throw Object.assign(
+      new Error(`Managed terminal result artifact ${path} could not be read`),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE', cause: error }
+    );
+  }
+}
+
+async function stopManagedTerminalSandbox(sandbox, { required = true } = {}) {
+  if (!sandbox?.stop) return;
+  try {
+    await sandbox.stop({ signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS) });
+  } catch (error) {
+    if (!required) return;
+    throw Object.assign(
+      new Error('Managed terminal result storage could not be durably stopped'),
+      { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE', cause: error }
+    );
+  }
+}
+
+function terminalResultNotFound() {
+  return Object.assign(
+    new Error('No durable terminal result exists for this submission attempt'),
+    { status: 404, code: 'SUBMISSION_EXECUTION_NOT_FOUND' }
+  );
+}
+
+function terminalResultAcknowledged(ack) {
+  return Object.assign(
+    new Error('The durable terminal result was already acknowledged'),
+    { status: 410, code: 'SUBMISSION_EXECUTION_GONE', terminalResult: ack }
+  );
+}
+
+function terminalResultStoreCorrupt(message = 'The durable terminal result store is invalid') {
+  return Object.assign(
+    new Error(message),
+    { status: 502, code: 'TERMINAL_RESULT_STORE_CORRUPT' }
+  );
+}
+
+async function managedTerminalState(sandbox, {
+  projectBinding,
+  submissionAttempt,
+  requestDigest = null
+}) {
+  const reservationBuffer = await readManagedTerminalArtifact(
+    sandbox,
+    MANAGED_SUBMISSION_RESERVATION_PATH
+  );
+  const reservation = reservationBuffer
+    ? parseManagedSubmissionReservation(reservationBuffer, { projectBinding, submissionAttempt })
+    : null;
+  if (reservationBuffer && !reservation) {
+    throw terminalResultStoreCorrupt('The durable submission reservation is invalid');
+  }
+  if (reservation && requestDigest != null && reservation.requestDigest !== requestDigest) {
+    throw Object.assign(
+      new Error('The submission attempt is already assigned to a different managed request'),
+      { status: 409, code: 'SUBMISSION_EXECUTION_CONFLICT' }
+    );
+  }
+  const ackBuffer = await readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_ACK_PATH);
+  if (ackBuffer) {
+    const ack = parseManagedTerminalAck(ackBuffer, {
+      projectBinding,
+      submissionAttempt
+    });
+    if (!ack) throw terminalResultStoreCorrupt('The durable terminal acknowledgement is invalid');
+    if (!reservation || ack.requestDigest !== reservation.requestDigest) {
+      throw terminalResultStoreCorrupt('The terminal acknowledgement is not bound to its reservation');
+    }
+    return { kind: 'acknowledged', ack };
+  }
+  const terminalBuffer = await readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_RESULT_PATH);
+  if (terminalBuffer) {
+    const envelope = parseManagedTerminalResult(terminalBuffer, {
+      projectBinding,
+      submissionAttempt,
+      requestDigest: reservation?.requestDigest ?? requestDigest
+    });
+    if (!envelope) {
+      throw terminalResultStoreCorrupt(
+        'The durable terminal result is invalid or belongs to another request'
+      );
+    }
+    if (!reservation || envelope.requestDigest !== reservation.requestDigest) {
+      throw terminalResultStoreCorrupt('The terminal result is not bound to its reservation');
+    }
+    if (Date.now() >= Date.parse(envelope.expiresAt)) {
+      return { kind: 'gone', expiresAt: envelope.expiresAt };
+    }
+    return { kind: 'terminal', envelope };
+  }
+  if (!reservation) return { kind: 'provisioning' };
+  if (Date.now() >= Date.parse(reservation.expiresAt)) {
+    return { kind: 'gone', expiresAt: reservation.expiresAt };
+  }
+  return { kind: 'pending', reservation };
+}
+
+async function resultFromManagedTerminalState(state, sandbox, {
+  screenshot = false,
+  optionalArtifactTimeoutMs = OPTIONAL_ARTIFACT_TIMEOUT_MS
+} = {}) {
+  if (state.kind === 'acknowledged') throw terminalResultAcknowledged(state.ack);
+  if (state.kind === 'gone') throw terminalResultAcknowledged(state);
+  if (state.kind === 'terminal' && state.envelope.state === 'failed') {
+    let message = state.envelope.error.message;
+    const errorBuffer = await readManagedTerminalArtifact(
+      sandbox,
+      'stratus-error.json',
+      optionalArtifactTimeoutMs
+    ).catch(() => null);
+    try {
+      const parsed = JSON.parse(errorBuffer.toString('utf8'));
+      if (parsed?.message) message = String(parsed.message).slice(0, 500);
+    } catch { /* persisted public failure remains available when private detail is absent */ }
+    const runProgress = await readSandboxRunnerProgress(sandbox, state.envelope.submissionAttempt);
+    throw Object.assign(new Error(message), {
+      status: 502,
+      code: state.envelope.error.code,
+      ...(runProgress ? { runProgress } : {})
+    });
+  }
+  if (state.kind !== 'terminal') return null;
+  const result = resultWithTerminalReference(state.envelope);
+  if (screenshot) {
+    const screenshotBuffer = await readManagedTerminalArtifact(
+      sandbox,
+      `stratus-screenshot-${state.envelope.phase}.png`,
+      optionalArtifactTimeoutMs
+    ).catch(() => null);
+    result.screenshot = screenshotBuffer?.toString('base64') || null;
+  }
+  return result;
+}
+
+function submissionAttemptInProgress() {
+  return Object.assign(
+    new Error('The exact managed submission attempt is already running'),
+    { status: 409, code: 'SUBMISSION_EXECUTION_IN_PROGRESS' }
+  );
+}
+
+async function recoverExistingManagedAttempt(sandboxApi, name, options) {
+  const sandbox = await getManagedTerminalSandbox(sandboxApi, name);
+  if (!sandbox) return null;
+  let terminal = false;
+  try {
+    const state = await managedTerminalState(sandbox, options);
+    terminal = state.kind === 'terminal'
+      || state.kind === 'acknowledged'
+      || state.kind === 'gone';
+    const result = await resultFromManagedTerminalState(state, sandbox, options);
+    if (result) return result;
+    throw submissionAttemptInProgress();
+  } finally {
+    if (terminal) await stopManagedTerminalSandbox(sandbox);
+  }
+}
+
+export async function retrieveManagedTerminalResult(input = {}, {
+  sandboxApi = Sandbox,
+  projectBinding = 'stratus-managed'
+} = {}) {
+  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, { required: true });
+  const name = managedTerminalResultSandboxName(projectBinding, submissionAttempt);
+  const sandbox = await getManagedTerminalSandbox(sandboxApi, name);
+  if (!sandbox) throw terminalResultNotFound();
+  let terminal = false;
+  try {
+    const state = await managedTerminalState(sandbox, {
+      projectBinding,
+      submissionAttempt
+    });
+    terminal = state.kind === 'terminal'
+      || state.kind === 'acknowledged'
+      || state.kind === 'gone';
+    if (state.kind === 'acknowledged' || state.kind === 'gone') {
+      throw terminalResultAcknowledged(state.ack || state);
+    }
+    if (state.kind === 'provisioning') {
+      throw Object.assign(
+        new Error('The durable submission reservation is still being created'),
+        { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+      );
+    }
+    if (state.kind === 'pending') {
+      return {
+        state: 'pending',
+        submissionAttempt,
+        expiresAt: state.reservation.expiresAt
+      };
+    }
+    return publicManagedTerminalEnvelope(state.envelope);
+  } finally {
+    if (terminal) await stopManagedTerminalSandbox(sandbox);
+  }
+}
+
+export async function acknowledgeManagedTerminalResult(input = {}, {
+  sandboxApi = Sandbox,
+  projectBinding = 'stratus-managed'
+} = {}) {
+  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, { required: true });
+  const name = managedTerminalResultSandboxName(projectBinding, submissionAttempt);
+  const sandbox = await getManagedTerminalSandbox(sandboxApi, name);
+  if (!sandbox) throw terminalResultNotFound();
+  const expected = {
+    projectBindingHash: digest(projectBinding),
+    submissionAttempt
+  };
+  let terminal = false;
+  try {
+    const state = await managedTerminalState(sandbox, {
+      projectBinding,
+      submissionAttempt
+    });
+    terminal = state.kind === 'terminal'
+      || state.kind === 'acknowledged'
+      || state.kind === 'gone';
+    if (state.kind === 'acknowledged') return state.ack;
+    if (state.kind === 'gone') throw terminalResultAcknowledged(state);
+    if (state.kind !== 'terminal') {
+      throw submissionAttemptInProgress();
+    }
+    const command = await sandbox.runCommand(
+      'node',
+      ['-e', ACK_MANAGED_TERMINAL_RESULT_SCRIPT, JSON.stringify(expected)],
+      {
+        timeoutMs: MANAGED_TERMINAL_STORE_TIMEOUT_MS,
+        signal: AbortSignal.timeout(MANAGED_TERMINAL_STORE_TIMEOUT_MS)
+      }
+    );
+    if (command.exitCode !== 0) {
+      const code = command.exitCode === 11 || command.exitCode === 12
+        ? 'TERMINAL_RESULT_STORE_CORRUPT'
+        : command.exitCode === 13
+          ? 'SUBMISSION_EXECUTION_NOT_FOUND'
+          : 'TERMINAL_RESULT_ACK_FAILED';
+      throw Object.assign(
+        new Error('The durable terminal result could not be acknowledged'),
+        { status: code === 'SUBMISSION_EXECUTION_NOT_FOUND' ? 404 : 502, code }
+      );
+    }
+    const ackBuffer = await readManagedTerminalArtifact(sandbox, MANAGED_TERMINAL_ACK_PATH);
+    const ack = parseManagedTerminalAck(ackBuffer, {
+      projectBinding,
+      submissionAttempt
+    });
+    if (!ack) {
+      throw Object.assign(
+        new Error('The durable terminal acknowledgement could not be verified'),
+        { status: 502, code: 'TERMINAL_RESULT_ACK_NOT_DURABLE' }
+      );
+    }
+    terminal = true;
+    return ack;
+  } finally {
+    if (terminal) await stopManagedTerminalSandbox(sandbox);
+  }
+}
+
 export async function executeSandboxRun(input, {
   urlValidator = assertPublicUrl,
   sandboxApi = Sandbox,
@@ -16763,12 +17558,37 @@ export async function executeSandboxRun(input, {
   assertSubmissionReleaseAllowed(input, releasePolicy);
   if (input?.continuationToken != null) {
     const continuation = normalizeManagedContinuation(input, { releasePolicy, requestAcceptedAtMs });
-    const sandboxName = continuationSandboxName(projectBinding, continuation.continuationToken);
+    const correlated = Boolean(continuation.submissionAttempt);
+    const sandboxName = correlated
+      ? managedTerminalResultSandboxName(projectBinding, continuation.submissionAttempt)
+      : continuationSandboxName(projectBinding, continuation.continuationToken);
     let sandbox;
+    let terminalObserved = false;
     try {
       providerHostRemainingMs(continuation.providerDeadlineAt);
       sandbox = await sandboxApi.get({ name: sandboxName, resume: true });
       providerHostRemainingMs(continuation.providerDeadlineAt);
+      if (correlated) {
+        const existingState = await managedTerminalState(sandbox, {
+          projectBinding,
+          submissionAttempt: continuation.submissionAttempt
+        });
+        if (existingState.kind === 'terminal'
+          || existingState.kind === 'acknowledged'
+          || existingState.kind === 'gone') {
+          terminalObserved = true;
+          return await resultFromManagedTerminalState(existingState, sandbox, {
+            screenshot: continuation.screenshot,
+            optionalArtifactTimeoutMs
+          });
+        }
+        if (existingState.kind === 'provisioning') {
+          throw Object.assign(
+            new Error('The durable submission reservation is still being created'),
+            { status: 503, code: 'TERMINAL_RESULT_STORE_UNAVAILABLE' }
+          );
+        }
+      }
       const requiredCapabilities = continuation.actions
         .filter((action) => action.type === 'requireCapability')
         .map((action) => action.value);
@@ -16815,7 +17635,9 @@ export async function executeSandboxRun(input, {
       try {
         produced = await waitForSandboxFile(
           sandbox,
-          ['stratus-result-1.json', 'stratus-error.json'],
+          correlated
+            ? [MANAGED_TERMINAL_RESULT_PATH, 'stratus-error.json']
+            : ['stratus-result-1.json', 'stratus-error.json'],
           providerWaitTimeoutMs(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS),
           { message: 'Managed browser continuation timed out', status: 410, code: 'CONTINUATION_EXPIRED' },
           continuation.providerDeadlineAt
@@ -16826,47 +17648,36 @@ export async function executeSandboxRun(input, {
       if (produced === 'stratus-error.json') {
         await throwSandboxRunnerError(sandbox, continuation.submissionAttempt);
       }
-      let resultBuffer;
-      try {
-        resultBuffer = await sandbox.readFileToBuffer(
-          { path: 'stratus-result-1.json' },
-          providerReadOptions(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS)
-        );
-      } catch (error) {
-        const resultError = Object.assign(
-          new Error(`Sandbox continuation result could not be read: ${error?.message || error}`),
+      if (correlated) {
+        terminalObserved = true;
+        const state = await managedTerminalState(sandbox, {
+          projectBinding,
+          submissionAttempt: continuation.submissionAttempt
+        });
+        const result = await resultFromManagedTerminalState(state, sandbox, {
+          screenshot: continuation.screenshot,
+          optionalArtifactTimeoutMs
+        });
+        if (!result) {
+          throw Object.assign(
+            new Error('Sandbox browser did not durably persist a continuation result'),
+            { status: 502, code: 'TERMINAL_RESULT_NOT_DURABLE' }
+          );
+        }
+        return result;
+      }
+      const resultBuffer = await sandbox.readFileToBuffer(
+        { path: 'stratus-result-1.json' },
+        providerReadOptions(continuation.providerDeadlineAt, CONTINUATION_TIMEOUT_MS)
+      ).catch(() => null);
+      if (!resultBuffer) {
+        throw Object.assign(
+          new Error('Sandbox browser did not produce a continuation result'),
           { status: 502, code: 'SANDBOX_RESULT_MISSING' }
         );
-        throw await errorWithSandboxRunnerProgress(
-          resultError,
-          sandbox,
-          continuation.submissionAttempt ?? null
-        );
       }
-      if (!resultBuffer) {
-        throw await errorWithSandboxRunnerProgress(
-          Object.assign(
-            new Error('Sandbox browser did not produce a continuation result'),
-            { status: 502, code: 'SANDBOX_RESULT_MISSING' }
-          ),
-          sandbox,
-          continuation.submissionAttempt ?? null
-        );
-      }
-      let result;
-      try {
-        result = JSON.parse(resultBuffer.toString('utf8'));
-      } catch (error) {
-        throw await errorWithSandboxRunnerProgress(
-          Object.assign(
-            new Error(`Sandbox continuation result was invalid: ${error?.message || error}`),
-            { status: 502, code: 'SANDBOX_RESULT_INVALID' }
-          ),
-          sandbox,
-          continuation.submissionAttempt ?? null
-        );
-      }
-      assertSubmissionAttemptEcho(result, continuation.submissionAttempt ?? null);
+      const result = JSON.parse(resultBuffer.toString('utf8'));
+      assertSubmissionAttemptEcho(result, null);
       if (continuation.screenshot) {
         const screenshot = await readOptionalSandboxArtifact(
           sandbox,
@@ -16881,13 +17692,36 @@ export async function executeSandboxRun(input, {
       if (error?.code) throw error;
       throw Object.assign(new Error('Continuation is expired, already used, or does not belong to this project'), { status: 409, code: 'CONTINUATION_REJECTED' });
     } finally {
-      if (sandbox) await sandbox.stop().catch(() => {});
+      if (sandbox) {
+        if (correlated) {
+          if (terminalObserved) await stopManagedTerminalSandbox(sandbox);
+        } else {
+          await sandbox.stop().catch(() => {});
+        }
+      }
     }
   }
 
   const context = await normalizeManagedRun(input, { urlValidator, releasePolicy, requestAcceptedAtMs });
+  const correlated = Boolean(context.submissionAttempt);
+  const requestDigest = correlated ? managedSubmissionRequestDigest(context) : null;
+  const sandboxName = correlated
+    ? managedTerminalResultSandboxName(projectBinding, context.submissionAttempt)
+    : null;
+  if (correlated) {
+    const recovered = await recoverExistingManagedAttempt(sandboxApi, sandboxName, {
+      projectBinding,
+      submissionAttempt: context.submissionAttempt,
+      requestDigest,
+      screenshot: context.screenshot,
+      optionalArtifactTimeoutMs
+    });
+    if (recovered) return recovered;
+  }
   let sandbox;
   let keepAlive = false;
+  let runnerMayBeActive = false;
+  let terminalObserved = false;
   try {
     providerHostRemainingMs(context.providerDeadlineAt);
     const template = sandboxApi === Sandbox
@@ -16905,9 +17739,14 @@ export async function executeSandboxRun(input, {
       ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
       : null;
     if (continuationExpiresAt) context.continuationExpiresAt = continuationExpiresAt;
-    sandbox = await sandboxApi.fork({
+    try {
+      sandbox = await sandboxApi.fork({
       sourceSandbox: template.name,
-      ...(continuationToken ? { name: continuationSandboxName(projectBinding, continuationToken) } : {}),
+      ...(sandboxName
+        ? { name: sandboxName }
+        : (continuationToken
+            ? { name: continuationSandboxName(projectBinding, continuationToken) }
+            : {})),
       /* The sandbox has to outlive whatever the caller is allowed to wait for, or the wait times
          out against a box that is already gone and the run is reported as slow rather than as
          evicted. Three things can be waited on now, in sequence, and the box has to cover all
@@ -16919,14 +17758,50 @@ export async function executeSandboxRun(input, {
           + CONTINUATION_TIMEOUT_MS + SANDBOX_LIFETIME_GRACE_MS
         : MANAGED_RUN_TIMEOUT_MS + SANDBOX_LIFETIME_GRACE_MS,
       resources: { vcpus: 2 },
-      persistent: false,
+      persistent: correlated,
+      ...(correlated ? {
+        snapshotExpiration: MANAGED_TERMINAL_RESULT_RETENTION_MS,
+        keepLastSnapshots: {
+          count: 1,
+          expiration: MANAGED_TERMINAL_RESULT_RETENTION_MS,
+          deleteEvicted: true
+        }
+      } : {}),
       networkPolicy: PUBLIC_EGRESS_NETWORK_POLICY
-    });
+      });
+    } catch (forkError) {
+      if (correlated) {
+        const raced = await recoverExistingManagedAttempt(sandboxApi, sandboxName, {
+          projectBinding,
+          submissionAttempt: context.submissionAttempt,
+          requestDigest,
+          screenshot: context.screenshot,
+          optionalArtifactTimeoutMs
+        });
+        if (raced) return raced;
+      }
+      throw forkError;
+    }
     providerHostRemainingMs(context.providerDeadlineAt);
+    const runnerContext = correlated
+      ? {
+          ...context,
+          terminalResultProjectHash: digest(projectBinding),
+          terminalResultRequestDigest: requestDigest
+        }
+      : context;
     const files = [
       { path: 'stratus-runner.cjs', content: Buffer.from(SANDBOX_RUNNER) },
-      { path: 'stratus-input.json', content: Buffer.from(JSON.stringify(context)) }
+      { path: 'stratus-input.json', content: Buffer.from(JSON.stringify(runnerContext)) }
     ];
+    if (correlated) files.unshift({
+      path: MANAGED_SUBMISSION_RESERVATION_PATH,
+      content: Buffer.from(JSON.stringify(managedSubmissionReservation({
+        projectBinding,
+        submissionAttempt: context.submissionAttempt,
+        requestDigest
+      })))
+    });
     if (continuationToken) files.push({
       path: 'stratus-continuation.json',
       content: Buffer.from(JSON.stringify({
@@ -16952,6 +17827,7 @@ export async function executeSandboxRun(input, {
      * result or crash file. Both ordinary and continuation-capable runs now share the same bounded
      * terminal-file polling and the same typed timeout. */
     providerHostRemainingMs(context.providerDeadlineAt);
+    runnerMayBeActive = true;
     try {
       await sandbox.runCommand({
         cmd: 'node',
@@ -16974,7 +17850,9 @@ export async function executeSandboxRun(input, {
     try {
       produced = await waitForSandboxFile(
         sandbox,
-        ['stratus-result-0.json', 'stratus-error.json'],
+        correlated
+          ? [MANAGED_TERMINAL_RESULT_PATH, 'stratus-result-0.json', 'stratus-error.json']
+          : ['stratus-result-0.json', 'stratus-error.json'],
         providerWaitTimeoutMs(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS),
         {
           message: 'Managed browser run timed out before it produced a result',
@@ -16989,55 +17867,73 @@ export async function executeSandboxRun(input, {
     if (produced === 'stratus-error.json') {
       await throwSandboxRunnerError(sandbox, context.submissionAttempt);
     }
-    let resultBuffer;
-    try {
-      resultBuffer = await sandbox.readFileToBuffer(
-        { path: 'stratus-result-0.json' },
-        providerReadOptions(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS)
-      );
-    } catch (error) {
-      const resultError = Object.assign(
-        new Error(`Sandbox browser result could not be read: ${error?.message || error}`),
-        { status: 502, code: 'SANDBOX_RESULT_MISSING' }
-      );
-      throw await errorWithSandboxRunnerProgress(
-        resultError,
-        sandbox,
-        context.submissionAttempt ?? null
-      );
-    }
-    if (!resultBuffer) {
-      throw await errorWithSandboxRunnerProgress(
-        Object.assign(
-          new Error('Sandbox browser did not produce a result'),
-          { status: 502, code: 'SANDBOX_RESULT_MISSING' }
-        ),
-        sandbox,
-        context.submissionAttempt ?? null
-      );
-    }
     let result;
-    try {
-      result = JSON.parse(resultBuffer.toString('utf8'));
-    } catch (error) {
-      throw await errorWithSandboxRunnerProgress(
-        Object.assign(
-          new Error(`Sandbox browser result was invalid: ${error?.message || error}`),
-          { status: 502, code: 'SANDBOX_RESULT_INVALID' }
-        ),
-        sandbox,
-        context.submissionAttempt ?? null
-      );
-    }
-    assertSubmissionAttemptEcho(result, context.submissionAttempt ?? null);
-    if (context.screenshot) {
-      const screenshot = await readOptionalSandboxArtifact(
-        sandbox,
-        'stratus-screenshot-0.png',
-        context.providerDeadlineAt,
+    if (produced === MANAGED_TERMINAL_RESULT_PATH) {
+      terminalObserved = true;
+      const state = await managedTerminalState(sandbox, {
+        projectBinding,
+        submissionAttempt: context.submissionAttempt
+      });
+      result = await resultFromManagedTerminalState(state, sandbox, {
+        screenshot: context.screenshot,
         optionalArtifactTimeoutMs
-      );
-      result.screenshot = screenshot?.toString('base64') || null;
+      });
+      if (!result) {
+        throw Object.assign(
+          new Error('Sandbox browser did not durably persist its terminal result'),
+          { status: 502, code: 'TERMINAL_RESULT_NOT_DURABLE' }
+        );
+      }
+    } else {
+      let resultBuffer;
+      try {
+        resultBuffer = await sandbox.readFileToBuffer(
+          { path: 'stratus-result-0.json' },
+          providerReadOptions(context.providerDeadlineAt, MANAGED_RUN_TIMEOUT_MS)
+        );
+      } catch (error) {
+        const resultError = Object.assign(
+          new Error(`Sandbox browser result could not be read: ${error?.message || error}`),
+          { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+        );
+        throw await errorWithSandboxRunnerProgress(
+          resultError,
+          sandbox,
+          context.submissionAttempt ?? null
+        );
+      }
+      if (!resultBuffer) {
+        throw await errorWithSandboxRunnerProgress(
+          Object.assign(
+            new Error('Sandbox browser did not produce a result'),
+            { status: 502, code: 'SANDBOX_RESULT_MISSING' }
+          ),
+          sandbox,
+          context.submissionAttempt ?? null
+        );
+      }
+      try {
+        result = JSON.parse(resultBuffer.toString('utf8'));
+      } catch (error) {
+        throw await errorWithSandboxRunnerProgress(
+          Object.assign(
+            new Error(`Sandbox browser result was invalid: ${error?.message || error}`),
+            { status: 502, code: 'SANDBOX_RESULT_INVALID' }
+          ),
+          sandbox,
+          context.submissionAttempt ?? null
+        );
+      }
+      assertSubmissionAttemptEcho(result, context.submissionAttempt ?? null);
+      if (context.screenshot) {
+        const screenshot = await readOptionalSandboxArtifact(
+          sandbox,
+          'stratus-screenshot-0.png',
+          context.providerDeadlineAt,
+          optionalArtifactTimeoutMs
+        );
+        result.screenshot = screenshot?.toString('base64') || null;
+      }
     }
     if (continuationToken && continuationEligible(result, context.continuationCheckpoint)) {
       keepAlive = true;
@@ -17051,13 +17947,24 @@ export async function executeSandboxRun(input, {
       result.continuationExpiresAt = typeof result.continuationExpiresAt === 'string'
         ? result.continuationExpiresAt
         : continuationExpiresAt;
+    } else if (correlated && !result.terminalResult) {
+      throw Object.assign(
+        new Error('Sandbox browser returned a terminal response without a durable result'),
+        { status: 502, code: 'TERMINAL_RESULT_NOT_DURABLE' }
+      );
     }
     return result;
   } catch (error) {
     if (error?.code) throw error;
     throw Object.assign(new Error(`Vercel Sandbox browser request failed: ${error.message}`), { status: 502, code: 'SANDBOX_UNAVAILABLE' });
   } finally {
-    if (sandbox && !keepAlive) await sandbox.stop().catch(() => {});
+    if (sandbox && !keepAlive) {
+      if (correlated) {
+        if (terminalObserved || !runnerMayBeActive) await stopManagedTerminalSandbox(sandbox);
+      } else {
+        await sandbox.stop().catch(() => {});
+      }
+    }
   }
 }
 

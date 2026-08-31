@@ -154,9 +154,10 @@ async function choiceDetailsFor(html) {
       const key = helpers.choiceQuestionKey(input, block);
       if (keys.has(key)) continue;
       keys.add(key);
+      const inventory = helpers.optionsOf(input, block);
       labels.push({
         label: helpers.questionLabel(input),
-        options: helpers.optionsOf(input, block),
+        options: inventory.values,
       });
     }
     return labels;
@@ -170,12 +171,23 @@ async function closedChoiceDetailsFor(html, selector) {
     const helpers = new Function(`${source}\nreturn { blockOf, marksRequired, optionsOf, questionLabel };`)();
     const control = document.querySelector(target);
     const block = helpers.blockOf(control);
+    const inventory = helpers.optionsOf(control, block);
     return {
       label: helpers.questionLabel(control),
-      options: helpers.optionsOf(control, block),
+      options: inventory.values,
       required: helpers.marksRequired(control, block),
     };
   }, [CLOSED_CHOICE_SOURCE, selector]);
+}
+
+async function optionInventoryFor(html, selector) {
+  await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+  return page.evaluate(([source, target]) => {
+    // eslint-disable-next-line no-new-func
+    const helpers = new Function(`${source}\nreturn { blockOf, optionsOf };`)();
+    const control = document.querySelector(target);
+    return helpers.optionsOf(control, helpers.blockOf(control));
+  }, [CHOICE_SOURCE, selector]);
 }
 
 /* THE DEFECT, AND THE FIX, ON THE MARKUP THAT CAUSED IT.
@@ -310,6 +322,36 @@ test('a Lever yes/no group reports both options', async () => {
 
   assert.equal(details.length, 1);
   assert.deepEqual(details[0].options, ['Yes', 'No']);
+});
+
+test('a mixed short and long employer choice inventory is retained in full', async () => {
+  const longChoice = 'This employer option includes detailed eligibility terms '.repeat(7).trim();
+  const inventory = await optionInventoryFor(`
+    <fieldset>
+      <legend>Which eligibility statement applies?</legend>
+      <label><input type="radio" name="eligibility" value="short">Yes</label>
+      <label><input type="radio" name="eligibility" value="long">${longChoice}</label>
+    </fieldset>`, 'input[type="radio"]');
+
+  assert.deepEqual(inventory, {
+    values: ['Yes', longChoice],
+    complete: true,
+  });
+});
+
+test('an unsafe employer choice marks the whole option inventory incomplete', async () => {
+  const unsafeChoice = 'x'.repeat(10_001);
+  const inventory = await optionInventoryFor(`
+    <fieldset>
+      <legend>Choose one statement</legend>
+      <label><input type="radio" name="statement" value="short">Short choice</label>
+      <label><input type="radio" name="statement" value="unsafe">${unsafeChoice}</label>
+    </fieldset>`, 'input[type="radio"]');
+
+  assert.deepEqual(inventory, {
+    values: ['Short choice'],
+    complete: false,
+  });
 });
 
 test('a heading painted uppercase is stored as the words the employer wrote', async () => {

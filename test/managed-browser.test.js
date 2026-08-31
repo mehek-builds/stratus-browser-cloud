@@ -16,6 +16,10 @@ import {
   executeManagedRun,
   executeSandboxRun,
   FREE_MANAGED_LIMITS,
+  MANAGED_SUBMISSION_RESERVATION_PATH,
+  MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+  MANAGED_TERMINAL_RESULT_PATH,
+  MANAGED_TERMINAL_RESULT_SCHEMA_VERSION,
   MANAGED_CONTINUATION_CONTRACT,
   normalizeManagedActions,
   normalizeManagedContinuation,
@@ -36,6 +40,43 @@ const SUBMISSION_ATTEMPT = Object.freeze({
 });
 
 const providerDeadlineAt = (offsetMs = 240_000) => new Date(Date.now() + offsetMs).toISOString();
+
+function managedTerminalEnvelope(run, input, { state = 'completed', phase = 0 } = {}) {
+  const completedAt = new Date().toISOString();
+  const common = {
+    schemaVersion: MANAGED_TERMINAL_RESULT_SCHEMA_VERSION,
+    projectBindingHash: input.terminalResultProjectHash,
+    submissionAttempt: input.submissionAttempt,
+    requestDigest: input.terminalResultRequestDigest,
+    state,
+    completedAt,
+    expiresAt: new Date(Date.parse(completedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    phase,
+  };
+  const core = state === 'completed'
+    ? { ...common, run }
+    : {
+        ...common,
+        error: { code: 'SANDBOX_RUN_FAILED', message: 'Managed browser run failed' },
+      };
+  return Buffer.from(JSON.stringify({
+    ...core,
+    resultId: crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex'),
+    persistedAt: new Date().toISOString(),
+  }));
+}
+
+function managedReservation(projectBinding, submissionAttempt = SUBMISSION_ATTEMPT, requestDigest = 'a'.repeat(64)) {
+  const reservedAt = new Date().toISOString();
+  return Buffer.from(JSON.stringify({
+    schemaVersion: MANAGED_SUBMISSION_RESERVATION_SCHEMA_VERSION,
+    projectBindingHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
+    submissionAttempt,
+    requestDigest,
+    reservedAt,
+    expiresAt: new Date(Date.parse(reservedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  }));
+}
 
 test('exact URL proof allows only Workable short-link canonicalization', () => {
   const expected = 'https://apply.workable.com/j/20e78cba92/apply?source=litos#apply';
@@ -587,12 +628,17 @@ test('sandbox continuation is project-bound and single-use without exposing a se
       for (const file of files) this.files.set(file.path, Buffer.from(file.content));
       if (this.files.has('stratus-continuation-input.json')) {
         const continuation = JSON.parse(this.files.get('stratus-continuation-input.json').toString('utf8'));
-        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+        const original = JSON.parse(this.files.get('stratus-input.json').toString('utf8'));
+        const result = {
           title: 'Application received',
           url: 'https://example.com/thanks',
           text: 'received',
           submissionAttempt: continuation.submissionAttempt,
-        })));
+        };
+        this.files.set('stratus-result-1.json', Buffer.from(JSON.stringify(result)));
+        this.files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(result, original, {
+          phase: 1,
+        }));
       }
     }
     async runCommand(command, args) {
@@ -653,13 +699,11 @@ test('sandbox continuation is project-bound and single-use without exposing a se
     actions: [{ type: 'click', selector: '#continue' }]
   }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
   assert.equal(second.title, 'Application received');
-  await assert.rejects(
-    executeSandboxRun({
-      continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
-      providerDeadlineAt: providerDeadlineAt(), actions: [],
-    }, { sandboxApi, urlValidator, projectBinding: 'project-a' }),
-    (error) => error.code === 'CONTINUATION_REJECTED'
-  );
+  const replay = await executeSandboxRun({
+    continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(), actions: [],
+  }, { sandboxApi, urlValidator, projectBinding: 'project-a' });
+  assert.equal(replay.terminalResult.resultId, second.terminalResult.resultId);
   await assert.rejects(
     executeSandboxRun({
       continuationToken: first.continuationToken, submissionAttempt: SUBMISSION_ATTEMPT,
@@ -695,8 +739,20 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     securityCode: 'ABC12345',
     expectedPageUrl,
   };
-  const harness = (manifest) => {
-    const files = new Map();
+  const harness = (manifest, projectBinding) => {
+    const requestDigest = 'a'.repeat(64);
+    const terminalInput = {
+      submissionAttempt: SUBMISSION_ATTEMPT,
+      terminalResultProjectHash: crypto.createHash('sha256').update(projectBinding).digest('hex'),
+      terminalResultRequestDigest: requestDigest,
+    };
+    const files = new Map([
+      [MANAGED_SUBMISSION_RESERVATION_PATH, managedReservation(
+        projectBinding,
+        SUBMISSION_ATTEMPT,
+        requestDigest,
+      )],
+    ]);
     let continuationWrites = 0;
     let claimedCapabilities = null;
     let claimedActionMode = null;
@@ -723,10 +779,14 @@ test('v4 continuation refuses an incompatible retained runner before writing con
         }
         if (files.has('stratus-continuation-input.json')) {
           const continuation = JSON.parse(files.get('stratus-continuation-input.json').toString('utf8'));
-          files.set('stratus-result-1.json', Buffer.from(JSON.stringify({
+          const result = {
             title: 'Compatible continuation',
             submissionAttempt: continuation.submissionAttempt,
-          })));
+          };
+          files.set('stratus-result-1.json', Buffer.from(JSON.stringify(result)));
+          files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(result, terminalInput, {
+            phase: 1,
+          }));
         }
       },
       async readFileToBuffer({ path: filePath }) { return files.get(filePath) || null; },
@@ -753,11 +813,12 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     }],
   ];
   for (const [label, manifest] of incompatibleManifests) {
-    const fake = harness(manifest);
+    const projectBinding = `project-${label}`;
+    const fake = harness(manifest, projectBinding);
     await assert.rejects(
       executeSandboxRun(v4Input, {
         sandboxApi: fake.sandboxApi,
-        projectBinding: `project-${label}`,
+        projectBinding,
       }),
       (error) => error.code === 'CONTINUATION_RUNNER_INCOMPATIBLE' && error.status === 409,
       label,
@@ -769,10 +830,11 @@ test('v4 continuation refuses an incompatible retained runner before writing con
     );
     assert.equal(fake.state().claimedActionMode, 'security-code');
     assert.equal(fake.state().continuationWrites, 0, `${label} must fail before continuation input is written`);
-    assert.equal(fake.state().stopped, true);
+    assert.equal(fake.state().stopped, false,
+      'a rejected continuation must not stop the retained runner before it terminalizes');
   }
 
-  const v3Fake = harness(null);
+  const v3Fake = harness(null, 'project-v3');
   const v3Result = await executeSandboxRun({
     continuationToken: 'w'.repeat(43),
     submissionAttempt: SUBMISSION_ATTEMPT,
@@ -2886,17 +2948,33 @@ function silentSandboxApi({
     materializeTerminal() {
       const inputBuffer = this.files.get('stratus-input.json');
       const input = inputBuffer ? JSON.parse(inputBuffer.toString('utf8')) : {};
-      if (crash) this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+      if (crash) {
+        this.files.set('stratus-error.json', Buffer.from(JSON.stringify({ message: crash })));
+        if (input.submissionAttempt) {
+          this.files.set(MANAGED_TERMINAL_RESULT_PATH, managedTerminalEnvelope(null, input, {
+            state: 'failed',
+          }));
+        }
+      }
       if (progress) this.files.set('stratus-progress.json', Buffer.from(JSON.stringify({
         ...progress,
         ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
         ...(progressSubmissionAttempt ? { submissionAttempt: progressSubmissionAttempt } : {}),
       })));
-      if (result) this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify({
-        ...result,
-        ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
-        ...(resultSubmissionAttempt ? { submissionAttempt: resultSubmissionAttempt } : {}),
-      })));
+      if (result) {
+        const resultPayload = {
+          ...result,
+          ...(input.submissionAttempt ? { submissionAttempt: input.submissionAttempt } : {}),
+          ...(resultSubmissionAttempt ? { submissionAttempt: resultSubmissionAttempt } : {}),
+        };
+        this.files.set('stratus-result-0.json', Buffer.from(JSON.stringify(resultPayload)));
+        if (input.submissionAttempt && resultPayload.continuationOffered !== true) {
+          this.files.set(
+            MANAGED_TERMINAL_RESULT_PATH,
+            managedTerminalEnvelope(resultPayload, input),
+          );
+        }
+      }
     }
     async writeFiles(files) { for (const file of files) this.files.set(file.path, Buffer.from(file.content)); }
     async runCommand(command, args, options) {
@@ -2987,7 +3065,8 @@ test('the public-only policy is installed on the sandbox fork before Chromium st
 test('setup delay consumes the original provider deadline and prevents sandbox launch', async () => {
   const realNow = Date.now;
   let now = Date.parse('2026-08-26T12:00:00.000Z');
-  let getCalls = 0;
+  let attemptGetCalls = 0;
+  let templateGetCalls = 0;
   let forkCalls = 0;
   Date.now = () => now;
   try {
@@ -3002,8 +3081,12 @@ test('setup delay consumes the original provider deadline and prevents sandbox l
         requestAcceptedAtMs: now,
         urlValidator: urlOnly,
         sandboxApi: {
-          async get() {
-            getCalls += 1;
+          async get({ name }) {
+            if (name !== CURRENT_SANDBOX_TEMPLATE) {
+              attemptGetCalls += 1;
+              return null;
+            }
+            templateGetCalls += 1;
             now += 12_000;
             return { name: CURRENT_SANDBOX_TEMPLATE, currentSnapshotId: 'snapshot' };
           },
@@ -3018,7 +3101,8 @@ test('setup delay consumes the original provider deadline and prevents sandbox l
   } finally {
     Date.now = realNow;
   }
-  assert.equal(getCalls, 1);
+  assert.equal(attemptGetCalls, 1);
+  assert.equal(templateGetCalls, 1);
   assert.equal(forkCalls, 0);
 });
 
@@ -3071,7 +3155,11 @@ test('a submit run that produces nothing is a RUN timeout, on the run\'s own bud
   assert.ok(fake.calls.every((call) => call.timeoutMs <= 5_000), JSON.stringify(fake.calls));
   assert.ok(fake.calls.every((call) => call.commandTimeoutMs <= 7_000), JSON.stringify(fake.calls));
   assert.ok(fake.calls.every((call) => (
-    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-0.json', 'stratus-error.json'])
+    JSON.stringify(call.wanted) === JSON.stringify([
+      MANAGED_TERMINAL_RESULT_PATH,
+      'stratus-result-0.json',
+      'stratus-error.json',
+    ])
   )));
   assert.equal(fake.runnerCalls[0].detached, true);
   assert.equal(fake.runnerCalls[0].timeoutMs, 270_000);
@@ -3143,6 +3231,8 @@ test('a result written at the final polling boundary wins over the run timeout',
 test('a continuation timeout keeps its own identity across bounded polling chunks', async () => {
   const calls = [];
   let stopped = false;
+  const projectBinding = 'continuation-timeout';
+  const reservation = managedReservation(projectBinding);
   const sandbox = {
     async runCommand(command, args, options) {
       if (command === 'node' && args?.[1] === CLAIM_CONTINUATION_SCRIPT) return { exitCode: 0 };
@@ -3156,7 +3246,9 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
       return { exitCode: 3, stdout: async () => '' };
     },
     async writeFiles() {},
-    async readFileToBuffer() { return null; },
+    async readFileToBuffer({ path: filePath }) {
+      return filePath === MANAGED_SUBMISSION_RESERVATION_PATH ? reservation : null;
+    },
     async stop() { stopped = true; },
   };
 
@@ -3168,7 +3260,7 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
       providerDeadlineAt: providerDeadlineAt(70_000),
     }, {
       sandboxApi: { async get() { return sandbox; } },
-      projectBinding: 'continuation-timeout',
+      projectBinding,
     }),
     (error) => {
       assert.equal(error.code, 'CONTINUATION_EXPIRED');
@@ -3182,9 +3274,13 @@ test('a continuation timeout keeps its own identity across bounded polling chunk
   assert.ok(calls.every((call) => call.timeoutMs <= 5_000 && call.commandTimeoutMs <= 7_000));
   assert.ok(calls.every((call) => typeof call.signal?.addEventListener === 'function'));
   assert.ok(calls.every((call) => (
-    JSON.stringify(call.wanted) === JSON.stringify(['stratus-result-1.json', 'stratus-error.json'])
+    JSON.stringify(call.wanted) === JSON.stringify([
+      MANAGED_TERMINAL_RESULT_PATH,
+      'stratus-error.json',
+    ])
   )));
-  assert.equal(stopped, true);
+  assert.equal(stopped, false,
+    'a response timeout must leave the retained runner free to persist its terminal result');
 });
 
 test('a response timeout returns correlated press progress instead of exposing a blind retry', async () => {
@@ -3217,9 +3313,11 @@ test('a response timeout returns correlated press progress instead of exposing a
       return true;
     },
   );
+  assert.equal(fake.sandboxes[0].stopped, false,
+    'the lost response must not stop a runner after employer submission');
 });
 
-test('confirmation progress survives a lost result response and is written before screenshot work', async () => {
+test('durable confirmation survives a lost ordinary result response and precedes screenshot work', async () => {
   const progress = {
     version: 1,
     phase: 0,
@@ -3248,24 +3346,16 @@ test('confirmation progress survives a lost result response and is written befor
     },
     resultReadError: new Error('provider response stream reset'),
   });
-  await assert.rejects(
-    executeSandboxRun({
-      url: 'https://example.com/apply',
-      actions: [],
-      allowSubmit: true,
-      requestContinuation: true,
-      submissionAttempt: SUBMISSION_ATTEMPT,
-      providerDeadlineAt: providerDeadlineAt(),
-    }, { sandboxApi: fake.api, urlValidator: urlOnly }),
-    (error) => {
-      assert.equal(error.code, 'SANDBOX_RESULT_MISSING');
-      assert.deepEqual(error.runProgress, {
-        ...progress,
-        submissionAttempt: SUBMISSION_ATTEMPT,
-      });
-      return true;
-    },
-  );
+  const result = await executeSandboxRun({
+    url: 'https://example.com/apply',
+    actions: [],
+    allowSubmit: true,
+    requestContinuation: true,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { sandboxApi: fake.api, urlValidator: urlOnly });
+  assert.equal(result.title, 'Application received');
+  assert.match(result.terminalResult.resultId, /^[a-f0-9]{64}$/);
   const progressIndex = SANDBOX_RUNNER.indexOf("stage: 'result_ready'");
   const screenshotIndex = SANDBOX_RUNNER.indexOf('if (currentInput.screenshot)', progressIndex);
   assert.ok(progressIndex >= 0 && screenshotIndex > progressIndex);
@@ -3705,7 +3795,7 @@ test('the runner checkpoints only bounded submit progress around activation and 
   assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
   assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
   assert.match(SANDBOX_RUNNER, /finalSubmitPressed = true;\n\s*recordCrashProgress\(\{[\s\S]*stage: 'submit_released',[\s\S]*applicationSubmitPressed: true/);
-  assert.match(SANDBOX_RUNNER, /fs\.writeFileSync\('stratus-result-' \+ phase[\s\S]*recordCrashProgress\(\{ phase, stage: 'result_written' \}\)/);
+  assert.match(SANDBOX_RUNNER, /recordCrashProgress\(\{ phase, stage: 'result_written' \}\)[\s\S]*persistTerminalResult\(input, phase, resultPayload\)/);
   assert.doesNotMatch(SANDBOX_RUNNER, /recordCrashProgress\([^)]*(?:value|text|file|email|phone|name):/i);
 });
 
@@ -3758,7 +3848,7 @@ test('only a phase-zero pressed unknown outcome adds the short receipt observati
     /continuationOffered = input\.requestContinuation === true\s*&& \(Boolean\(humanVerification\) \|\| input\.continuationCheckpoint === true \|\| pressedUnknown\)/s,
   );
   assert.match(SANDBOX_RUNNER, /receiptObservationOnly\s*\? 15\s*: Math\.max/s);
-  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) break/);
+  assert.match(SANDBOX_RUNNER, /if \(phase > 0 \|\| !continuationOffered\) \{/);
 });
 
 test('the runner reads the submit outcome off the page and reports it', () => {

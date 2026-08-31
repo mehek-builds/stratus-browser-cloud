@@ -5,6 +5,7 @@
     { "src": "public/**", "use": "@vercel/static" }
   ],
   "routes": [
+    { "src": "/api/run-results/acknowledge", "dest": "/api/run-results-acknowledge.js" },
     { "src": "/api/(.*)", "dest": "/api/$1.js" },
     { "src": "/free.css", "dest": "/public/free.css" },
     { "src": "/free.js", "dest": "/public/free.js" },
