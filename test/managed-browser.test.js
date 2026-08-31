@@ -484,7 +484,80 @@ test('raw final action grammar requires explicit release and durable correlation
     (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
   );
   assert.equal(providerCalls, 0);
-  assert.equal(validatorCalls, 2);
+  assert.equal(validatorCalls, 0);
+});
+
+test('every raw mutation requires exact attempt and deadline before URL validation or provider work', async () => {
+  const mutations = [
+    { type: 'click' },
+    { type: 'fill' },
+    { type: 'fillByLabelText' },
+    { type: 'upload' },
+    { type: 'press', value: 'Tab' },
+    { type: 'select' },
+    { type: 'discover' },
+    { type: 'confirmAndSubmit', allowSubmit: true },
+  ];
+  let validatorCalls = 0;
+  let providerCalls = 0;
+  for (const mutation of mutations) {
+    const { allowSubmit = false, ...action } = mutation;
+    await assert.rejects(
+      normalizeManagedRun({
+        url: 'https://example.com/apply',
+        allowSubmit,
+        actions: [action],
+      }, {
+        urlValidator: async (value) => {
+          validatorCalls += 1;
+          return new URL(value);
+        },
+      }),
+      (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+      action.type,
+    );
+    await assert.rejects(
+      normalizeManagedRun({
+        url: 'https://example.com/apply',
+        allowSubmit,
+        actions: [action],
+        submissionAttempt: SUBMISSION_ATTEMPT,
+      }, {
+        urlValidator: async (value) => {
+          validatorCalls += 1;
+          return new URL(value);
+        },
+      }),
+      (error) => error.code === 'PROVIDER_DEADLINE_REQUIRED',
+      action.type,
+    );
+  }
+  await assert.rejects(
+    executeManagedRun({
+      url: 'https://example.com/apply',
+      actions: [{ type: 'fill' }],
+    }, {
+      sandboxExecutor: async () => {
+        providerCalls += 1;
+        return {};
+      },
+    }),
+    (error) => error.code === 'SUBMISSION_ATTEMPT_REQUIRED',
+  );
+  assert.equal(validatorCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test('selector spelling never grants final action authority', async () => {
+  const normalized = await normalizeManagedRun({
+    url: 'https://example.com/apply',
+    actions: [{ type: 'click', selector: 'button[type="submit"]' }],
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, { urlValidator: async (value) => new URL(value) });
+  assert.equal(normalized.allowSubmit, false);
+  assert.equal(normalized.exactMutationAuthority, true);
+  assert.equal(normalized.exactFinalActionAuthority, false);
 });
 
 test('managed actions accept reviewed questions and bounded resume uploads', () => {
@@ -667,7 +740,11 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     providerDeadlineAt: deadline,
     actions: [{ type: 'extract', selector: '#status' }],
     screenshot: false,
-    fullPage: false
+    fullPage: false,
+    // A read-only continuation carries both authority flags explicitly false so a downstream
+    // reader can never infer mutation or final-action authority from their absence.
+    exactFinalActionAuthority: false,
+    exactMutationAuthority: false
   });
   assert.throws(
     () => normalizeManagedContinuation({ continuationToken: token, url: 'https://example.com', actions: [] }),
@@ -2338,7 +2415,14 @@ test('exact employer page URL capability is required before actions and at the a
     { type: 'requireCapability', value: EXACT_PAGE_URL_CAPABILITY, optional: false, expectedPageUrl },
     { type: 'fill', selector: '#email', value: 'person@example.com' },
   ]);
-  const fillRun = await normalizeManagedRun({ url: expectedPageUrl, actions: fillOnly }, {
+  // A fill is a mutation, so it now needs a durable attempt even though it never presses submit.
+  // Authority is no longer inferred from whether a selector happens to spell "submit".
+  const fillRun = await normalizeManagedRun({
+    url: expectedPageUrl,
+    actions: fillOnly,
+    submissionAttempt: SUBMISSION_ATTEMPT,
+    providerDeadlineAt: providerDeadlineAt(),
+  }, {
     urlValidator: async (value) => new URL(value),
   });
   assert.equal(fillRun.actions[0].expectedPageUrl, expectedPageUrl);
@@ -3131,14 +3215,12 @@ test('the pre-submit gate runs before the final click and can stop it', () => {
   assert.match(SANDBOX_RUNNER, /const blockers = \[\.\.\.submitGateBlockers\]/);
 });
 
-test('the final submit is recognised by intent and by target, not one or the other', () => {
+test('the final submit is recognised only by explicit intent', () => {
   const { isFinalSubmitAction } = sandboxScope(['isFinalSubmitAction']);
-  // What the backend actually appends today.
-  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' }), true);
-  assert.equal(isFinalSubmitAction({ type: 'click', selector: "button[type='submit']" }), true);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: 'button[type="submit"], input[type="submit"]' }), false);
+  assert.equal(isFinalSubmitAction({ type: 'click', selector: "button[type='submit']" }), false);
   assert.equal(isFinalSubmitAction({ type: 'click', selector: '#send', label: 'final_submit' }), true);
-  // A gate that can be walked around by omitting the label is not a gate; one that fires on every
-  // click is not usable. Ordinary clicks pass through.
+  // Ordinary clicks pass through the final-action classifier and are contained at runtime.
   assert.equal(isFinalSubmitAction({ type: 'click', selector: '#onetrust-accept-btn-handler' }), false);
   assert.equal(isFinalSubmitAction({ type: 'click', selector: 'a:has-text("Apply for this job")' }), false);
   assert.equal(isFinalSubmitAction({ type: 'fill', selector: 'button[type="submit"]' }), false);
@@ -4182,7 +4264,9 @@ test('one provider deadline governs launch, continuation, and every physical sub
   assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
   assert.match(
     SANDBOX_RUNNER,
-    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+    // An exact-mutation transport authorization may sit inside the same critical section between
+    // the window check and the network watch. The ordering is what this pins, not adjacency.
+    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n(?:\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n)?\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
   );
   assert.match(
     SANDBOX_RUNNER,

@@ -142,7 +142,6 @@ if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
 const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
 const READ_ONLY_ACTIONS = new Set(['waitForSelector', 'extract', 'requireCapability']);
-const RAW_FINAL_CLICK_SELECTOR = /\[\s*type\s*[~^$*|]?=\s*["']?submit/i;
 const MAX_ACTIONS = 120;
 const MAX_VALUE_LENGTH = 10_000;
 const MAX_FILE_BASE64_LENGTH = 6_000_000;
@@ -542,11 +541,17 @@ let terminalFailureInput = null;
   const retainedAtomicV4Run = (input.actions || []).some((action) => (
     action.type === 'confirmAndSubmit' && action.chooserPolicy?.version === 4
   ));
+  const exactMutationAuthority = input.exactMutationAuthority === true
+    && Boolean(input.submissionAttempt);
+  const managedMutationContainmentRequired = exactMutationAuthority && !retainedAtomicV4Run;
   const v4ContainmentToken = retainedAtomicV4Run ? crypto.randomBytes(24).toString('hex') : null;
   let v4OutOfBandTransportAttempted = false;
   let v4PageTransportLockUnavailable = false;
   let v4PrimaryPage = null;
   let v4InitialNavigationActive = retainedAtomicV4Run;
+  let managedOutOfBandTransportAttempted = false;
+  let managedInitialNavigationActive = managedMutationContainmentRequired;
+  let managedPrimaryPage = null;
   fs.writeFileSync('stratus-runner-capabilities.json', JSON.stringify({
     protocolVersion: 4,
     capabilities: [extractAssertionsCapability, exactPageUrlCapability, atomicSubmitV4Capability]
@@ -556,7 +561,7 @@ let terminalFailureInput = null;
     ...(process.env.CHROME_EXECUTABLE_PATH ? { executablePath: process.env.CHROME_EXECUTABLE_PATH } : {}),
     args: [
       '--no-sandbox',
-      ...(retainedAtomicV4Run ? [
+      ...(retainedAtomicV4Run || managedMutationContainmentRequired ? [
         '--dns-prefetch-disable',
         '--disable-background-networking',
         '--disable-blink-features=WebRTC,WebTransport,LinkPreconnect',
@@ -568,13 +573,74 @@ let terminalFailureInput = null;
   try {
     const browserContext = await browser.newContext({
       viewport: input.viewport || { width: 1440, height: 900 },
-      ...(retainedAtomicV4Run ? {
-      // A service worker can originate a request outside Playwright routing. V4's final-submit
-      // interlock depends on every candidate transport passing through browserContext.route, so a
-      // run that can submit must not inherit or install that bypass.
+      ...(retainedAtomicV4Run || managedMutationContainmentRequired ? {
+      // A service worker can originate a request outside Playwright routing. Mutation containment
+      // depends on every candidate transport passing through browserContext.route, so an exact
+      // mutation run must not inherit or install that bypass.
       serviceWorkers: 'block'
       } : {})
     });
+    if (managedMutationContainmentRequired) {
+      await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {
+        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        await webSocketRoute.close({
+          code: 1008,
+          reason: 'Managed non-submit mutation blocks WebSocket transport'
+        });
+      });
+      var managedTransportConsoleToken = '__litosManagedTransport_'
+        + crypto.randomBytes(18).toString('hex');
+      await browserContext.addInitScript(({ consoleToken }) => {
+        const nativeConsole = console;
+        const consoleError = console.error;
+        const apply = Reflect.apply;
+        const defineProperty = Object.defineProperty;
+        const notify = (kind) => {
+          try { apply(consoleError, nativeConsole, [consoleToken + ':' + kind]); } catch {}
+        };
+        const blockedConstructor = (name) => function litosBlockedTransport() {
+          notify(name);
+          throw new TypeError('Managed non-submit mutation blocks ' + name + ' transport');
+        };
+        for (const name of ['Worker', 'SharedWorker', 'WebTransport', 'WebSocketStream']) {
+          if (!(name in globalThis)) continue;
+          try {
+            defineProperty(globalThis, name, {
+              value: blockedConstructor(name),
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+          } catch { notify('unavailable'); }
+        }
+        try {
+          defineProperty(Window.prototype, 'open', {
+            value: function litosBlockedPopup() {
+              notify('popup');
+              return null;
+            },
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+        } catch { notify('unavailable'); }
+        try {
+          if (globalThis.ServiceWorkerContainer?.prototype) {
+            defineProperty(ServiceWorkerContainer.prototype, 'register', {
+              value: function litosBlockedServiceWorker() {
+                notify('service_worker');
+                return Promise.reject(new TypeError(
+                  'Managed non-submit mutation blocks service worker registration'
+                ));
+              },
+              configurable: false,
+              enumerable: false,
+              writable: false
+            });
+          }
+        } catch { notify('unavailable'); }
+      }, { consoleToken: managedTransportConsoleToken });
+    }
     if (retainedAtomicV4Run) {
       // HTTP routing cannot see WebSocket frames. A socket opened by employer code could otherwise
       // carry applicant data during a fill or final-click handler without crossing either v4
@@ -1381,6 +1447,24 @@ let terminalFailureInput = null;
       });
     }
     const page = await browserContext.newPage();
+    managedPrimaryPage = page;
+    if (managedMutationContainmentRequired) {
+      // Context-scoped, never page-scoped. A page listener would miss a blocked transport that a
+      // popup raises before browserContext.on('page') can close it, which is the same escape the
+      // v4 guard binds at context level.
+      browserContext.on('console', (message) => {
+        const text = message.text();
+        if (text.startsWith(managedTransportConsoleToken + ':')
+          && !(managedInitialNavigationActive && message.page() === managedPrimaryPage)) {
+          managedOutOfBandTransportAttempted = true;
+        }
+      });
+      browserContext.on('page', (candidate) => {
+        if (candidate === managedPrimaryPage) return;
+        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        void candidate.close().catch(() => undefined);
+      });
+    }
     v4PrimaryPage = page;
     let v4UtilityContext = null;
     let v4DocumentGeneration = 0;
@@ -1407,6 +1491,55 @@ let terminalFailureInput = null;
           : null;
       }, { method, args: v4UtilityValue(args) });
     };
+    let managedMutationTransportContainment = null;
+    if (managedMutationContainmentRequired) {
+      const transportTypes = new Set([
+        'fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker'
+      ]);
+      const containment = {
+        mode: 'initial_navigation',
+        allowedNavigationUrl: null,
+        blockedAttemptCount: 0,
+        blockedReason: null,
+        handler: null
+      };
+      const block = async (route, reason) => {
+        if (containment.mode !== 'initial_navigation') {
+          containment.blockedAttemptCount += 1;
+          containment.blockedReason = reason;
+        }
+        return route.abort('blockedbyclient');
+      };
+      containment.handler = async (route) => {
+        const request = route.request();
+        const method = request.method().toUpperCase();
+        const readOnlyMethod = method === 'GET' || method === 'HEAD';
+        const navigation = request.isNavigationRequest();
+        const mainFrameNavigation = navigation && request.frame() === page.mainFrame();
+        if (containment.mode === 'activation') return route.fallback();
+        if (containment.mode === 'initial_navigation') {
+          return readOnlyMethod
+            ? route.fallback()
+            : block(route, 'write-shaped transport during initial navigation');
+        }
+        if (mainFrameNavigation && readOnlyMethod && containment.allowedNavigationUrl) {
+          let target = null;
+          try { target = canonicalPageUrl(request.url()); } catch {}
+          if (target === containment.allowedNavigationUrl) {
+            containment.allowedNavigationUrl = null;
+            return route.fallback();
+          }
+        }
+        if (transportTypes.has(request.resourceType())) {
+          return block(route, request.resourceType() + ' transport');
+        }
+        if (navigation) return block(route, 'navigation transport');
+        if (!readOnlyMethod) return block(route, method + ' transport');
+        return route.fallback();
+      };
+      await browserContext.route('**/*', containment.handler);
+      managedMutationTransportContainment = containment;
+    }
     let v4PreSubmitTransportContainment = null;
     let v4InitialNavigationBoundary = canonicalPageUrl(input.url);
     if (retainedAtomicV4Run) {
@@ -3403,6 +3536,11 @@ let terminalFailureInput = null;
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     assertProviderActionWindow();
     const navigationResponse = await page.goto(input.url, { waitUntil, timeout: 45000 });
+    if (managedMutationTransportContainment) {
+      managedMutationTransportContainment.mode = 'locked';
+      managedMutationTransportContainment.allowedNavigationUrl = null;
+      managedInitialNavigationActive = false;
+    }
     if (retainedAtomicV4Run) {
       /* Playwright's route handler currently sees the initial request but not an HTTP redirect
        * target after route.fallback(). Validate the browser's own immutable redirectedFrom chain
@@ -3583,6 +3721,95 @@ let terminalFailureInput = null;
           record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: null, failure: String(failure && failure.errorText || 'failed').slice(0, 120) });
         } catch (error) { /* a witness must never break the run */ }
       });
+    };
+    const managedTransportViolation = (message) => Object.assign(
+      new Error(message),
+      { code: 'UNAUTHORIZED_EMPLOYER_MUTATION' }
+    );
+    const hasExactFinalActionAuthority = (runInput, action) => Boolean(
+      managedMutationTransportContainment
+      && runInput?.allowSubmit === true
+      && runInput?.exactFinalActionAuthority === true
+      && (
+        action?.type === 'confirmAndSubmit'
+        || (action?.type === 'click' && action.label === 'final_submit')
+        || (action?.type === 'press' && action.label === 'final_submit'
+          && /^enter$/i.test(String(action.value || '')))
+      )
+    );
+    const assertManagedMutationTransportClean = () => {
+      if (!managedMutationTransportContainment) return;
+      if (managedMutationTransportContainment.blockedAttemptCount > 0
+        || managedOutOfBandTransportAttempted) {
+        throw managedTransportViolation(
+          'A non-submit action attempted employer transport without exact final authority'
+        );
+      }
+    };
+    const authorizeManagedFinalTransport = (runInput, action) => {
+      if (!managedMutationTransportContainment) return;
+      assertManagedMutationTransportClean();
+      if (!hasExactFinalActionAuthority(runInput, action)) {
+        throw managedTransportViolation(
+          'A final employer action requires literal allowSubmit and exact final authority'
+        );
+      }
+      managedMutationTransportContainment.allowedNavigationUrl = null;
+      managedMutationTransportContainment.mode = 'activation';
+    };
+    const prepareManagedReadOnlyClick = async (runInput, action, matches) => {
+      if (!managedMutationTransportContainment) return;
+      assertManagedMutationTransportClean();
+      const count = await matches.count();
+      if (count !== 1) {
+        throw managedTransportViolation(
+          'A generic click requires exactly one runtime-resolved target, found ' + count
+        );
+      }
+      const target = await matches.first().evaluate((element) => {
+        const nativeControl = element.closest('button, input');
+        const tag = nativeControl?.tagName?.toLowerCase() || '';
+        const type = String(nativeControl?.getAttribute?.('type') || '').toLowerCase();
+        const nativeSubmitter = Boolean(nativeControl?.form && (
+          (tag === 'button' && (!type || type === 'submit'))
+          || (tag === 'input' && (type === 'submit' || type === 'image'))
+        ));
+        const anchor = element.closest('a[href], area[href]');
+        return {
+          nativeSubmitter,
+          href: anchor?.href || null,
+          target: String(anchor?.getAttribute?.('target') || '').toLowerCase(),
+          download: Boolean(anchor?.hasAttribute?.('download'))
+        };
+      });
+      if (target.nativeSubmitter && !hasExactFinalActionAuthority(runInput, action)) {
+        throw managedTransportViolation(
+          'A native submit control requires literal allowSubmit and exact final authority'
+        );
+      }
+      if (target.href) {
+        let destination;
+        let current;
+        try {
+          destination = new URL(target.href);
+          current = new URL(page.url());
+        } catch {
+          throw managedTransportViolation('A generic click resolved to an invalid navigation target');
+        }
+        if (!['http:', 'https:'].includes(destination.protocol)
+          || destination.origin !== current.origin
+          || (target.target && target.target !== '_self')
+          || target.download) {
+          throw managedTransportViolation(
+            'A generic click may navigate only to one exact same-origin read-only target'
+          );
+        }
+        managedMutationTransportContainment.allowedNavigationUrl = canonicalPageUrl(
+          destination.href
+        );
+      } else {
+        managedMutationTransportContainment.allowedNavigationUrl = null;
+      }
     };
     /* V4'S LAST MUTATION BOUNDARY IS THE REQUEST, NOT THE ELEMENT HANDLE.
      *
@@ -13254,6 +13481,7 @@ let terminalFailureInput = null;
         }
         if (!blocked) {
           assertProviderActionWindow(providerMinimumSubmitWindowMs);
+          if (chooserVersion !== 4) authorizeManagedFinalTransport(currentInput, action);
           armSubmitNetworkWatch();
           recordCrashProgress({
             phase,
@@ -13334,14 +13562,10 @@ let terminalFailureInput = null;
       for (const handle of requiredOpenerHandles) await handle?.dispose().catch(() => undefined);
       return passResult;
     };
-    // A click is the final submit when the caller says so, or when it targets a submit control.
-    // Both, rather than either, because the label is the caller's declared intent and the selector
-    // is what actually gets pressed, and a gate that can be walked around by omitting a label is
-    // not a gate.
-    const isFinalSubmitAction = (action) => action.type === 'click' && (
-      action.label === 'final_submit'
-      || /\[\s*type\s*[~^$*|]?=\s*["']?submit/i.test(action.selector || '')
-    );
+    // Finality is explicit action authority, never punctuation in a selector. Runtime target
+    // inspection separately rejects an unlabeled click that resolves to a native submitter.
+    const isFinalSubmitAction = (action) => action.type === 'click'
+      && action.label === 'final_submit';
     // R-100. The optional pre-check is 'await locator.count() === 0', an instantaneous DOM snapshot
     // with no auto-wait, and it used to apply to waitForSelector too. That cancelled the one action
     // whose entire job is to wait, by answering "not there" before its timeout ever started. Two
@@ -13521,6 +13745,7 @@ let terminalFailureInput = null;
     let submitDecisionTerminal = false;
     for (const action of currentInput.actions || []) {
      assertProviderActionWindow();
+     assertManagedMutationTransportClean();
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
@@ -14741,11 +14966,13 @@ let terminalFailureInput = null;
         continue;
       }
       if (action.type === 'click') {
+        await prepareManagedReadOnlyClick(currentInput, action, matches);
         // Armed BEFORE the click for the same reason finalSubmitPressed is set before the wait: the
         // response worth recording is the one the click itself causes, and a watch attached after
         // the click races the request it exists to see.
         if (isFinalSubmitAction(action)) {
           assertProviderActionWindow(providerMinimumSubmitWindowMs);
+          authorizeManagedFinalTransport(currentInput, action);
           armSubmitNetworkWatch();
           recordCrashProgress({
             phase,
@@ -14754,7 +14981,14 @@ let terminalFailureInput = null;
             policyVersion: null
           });
         }
-        await locator.click();
+        try {
+          await locator.click();
+        } finally {
+          if (managedMutationTransportContainment
+            && managedMutationTransportContainment.mode !== 'activation') {
+            managedMutationTransportContainment.allowedNavigationUrl = null;
+          }
+        }
         // RECORDED BEFORE THE WAIT, not after. A submit click that lands and then navigates, times
         // out, or takes the sandbox down with it has still been pressed, and "was the button
         // pressed" is the one fact the applicant's next move depends on. Setting it after the wait
@@ -15844,6 +16078,9 @@ let terminalFailureInput = null;
         //     screener questions still empty. Six "is required" messages rendered, none of them
         //     cleared when those fields were filled a moment later, and the preview screenshot the
         //     applicant is asked to approve showed a correctly filled form covered in red.
+        if (hasExactFinalActionAuthority(currentInput, action)) {
+          authorizeManagedFinalTransport(currentInput, action);
+        }
         if (!locator) {
           await page.keyboard.press(action.value);
         } else if (/^enter$/i.test(String(action.value || '')) && await choiceControlIsClosed(locator)) {
@@ -15965,6 +16202,9 @@ let terminalFailureInput = null;
       // An optional action that fails is now recorded and stepped over; a required one still stops
       // the run, because the caller marked it as something the run cannot proceed without.
       const actionFailure = String(actionError?.message || actionError).split('\n')[0].slice(0, 200);
+      if (actionError?.code === 'UNAUTHORIZED_EMPLOYER_MUTATION') {
+        throw actionError;
+      }
       if (!action.optional) {
         if (!finalSubmitPressed) throw actionError;
         markPostSubmitObservationFailed();
@@ -15992,7 +16232,22 @@ let terminalFailureInput = null;
       }
       await disposeSuccessfulAddressWitness(successfulAddressWitness);
       await exactActionContext?.dispose?.();
+      if (managedMutationTransportContainment
+        && !hasExactFinalActionAuthority(currentInput, action)
+        && !['waitForSelector', 'extract', 'requireCapability'].includes(action.type)) {
+        await page.waitForTimeout(25);
+        assertManagedMutationTransportClean();
+      }
      }
+    }
+    if (managedMutationTransportContainment
+      && managedMutationTransportContainment.mode !== 'activation') {
+      await page.waitForTimeout(50);
+      assertManagedMutationTransportClean();
+    }
+    if (managedMutationTransportContainment?.mode === 'activation') {
+      managedMutationTransportContainment.mode = 'locked';
+      managedMutationTransportContainment.allowedNavigationUrl = null;
     }
     const observeForResult = async (reader, fallback) => {
       if (postSubmitObservationDisposition) return fallback;
@@ -16377,9 +16632,7 @@ function classifyRawManagedRequest(input) {
     if (READ_ONLY_ACTIONS.has(action.type)) continue;
     mutation = true;
     if (action.type === 'confirmAndSubmit'
-      || (action.type === 'click' && (
-        action.label === 'final_submit' || RAW_FINAL_CLICK_SELECTOR.test(String(action.selector || ''))
-      ))
+      || (action.type === 'click' && action.label === 'final_submit')
       || (action.type === 'press' && /^enter$/i.test(String(action.value || '')))) {
       finalAction = true;
     }
@@ -16730,6 +16983,21 @@ export async function normalizeManagedRun(input = {}, {
   if (!input || typeof input !== 'object') throw inputError('Request body must be a JSON object');
   assertSubmissionReleaseAllowed(input, releasePolicy);
   if (input.continuationToken != null) throw inputError('A continuation request must not include a URL run payload', 'INVALID_CONTINUATION');
+  /* Correlation is raw mutation authority, so it is resolved before URL validation or any provider
+   * adapter can run. A malformed or missing attempt must not be able to spend a DNS lookup, open a
+   * sandbox, or reach an employer simply because its selector did not happen to spell "submit". */
+  const requestContinuation = input.requestContinuation === true;
+  const allowSubmit = input.allowSubmit === true;
+  const actionAuthority = classifyRawManagedRequest(input);
+  const providerBoundaryCapable = actionAuthority.mutation || allowSubmit || requestContinuation;
+  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired
+  });
+  const providerDeadlineAt = normalizeProviderDeadline(input.providerDeadlineAt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired,
+    requestAcceptedAtMs,
+    compatibilityBudgetMs: MANAGED_RUN_TIMEOUT_MS
+  });
   const url = await urlValidator(input.url);
   const canonicalRunUrl = new URL(url.toString());
   canonicalRunUrl.hash = '';
@@ -16744,22 +17012,10 @@ export async function normalizeManagedRun(input = {}, {
   const viewport = input.viewport || {};
   const width = Math.min(Math.max(Number(viewport.width) || 1440, 320), 1920);
   const height = Math.min(Math.max(Number(viewport.height) || 900, 240), 1080);
-  const requestContinuation = Boolean(input.requestContinuation);
   const continuationTtlSeconds = Math.min(
     Math.max(Number(input.continuationTtlSeconds) || MANAGED_CONTINUATION_CONTRACT.defaultTtlSeconds, MANAGED_CONTINUATION_CONTRACT.minTtlSeconds),
     MANAGED_CONTINUATION_CONTRACT.maxTtlSeconds
   );
-  const allowSubmit = input.allowSubmit === true;
-  const actionAuthority = classifyRawManagedRequest(input);
-  const providerBoundaryCapable = allowSubmit || requestContinuation || actionAuthority.finalAction;
-  const submissionAttempt = normalizeSubmissionAttempt(input.submissionAttempt, {
-    required: providerBoundaryCapable && releasePolicy.correlationRequired
-  });
-  const providerDeadlineAt = normalizeProviderDeadline(input.providerDeadlineAt, {
-    required: providerBoundaryCapable && releasePolicy.correlationRequired,
-    requestAcceptedAtMs,
-    compatibilityBudgetMs: MANAGED_RUN_TIMEOUT_MS
-  });
   return {
     url: url.toString(),
     actions,
@@ -16771,6 +17027,12 @@ export async function normalizeManagedRun(input = {}, {
     // it: the one value that opens the gate is the literal true.
     allowSubmit,
     ...(submissionAttempt ? { submissionAttempt } : {}),
+    // These booleans are derived after strict raw validation and are never copied from the caller.
+    // The sandbox can therefore distinguish exact mutation authority from a spoofed input field.
+    exactMutationAuthority: Boolean(submissionAttempt && actionAuthority.mutation),
+    exactFinalActionAuthority: Boolean(
+      submissionAttempt && allowSubmit && actionAuthority.finalAction
+    ),
     providerDeadlineAt,
     fullPage: Boolean(input.fullPage),
     waitUntil: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'].includes(input.waitUntil) ? input.waitUntil : 'networkidle2',
@@ -16817,6 +17079,8 @@ export function normalizeManagedContinuation(input = {}, {
     ...(submissionAttempt ? { submissionAttempt } : {}),
     providerDeadlineAt,
     actions,
+    exactMutationAuthority: Boolean(submissionAttempt && actionMode !== 'observation'),
+    exactFinalActionAuthority: Boolean(submissionAttempt && actionMode === 'security-code'),
     screenshot: input.screenshot !== false,
     fullPage: Boolean(input.fullPage)
   };
@@ -18019,9 +18283,11 @@ if (!['stratus-submission-reservation.json', 'stratus-continuation-reservation.j
   || expected.terminalPath !== paths.terminalPath
   || expected.ackPath !== paths.ackPath
   || !/^[a-f0-9]{64}$/.test(expected.resultId || '')) process.exit(11);
-const privateArtifact = continuation
-  ? /^(?:stratus-continuation-(?:input|candidate-[a-f0-9]+|claim|used|ready|terminal-result)\.json|stratus-continuation\.json|stratus-result-1\.json|stratus-screenshot-1\.png|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/
-  : /^(?:stratus-input\.json|stratus-result-0\.json|stratus-screenshot-0\.png|stratus-terminal-result\.json|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/;
+const initialPrivateArtifact = /^(?:stratus-input\.json|stratus-result-0\.json|stratus-screenshot-0\.png|stratus-terminal-result\.json|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/;
+const continuationPrivateArtifact = /^(?:stratus-continuation-(?:input|candidate-[a-f0-9]+|claim|used|ready|terminal-result)\.json|stratus-continuation\.json|stratus-result-1\.json|stratus-screenshot-1\.png|stratus-progress\.json|stratus-error\.json)(?:\.tmp-[^/]+)?$/;
+const privateArtifact = expected.acknowledgementKind === 'retention_expired'
+  ? { test: (path) => initialPrivateArtifact.test(path) || continuationPrivateArtifact.test(path) }
+  : (continuation ? continuationPrivateArtifact : initialPrivateArtifact);
 const scrubTerminalArtifacts = () => {
   const targets = fs.readdirSync('.').filter((path) => privateArtifact.test(path));
   const failures = [];
@@ -18639,9 +18905,7 @@ async function managedTerminalState(sandbox, {
       scopePaths
     };
   }
-  if (Date.now() >= Date.parse(reservation.expiresAt)) {
-    return { kind: 'gone', expiresAt: reservation.expiresAt, continuationScope, scopePaths };
-  }
+  const reservationRetentionExpired = Date.now() >= Date.parse(reservation.expiresAt);
   if (Date.now() >= Date.parse(reservation.providerDeadlineAt)) {
     const finalized = await finalizeManagedIndeterminate(sandbox, {
       projectBinding,
@@ -18654,7 +18918,15 @@ async function managedTerminalState(sandbox, {
       lockPath: scopePaths.lockPath,
       storeBudget
     });
-    if (!finalized) return { kind: 'pending', reservation, continuationScope, scopePaths };
+    if (!finalized) {
+      if (reservationRetentionExpired) {
+        throw Object.assign(
+          new Error('Expired managed execution cleanup is still waiting for the runner lock'),
+          { status: 503, code: 'TERMINAL_RESULT_CLEANUP_PENDING' }
+        );
+      }
+      return { kind: 'pending', reservation, continuationScope, scopePaths };
+    }
     if (finalized === 'acknowledged') {
       return managedTerminalState(sandbox, {
         projectBinding,
@@ -18678,6 +18950,23 @@ async function managedTerminalState(sandbox, {
       throw terminalResultStoreCorrupt(
         'The expired managed execution terminal result is invalid'
       );
+    }
+    if (reservationRetentionExpired) {
+      const ack = await completeManagedTerminalAcknowledgement(sandbox, {
+        projectBinding,
+        submissionAttempt,
+        resultId: envelope.resultId,
+        acknowledgementKind: 'retention_expired',
+        scopePaths,
+        storeBudget
+      });
+      return {
+        kind: 'gone',
+        expiresAt: reservation.expiresAt,
+        ack,
+        continuationScope,
+        scopePaths
+      };
     }
     return { kind: 'terminal', envelope, continuationScope, scopePaths };
   }
@@ -19510,5 +19799,20 @@ export async function executeManagedRun(input, {
   // This check precedes even a custom executor so a quiesced deployment cannot create a sandbox,
   // resume a continuation, or invoke any other provider adapter through this public boundary.
   assertSubmissionReleaseAllowed(input, releasePolicy);
+  const rawAuthority = classifyRawManagedRequest(input);
+  const providerBoundaryCapable = rawAuthority.mutation
+    || rawAuthority.submitReleased
+    || rawAuthority.continuation
+    || rawAuthority.continuationRequested;
+  normalizeSubmissionAttempt(input?.submissionAttempt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired
+  });
+  normalizeProviderDeadline(input?.providerDeadlineAt, {
+    required: providerBoundaryCapable && releasePolicy.correlationRequired,
+    requestAcceptedAtMs: Date.now(),
+    compatibilityBudgetMs: rawAuthority.continuation
+      ? CONTINUATION_TIMEOUT_MS
+      : MANAGED_RUN_TIMEOUT_MS
+  });
   return sandboxExecutor(input, { urlValidator, projectBinding, releasePolicy });
 }
