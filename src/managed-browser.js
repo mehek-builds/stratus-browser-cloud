@@ -16803,7 +16803,17 @@ let terminalFailureInput = null;
           timeout: 15_000
         });
       } catch { /* screenshots are optional and cannot change terminal employer authority */ }
-      if (currentInput.submissionAttempt && fs.existsSync(activeTerminalAckPath)) {
+      /* Only a DURABLE submission's receipt image is private enough to delete after the terminal
+       * ACK. An ephemeral scan attempt has carried a submissionAttempt on every prepare fill since
+       * the correlation-required rollout, so this condition started deleting the PREPARE's preview
+       * the moment the host ACKed the terminal result - and the host reads the preview AFTER the
+       * ACK. Measured live 2026-09-01 on a Breezy prepare: two complete seven-question fills, the
+       * screenshot captured and unlinked in the same breath, and litos-api failed the run with
+       * "Stratus managed browser did not return a preview screenshot" every time. The scan
+       * attempt's preview IS the product surface ("what the form looked like after we filled it
+       * in"); only the durable path keeps its deletion hygiene. */
+      if (currentInput.submissionAttempt && hasDurableSubmissionAuthority
+        && fs.existsSync(activeTerminalAckPath)) {
         try { fs.unlinkSync(screenshotPath); } catch {}
       }
     }
