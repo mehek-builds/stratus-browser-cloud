@@ -1626,6 +1626,21 @@ let terminalFailureInput = null;
        * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
        * this suffix with the application page. On multi-label public suffixes (co.uk) this
        * over-matches toward FATAL, never away from it. */
+      /* THE NEXT DEFINITIONS ARE MODULE SOURCE INJECTED BY INTERPOLATION, the same way
+       * RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE ships a module function into this string. This
+       * runner is one String.raw template evaluated in the sandbox, so a bare module identifier
+       * here is a ReferenceError at run time. That is exactly what shipped in production
+       * 2026-09-01: "transportRegistrableSuffix is not defined" on every managed run, from a plain
+       * assignment that parsed, passed node -c, and matched every source-contract regex. Inside
+       * this template, interpolate the source; never reference the module by name. */
+      const GRAPHQL_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION)};
+      const isGraphqlReadDocument = ${isGraphqlReadDocument.toString()};
+      const ASHBY_PUBLIC_BOARD_SITE = ${JSON.stringify(ASHBY_PUBLIC_BOARD_SITE)};
+      const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = ${JSON.stringify(ASHBY_PUBLIC_BOARD_GRAPHQL_PATH)};
+      const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
+      const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
+      const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
+      const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
