@@ -323,13 +323,14 @@ export const MANAGED_PROVISIONING_LEASE_MS = 60_000;
 const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
 const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
 const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
-/* How long the host is willing to WAIT for the preview screenshot to appear. The runner publishes
- * the terminal result FIRST (the authority moment must not wait on pixels) and captures the
- * screenshot afterward, with a capture budget of its own, so the host's read races the write.
- * readManagedTerminalArtifact returns null immediately on a file that does not exist yet, and
- * before this wait existed that race was lost on every prepare of a long board page: two complete
- * seven-question Breezy fills on 2026-09-01 each ended with litos-api failing the run on "did not
- * return a preview screenshot" while the capture was still rendering. */
+/* How long a screenshotWait caller is willing to wait for the preview artifact to APPEAR. The
+ * runner publishes the terminal result first (the authority moment must not wait on pixels) and
+ * captures afterward with its own budget, so the host's read races the write and, before this
+ * wait existed, lost that race on every prepare of a long board page (measured live 2026-09-01:
+ * two complete seven-question Breezy fills, both failed by litos-api on "did not return a preview
+ * screenshot" while the capture was still rendering). Waiting is for CLEAN ABSENCE only: a read
+ * that stalls or fails resolves null immediately, and a result that claims a pressed submission
+ * never waits at all. */
 const SCREENSHOT_ARTIFACT_WAIT_MS = 20_000;
 const SCREENSHOT_ARTIFACT_POLL_MS = 500;
 export const MANAGED_TERMINAL_ACK_REQUEST_TIMEOUT_MS = 50_000;
@@ -17329,6 +17330,12 @@ export async function normalizeManagedRun(input = {}, {
     url: url.toString(),
     actions,
     screenshot: input.screenshot !== false,
+    /* Opt-in from the caller that NEEDS the preview artifact and is willing to wait for its
+     * writer: litos-api's prepare path hard-fails a run whose screenshot is missing, and the
+     * runner captures AFTER publishing the terminal result, so an immediate read races the
+     * capture. Only the literal true opens the wait; every other caller keeps the immediate
+     * single-read semantics the stalled-screenshot contract pins. */
+    screenshotWait: input.screenshotWait === true,
     // DEFAULT DENY, and the default is the entire safety property. Every existing caller becomes a
     // run that cannot submit, which is what they all already believed they were, and only a caller
     // that says the word gets the ability to send a real application to a real employer. Written as
@@ -17391,6 +17398,7 @@ export function normalizeManagedContinuation(input = {}, {
     exactMutationAuthority: Boolean(submissionAttempt && actionMode !== 'observation'),
     exactFinalActionAuthority: Boolean(submissionAttempt && actionMode === 'security-code'),
     screenshot: input.screenshot !== false,
+    screenshotWait: input.screenshotWait === true,
     fullPage: Boolean(input.fullPage)
   };
 }
@@ -18763,22 +18771,33 @@ async function readOptionalSandboxArtifact(
   }
 }
 
-/* See SCREENSHOT_ARTIFACT_WAIT_MS: the runner captures the screenshot AFTER publishing its result,
- * so every result-then-screenshot read path must be willing to wait for the file to appear rather
- * than losing the race on a single immediate read. */
+/* See SCREENSHOT_ARTIFACT_WAIT_MS. Retries only clean absence; anything else resolves at once. */
 async function waitForSandboxScreenshot(
   sandbox,
   path,
   providerDeadlineAt,
-  maximumMs = OPTIONAL_ARTIFACT_TIMEOUT_MS
+  maximumMs = OPTIONAL_ARTIFACT_TIMEOUT_MS,
+  waitMs = 0
 ) {
-  const deadline = Date.now() + SCREENSHOT_ARTIFACT_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   for (;;) {
-    const screenshot = await readOptionalSandboxArtifact(sandbox, path, providerDeadlineAt, maximumMs);
-    if (screenshot || Date.now() >= deadline) return screenshot;
+    let buffer = null;
+    try {
+      buffer = await sandbox.readFileToBuffer(
+        { path },
+        providerReadOptions(providerDeadlineAt, maximumMs)
+      );
+    } catch (error) {
+      if (!sandboxNotFound(error)) return null;
+    }
+    if (buffer || Date.now() >= deadline) return buffer;
     await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_ARTIFACT_POLL_MS));
   }
 }
+
+const screenshotWaitMsForResult = (screenshotWait, result) => (
+  screenshotWait === true && !result?.submitOutcome?.pressed ? SCREENSHOT_ARTIFACT_WAIT_MS : 0
+);
 
 function managedTerminalRequestBudget({
   requestAcceptedAtMs = Date.now(),
@@ -19301,6 +19320,7 @@ async function managedTerminalState(sandbox, {
 
 async function resultFromManagedTerminalState(state, sandbox, {
   screenshot = false,
+  screenshotWait = false,
   optionalArtifactTimeoutMs = OPTIONAL_ARTIFACT_TIMEOUT_MS,
   storeBudget = null
 } = {}) {
@@ -19336,18 +19356,20 @@ async function resultFromManagedTerminalState(state, sandbox, {
   if (state.kind !== 'terminal' && state.kind !== 'checkpoint') return null;
   const result = resultWithTerminalReference(state.envelope);
   if (screenshot) {
-    // See SCREENSHOT_ARTIFACT_WAIT_MS: the capture is written after the terminal result, so a
-    // single immediate read loses the race on any page whose capture outlives the result write.
-    const screenshotDeadline = Date.now() + SCREENSHOT_ARTIFACT_WAIT_MS;
+    /* See SCREENSHOT_ARTIFACT_WAIT_MS: the capture is written after the terminal result. Only a
+     * screenshotWait caller with an unpressed result waits, and only through clean absence; a read
+     * that throws resolves null at once. */
+    const screenshotDeadline = Date.now() + screenshotWaitMsForResult(screenshotWait, result);
     let screenshotBuffer = null;
     for (;;) {
+      let readFailed = false;
       screenshotBuffer = await readManagedTerminalArtifact(
         sandbox,
         `stratus-screenshot-${state.envelope.phase}.png`,
         optionalArtifactTimeoutMs,
         storeBudget
-      ).catch(() => null);
-      if (screenshotBuffer || Date.now() >= screenshotDeadline) break;
+      ).catch(() => { readFailed = true; return null; });
+      if (screenshotBuffer || readFailed || Date.now() >= screenshotDeadline) break;
       await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_ARTIFACT_POLL_MS));
     }
     result.screenshot = screenshotBuffer?.toString('base64') || null;
@@ -19621,6 +19643,7 @@ export async function executeSandboxRun(input, {
           terminalObserved = true;
           return await resultFromManagedTerminalState(existingState, sandbox, {
             screenshot: continuation.screenshot,
+            screenshotWait: continuation.screenshotWait,
             optionalArtifactTimeoutMs
           });
         }
@@ -19777,6 +19800,7 @@ export async function executeSandboxRun(input, {
         });
         const result = await resultFromManagedTerminalState(state, sandbox, {
           screenshot: continuation.screenshot,
+          screenshotWait: continuation.screenshotWait,
           optionalArtifactTimeoutMs
         });
         if (!result) {
@@ -19807,7 +19831,8 @@ export async function executeSandboxRun(input, {
           sandbox,
           'stratus-screenshot-1.png',
           continuation.providerDeadlineAt,
-          optionalArtifactTimeoutMs
+          optionalArtifactTimeoutMs,
+          screenshotWaitMsForResult(continuation.screenshotWait, result)
         );
         result.screenshot = screenshot?.toString('base64') || null;
       }
@@ -20046,6 +20071,7 @@ export async function executeSandboxRun(input, {
       });
       result = await resultFromManagedTerminalState(state, sandbox, {
         screenshot: context.screenshot,
+        screenshotWait: context.screenshotWait,
         optionalArtifactTimeoutMs
       });
       if (!result) {
@@ -20100,7 +20126,8 @@ export async function executeSandboxRun(input, {
           sandbox,
           'stratus-screenshot-0.png',
           context.providerDeadlineAt,
-          optionalArtifactTimeoutMs
+          optionalArtifactTimeoutMs,
+          screenshotWaitMsForResult(context.screenshotWait, result)
         );
         result.screenshot = screenshot?.toString('base64') || null;
       }
