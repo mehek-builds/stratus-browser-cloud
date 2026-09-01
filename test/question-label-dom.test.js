@@ -1238,16 +1238,16 @@ test('an unnamed choice group still reads its block, and same-name peers in anot
       <label><input type="radio" name="remote" value="n">No indeed</label>
       <label><input type="radio" name="remote" value="m">Maybe</label>
     </fieldset></form>
-    <div class="field"><span>Languages</span>
-      <label><input type="checkbox">English</label>
-      <label><input type="checkbox">Spanish</label>
-    </div>
+    <fieldset><legend>Shift</legend>
+      <label><input type="radio">Day</label>
+      <label><input type="radio">Night</label>
+    </fieldset>
   `;
   const first = await optionInventoryFor(twoForms, '#a input');
   assert.deepEqual(first.values, ['Yes', 'No']);
   const second = await optionInventoryFor(twoForms, '#b input');
   assert.deepEqual(second.values, ['Yes indeed', 'No indeed', 'Maybe']);
-  // No name at all: the block is still the scope, exactly as before.
-  const languages = await optionInventoryFor(twoForms, 'input[type="checkbox"]');
-  assert.deepEqual(languages.values, ['English', 'Spanish']);
+  // No name at all: the block (here the fieldset) is still the scope, exactly as before.
+  const shift = await optionInventoryFor(twoForms, 'fieldset:last-of-type input');
+  assert.deepEqual(shift.values, ['Day', 'Night']);
 });
