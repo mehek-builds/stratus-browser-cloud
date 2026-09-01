@@ -14021,7 +14021,9 @@ let terminalFailureInput = null;
     successfulAddressIntegrityFailure = false;
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
-    for (const [actionIndex, action] of (currentInput.actions || []).entries()) {
+    let actionIndex = -1;
+    for (const action of currentInput.actions || []) {
+     actionIndex += 1;
      assertProviderActionWindow();
      /* WHICH ACTION THE RUN IS ON, persisted before the action runs, so a run that dies mid-action
       * (the provider deadline closing the browser, a host timeout, a crash) leaves behind the
