@@ -19504,7 +19504,21 @@ export async function executeSandboxRun(input, {
   }
 
   const context = await normalizeManagedRun(input, { urlValidator, releasePolicy, requestAcceptedAtMs });
-  const correlated = Boolean(context.submissionAttempt);
+  /* DURABLE SUBMISSION AUTHORITY IS NARROWER THAN CORRELATION, and conflating the two was the second
+   * half of the 2026-09-01 onboarding outage. correlationRequired demands a submissionAttempt for any
+   * mutation, so an option-probe pre-scan (click a listbox open, read it, Escape) now carries one for
+   * traceability and containment. That attempt must NOT, on its own, drag a read into the durable
+   * submission machinery: a persistent sandbox named after the attempt, a 30-day snapshot retention,
+   * a reservation, and a minted terminal result that means "an employer received an application".
+   * Only a run that can actually reach a durable employer outcome takes that path, and the two things
+   * that can are an explicit submit release and a continuation. A final employer action already
+   * requires allowSubmit (assertSubmissionReleaseAllowed), so a correlated run that is neither
+   * allowSubmit nor a continuation can never submit; it runs ephemerally, echoes its attempt, and
+   * mints no terminal result. exactMutationAuthority (transport containment) is unchanged and still
+   * fires for the probe clicks, so nothing reaches an employer because a selector did not spell
+   * submit. This STRENGTHENS the invariant: terminal results now exist only where a submission can. */
+  const correlated = Boolean(context.submissionAttempt)
+    && (context.allowSubmit === true || context.requestContinuation === true);
   const requestDigest = correlated ? managedSubmissionRequestDigest(context) : null;
   const sandboxName = correlated
     ? managedTerminalResultSandboxName(projectBinding, context.submissionAttempt)

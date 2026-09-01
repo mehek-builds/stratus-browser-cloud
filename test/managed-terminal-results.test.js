@@ -445,6 +445,57 @@ test('a lost response is retrieved and the same execution never dispatches twice
   assert.deepEqual(fake.calls, { forks: 1, runnerStarts: 1, acknowledgements: 0 });
 });
 
+test('a correlated mutating read scan runs ephemerally and mints no durable submission', async () => {
+  // The onboarding-outage fix: an option-probe pre-scan (click a listbox open, read it, Escape)
+  // classifies as a mutation, so correlationRequired makes it carry a submissionAttempt. That attempt
+  // is for traceability and transport containment, NOT a submission. It must therefore run through the
+  // ephemeral path: no persistent sandbox named after the attempt, no reservation, no minted terminal
+  // result. It still echoes its attempt so the caller can bind the result to the exact call it made.
+  const fake = fakeSandboxApi();
+  const options = {
+    sandboxApi: fake.api,
+    projectBinding: PROJECT_BINDING,
+    urlValidator: async (value) => new URL(value),
+  };
+  const readScan = request({
+    allowSubmit: false,
+    actions: [
+      { type: 'click', selector: '#combobox', label: 'option_probe_open:combobox:1', optional: true },
+      { type: 'extract', selector: '#listbox', label: 'options:combobox', optional: true },
+      { type: 'press', selector: '#combobox', value: 'Escape', label: 'option_probe_close:combobox:1', optional: true },
+    ],
+  });
+
+  const result = await executeSandboxRun(readScan, options);
+
+  // The scan returned, echoing its correlation, without a durable terminal result.
+  assert.deepEqual(result.submissionAttempt, ATTEMPT);
+  assert.equal(result.terminalResult, undefined);
+  // One ephemeral sandbox, stopped, never persisted under the attempt's terminal-result name.
+  assert.deepEqual(fake.calls, { forks: 1, runnerStarts: 1, acknowledgements: 0 });
+  assert.equal(fake.sandboxes.has(managedTerminalResultSandboxName(PROJECT_BINDING, ATTEMPT)), false,
+    'a read scan must not create a persistent sandbox named after its attempt');
+  // Nothing durable was minted, so a later terminal lookup for the same attempt finds no submission.
+  await assert.rejects(
+    retrieveManagedTerminalResult(
+      { submissionAttempt: ATTEMPT },
+      { sandboxApi: fake.api, projectBinding: PROJECT_BINDING },
+    ),
+    (error) => error.code === 'SUBMISSION_EXECUTION_NOT_FOUND' && error.status === 404,
+  );
+
+  // Contrast: the SAME attempt with an explicit submit release still takes the durable path and mints
+  // a terminal result. The invariant is intact: durable receipts exist only where a submission can.
+  const submitFake = fakeSandboxApi();
+  const submitted = await executeSandboxRun(request(), {
+    sandboxApi: submitFake.api,
+    projectBinding: PROJECT_BINDING,
+    urlValidator: async (value) => new URL(value),
+  });
+  assert.match(submitted.terminalResult.resultId, /^[a-f0-9]{64}$/);
+  assert.equal(submitFake.sandboxes.has(managedTerminalResultSandboxName(PROJECT_BINDING, ATTEMPT)), true);
+});
+
 test('ACK and GET preserve the phase-0 runner until its exact continuation completes', async () => {
   const fake = fakeSandboxApi();
   const initialDigest = '1'.repeat(64);
