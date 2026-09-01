@@ -102,5 +102,9 @@ test('the watch is armed at both press sites and travels in submitOutcome', () =
   const legacyClick = SANDBOX_RUNNER.indexOf('await locator.click();', armSites[1]);
   assert.ok(legacyClick > armSites[1],
     'the legacy watch is armed before the final locator is clicked');
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(await observeForResult\([\s\S]*?readSubmitOutcome\(\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  // submitOutcome now polls settleSubmitOutcome (which reads readSubmitOutcome until it settles)
+  // rather than reading once; the network watch still travels alongside it in the same object.
+  assert.match(SANDBOX_RUNNER, /\.\.\.\(await settleSubmitOutcome\(\)\),[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  assert.match(SANDBOX_RUNNER, /const settleSubmitOutcome = async \(\) => \{[\s\S]*?await readSubmitOutcome\(\)/,
+    'settleSubmitOutcome still reads the outcome, now polled until it settles');
 });
