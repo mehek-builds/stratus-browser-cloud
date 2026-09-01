@@ -101,6 +101,10 @@ test('a collector path on the employer host is spared, by exact last segment onl
   assert.equal(isEmployerTelemetryPath('https://jobs.example.com/js/pageview.gif'), true);
   assert.equal(isEmployerTelemetryPath('https://jobs.example.com/api/v2/analytics'), true);
   assert.equal(isEmployerTelemetryPath('https://jobs.example.com/rum'), true);
+  // Cloudflare's reserved prefix, measured on the live Apollo Research (Lever) fill.
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/cdn-cgi/challenge-platform/h/b/jsd/oneshot/e694063b5082/0.12:1788300912:abc/a347f0385e2eed35'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/cdn-cgi/rum'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/apollo/cdn-cgi/anything'), false, 'the prefix, never a substring');
 });
 
 test('THE REAL SUBMIT PATH IS NEVER A COLLECTOR PATH', () => {

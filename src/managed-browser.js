@@ -122,10 +122,18 @@ export const EMPLOYER_TELEMETRY_PATH_SEGMENTS = Object.freeze([
   'pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics', 'collect', 'ping'
 ]);
 
+/* Cloudflare's reserved prefix on every site it fronts: challenge-platform (the JavaScript
+ * detection beacon), rum, beacon, trace. Measured 2026-09-01 on the live Apollo Research fill:
+ * "POST https://jobs.lever.co/cdn-cgi/challenge-platform/h/b/jsd/oneshot/..." killed the run before
+ * a field was touched. No application submit lives under /cdn-cgi/; Cloudflare owns the prefix. */
+export const CLOUDFLARE_RESERVED_PATH_PREFIX = '/cdn-cgi/';
+
 export const isEmployerTelemetryPath = (url) => {
   let pathname = '';
   try { pathname = new URL(String(url)).pathname; } catch { return false; }
-  const segments = pathname.toLowerCase().split('/').filter(Boolean);
+  const lower = pathname.toLowerCase();
+  if (lower.startsWith(CLOUDFLARE_RESERVED_PATH_PREFIX)) return true;
+  const segments = lower.split('/').filter(Boolean);
   if (segments.length === 0) return false;
   const last = segments[segments.length - 1].replace(/\.[a-z0-9]{1,5}$/, '');
   return EMPLOYER_TELEMETRY_PATH_SEGMENTS.includes(last);
@@ -1725,6 +1733,7 @@ let terminalFailureInput = null;
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
       const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
+      const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
       const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
