@@ -16321,6 +16321,51 @@ let terminalFailureInput = null;
         return fallback;
       }
     };
+    /* KEEP WATCHING THE PAGE FOR THE CONFIRMATION, don't read it once and give up.
+     *
+     * The employer's confirmation is asynchronous: on a React ATS (Ashby, and every SPA board) the
+     * "thank you / submission received" state - and the ATS's own confirmed hook - render a beat
+     * AFTER the submit press, not on the first tick. observeForResult reads once, immediately, so it
+     * returned 'unknown' on those portals and the packet landed unverified over a submission that had
+     * actually gone through ("could not verify the employer confirmation"). So poll readSubmitOutcome
+     * until it reports a SETTLED state (confirmed or rejected), then take that reading; fall back to
+     * the last 'unknown' only after the window closes.
+     *
+     * This cannot manufacture a confirmation: readSubmitOutcome's confirmed arm already requires the
+     * form to be gone plus a specific confirmed hook or phrase, and its rejected arm its own
+     * container - polling only gives that evidence time to appear. Bounded by its own window AND the
+     * provider action deadline, so it never runs the container past its budget. */
+    const POST_SUBMIT_OUTCOME_POLL_MS = 250;
+    // Same window the confirmAndSubmit v4 settle uses (input override, then the suite-wide env, then
+    // 30s in a sandbox run), clamped to 30s. When the v4 settle already ran, the state is settled and
+    // the first read returns at once; the window only bites on a submit path that did not settle.
+    const outcomeSettleWindowMs = (() => {
+      const clamp = (value) => Math.min(value, 30_000);
+      const requested = Number(input && input.postSubmitSettleMs);
+      if (Number.isFinite(requested) && requested > 0) return clamp(requested);
+      const fromEnv = Number(typeof process !== 'undefined' && process.env && process.env.LITOS_POST_SUBMIT_SETTLE_MS);
+      if (Number.isFinite(fromEnv) && fromEnv > 0) return clamp(fromEnv);
+      return 30_000;
+    })();
+    const settleSubmitOutcome = async () => {
+      const fallback = { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null };
+      if (postSubmitObservationDisposition) return fallback;
+      let deadline = Date.now() + outcomeSettleWindowMs;
+      if (providerActionDeadlineMs > 0) deadline = Math.min(deadline, providerActionDeadlineMs);
+      let last = fallback;
+      for (;;) {
+        try {
+          last = await readSubmitOutcome();
+        } catch (error) {
+          if (!finalSubmitPressed && !postSubmitObservationDisposition) throw error;
+          markPostSubmitObservationFailed();
+          return last;
+        }
+        if (last && (last.state === 'confirmed' || last.state === 'rejected')) return last;
+        if (Date.now() + POST_SUBMIT_OUTCOME_POLL_MS >= deadline) return last;
+        await page.waitForTimeout(POST_SUBMIT_OUTCOME_POLL_MS);
+      }
+    };
     // The gate's findings lead, because "we did not send this" is the first thing the caller needs
     // to know and the reason has to travel with it.
     const blockers = [...submitGateBlockers];
@@ -16373,10 +16418,8 @@ let terminalFailureInput = null;
     const submitOutcome = finalSubmitPressed
       ? {
           pressed: true,
-          ...(await observeForResult(
-            () => readSubmitOutcome(),
-            { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }
-          )),
+          // Poll for the async confirmation to render rather than reading once. See settleSubmitOutcome.
+          ...(await settleSubmitOutcome()),
           ...(submitNetwork ? { network: submitNetwork } : {}),
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
