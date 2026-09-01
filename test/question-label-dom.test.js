@@ -1172,3 +1172,82 @@ test('a placeholder control sharing its question block with another control keep
   assert.match(label, /^type your response cards\[/);
   assert.doesNotMatch(label, /high school/, 'an ambiguous heading must never be borrowed');
 });
+
+/* Transcribed from https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager/apply
+ * on 2026-09-01 (the Angular placeholders rendered as the live text). Each EEOC radio sits in its own
+ * bare <li> under a <ul> with no fieldset, class or role; the three share one name. blockOf falls
+ * back to the option's own <li>, and the inventory read ONE option, so the fill had nothing to press
+ * for "No" and the dashboard showed a required single-option question whose only option was the
+ * wrong answer. The gender group on the same page, whose <li class="option"> rows share a parent
+ * div, read all three. */
+const BREEZY_EEOC = `
+  <form>
+    <h3>Voluntary Self-Identification of Gender and Race/Ethnicity</h3>
+    <ul><li><span>Gender</span>
+      <div><ul>
+        <li class="option"><input id="gender_male" type="radio" name="gender" value="male"><label for="gender_male"><span>Male</span></label></li>
+        <li class="option"><input id="gender_female" type="radio" name="gender" value="female"><label for="gender_female"><span>Female</span></label></li>
+        <li class="option"><input id="gender_no" type="radio" name="gender" value="unspecified"><label for="gender_no"><span>I don't wish to answer</span></label></li>
+      </ul></div>
+    </li></ul>
+    <hr>
+    <h3>Voluntary Self-Identification of Veteran Status</h3>
+    <p>This employer is a Government contractor subject to the Vietnam Era Veterans' Readjustment Assistance Act.</p>
+    <p>Please check one of the boxes below:</p>
+    <ul>
+      <li><input id="vet_yes" type="radio" name="eeoc.veteran_status" value="true"><label for="vet_yes"><strong>I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN LISTED ABOVE</strong></label></li>
+      <li><input id="vet_no" type="radio" name="eeoc.veteran_status" value="false"><label for="vet_no"><strong>I AM NOT A PROTECTED VETERAN</strong></label></li>
+      <li><input id="vet_nope" type="radio" name="eeoc.veteran_status" value="unspecified"><label for="vet_nope"><strong>I DON'T WISH TO ANSWER</strong></label></li>
+    </ul>
+    <hr>
+    <h3>Voluntary Self-Identification of Disability</h3>
+    <ul>
+      <li><input id="disability_yes" type="radio" name="eeoc.disability_status" value="true"><label for="disability_yes"><strong>Yes, I have a disability, or have had one in the past</strong></label></li>
+      <li><input id="disability_no" type="radio" name="eeoc.disability_status" value="false"><label for="disability_no"><strong>No, I don't have a disability</strong></label></li>
+      <li><input id="disability_nope" type="radio" name="eeoc.disability_status" value="unspecified"><label for="disability_nope"><strong>I don't wish to answer</strong></label></li>
+    </ul>
+  </form>
+`;
+
+test('a named radio group in bare list rows reads every same-name peer, not the one row blockOf found', async () => {
+  const veteran = await optionInventoryFor(BREEZY_EEOC, '#vet_yes');
+  assert.deepEqual(veteran.values, [
+    'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN LISTED ABOVE',
+    'I AM NOT A PROTECTED VETERAN',
+    "I DON'T WISH TO ANSWER",
+  ]);
+  assert.equal(veteran.complete, true);
+  const disability = await optionInventoryFor(BREEZY_EEOC, '#disability_yes');
+  assert.equal(disability.values.length, 3);
+  // The group that always worked still reads the same three, and the three groups stay three questions.
+  const gender = await optionInventoryFor(BREEZY_EEOC, '#gender_male');
+  assert.deepEqual(gender.values, ['Male', 'Female', "I don't wish to answer"]);
+  const details = await choiceDetailsFor(BREEZY_EEOC);
+  assert.equal(details.length, 3, 'one question per name');
+  assert.deepEqual(details.map((entry) => entry.options.length), [3, 3, 3]);
+});
+
+test('an unnamed choice group still reads its block, and same-name peers in another form are not its own', async () => {
+  const twoForms = `
+    <form id="a"><fieldset><legend>Remote?</legend>
+      <label><input type="radio" name="remote" value="y">Yes</label>
+      <label><input type="radio" name="remote" value="n">No</label>
+    </fieldset></form>
+    <form id="b"><fieldset><legend>Remote too?</legend>
+      <label><input type="radio" name="remote" value="y">Yes indeed</label>
+      <label><input type="radio" name="remote" value="n">No indeed</label>
+      <label><input type="radio" name="remote" value="m">Maybe</label>
+    </fieldset></form>
+    <div class="field"><span>Languages</span>
+      <label><input type="checkbox">English</label>
+      <label><input type="checkbox">Spanish</label>
+    </div>
+  `;
+  const first = await optionInventoryFor(twoForms, '#a input');
+  assert.deepEqual(first.values, ['Yes', 'No']);
+  const second = await optionInventoryFor(twoForms, '#b input');
+  assert.deepEqual(second.values, ['Yes indeed', 'No indeed', 'Maybe']);
+  // No name at all: the block is still the scope, exactly as before.
+  const languages = await optionInventoryFor(twoForms, 'input[type="checkbox"]');
+  assert.deepEqual(languages.values, ['English', 'Spanish']);
+});

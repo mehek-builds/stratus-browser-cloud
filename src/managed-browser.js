@@ -14885,7 +14885,27 @@ let terminalFailureInput = null;
               || el.getAttribute('role') === 'listbox'
               || el.getAttribute('aria-haspopup') === 'listbox';
             if (!block) return { values, complete: closedChoice ? false : null };
-            for (const [index, input] of [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')].entries()) {
+            /* A NAMED RADIO OR CHECKBOX GROUP IS ITS SAME-NAME PEERS, wherever the markup put them.
+             * The block is the right scope for a group with no name; for a named group the HTML
+             * semantics already say which inputs are one question (one name, one form), and
+             * choiceQuestionKey keys the question on that same name. Reading the block alone read
+             * ONE option on Breezy's EEOC section (alertalarm.breezy.hr, 2026-09-01): each veteran
+             * and disability radio sits in its own bare <li> under a <ul> with no fieldset, class
+             * or role, so blockOf fell back to the option's own <li>, the inventory held only
+             * "I identify as one or more of the classifications of protected veteran listed above",
+             * and a "No" had nothing to press. The gender group on the same page read all three
+             * because its <li class="option"> rows share one parent div. Same-name peers are the
+             * rule the backend's own discovery already uses (questionDiscovery.ts). */
+            const nativeChoice = el.type === 'radio' || el.type === 'checkbox';
+            const sameNamePeers = nativeChoice && el.name
+              ? [...(el.form || document).querySelectorAll(
+                'input[type="radio"][name="' + CSS.escape(el.name) + '"], input[type="checkbox"][name="' + CSS.escape(el.name) + '"]'
+              )].filter((input) => input.name === el.name)
+              : [];
+            const choiceInputs = sameNamePeers.length > 1
+              ? sameNamePeers
+              : [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+            for (const [index, input] of choiceInputs.entries()) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');
               const text = clean(
