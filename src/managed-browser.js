@@ -103,6 +103,34 @@ export const isEmployerDomainTelemetryHost = (hostname) => {
   );
 };
 
+/* A BEACON ON THE EMPLOYER'S OWN HOST IS STILL ONLY A BEACON, when its path says so.
+ *
+ * Teamtailor's application page posts a page-view beacon to the tenant host itself:
+ * "POST https://tixtrack.teamtailor.com/pageview". That host IS the employer's registrable site,
+ * isEmployerDomainTelemetryHost is keyed on hosts, so the run died for it every time (measured
+ * 2026-09-01 on the live TixTrack fill, two seconds after the page loaded, before a single field
+ * was touched). The path is the only thing that distinguishes it, and an application submit never
+ * lives at a path whose last segment is a page-view or analytics collector.
+ *
+ * SAME CONTRACT AS THE HOST LIST: this changes fatality only. The request is still aborted by the
+ * same block() and reaches nobody; the run stops dying for it. And the same #129 caveat: a path
+ * spared here is also refused by the upload window, which is right for a collector and would be
+ * wrong for a board whose resume upload lived at one of these names. None does. Matching is on the
+ * last path segment, exact names only, optional extension, never a substring: /pageview and
+ * /js/pageview.gif match, /pageview/submit and /api/pageview-settings do not. */
+export const EMPLOYER_TELEMETRY_PATH_SEGMENTS = Object.freeze([
+  'pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics', 'collect', 'ping'
+]);
+
+export const isEmployerTelemetryPath = (url) => {
+  let pathname = '';
+  try { pathname = new URL(String(url)).pathname; } catch { return false; }
+  const segments = pathname.toLowerCase().split('/').filter(Boolean);
+  if (segments.length === 0) return false;
+  const last = segments[segments.length - 1].replace(/\.[a-z0-9]{1,5}$/, '');
+  return EMPLOYER_TELEMETRY_PATH_SEGMENTS.includes(last);
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1696,6 +1724,8 @@ let terminalFailureInput = null;
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
+      const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
+      const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
@@ -1709,6 +1739,9 @@ let terminalFailureInput = null;
           // A collector on the employer's own registrable domain is still only a collector. See
           // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
           // which is aborted exactly as before and reaches nobody.
+          // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
+          // contract: the request is still aborted; only the run is spared.
+          if (isEmployerTelemetryPath(request.url())) return false;
           if (isEmployerDomainTelemetryHost(hostname)) return false;
           return registrableSuffix(hostname) === applicationTransportSite;
         } catch { return true; }
