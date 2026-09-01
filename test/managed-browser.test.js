@@ -762,6 +762,9 @@ test('managed continuation contract is bounded and rejects URL or recursion', ()
     providerDeadlineAt: deadline,
     actions: [{ type: 'extract', selector: '#status' }],
     screenshot: false,
+    // The preview-artifact wait is opt-in by the literal true; a continuation that did not ask
+    // for it carries an explicit false so no reader can infer a wait from an absent field.
+    screenshotWait: false,
     fullPage: false,
     // A read-only continuation carries both authority flags explicitly false so a downstream
     // reader can never infer mutation or final-action authority from their absence.
