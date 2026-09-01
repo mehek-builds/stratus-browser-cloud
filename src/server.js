@@ -11,6 +11,7 @@ import { AgentRuntime } from './agent-runtime.js';
 import { assertPublicUrl, htmlToText, textToMarkdown } from './security.js';
 import { hmac, id, json, now, readJson, redact, sha256 } from './utils.js';
 import { executeLocalManagedRun } from './local-managed-runner.js';
+import { managedRunCompletionLogSummary, managedRunProgressLogSummary } from './run-log-summary.js';
 
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg' };
 
@@ -58,7 +59,13 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         if (!store.authenticate(apiKey)) {
           return json(res, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid Litos service identity is required' } });
         }
-        return json(res, 200, { run: await executeLocalManagedRun(await readJson(req, 25_000_000)) });
+        /* One PII-free line per completed run (see src/run-log-summary.js). The request-level catch
+         * below already logs every failure; a run that completes without the artifact the host
+         * needs is not a failure here, and until this line existed it left no trace at all. */
+        const runInput = await readJson(req, 25_000_000);
+        const run = await executeLocalManagedRun(runInput);
+        console.log(JSON.stringify({ requestId, ...managedRunCompletionLogSummary(runInput, run, Date.now() - started) }));
+        return json(res, 200, { run });
       }
       if (route.startsWith('/artifacts/')) return serveArtifact(route, res);
       if (!route.startsWith('/v1') && !route.startsWith('/openapi')) return serveStatic(route, res);
@@ -318,7 +325,11 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
       return json(res, 404, { error: { code: 'NOT_FOUND', message: `No route for ${req.method} ${route}` } });
     } catch (error) {
       const status = error.status || 500;
-      console.error(JSON.stringify({ level: 'error', requestId, method: req.method, url: req.url, status, durationMs: Date.now() - started, error: redact(error.message) }));
+      console.error(JSON.stringify({
+        level: 'error', requestId, method: req.method, url: req.url, status, durationMs: Date.now() - started, error: redact(error.message),
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.runProgress ? { runProgress: managedRunProgressLogSummary(error.runProgress) } : {}),
+      }));
       return json(res, status, { error: { code: error.code || (status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'), message: status === 500 ? 'The request failed. Check server logs with the request ID.' : error.message, requestId, runId: error.runId, runProgress: error.runProgress } });
     }
   });
