@@ -65,6 +65,44 @@ export const PUBLIC_EGRESS_NETWORK_POLICY = Object.freeze({
  * path, or a non-Ashby run all return false and fall through to the existing block, which stays
  * fatal. If Ashby adds a read operation this list does not carry, that board fails closed and
  * loudly rather than quietly filing something, which is the side to fail on. */
+/* TELEMETRY THAT MERELY SHARES AN EMPLOYER'S REGISTRABLE DOMAIN IS NOT THE EMPLOYER.
+ *
+ * Greenhouse serves its Snowplow collector from c.spl.greenhouse.io, which reduces to the same
+ * greenhouse.io that job-boards.greenhouse.io does. PR #127 spared third-party beacons from killing
+ * a run by comparing registrable domains, and this one sits INSIDE the employer's, so it was still
+ * counted and still fatal. Measured 2026-09-01: a live Verkada fill stopped at "POST
+ * https://c.spl.greenhouse.io/com.snowplowanalytics.snowplow/tp2", and a replay of the real
+ * containment against a live Anthropic posting reproduced it with the page fully rendered and 10
+ * controls readable. Unlike Ashby, the form was never the problem here, only the fatality was.
+ *
+ * THIS CHANGES FATALITY ONLY, AND DELIBERATELY GRANTS NOTHING. Every one of these requests is still
+ * aborted by the same block() call and still reaches nobody; the run simply stops dying for a
+ * beacon that cannot file an application. Nothing new leaves the browser, which is what separates
+ * this from the Ashby read allowance and from the #129 upload window.
+ *
+ * Matching is an exact host or an exact subdomain of one, never a substring, so a look-alike like
+ * spl.greenhouse.io.evil.example does not match and neither does notspl.greenhouse.io. The real
+ * submit path, job-boards.greenhouse.io/embed/job_app, shares none of these hosts and stays fully
+ * employer-bound and fatal.
+ *
+ * BEFORE ADDING A HOST, note that employerBoundTransport is read at TWO call sites with different
+ * questions, and an entry here answers both. In block() it asks "must the run die for this?", where
+ * false means spared. In the #129 upload window it is a positive requirement to ADMIT a POST/PUT,
+ * where false means refused. For a pure collector those agree, and the refusal is a bonus: a beacon
+ * cannot ride the upload allowance. But a host that serves BOTH tracking and uploads would be
+ * spared the fatality and simultaneously locked out of the upload window, silently breaking that
+ * board's resume attachment - the exact failure #129 exists to fix. So add a host only with a
+ * measured capture proving it is a collector AND that no upload for that board targets it. */
+export const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = Object.freeze(['spl.greenhouse.io']);
+
+export const isEmployerDomainTelemetryHost = (hostname) => {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!host) return false;
+  return EMPLOYER_DOMAIN_TELEMETRY_HOSTS.some(
+    (telemetry) => host === telemetry || host.endsWith('.' + telemetry)
+  );
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1635,7 +1673,12 @@ let terminalFailureInput = null;
       const employerBoundTransport = (request) => {
         if (!applicationTransportSite) return true;
         try {
-          return registrableSuffix(new URL(request.url()).hostname) === applicationTransportSite;
+          const { hostname } = new URL(request.url());
+          // A collector on the employer's own registrable domain is still only a collector. See
+          // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
+          // which is aborted exactly as before and reaches nobody.
+          if (isEmployerDomainTelemetryHost(hostname)) return false;
+          return registrableSuffix(hostname) === applicationTransportSite;
         } catch { return true; }
       };
       /* The one same-site write-shaped transport that is a read, decided from the request body.
