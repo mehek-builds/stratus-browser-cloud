@@ -1618,6 +1618,7 @@ let terminalFailureInput = null;
         blockedAttemptCount: 0,
         blockedReason: null,
         blockedThirdPartyCount: 0,
+        uploadActionArmed: false,
         handler: null
       };
       /* The last two host labels of the page this run is authorized to fill. Everything the
@@ -1693,6 +1694,24 @@ let terminalFailureInput = null;
             containment.allowedNavigationUrl = null;
             return route.fallback();
           }
+        }
+        /* AN AUTHORIZED UPLOAD ACTION CARRIES ITS OWN TRANSPORT. Setting a file input makes the
+         * board's own change handler POST the bytes to the employer immediately - measured live on
+         * the Breezy posting this containment killed 2026-09-01: the run's only employer-bound
+         * block was "POST https://app.breezy.hr/api/portal/alertalarm/upload", fired the moment
+         * the resume was attached, long before any submit control exists. Greenhouse and Ashby
+         * upload eagerly the same way, so without this no portal with eager uploads can complete
+         * a managed fill. Attaching a document is not filing an application. The allowance opens
+         * when an upload action from the reviewed packet begins, closes when the next mutation
+         * action begins, and admits only employer-bound POST/PUT xhr/fetch. Third-party targets,
+         * navigations, channels, and every other method stay blocked, and the final submit still
+         * requires its exact literal authority. Applied on Mehek's explicit instruction after the
+         * tradeoff was put to her (see UPLOAD-ALLOWANCE decision record, 2026-09-01). */
+        if (containment.uploadActionArmed
+          && (method === 'POST' || method === 'PUT')
+          && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
+          && employerBoundTransport(request)) {
+          return route.fallback();
         }
         if (transportTypes.has(request.resourceType())) {
           /* A GET or HEAD data read cannot file anything with the employer, and every SPA board
@@ -13930,6 +13949,16 @@ let terminalFailureInput = null;
     for (const action of currentInput.actions || []) {
      assertProviderActionWindow();
      assertManagedMutationTransportClean();
+     if (managedMutationTransportContainment) {
+       /* The upload allowance is scoped to the upload action itself plus any read-only actions
+        * after it, because the page's own upload XHR starts on the change event and can still be
+        * in flight while proofs are read. The next MUTATION action closes it. */
+       if (action.type === 'upload') {
+         managedMutationTransportContainment.uploadActionArmed = true;
+       } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
+         managedMutationTransportContainment.uploadActionArmed = false;
+       }
+     }
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
