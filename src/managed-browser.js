@@ -118,8 +118,14 @@ export const isEmployerDomainTelemetryHost = (hostname) => {
  * wrong for a board whose resume upload lived at one of these names. None does. Matching is on the
  * last path segment, exact names only, optional extension, never a substring: /pageview and
  * /js/pageview.gif match, /pageview/submit and /api/pageview-settings do not. */
+/* ADMISSION RULE, the same as the host list's: a segment enters with a measured capture of a
+ * collector at that name on an employer host (pageview: TixTrack, 2026-09-01) or on a third-party
+ * host already spared by suffix (rum: browser-intake-datadoghq.com; beacon, telemetry, analytics,
+ * metrics, pageviews: the generic collector names those vendors serve). Unlike a host, a segment is
+ * global to every employer host on every board, so an English verb a board could plausibly name a
+ * form route ("collect", "ping") is refused until measured. */
 export const EMPLOYER_TELEMETRY_PATH_SEGMENTS = Object.freeze([
-  'pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics', 'collect', 'ping'
+  'pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics'
 ]);
 
 /* Cloudflare's reserved prefix on every site it fronts: challenge-platform (the JavaScript

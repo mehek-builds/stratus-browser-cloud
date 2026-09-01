@@ -118,6 +118,8 @@ test('THE REAL SUBMIT PATH IS NEVER A COLLECTOR PATH', () => {
     'https://jobs.example.com/api/pageview-settings',
     'https://jobs.example.com/analytics-consent',
     'https://jobs.example.com/collection',
+    'https://jobs.example.com/collect',
+    'https://jobs.example.com/ping',
     'https://jobs.example.com/',
     'not a url',
     '',
@@ -132,6 +134,6 @@ test('the path exemption is consulted for fatality only too, inside employerBoun
   const fn = source.slice(source.indexOf('const employerBoundTransport = (request) => {'));
   const body = fn.slice(0, fn.indexOf('\n      };'));
   assert.ok(body.includes('isEmployerTelemetryPath(request.url())'), 'the path check lives inside employerBoundTransport');
-  assert.deepEqual([...EMPLOYER_TELEMETRY_PATH_SEGMENTS], ['pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics', 'collect', 'ping']);
+  assert.deepEqual([...EMPLOYER_TELEMETRY_PATH_SEGMENTS], ['pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics']);
   assert.equal(Object.isFrozen(EMPLOYER_TELEMETRY_PATH_SEGMENTS), true);
 });
