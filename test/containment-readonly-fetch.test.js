@@ -11,7 +11,7 @@ const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.
 
 test('locked-mode containment lets read-only data fetches through', () => {
   assert.match(source, /const readOnlyDataFetch = readOnlyMethod\s*\n?\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\);/);
-  assert.match(source, /if \(!readOnlyDataFetch\) return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\)\) \{\s*\n\s*return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
 });
 
 test('everything else in the contained set stays blocked', () => {

@@ -46,6 +46,111 @@ export const PUBLIC_EGRESS_NETWORK_POLICY = Object.freeze({
   })
 });
 
+/* ASHBY'S PUBLIC BOARD READS OVER POST, SO THE METHOD ALONE CANNOT SEPARATE A READ FROM A FILING.
+ *
+ * jobs.ashbyhq.com serves an SPA whose every read is a same-host POST to a single GraphQL
+ * endpoint. ApiJobPosting carries the form definition that discovery enumerates, and
+ * ApiAutocompleteGeoLocation fires later, while a location field is being typed during the fill.
+ * Measured against a live Ashby posting on 2026-09-01. Because those requests share the
+ * application page's registrable site, the mutation containment read them as employer-bound: they
+ * were aborted during initial_navigation, so the form never rendered and ashby logged read=0, and
+ * aborted AND fatal once locked. That held every Ashby run at discovered=0 even after PR #127
+ * stopped third-party beacons from killing a run.
+ *
+ * The allowance is the narrowest thing that lets the form render, and it is decided by the
+ * request's OWN BODY, never by the ?op= query label - that label is an observability hint the page
+ * sets freely, so trusting it would let a mutation ride in under a read's name. The parsed body
+ * must name an allow-listed operation AND its GraphQL document must open with the literal `query`
+ * keyword. A batched array, an unparseable body, an operation this list does not name, a different
+ * path, or a non-Ashby run all return false and fall through to the existing block, which stays
+ * fatal. If Ashby adds a read operation this list does not carry, that board fails closed and
+ * loudly rather than quietly filing something, which is the side to fail on. */
+export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
+export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
+export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
+  'ApiJobPosting',
+  'ApiJobBoardWithTeams',
+  'ApiOrganizationFromHostedJobsPageName',
+  'ApiAutocompleteGeoLocation'
+]);
+
+/* The last two host labels. The run-scoped copy of this rule justified the approximation by noting
+ * it "over-matches toward FATAL, never away from it" - but here the same over-match runs toward
+ * ALLOW, so that safety argument does NOT carry across. It holds today only because ashbyhq.com is
+ * one label under a single-label TLD; on a multi-label public suffix 'evil.co.uk' and 'board.co.uk'
+ * both reduce to 'co.uk' and would pass this check. The exact path and the operation proof are what
+ * stop that being an open door, so neither may be relaxed while this is the host test. One
+ * definition, shared with the run-scoped containment, so the two can never drift apart. */
+export const transportRegistrableSuffix = (host) => String(host || '').toLowerCase()
+  .split('.').filter(Boolean).slice(-2).join('.');
+
+/* Diagnostics only, never authorization. #127 deliberately strips query strings out of the
+ * violation sentence because a submit URL can carry tokens, which also strips Ashby's ?op= label
+ * and leaves every blocked Ashby read looking like the same anonymous POST. Reading the operation
+ * name back out of the BODY names the gap without reintroducing URL secrets: if Ashby ships a read
+ * operation this allowlist does not carry, the 502 says which one instead of reading as a fresh
+ * regression. */
+export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return null;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return null;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return null; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const operationName = body.operationName;
+  return typeof operationName === 'string' && operationName ? operationName.slice(0, 80) : null;
+};
+
+/* PROVE THE DOCUMENT IS A READ, WITHOUT DEPENDING ON HOW A CLIENT SERIALIZES IT.
+ *
+ * An earlier form of this test asked whether the document STARTED with `query`. That is true of
+ * every Ashby body observed on 2026-09-01 and false for two shapes that are equally legal and that
+ * a client can adopt without its API changing at all: a fragment defined ahead of the operation,
+ * and a leading `#` comment. Either would have been read as a write and taken Ashby from fixed
+ * straight back to 100% down, so that brittleness ran in the fatal direction.
+ *
+ * The proof instead requires the document to DEFINE at least one `query` operation and to define no
+ * `mutation` and no `subscription`. An operation definition keyword is preceded by the start of the
+ * document, whitespace or a closing brace, and followed by an optional name and then `(` or `{`, so
+ * a field or argument that merely contains the word does not match. Two shapes stay blocked on
+ * purpose: a shorthand anonymous document (`{ x }`, carrying no keyword to prove anything with) and
+ * an Automatic Persisted Query body carrying only a hash and no document at all. Neither offers
+ * evidence, and this is a boundary where absence of evidence must read as absence of permission.
+ * Both fail closed and name their operation in the log. */
+const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s}])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+
+export const isGraphqlReadDocument = (document) => {
+  if (typeof document !== 'string' || !document) return false;
+  const defined = new Set();
+  for (const match of document.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION, 'g'))) {
+    defined.add(match[1]);
+  }
+  return defined.has('query') && !defined.has('mutation') && !defined.has('subscription');
+};
+
+export const isAshbyPublicBoardRead = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (!ASHBY_PUBLIC_BOARD_READ_OPERATIONS.includes(body.operationName)) return false;
+  return isGraphqlReadDocument(body.query);
+};
+
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
@@ -1520,8 +1625,7 @@ let terminalFailureInput = null;
        * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
        * this suffix with the application page. On multi-label public suffixes (co.uk) this
        * over-matches toward FATAL, never away from it. */
-      const registrableSuffix = (host) => String(host || '').toLowerCase()
-        .split('.').filter(Boolean).slice(-2).join('.');
+      const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
       })();
@@ -1533,6 +1637,15 @@ let terminalFailureInput = null;
           return registrableSuffix(new URL(request.url()).hostname) === applicationTransportSite;
         } catch { return true; }
       };
+      /* The one same-site write-shaped transport that is a read, decided from the request body.
+       * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
+      const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
       /* Every blocked request is aborted either way - nothing ever reaches anyone. What differs is
        * whether the run must DIE for it. It must when the blocked transport was bound for the
        * employer's own site, because then the page's fill semantics may depend on it and a later
@@ -1547,7 +1660,14 @@ let terminalFailureInput = null;
             containment.blockedAttemptCount += 1;
             let target = '';
             try { const parsed = new URL(request.url()); target = ' ' + (parsed.origin + parsed.pathname).slice(0, 200); } catch {}
-            containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target;
+            // An Ashby read operation this allowlist does not carry is the most likely next gap,
+            // so name it rather than leaving another anonymous POST in the logs.
+            const operationName = ashbyPublicBoardOperationName({
+              url: request.url(),
+              postData: request.postData()
+            });
+            containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target
+              + (operationName ? ' op=' + operationName : '');
           } else {
             containment.blockedThirdPartyCount += 1;
           }
@@ -1562,7 +1682,7 @@ let terminalFailureInput = null;
         const mainFrameNavigation = navigation && request.frame() === page.mainFrame();
         if (containment.mode === 'activation') return route.fallback();
         if (containment.mode === 'initial_navigation') {
-          return readOnlyMethod
+          return readOnlyMethod || ashbyPublicBoardRead(request)
             ? route.fallback()
             : block(route, 'write-shaped transport during initial navigation');
         }
@@ -1588,7 +1708,9 @@ let terminalFailureInput = null;
            * method is still counted and fatal. */
           const readOnlyDataFetch = readOnlyMethod
             && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch');
-          if (!readOnlyDataFetch) return block(route, request.resourceType() + ' transport');
+          if (!readOnlyDataFetch && !ashbyPublicBoardRead(request)) {
+            return block(route, request.resourceType() + ' transport');
+          }
           return route.fallback();
         }
         if (navigation) return block(route, 'navigation transport');
