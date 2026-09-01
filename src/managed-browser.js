@@ -1542,7 +1542,21 @@ let terminalFailureInput = null;
           }
         }
         if (transportTypes.has(request.resourceType())) {
-          return block(route, request.resourceType() + ' transport');
+          /* A GET or HEAD data read cannot file anything with the employer, and every SPA board
+           * (Breezy, Ashby, Greenhouse's React boards) fetches its form config and posting JSON
+           * right after domcontentloaded, which is the exact moment this containment flips to
+           * 'locked'. Counting those reads as violations killed every managed fill within seconds
+           * of navigation, observed in production 2026-09-01: 100% of /api/run failed with "A
+           * non-submit action attempted employer transport without exact final authority". The
+           * initial_navigation branch above already accepts GET and HEAD as read-safe; this applies
+           * the same premise to xhr and fetch data reads for the rest of the run. Everything else
+           * in this set stays blocked: a websocket or worker is a read-write channel regardless of
+           * its handshake method, eventsource and ping carry side effects, and every write-shaped
+           * method is still counted and fatal. */
+          const readOnlyDataFetch = readOnlyMethod
+            && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch');
+          if (!readOnlyDataFetch) return block(route, request.resourceType() + ' transport');
+          return route.fallback();
         }
         if (navigation) return block(route, 'navigation transport');
         if (!readOnlyMethod) return block(route, method + ' transport');
