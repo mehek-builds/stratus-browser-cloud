@@ -16789,10 +16789,18 @@ let terminalFailureInput = null;
     if (currentInput.screenshot) {
       const screenshotPath = 'stratus-screenshot-' + phase + '.png';
       try {
+        /* One second was not a real budget. The comment below calls screenshots optional, but the
+         * backend's prepare path hard-fails the whole run when the artifact is missing ("Stratus
+         * managed browser did not return a preview screenshot"), so a capture that quietly times
+         * out kills an otherwise complete fill. Measured live 2026-09-01 on a Breezy posting: two
+         * consecutive prepares finished all seven employer questions and then died exactly here,
+         * because a fullPage capture of a long board page does not fit in 1000ms. The terminal
+         * employer result is already written by this point, so the only cost of patience is
+         * latency on the path that was previously a guaranteed failure. */
         await page.screenshot({
           path: screenshotPath,
           fullPage: Boolean(currentInput.fullPage),
-          timeout: 1_000
+          timeout: 15_000
         });
       } catch { /* screenshots are optional and cannot change terminal employer authority */ }
       if (currentInput.submissionAttempt && fs.existsSync(activeTerminalAckPath)) {
