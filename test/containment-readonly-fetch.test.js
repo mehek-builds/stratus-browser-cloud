@@ -22,3 +22,16 @@ test('everything else in the contained set stays blocked', () => {
   // And the violation assert itself is untouched: one counted block still fails the run.
   assert.match(source, /A non-submit action attempted employer transport without exact final authority/);
 });
+
+test('only employer-bound blocked transport is run-fatal; third-party blocks are aborted quietly', () => {
+  // The fatality discriminator is a registrable-suffix match against the application page's host,
+  // fail-closed: an unparseable target counts as employer-bound.
+  assert.match(source, /const employerBoundTransport = \(request\) => \{/);
+  assert.match(source, /if \(!applicationTransportSite\) return true;/);
+  assert.match(source, /\} catch \{ return true; \}/);
+  // A third-party block is still aborted, and tracked, but does not increment the fatal counter.
+  assert.match(source, /containment\.blockedThirdPartyCount \+= 1;/);
+  assert.match(source, /if \(employerBoundTransport\(request\)\) \{\s*\n\s*containment\.blockedAttemptCount \+= 1;/);
+  // The violation sentence names the blocked request so a 502 is diagnosable from logs alone.
+  assert.match(source, /\+ \(detail \? ' \(' \+ detail \+ '\)' : ''\)/);
+});
