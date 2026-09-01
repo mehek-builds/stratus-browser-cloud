@@ -16642,9 +16642,18 @@ function classifyRawManagedRequest(input) {
     }
     if (READ_ONLY_ACTIONS.has(action.type)) continue;
     mutation = true;
+    // A final employer action is the authorized submit (confirmAndSubmit) or an explicit final
+    // submit click. A press of Enter is a final action ONLY when it is not scoped to a specific
+    // control: a bare page-level Enter can trigger native form submission and must stay authority-
+    // gated. But the managed fill commits combobox and typeahead selections by pressing Enter on
+    // the field's own input (labelled `<field>_select`), and that keystroke selects the option, it
+    // does not submit the form. Treating those field-scoped commits as a final employer action is
+    // what made every fill of a form with a select control fail closed with "a final employer
+    // action requires allowSubmit to be literal true", so nothing was ever filled or sent. The
+    // authorized submit stays confirmAndSubmit, which remains gated below.
     if (action.type === 'confirmAndSubmit'
       || (action.type === 'click' && action.label === 'final_submit')
-      || (action.type === 'press' && /^enter$/i.test(String(action.value || '')))) {
+      || (action.type === 'press' && /^enter$/i.test(String(action.value || '')) && !action.selector)) {
       finalAction = true;
     }
   }
