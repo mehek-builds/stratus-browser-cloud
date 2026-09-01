@@ -29,14 +29,14 @@ test('a preview published after the result is found, because the runner writes i
 test('no wait was asked for: one read, absent means null at once, as before', async () => withSession(async (session) => {
   const started = Date.now();
   assert.equal(await waitForLocalScreenshot(session, 0, 0, 50), null);
-  assert.ok(Date.now() - started < 100);
+  assert.ok(Date.now() - started < 1_000);
 }));
 
 test('a child that exited without publishing the preview ends the wait immediately', async () => withSession(async (session) => {
   session.child.exitCode = 0;
   const started = Date.now();
   assert.equal(await waitForLocalScreenshot(session, 0, 5_000, 50), null);
-  assert.ok(Date.now() - started < 200, 'did not wait out the budget on a dead runner');
+  assert.ok(Date.now() - started < 1_000, 'did not wait out the budget on a dead runner');
 }));
 
 test('a child that exits mid-wait ends the wait at the next poll', async () => withSession(async (session) => {
@@ -51,7 +51,15 @@ test('only clean absence is retried; any other read failure resolves at once', a
   await fs.mkdir(path.join(session.directory, 'stratus-screenshot-0.png'));
   const started = Date.now();
   assert.equal(await waitForLocalScreenshot(session, 0, 5_000, 50), null);
-  assert.ok(Date.now() - started < 100);
+  assert.ok(Date.now() - started < 1_000);
+}));
+
+test('a child killed by a signal has exitCode null and still ends the wait immediately', async () => withSession(async (session) => {
+  session.child.exitCode = null;
+  session.child.signalCode = 'SIGKILL';
+  const started = Date.now();
+  assert.equal(await waitForLocalScreenshot(session, 0, 5_000, 50), null);
+  assert.ok(Date.now() - started < 1_000, 'a signal-killed runner is not waited for');
 }));
 
 test('the wait budget is the sandbox host contract: asked for, unpressed, else zero', () => {

@@ -23,6 +23,13 @@ function managedError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
 }
 
+/* A child that ended by SIGNAL has exitCode null and signalCode set; only a normal exit sets
+ * exitCode. Checking exitCode alone (as this file did everywhere) reads an OOM-killed or
+ * SIGTERMed runner as still running and waits out the whole budget on a process that is gone. */
+function childExited(child) {
+  return child?.exitCode != null || child?.signalCode != null;
+}
+
 async function waitForFile(directory, names, timeoutMs, child) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -32,7 +39,7 @@ async function waitForFile(directory, names, timeoutMs, child) {
         return name;
       } catch {}
     }
-    if (child.exitCode !== null) break;
+    if (childExited(child)) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   for (const name of names) {
@@ -94,7 +101,7 @@ export async function waitForLocalScreenshot(session, phase, waitMs, pollMs = SC
     } catch (error) {
       if (error?.code !== 'ENOENT') return null;
     }
-    if (session.child?.exitCode !== null && session.child?.exitCode !== undefined) {
+    if (childExited(session.child)) {
       return fs.readFile(file).catch(() => null);
     }
     if (Date.now() >= deadline) return null;
@@ -114,7 +121,7 @@ async function readResult(session, phase, screenshot, screenshotWait) {
 async function cleanup(session) {
   sessions.delete(session.token);
   active.delete(session.id);
-  if (session.child.exitCode === null) session.child.kill('SIGTERM');
+  if (!childExited(session.child)) session.child.kill('SIGTERM');
   await fs.rm(session.directory, { recursive: true, force: true }).catch(() => {});
 }
 
