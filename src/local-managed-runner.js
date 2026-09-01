@@ -9,6 +9,8 @@ import {
   normalizeManagedContinuation,
   normalizeManagedRun,
   SANDBOX_RUNNER,
+  SCREENSHOT_ARTIFACT_POLL_MS,
+  screenshotWaitMsForResult,
 } from './managed-browser.js';
 
 const RUN_TIMEOUT_MS = 150_000;
@@ -67,10 +69,43 @@ async function readProgress(directory, expectedSubmissionAttempt = null) {
   }
 }
 
-async function readResult(session, phase, screenshot) {
+/* THE PREVIEW IS WRITTEN AFTER THE RESULT, on this path exactly as on the sandbox path.
+ *
+ * The runner publishes stratus-result-N.json first (it is the employer authority and must never
+ * wait on a picture), then captures the screenshot and publishes it by rename. startRun wakes on
+ * the result file, so a single immediate read of the PNG raced the capture and lost on every run,
+ * and cleanup then SIGTERMed the child mid-capture and deleted the directory. Measured live on
+ * Railway 2026-09-01: five prepare fills in a row (Breezy three times, Recruitee twice) came back
+ * in one to four seconds with a complete fill and no screenshot, and litos-api, which hard-fails a
+ * prepare without its preview, refused every one. stratus #137 fixed the identical race on the
+ * Vercel Sandbox host (waitForSandboxScreenshot) and this path was never on it.
+ *
+ * Same contract as the sandbox host, deliberately: the wait is taken only when the caller asked
+ * for it (screenshotWait: true) and only for an unpressed result, so a stalled optional screenshot
+ * can never delay a confirmed submission receipt; it retries only clean absence (ENOENT), and it
+ * stops the moment the child has exited, because a runner that exited without publishing the PNG
+ * has given up on it (the capture failure is swallowed in the runner by design). */
+export async function waitForLocalScreenshot(session, phase, waitMs, pollMs = SCREENSHOT_ARTIFACT_POLL_MS) {
+  const file = path.join(session.directory, `stratus-screenshot-${phase}.png`);
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    try {
+      return await fs.readFile(file);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return null;
+    }
+    if (session.child?.exitCode !== null && session.child?.exitCode !== undefined) {
+      return fs.readFile(file).catch(() => null);
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
+async function readResult(session, phase, screenshot, screenshotWait) {
   const result = JSON.parse(await fs.readFile(path.join(session.directory, `stratus-result-${phase}.json`), 'utf8'));
   if (screenshot) {
-    const bytes = await fs.readFile(path.join(session.directory, `stratus-screenshot-${phase}.png`)).catch(() => null);
+    const bytes = await waitForLocalScreenshot(session, phase, screenshotWaitMsForResult(screenshotWait, result));
     result.screenshot = bytes?.toString('base64') || null;
   }
   return result;
@@ -143,7 +178,7 @@ async function startRun(input) {
     await cleanup(session);
     throw error;
   }
-  const result = await readResult(session, 0, context.screenshot);
+  const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
   if (token && continuationEligible(result, context.continuationCheckpoint)) {
     session.expiresAt = result.continuationExpiresAt || expiresAt;
     sessions.set(token, session);
@@ -183,7 +218,7 @@ async function continueRun(input) {
     await cleanup(session);
     throw error;
   }
-  const result = await readResult(session, 1, continuation.screenshot);
+  const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait);
   await cleanup(session);
   return result;
 }

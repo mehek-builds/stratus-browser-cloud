@@ -331,8 +331,8 @@ const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
  * screenshot" while the capture was still rendering). Waiting is for CLEAN ABSENCE only: a read
  * that stalls or fails resolves null immediately, and a result that claims a pressed submission
  * never waits at all. */
-const SCREENSHOT_ARTIFACT_WAIT_MS = 20_000;
-const SCREENSHOT_ARTIFACT_POLL_MS = 500;
+export const SCREENSHOT_ARTIFACT_WAIT_MS = 20_000;
+export const SCREENSHOT_ARTIFACT_POLL_MS = 500;
 /* The per-read budget while waiting. OPTIONAL_ARTIFACT_TIMEOUT_MS (1s) was sized for a receipt
  * image nobody strictly needed; the artifact this wait exists for is a full-page PNG of a long
  * board page, the one most likely to take more than a second to come back through the sandbox
@@ -18808,7 +18808,7 @@ async function waitForSandboxScreenshot(
   }
 }
 
-const screenshotWaitMsForResult = (screenshotWait, result) => (
+export const screenshotWaitMsForResult = (screenshotWait, result) => (
   screenshotWait === true && !result?.submitOutcome?.pressed ? SCREENSHOT_ARTIFACT_WAIT_MS : 0
 );
 
