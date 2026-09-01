@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   isAshbyPublicBoardRead,
+  isGraphqlReadDocument,
   ashbyPublicBoardOperationName,
   ASHBY_PUBLIC_BOARD_READ_OPERATIONS
 } from '../src/managed-browser.js';
@@ -36,6 +37,29 @@ test('the reads a live Ashby application page issues are allowed', () => {
   assert.equal(isAshbyPublicBoardRead(ashbyRead({
     postData: JSON.stringify({ operationName: 'ApiJobPosting', query: 'query { jobPosting { id } }' })
   })), true);
+});
+
+test('the read proof survives how a client serializes a document', () => {
+  /* Review finding: an earlier "starts with query" test was brittle in the FATAL direction. Each
+   * shape below is a legal read on an allow-listed operation that a client can adopt without its
+   * API changing, and blocking any of them would take Ashby from fixed back to 100% down. */
+  assert.equal(isGraphqlReadDocument('query ApiJobPosting($a: String!) { x }'), true);
+  assert.equal(isGraphqlReadDocument('query { x }'), true);
+  assert.equal(isGraphqlReadDocument('fragment F on JobPosting { id }\nquery ApiJobPosting { ...F }'), true);
+  assert.equal(isGraphqlReadDocument('# @generated\nquery ApiJobPosting { x }'), true);
+  // A field or argument that merely contains the word is not an operation definition.
+  assert.equal(isGraphqlReadDocument('query A { mutationCount subscriptionState }'), true);
+});
+
+test('the read proof still refuses anything it cannot prove is a read', () => {
+  assert.equal(isGraphqlReadDocument('mutation M($i: I!) { submitApplication(input: $i) { id } }'), false);
+  assert.equal(isGraphqlReadDocument('subscription S { x }'), false);
+  // A mutation smuggled in behind a legitimate query is still a mutation.
+  assert.equal(isGraphqlReadDocument('query A { x }\nmutation B { submitApplication { id } }'), false);
+  // Shorthand anonymous and Automatic Persisted Query bodies carry no proof, so they stay blocked.
+  assert.equal(isGraphqlReadDocument('{ x }'), false);
+  assert.equal(isGraphqlReadDocument(undefined), false);
+  assert.equal(isGraphqlReadDocument(''), false);
 });
 
 test('a mutation cannot ride in under an allow-listed read operation name', () => {
@@ -118,7 +142,7 @@ test('a blocked Ashby operation names itself in the violation sentence', () => {
     postData: JSON.stringify({ operationName: 'ApiApplicationUpload', query: 'query X { x }' })
   }), false);
   // Nothing is read off a non-Ashby host, so no other board's body reaches the logs.
-  assert.equal(on(JSON.stringify({ operationName: 'X' })) && true, true);
+  assert.equal(on(JSON.stringify({ operationName: 'X' })), 'X');
   assert.equal(ashbyPublicBoardOperationName({
     url: 'https://api.greenhouse.io/api/non-user-graphql',
     postData: JSON.stringify({ operationName: 'Secret' })

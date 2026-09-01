@@ -74,8 +74,14 @@ export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
   'ApiAutocompleteGeoLocation'
 ]);
 
-/* The last two host labels, matching how the containment decides employer-bound transport. */
-const transportRegistrableSuffix = (host) => String(host || '').toLowerCase()
+/* The last two host labels. The run-scoped copy of this rule justified the approximation by noting
+ * it "over-matches toward FATAL, never away from it" - but here the same over-match runs toward
+ * ALLOW, so that safety argument does NOT carry across. It holds today only because ashbyhq.com is
+ * one label under a single-label TLD; on a multi-label public suffix 'evil.co.uk' and 'board.co.uk'
+ * both reduce to 'co.uk' and would pass this check. The exact path and the operation proof are what
+ * stop that being an open door, so neither may be relaxed while this is the host test. One
+ * definition, shared with the run-scoped containment, so the two can never drift apart. */
+export const transportRegistrableSuffix = (host) => String(host || '').toLowerCase()
   .split('.').filter(Boolean).slice(-2).join('.');
 
 /* Diagnostics only, never authorization. #127 deliberately strips query strings out of the
@@ -94,6 +100,33 @@ export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const operationName = body.operationName;
   return typeof operationName === 'string' && operationName ? operationName.slice(0, 80) : null;
+};
+
+/* PROVE THE DOCUMENT IS A READ, WITHOUT DEPENDING ON HOW A CLIENT SERIALIZES IT.
+ *
+ * An earlier form of this test asked whether the document STARTED with `query`. That is true of
+ * every Ashby body observed on 2026-09-01 and false for two shapes that are equally legal and that
+ * a client can adopt without its API changing at all: a fragment defined ahead of the operation,
+ * and a leading `#` comment. Either would have been read as a write and taken Ashby from fixed
+ * straight back to 100% down, so that brittleness ran in the fatal direction.
+ *
+ * The proof instead requires the document to DEFINE at least one `query` operation and to define no
+ * `mutation` and no `subscription`. An operation definition keyword is preceded by the start of the
+ * document, whitespace or a closing brace, and followed by an optional name and then `(` or `{`, so
+ * a field or argument that merely contains the word does not match. Two shapes stay blocked on
+ * purpose: a shorthand anonymous document (`{ x }`, carrying no keyword to prove anything with) and
+ * an Automatic Persisted Query body carrying only a hash and no document at all. Neither offers
+ * evidence, and this is a boundary where absence of evidence must read as absence of permission.
+ * Both fail closed and name their operation in the log. */
+const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s}])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+
+export const isGraphqlReadDocument = (document) => {
+  if (typeof document !== 'string' || !document) return false;
+  const defined = new Set();
+  for (const match of document.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION, 'g'))) {
+    defined.add(match[1]);
+  }
+  return defined.has('query') && !defined.has('mutation') && !defined.has('subscription');
 };
 
 export const isAshbyPublicBoardRead = ({
@@ -115,8 +148,7 @@ export const isAshbyPublicBoardRead = ({
   try { body = JSON.parse(postData || ''); } catch { return false; }
   if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
   if (!ASHBY_PUBLIC_BOARD_READ_OPERATIONS.includes(body.operationName)) return false;
-  // A read document opens with `query`; `mutation` and `subscription` never reach the employer.
-  return /^\s*query[\s({]/.test(String(body.query || ''));
+  return isGraphqlReadDocument(body.query);
 };
 
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
@@ -1593,8 +1625,7 @@ let terminalFailureInput = null;
        * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
        * this suffix with the application page. On multi-label public suffixes (co.uk) this
        * over-matches toward FATAL, never away from it. */
-      const registrableSuffix = (host) => String(host || '').toLowerCase()
-        .split('.').filter(Boolean).slice(-2).join('.');
+      const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
       })();
