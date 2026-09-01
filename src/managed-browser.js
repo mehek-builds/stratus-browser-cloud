@@ -157,6 +157,8 @@ export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
  * evidence, and this is a boundary where absence of evidence must read as absence of permission.
  * Both fail closed and name their operation in the log. */
 const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s}])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+/* The same grammar with the operation NAME captured, for the one rule that must pin it. */
+const GRAPHQL_OPERATION_DEFINITION_NAMED = '(?:^|[\\s}])(query|mutation|subscription)\\s*([A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
 
 export const isGraphqlReadDocument = (document) => {
   if (typeof document !== 'string' || !document) return false;
@@ -165,6 +167,67 @@ export const isGraphqlReadDocument = (document) => {
     defined.add(match[1]);
   }
   return defined.has('query') && !defined.has('mutation') && !defined.has('subscription');
+};
+
+/* ASHBY KEEPS THE APPLICATION'S VALUES ON THE SERVER, NOT IN THE SUBMIT.
+ *
+ * Read from Ashby's own public board bundle (cdn.ashbyprd.com/frontend_non_user, 2026-09-01): the
+ * final submit, ApiSubmitSingleApplicationFormAction, carries organizationHostedJobsPageName,
+ * jobPostingId, formRenderIdentifier, formDefinitionIdentifier, actionIdentifier, recaptchaToken,
+ * sourceAttributionCode, viewedAutomatedProcessingLegalNoticeRuleId, deviceFingerprint and
+ * applicationRequestId, and not one field value. Every value typed into the form is persisted as it
+ * is typed by ApiSetFormValue (path, value), a file by ApiSetFormValueToFile (path, fileHandle),
+ * both keyed on the same formRenderIdentifier the submit names. Measured live on the Cartesia fill
+ * the same day: the containment killed the run at the first field on "POST
+ * jobs.ashbyhq.com/api/non-user-graphql op=ApiSetFormValue", and had it merely spared the run and
+ * aborted the write, the submit would have filed a blank application under her name, which is the
+ * exact harm the fatality exists to prevent, arriving from the other side.
+ *
+ * So these four are ADMITTED during the fill, under the same discipline as the #129 upload window:
+ * only on Ashby's public board site and its one GraphQL path, only xhr/fetch POST, only a document
+ * that defines exactly one mutation with exactly one of these four names, only in locked mode
+ * (never during initial navigation, never as a navigation), and never anything that names an
+ * actionIdentifier or carries a recaptchaToken, which are the submit's variables and no draft's.
+ * The final submit still requires its exact literal authority; a draft write cannot file. */
+export const ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS = Object.freeze([
+  'ApiSetFormValue',
+  'ApiSetFormValueToFile',
+  'ApiAddManyFilesToFormValue',
+  'ApiRemoveFileFromFormValue'
+]);
+
+export const isGraphqlSingleMutationNamed = (document, name) => {
+  if (typeof document !== 'string' || !document || typeof name !== 'string' || !name) return false;
+  const definitions = [...document.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION_NAMED, 'g'))];
+  if (definitions.length !== 1) return false;
+  return definitions[0][1] === 'mutation' && definitions[0][2] === name;
+};
+
+export const isAshbyPublicBoardDraftWrite = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (!ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS.includes(body.operationName)) return false;
+  if (!isGraphqlSingleMutationNamed(body.query, body.operationName)) return false;
+  const variables = body.variables && typeof body.variables === 'object' && !Array.isArray(body.variables)
+    ? body.variables
+    : {};
+  if ('actionIdentifier' in variables || 'recaptchaToken' in variables) return false;
+  return true;
 };
 
 export const isAshbyPublicBoardRead = ({
@@ -1693,6 +1756,10 @@ let terminalFailureInput = null;
       const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
       const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
+      const ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS)};
+      const GRAPHQL_OPERATION_DEFINITION_NAMED = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION_NAMED)};
+      const isGraphqlSingleMutationNamed = ${isGraphqlSingleMutationNamed.toString()};
+      const isAshbyPublicBoardDraftWrite = ${isAshbyPublicBoardDraftWrite.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
@@ -1716,6 +1783,14 @@ let terminalFailureInput = null;
       /* The one same-site write-shaped transport that is a read, decided from the request body.
        * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
       const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
+      /* The draft-value writes Ashby's own submit depends on. See isAshbyPublicBoardDraftWrite. */
+      const ashbyPublicBoardDraftWrite = (request) => isAshbyPublicBoardDraftWrite({
         applicationSite: applicationTransportSite,
         method: request.method(),
         resourceType: request.resourceType(),
@@ -1786,6 +1861,13 @@ let terminalFailureInput = null;
           && (method === 'POST' || method === 'PUT')
           && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
           && employerBoundTransport(request)) {
+          return route.fallback();
+        }
+        /* ASHBY'S DRAFT WRITES CARRY THE VALUES THE SUBMIT WILL FILE. Admitted only in locked mode
+         * (the branches above already handled activation and initial navigation), only for the
+         * four draft operations, and never for the submit action, which stays behind its exact
+         * literal authority. See isAshbyPublicBoardDraftWrite. */
+        if (containment.mode === 'locked' && ashbyPublicBoardDraftWrite(request)) {
           return route.fallback();
         }
         if (transportTypes.has(request.resourceType())) {
