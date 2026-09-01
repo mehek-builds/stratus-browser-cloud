@@ -14897,14 +14897,22 @@ let terminalFailureInput = null;
              * because its <li class="option"> rows share one parent div. Same-name peers are the
              * rule the backend's own discovery already uses (questionDiscovery.ts). */
             const nativeChoice = el.type === 'radio' || el.type === 'checkbox';
-            const sameNamePeers = nativeChoice && el.name
+            const blockChoices = [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+            /* A semantic group or a fieldset that already holds two or more of this name is the
+             * group, and it wins over the name: the readiness reader treats a same-name input
+             * outside a labelled group as foreign, two fieldsets can legitimately share a name
+             * under two legends, and the backend copy of this rule lets the fieldset speak first.
+             * The same-name walk is for the bare markup where the block found only the option. */
+            const blockIsGroup = Boolean(block.closest && block.closest(
+              'fieldset, [role="group"][aria-labelledby], [role="group"][aria-label],'
+              + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+            )) && blockChoices.filter((input) => input.name === el.name).length > 1;
+            const sameNamePeers = nativeChoice && el.name && !blockIsGroup
               ? [...(el.form || document).querySelectorAll(
                 'input[type="radio"][name="' + CSS.escape(el.name) + '"], input[type="checkbox"][name="' + CSS.escape(el.name) + '"]'
-              )].filter((input) => input.name === el.name)
+              )].filter((input) => input.name === el.name && input.form === el.form)
               : [];
-            const choiceInputs = sameNamePeers.length > 1
-              ? sameNamePeers
-              : [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+            const choiceInputs = sameNamePeers.length > 1 ? sameNamePeers : blockChoices;
             for (const [index, input] of choiceInputs.entries()) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');

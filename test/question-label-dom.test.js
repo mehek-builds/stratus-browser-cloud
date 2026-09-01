@@ -1251,3 +1251,29 @@ test('an unnamed choice group still reads its block, and same-name peers in anot
   const shift = await optionInventoryFor(twoForms, '#shift input');
   assert.deepEqual(shift.values, ['Day', 'Night']);
 });
+
+test('a labelled group wins over its name: a same-name input outside it is foreign, and two fieldsets sharing a name stay two', async () => {
+  const html = `
+    <form>
+      <div role="group" aria-labelledby="team-q"><span id="team-q">Team</span>
+        <label><input type="checkbox" name="bounded" value="eng">Engineering</label>
+        <label><input type="checkbox" name="bounded" value="prod">Product</label>
+      </div>
+      <label><input type="checkbox" name="bounded" value="stray" checked>Unrelated answer</label>
+      <fieldset id="fe"><legend>Frontend skills</legend>
+        <label><input type="checkbox" name="skills[]" value="react">React</label>
+        <label><input type="checkbox" name="skills[]" value="vue">Vue</label>
+      </fieldset>
+      <fieldset id="be"><legend>Backend skills</legend>
+        <label><input type="checkbox" name="skills[]" value="node">Node</label>
+        <label><input type="checkbox" name="skills[]" value="go">Go</label>
+      </fieldset>
+    </form>
+  `;
+  const team = await optionInventoryFor(html, '[role="group"] input');
+  assert.deepEqual(team.values, ['Engineering', 'Product']);
+  const frontend = await optionInventoryFor(html, '#fe input');
+  assert.deepEqual(frontend.values, ['React', 'Vue']);
+  const backend = await optionInventoryFor(html, '#be input');
+  assert.deepEqual(backend.values, ['Node', 'Go']);
+});
