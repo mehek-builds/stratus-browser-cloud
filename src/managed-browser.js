@@ -323,6 +323,15 @@ export const MANAGED_PROVISIONING_LEASE_MS = 60_000;
 const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
 const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
 const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
+/* How long the host is willing to WAIT for the preview screenshot to appear. The runner publishes
+ * the terminal result FIRST (the authority moment must not wait on pixels) and captures the
+ * screenshot afterward, with a capture budget of its own, so the host's read races the write.
+ * readManagedTerminalArtifact returns null immediately on a file that does not exist yet, and
+ * before this wait existed that race was lost on every prepare of a long board page: two complete
+ * seven-question Breezy fills on 2026-09-01 each ended with litos-api failing the run on "did not
+ * return a preview screenshot" while the capture was still rendering. */
+const SCREENSHOT_ARTIFACT_WAIT_MS = 20_000;
+const SCREENSHOT_ARTIFACT_POLL_MS = 500;
 export const MANAGED_TERMINAL_ACK_REQUEST_TIMEOUT_MS = 50_000;
 export const MANAGED_TERMINAL_REQUEST_TIMEOUT_MS = 50_000;
 /* THE HELD SESSION, and what the two numbers on it now mean.
@@ -18754,6 +18763,23 @@ async function readOptionalSandboxArtifact(
   }
 }
 
+/* See SCREENSHOT_ARTIFACT_WAIT_MS: the runner captures the screenshot AFTER publishing its result,
+ * so every result-then-screenshot read path must be willing to wait for the file to appear rather
+ * than losing the race on a single immediate read. */
+async function waitForSandboxScreenshot(
+  sandbox,
+  path,
+  providerDeadlineAt,
+  maximumMs = OPTIONAL_ARTIFACT_TIMEOUT_MS
+) {
+  const deadline = Date.now() + SCREENSHOT_ARTIFACT_WAIT_MS;
+  for (;;) {
+    const screenshot = await readOptionalSandboxArtifact(sandbox, path, providerDeadlineAt, maximumMs);
+    if (screenshot || Date.now() >= deadline) return screenshot;
+    await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_ARTIFACT_POLL_MS));
+  }
+}
+
 function managedTerminalRequestBudget({
   requestAcceptedAtMs = Date.now(),
   requestTimeoutMs = MANAGED_TERMINAL_REQUEST_TIMEOUT_MS,
@@ -19310,12 +19336,20 @@ async function resultFromManagedTerminalState(state, sandbox, {
   if (state.kind !== 'terminal' && state.kind !== 'checkpoint') return null;
   const result = resultWithTerminalReference(state.envelope);
   if (screenshot) {
-    const screenshotBuffer = await readManagedTerminalArtifact(
-      sandbox,
-      `stratus-screenshot-${state.envelope.phase}.png`,
-      optionalArtifactTimeoutMs,
-      storeBudget
-    ).catch(() => null);
+    // See SCREENSHOT_ARTIFACT_WAIT_MS: the capture is written after the terminal result, so a
+    // single immediate read loses the race on any page whose capture outlives the result write.
+    const screenshotDeadline = Date.now() + SCREENSHOT_ARTIFACT_WAIT_MS;
+    let screenshotBuffer = null;
+    for (;;) {
+      screenshotBuffer = await readManagedTerminalArtifact(
+        sandbox,
+        `stratus-screenshot-${state.envelope.phase}.png`,
+        optionalArtifactTimeoutMs,
+        storeBudget
+      ).catch(() => null);
+      if (screenshotBuffer || Date.now() >= screenshotDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_ARTIFACT_POLL_MS));
+    }
     result.screenshot = screenshotBuffer?.toString('base64') || null;
   }
   return result;
@@ -19769,7 +19803,7 @@ export async function executeSandboxRun(input, {
       const result = JSON.parse(resultBuffer.toString('utf8'));
       assertSubmissionAttemptEcho(result, null);
       if (continuation.screenshot) {
-        const screenshot = await readOptionalSandboxArtifact(
+        const screenshot = await waitForSandboxScreenshot(
           sandbox,
           'stratus-screenshot-1.png',
           continuation.providerDeadlineAt,
@@ -20062,7 +20096,7 @@ export async function executeSandboxRun(input, {
       }
       assertSubmissionAttemptEcho(result, context.submissionAttempt ?? null);
       if (context.screenshot) {
-        const screenshot = await readOptionalSandboxArtifact(
+        const screenshot = await waitForSandboxScreenshot(
           sandbox,
           'stratus-screenshot-0.png',
           context.providerDeadlineAt,
