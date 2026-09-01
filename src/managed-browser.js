@@ -1512,12 +1512,45 @@ let terminalFailureInput = null;
         allowedNavigationUrl: null,
         blockedAttemptCount: 0,
         blockedReason: null,
+        blockedThirdPartyCount: 0,
         handler: null
       };
+      /* The last two host labels of the page this run is authorized to fill. Everything the
+       * employer's board can reach through its own app - a Breezy field save on breezy.hr, a
+       * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
+       * this suffix with the application page. On multi-label public suffixes (co.uk) this
+       * over-matches toward FATAL, never away from it. */
+      const registrableSuffix = (host) => String(host || '').toLowerCase()
+        .split('.').filter(Boolean).slice(-2).join('.');
+      const applicationTransportSite = (() => {
+        try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
+      })();
+      /* Whether a blocked transport could have been the employer's own. An unparseable or
+       * schemeless target counts as employer-bound, fail-closed. */
+      const employerBoundTransport = (request) => {
+        if (!applicationTransportSite) return true;
+        try {
+          return registrableSuffix(new URL(request.url()).hostname) === applicationTransportSite;
+        } catch { return true; }
+      };
+      /* Every blocked request is aborted either way - nothing ever reaches anyone. What differs is
+       * whether the run must DIE for it. It must when the blocked transport was bound for the
+       * employer's own site, because then the page's fill semantics may depend on it and a later
+       * submit could file a form whose state never persisted. A third-party analytics beacon, share
+       * widget, or maps tile cannot file anything with the employer, and counting those killed
+       * every Breezy fill in production 2026-09-01 (measured on the live posting: a
+       * google-analytics POST, a sharethis iframe, a maps.googleapis POST - nothing else). */
       const block = async (route, reason) => {
         if (containment.mode !== 'initial_navigation') {
-          containment.blockedAttemptCount += 1;
-          containment.blockedReason = reason;
+          const request = route.request();
+          if (employerBoundTransport(request)) {
+            containment.blockedAttemptCount += 1;
+            let target = '';
+            try { const parsed = new URL(request.url()); target = ' ' + (parsed.origin + parsed.pathname).slice(0, 200); } catch {}
+            containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target;
+          } else {
+            containment.blockedThirdPartyCount += 1;
+          }
         }
         return route.abort('blockedbyclient');
       };
@@ -3766,8 +3799,12 @@ let terminalFailureInput = null;
       if (!managedMutationTransportContainment) return;
       if (managedMutationTransportContainment.blockedAttemptCount > 0
         || managedOutOfBandTransportAttempted) {
+        // The named transport travels with the sentence so the next operator reading a 502 knows
+        // WHICH request tripped the containment instead of re-deriving it from a live probe.
+        const detail = managedMutationTransportContainment.blockedReason;
         throw managedTransportViolation(
           'A non-submit action attempted employer transport without exact final authority'
+          + (detail ? ' (' + detail + ')' : '')
         );
       }
     };
