@@ -31,6 +31,19 @@ export function managedRunProgressLogSummary(progress) {
     policyVersion: progress.policyVersion === 3 || progress.policyVersion === 4
       ? progress.policyVersion
       : null,
+    /* The action the run was on when it stopped: index, type and the action's own label (a
+     * question's employer text, never an applicant value). Absent on a run that never entered
+     * its action loop. */
+    ...(progress.action && typeof progress.action === 'object'
+      && Number.isInteger(progress.action.index)
+      ? {
+        action: {
+          index: progress.action.index,
+          type: typeof progress.action.type === 'string' ? progress.action.type.slice(0, 40) : null,
+          label: typeof progress.action.label === 'string' ? progress.action.label.slice(0, 200) : null
+        }
+      }
+      : {}),
     ...(progress.employerOutcome && typeof progress.employerOutcome === 'object' ? {
       employerOutcome: {
         kind: outcomeKinds.has(progress.employerOutcome.kind) ? progress.employerOutcome.kind : null,
