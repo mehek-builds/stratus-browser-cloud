@@ -333,6 +333,11 @@ const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
  * never waits at all. */
 const SCREENSHOT_ARTIFACT_WAIT_MS = 20_000;
 const SCREENSHOT_ARTIFACT_POLL_MS = 500;
+/* The per-read budget while waiting. OPTIONAL_ARTIFACT_TIMEOUT_MS (1s) was sized for a receipt
+ * image nobody strictly needed; the artifact this wait exists for is a full-page PNG of a long
+ * board page, the one most likely to take more than a second to come back through the sandbox
+ * file API, and a read that times out is a failure that ends the wait, not an absence. */
+const SCREENSHOT_ARTIFACT_READ_TIMEOUT_MS = 5_000;
 export const MANAGED_TERMINAL_ACK_REQUEST_TIMEOUT_MS = 50_000;
 export const MANAGED_TERMINAL_REQUEST_TIMEOUT_MS = 50_000;
 /* THE HELD SESSION, and what the two numbers on it now mean.
@@ -16807,11 +16812,18 @@ let terminalFailureInput = null;
          * because a fullPage capture of a long board page does not fit in 1000ms. The terminal
          * employer result is already written by this point, so the only cost of patience is
          * latency on the path that was previously a guaranteed failure. */
-        await page.screenshot({
-          path: screenshotPath,
+        const screenshotBytes = await page.screenshot({
           fullPage: Boolean(currentInput.fullPage),
           timeout: 15_000
         });
+        /* Captured to memory and published by rename, never written in place. The host may now be
+         * polling for this file (screenshotWait), and Playwright's own path option is a plain
+         * write: a poll landing mid-write would read a truncated PNG, which the host treats as a
+         * present artifact and the product shows as "what the form looked like". The temporary name
+         * carries the .tmp- suffix the private-artifact sweep already recognises. */
+        const screenshotTemporary = screenshotPath + '.tmp-' + process.pid + '-' + crypto.randomBytes(8).toString('hex');
+        fs.writeFileSync(screenshotTemporary, screenshotBytes);
+        fs.renameSync(screenshotTemporary, screenshotPath);
       } catch { /* screenshots are optional and cannot change terminal employer authority */ }
       /* Only a DURABLE submission's receipt image is private enough to delete after the terminal
        * ACK. An ephemeral scan attempt has carried a submissionAttempt on every prepare fill since
@@ -18780,12 +18792,13 @@ async function waitForSandboxScreenshot(
   waitMs = 0
 ) {
   const deadline = Date.now() + waitMs;
+  const readMaximumMs = waitMs > 0 ? Math.max(maximumMs, SCREENSHOT_ARTIFACT_READ_TIMEOUT_MS) : maximumMs;
   for (;;) {
     let buffer = null;
     try {
       buffer = await sandbox.readFileToBuffer(
         { path },
-        providerReadOptions(providerDeadlineAt, maximumMs)
+        providerReadOptions(providerDeadlineAt, readMaximumMs)
       );
     } catch (error) {
       if (!sandboxNotFound(error)) return null;
@@ -19359,14 +19372,18 @@ async function resultFromManagedTerminalState(state, sandbox, {
     /* See SCREENSHOT_ARTIFACT_WAIT_MS: the capture is written after the terminal result. Only a
      * screenshotWait caller with an unpressed result waits, and only through clean absence; a read
      * that throws resolves null at once. */
-    const screenshotDeadline = Date.now() + screenshotWaitMsForResult(screenshotWait, result);
+    const screenshotWaitMs = screenshotWaitMsForResult(screenshotWait, result);
+    const screenshotDeadline = Date.now() + screenshotWaitMs;
+    const screenshotReadTimeoutMs = screenshotWaitMs > 0
+      ? Math.max(optionalArtifactTimeoutMs, SCREENSHOT_ARTIFACT_READ_TIMEOUT_MS)
+      : optionalArtifactTimeoutMs;
     let screenshotBuffer = null;
     for (;;) {
       let readFailed = false;
       screenshotBuffer = await readManagedTerminalArtifact(
         sandbox,
         `stratus-screenshot-${state.envelope.phase}.png`,
-        optionalArtifactTimeoutMs,
+        screenshotReadTimeoutMs,
         storeBudget
       ).catch(() => { readFailed = true; return null; });
       if (screenshotBuffer || readFailed || Date.now() >= screenshotDeadline) break;
