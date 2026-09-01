@@ -29,6 +29,7 @@ import {
   normalizeManagedRun,
   PUBLIC_EGRESS_NETWORK_POLICY,
   resolvedManagedExactPageUrl,
+  assertSubmissionReleaseAllowed,
   submissionReleasePolicy,
   STRATUS_SUBMISSION_CORRELATION_MODE_ENV,
   STRATUS_SUBMISSION_QUIESCENCE_ENV,
@@ -4459,4 +4460,30 @@ test('the furniture-label vocabulary is one vocabulary in both passes', () => {
   for (const literal of literals.slice(1)) {
     assert.equal(literal, literals[0], 'a furniture vocabulary drifted apart');
   }
+});
+
+
+test('a field-scoped Enter press is a select commit, not a final employer action', () => {
+  const policy = submissionReleasePolicy({});
+  // Field-scoped Enter (carries a selector) commits a dropdown/typeahead selection during a fill.
+  // It selects an option, it does not submit the form, so it must be allowed without allowSubmit -
+  // this is the fill of every form with a select control, which used to fail closed.
+  assert.doesNotThrow(() => assertSubmissionReleaseAllowed({
+    actions: [
+      { type: 'fill', selector: '#name', value: 'Mehek', label: 'legal_name' },
+      { type: 'press', selector: '#location', value: 'Enter', label: 'location_select' },
+    ],
+  }, policy));
+  // A bare Enter with no selector can trigger native form submission, so it stays authority-gated.
+  assert.throws(() => assertSubmissionReleaseAllowed({
+    actions: [{ type: 'press', value: 'Enter', label: 'bare_enter' }],
+  }, policy), /allowSubmit to be literal true/);
+  // The authorized submit action still requires literal allowSubmit.
+  assert.throws(() => assertSubmissionReleaseAllowed({
+    actions: [{ type: 'confirmAndSubmit', selector: '#s', label: 'required_field_confirmation' }],
+  }, policy), /allowSubmit to be literal true/);
+  assert.doesNotThrow(() => assertSubmissionReleaseAllowed({
+    actions: [{ type: 'confirmAndSubmit', selector: '#s', label: 'required_field_confirmation' }],
+    allowSubmit: true,
+  }, policy));
 });
