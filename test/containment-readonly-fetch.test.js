@@ -23,6 +23,15 @@ test('everything else in the contained set stays blocked', () => {
   assert.match(source, /A non-submit action attempted employer transport without exact final authority/);
 });
 
+test('the upload allowance is scoped to the armed window, employer-bound POST/PUT xhr/fetch only', () => {
+  // Armed exactly by an upload action, disarmed by the next mutation action; read-only actions
+  // after the upload keep it open because the page's upload XHR starts on the change event.
+  assert.match(source, /if \(action\.type === 'upload'\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = true;/);
+  assert.match(source, /\} else if \(!\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = false;/);
+  // The allowance itself: employer-bound POST/PUT xhr/fetch and nothing wider.
+  assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& employerBoundTransport\(request\)\) \{\s*\n\s*return route\.fallback\(\);/);
+});
+
 test('only employer-bound blocked transport is run-fatal; third-party blocks are aborted quietly', () => {
   // The fatality discriminator is a registrable-suffix match against the application page's host,
   // fail-closed: an unparseable target counts as employer-bound.
