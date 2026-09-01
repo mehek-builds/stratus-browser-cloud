@@ -420,7 +420,8 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
     event.preventDefault();
     document.getElementById('submitted').textContent = 'yes';
   });
-  if (new URLSearchParams(location.search).get('receipt') === 'ashby') {
+  var receiptMode = new URLSearchParams(location.search).get('receipt');
+  if (receiptMode === 'ashby' || receiptMode === 'ashby-reject') {
     document.getElementById('app-form').style.display = 'none';
     document.getElementById('delayed-receipt-form').style.display = 'block';
   }
@@ -436,11 +437,16 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Replay Fixture</tit
      * arithmetic instead of coincidence: the receipt lands at 2.6s, after phase zero has given up at
      * 2s, and BEFORE the continuation begins at roughly 3s.
      *
-     * That ordering is deliberate. The success container is persistent once rendered, so phase one
-     * sees it on its FIRST read and the assertion does not depend on how phase one polls. */
+     * That ordering is deliberate. The success/failure container is persistent once rendered, so
+     * phase one sees it on its FIRST read and the assertion does not depend on how phase one polls.
+     * ashby-reject renders the FAILURE container instead: a late, definite rejection must be caught
+     * by the same continuation and reported 'rejected', not left as a terminal unverified row. */
+    var rejecting = receiptMode === 'ashby-reject';
     setTimeout(function () {
       document.getElementById('delayed-receipt-form').remove();
-      document.getElementById('delayed-receipt-result').innerHTML = '<div class="ashby-application-form-success-container"><div role="status" aria-live="polite">Success. Thank you for submitting your application to kos.ai.</div></div>';
+      document.getElementById('delayed-receipt-result').innerHTML = rejecting
+        ? '<div class="ashby-application-form-failure-container"><div role="status" aria-live="polite">We could not submit your application. Please try again.</div></div>'
+        : '<div class="ashby-application-form-success-container"><div role="status" aria-live="polite">Success. Thank you for submitting your application to kos.ai.</div></div>';
     }, 2600);
   });
   document.getElementById('apply').addEventListener('click', function () {
@@ -1765,6 +1771,85 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   assert.deepEqual(second.requiredFieldConfirmation, null, 'phase one ran no confirmation or submit action');
   const exitCode = await new Promise((resolve) => child.on('close', resolve));
   assert.equal(exitCode, 0, `receipt observation runner exited ${exitCode}: ${stderr}`);
+}
+
+/* THE SAME SECOND LOOK CATCHES A DELAYED REJECTION, NOT ONLY A DELAYED CONFIRMATION.
+ *
+ * An employer verdict that lands after phase zero's window can be a definite FAILURE as easily as a
+ * success. The fixture renders Ashby's published failure container at 2.6s - past the 2s settle,
+ * before the continuation - so phase zero must report pressed+unknown and phase one, the empty
+ * read-only continuation, must report 'rejected' from that container on the same retained page.
+ * Without this, a late rejection becomes a terminal unverified "check the portal" row when the page
+ * in fact says plainly that nothing was filed. It also proves the continuation is not confirmation-
+ * only: it carries whichever settled verdict the ATS renders. */
+{
+  const result0 = path.join(workDir, 'stratus-result-0.json');
+  const result1 = path.join(workDir, 'stratus-result-1.json');
+  const continuationInput = path.join(workDir, 'stratus-continuation-input.json');
+  fs.rmSync(result0, { force: true });
+  fs.rmSync(result1, { force: true });
+  fs.rmSync(continuationInput, { force: true });
+  fs.rmSync(path.join(workDir, 'stratus-continuation-ready.json'), { force: true });
+  fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
+    providerDeadlineAt: providerDeadlineAt(),
+    url: `${base}?receipt=ashby-reject`,
+    actions: [
+      { type: 'fill', selector: '#delayed-receipt-email', value: 'routing@example.test', label: 'email' },
+      { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' }
+    ],
+    screenshot: false,
+    waitUntil: 'networkidle',
+    viewport: { width: 1440, height: 900 },
+    submissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 120,
+    continuationExpiresAt: new Date(Date.now() + 120_000).toISOString(),
+    // 2s window puts the 2.6s failure receipt past phase zero and before phase one, as above.
+    postSubmitSettleMs: 2000,
+    allowedHost: new URL(base).hostname
+  }));
+  const child = spawn(process.execPath, ['--require', path.join(HERE, 'managed-runner-shim.cjs'), 'stratus-runner.cjs'], {
+    cwd: workDir,
+    env: { ...process.env, NODE_PATH: path.join(process.cwd(), 'node_modules') }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.resume();
+  const waitForFile = async (file, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(file) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.ok(fs.existsSync(file), `runner did not create ${path.basename(file)}: ${stderr}`);
+  };
+  await waitForFile(result0);
+  const first = JSON.parse(fs.readFileSync(result0, 'utf8'));
+  assert.equal(first.submitOutcome.pressed, true);
+  assert.equal(first.submitOutcome.state, 'unknown', 'the failure container has not rendered yet at phase zero');
+  assert.match(first.text, /submission-count:1/, 'phase zero must dispatch exactly one submit');
+  assert.equal(first.continuationOffered, true);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  fs.writeFileSync(continuationInput, JSON.stringify({
+    parentSubmissionAttempt: REPLAY_SUBMISSION_ATTEMPT,
+    submissionAttempt: {
+      ...REPLAY_SUBMISSION_ATTEMPT,
+      executionId: '66666666-6666-4666-8666-666666666666'
+    },
+    providerDeadlineAt: providerDeadlineAt(),
+    actions: [],
+    screenshot: false,
+    fullPage: false
+  }));
+  await waitForFile(result1);
+  const second = JSON.parse(fs.readFileSync(result1, 'utf8'));
+  assert.equal(second.submitOutcome.pressed, true, 'empty phase one retains the phase-zero click fact');
+  assert.equal(second.submitOutcome.state, 'rejected');
+  assert.equal(second.submitOutcome.source, 'ats_state');
+  assert.equal(second.submitOutcome.evidence, '.ashby-application-form-failure-container');
+  assert.match(second.text, /submission-count:1/, 'the empty observation must not dispatch another submit');
+  assert.equal(second.url, first.url, 'the empty observation must retain the same employer page URL');
+  assert.deepEqual(second.requiredFieldConfirmation, null, 'phase one ran no confirmation or submit action');
+  const exitCode = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(exitCode, 0, `receipt-rejection observation runner exited ${exitCode}: ${stderr}`);
 }
 
 /* 12. THE ASHBY GRADUATION DATE PICKER, end to end, against the markup the live board serves.
