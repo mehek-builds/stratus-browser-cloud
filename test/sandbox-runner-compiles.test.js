@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import * as managedBrowser from '../src/managed-browser.js';
 import { SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 /* The runner ships to the sandbox as ONE String.raw template written to stratus-runner.cjs, so a
@@ -26,4 +27,25 @@ test('the shared transport definitions are injected before their first use', () 
   assert.ok(opName >= 0 && opUse > opName, 'ashbyPublicBoardOperationName source precedes its call');
   // And its regex dependency rides along as a literal, not a module name.
   assert.match(SANDBOX_RUNNER, /const GRAPHQL_OPERATION_DEFINITION = "/);
+});
+
+test('every module export the runner references is defined inside the runner first', () => {
+  /* The general guard for this class. #128 shipped a bare module reference and threw
+   * ReferenceError on every run; #131 shipped another one INSIDE employerBoundTransport's try,
+   * where the catch converted it to fail-closed and every third-party beacon silently became
+   * run-fatal again. Any exported name the runner mentions must have an in-string const
+   * definition before its first mention. */
+  /* Comment prose may name an export without using it, so the scan looks at CODE mentions only:
+   * the runner with line comments and block comments stripped. String literals stay in, which can
+   * only over-report, never under-report. */
+  const code = SANDBOX_RUNNER
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const names = Object.keys(managedBrowser).filter((name) => name !== 'SANDBOX_RUNNER');
+  const missing = [];
+  for (const name of names) {
+    if (!new RegExp('\\b' + name + '\\b').test(code)) continue;
+    if (code.indexOf('const ' + name + ' = ') < 0) missing.push(name);
+  }
+  assert.deepEqual(missing, [], 'runner references these module exports without an in-string definition');
 });

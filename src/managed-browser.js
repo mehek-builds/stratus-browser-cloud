@@ -1679,6 +1679,8 @@ let terminalFailureInput = null;
       const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
+      const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
+      const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
