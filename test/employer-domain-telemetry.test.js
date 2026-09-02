@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   isEmployerDomainTelemetryHost,
-  EMPLOYER_DOMAIN_TELEMETRY_HOSTS
+  EMPLOYER_DOMAIN_TELEMETRY_HOSTS,
+  isEmployerTelemetryPath,
+  EMPLOYER_TELEMETRY_PATH_SEGMENTS,
 } from '../src/managed-browser.js';
 
 /* Greenhouse serves its Snowplow collector from c.spl.greenhouse.io, inside the same registrable
@@ -89,4 +91,49 @@ test('a telemetry host is refused admission to the #129 upload window', () => {
   const admittedByUploadWindow = (host) => !isEmployerDomainTelemetryHost(host);
   assert.equal(admittedByUploadWindow('c.spl.greenhouse.io'), false, 'a beacon may not ride an upload');
   assert.equal(admittedByUploadWindow('job-boards.greenhouse.io'), true, 'a real upload must still be admitted');
+});
+
+/* The Teamtailor page-view beacon lives on the employer's own host, so the host rule cannot spare
+ * it; the path can. Measured 2026-09-01 on the live TixTrack fill. */
+test('a collector path on the employer host is spared, by exact last segment only', () => {
+  assert.equal(isEmployerTelemetryPath('https://tixtrack.teamtailor.com/pageview'), true);
+  assert.equal(isEmployerTelemetryPath('https://tixtrack.teamtailor.com/pageview?ref=apply'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.example.com/js/pageview.gif'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.example.com/api/v2/analytics'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.example.com/rum'), true);
+  // Cloudflare's reserved prefix, measured on the live Apollo Research (Lever) fill.
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/cdn-cgi/challenge-platform/h/b/jsd/oneshot/e694063b5082/0.12:1788300912:abc/a347f0385e2eed35'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/cdn-cgi/rum'), true);
+  assert.equal(isEmployerTelemetryPath('https://jobs.lever.co/apollo/cdn-cgi/anything'), false, 'the prefix, never a substring');
+});
+
+test('THE REAL SUBMIT PATH IS NEVER A COLLECTOR PATH', () => {
+  for (const url of [
+    'https://tixtrack.teamtailor.com/jobs/8287889/applications',
+    'https://tixtrack.teamtailor.com/jobs/8287889/applications/new',
+    'https://job-boards.greenhouse.io/embed/job_app',
+    'https://jobs.lever.co/apollo/apply',
+    'https://alertalarm.breezy.hr/api/portal/alertalarm/upload',
+    'https://jobs.example.com/pageview/submit',
+    'https://jobs.example.com/api/pageview-settings',
+    'https://jobs.example.com/analytics-consent',
+    'https://jobs.example.com/collection',
+    'https://jobs.example.com/collect',
+    'https://jobs.example.com/ping',
+    'https://jobs.example.com/',
+    'not a url',
+    '',
+  ]) {
+    assert.equal(isEmployerTelemetryPath(url), false, url);
+  }
+});
+
+test('the path exemption is consulted for fatality only too, inside employerBoundTransport, once', () => {
+  const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
+  assert.equal(source.split('isEmployerTelemetryPath(').length - 1, 1);
+  const fn = source.slice(source.indexOf('const employerBoundTransport = (request) => {'));
+  const body = fn.slice(0, fn.indexOf('\n      };'));
+  assert.ok(body.includes('isEmployerTelemetryPath(request.url())'), 'the path check lives inside employerBoundTransport');
+  assert.deepEqual([...EMPLOYER_TELEMETRY_PATH_SEGMENTS], ['pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics']);
+  assert.equal(Object.isFrozen(EMPLOYER_TELEMETRY_PATH_SEGMENTS), true);
 });
