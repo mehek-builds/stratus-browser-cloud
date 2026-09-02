@@ -7491,6 +7491,50 @@ let terminalFailureInput = null;
         + ' or contains(@class,"_fieldEntry_")) and .//input[@type="radio" or @type="checkbox"]][1]'
       ).first();
       if ((await block.count()) > 0) return block;
+      /* A BARE LIST OF SAME-NAME ROWS UNDER THE HEADING THAT NAMES IT.
+       *
+       * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: the veteran and
+       * disability groups are a <ul> of bare <li> rows under an <h3>, with no fieldset, group
+       * role, field path or provider class for the ancestor walk above to find. What the caller's
+       * container then resolves to depends entirely on the wrappers the theme happens to add:
+       * none at all (no div or fieldset ancestor holds a control, so the block is empty and the
+       * action ends in "field not found"), one div around the whole EEOC section (three names,
+       * refused as three questions), or one div per section (works, by luck of the theme). The
+       * rows themselves are unambiguous: the first control after the heading is a radio whose
+       * same-name peers share one smallest ancestor, and that ancestor holds no other choice
+       * name. That is the group wherever the wrappers sit, and it is stamped so the caller scopes
+       * every later read and tick to it.
+       *
+       * Bounded three ways. The first following element that is a control OR a heading or legend
+       * is taken, so a heading that belongs to the NEXT question ends the search before its rows
+       * are reached; the ancestor must hold exactly one radio or checkbox name, the same
+       * one-name-one-question rule radioGroupNames enforces on the caller; and a control that is
+       * not a named radio or checkbox with peers falls straight back to the container the caller
+       * already resolved, so no other shape changes. */
+      const following = anchor.locator(
+        'xpath=following::*[(self::input and not(@type="hidden")) or self::select or self::textarea'
+        + ' or self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6 or self::legend][1]'
+      ).first();
+      const anchored = (await following.count()) > 0 && await following.evaluate((element) => {
+        for (const stale of document.querySelectorAll('[data-litos-anchored-group]')) {
+          stale.removeAttribute('data-litos-anchored-group');
+        }
+        if (!(element instanceof HTMLInputElement)) return false;
+        if (element.type !== 'radio' && element.type !== 'checkbox') return false;
+        if (!element.name) return false;
+        const peers = [...(element.form || document).querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+          .filter((input) => input.name === element.name && input.form === element.form);
+        if (peers.length < 2) return false;
+        let group = element.parentElement;
+        while (group && !peers.every((peer) => group.contains(peer))) group = group.parentElement;
+        if (!group || group === document.body || group === document.documentElement) return false;
+        const names = new Set([...group.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+          .map((input) => input.name || ''));
+        if (names.size !== 1) return false;
+        group.setAttribute('data-litos-anchored-group', '');
+        return true;
+      }).catch(() => false);
+      if (anchored) return page.locator('[data-litos-anchored-group]').first();
       return fallback;
     };
     /* Two named radio groups inside one block are TWO QUESTIONS. Radios in one question share a name
