@@ -14069,8 +14069,22 @@ let terminalFailureInput = null;
     successfulAddressIntegrityFailure = false;
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
+    let actionIndex = -1;
     for (const action of currentInput.actions || []) {
+     actionIndex += 1;
      assertProviderActionWindow();
+     /* WHICH ACTION THE RUN IS ON, persisted before the action runs, so a run that dies mid-action
+      * (the provider deadline closing the browser, a host timeout, a crash) leaves behind the
+      * action it was on and not only the phase. Measured 2026-09-01 on a Recruitee fill that sat
+      * in phase 0 for the host's whole budget: the progress said phase_started and nothing else.
+      * Index, type and the action's own label (a question's employer text), never a value. */
+     recordCrashProgress({
+       action: {
+         index: actionIndex,
+         type: String(action.type || '').slice(0, 40),
+         label: String(action.label || '').slice(0, 200)
+       }
+     });
      assertManagedMutationTransportClean();
      if (managedMutationTransportContainment) {
        /* The upload allowance is scoped to the upload action itself plus any read-only actions
@@ -18115,6 +18129,15 @@ export function normalizeManagedBrowserProgress(parsed, expectedSubmissionAttemp
   const validSecurityCodeOutcome = parsed?.securityCodeOutcome == null
     || ['accepted', 'rejected', 'no_control', 'not_entered'].includes(parsed.securityCodeOutcome);
   const finalProgress = parsed?.stage === 'result_ready' || parsed?.stage === 'result_written';
+  /* The action in flight, when the runner recorded one. Malformed is treated as absent rather than
+   * invalidating the progress: the fields above are the employer-outcome authority, this is a
+   * diagnostic pointer. */
+  const action = parsed?.action && typeof parsed.action === 'object'
+    && Number.isInteger(parsed.action.index) && parsed.action.index >= 0
+    && typeof parsed.action.type === 'string' && parsed.action.type.length <= 40
+    && typeof parsed.action.label === 'string' && parsed.action.label.length <= 200
+    ? { index: parsed.action.index, type: parsed.action.type, label: parsed.action.label }
+    : null;
   if (parsed?.version !== 1
     || !Number.isInteger(parsed?.phase) || parsed.phase < 0 || parsed.phase > 1
     || !validStage || typeof parsed?.submitPressed !== 'boolean'
@@ -18139,7 +18162,8 @@ export function normalizeManagedBrowserProgress(parsed, expectedSubmissionAttemp
       ? { requiredFieldConfirmationStatus: parsed.requiredFieldConfirmationStatus }
       : {}),
     ...(parsed.securityCodeOutcome != null ? { securityCodeOutcome: parsed.securityCodeOutcome } : {}),
-    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {})
+    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {}),
+    ...(action ? { action } : {})
   };
   return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
 }

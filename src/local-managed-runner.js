@@ -15,6 +15,22 @@ import {
 
 const RUN_TIMEOUT_MS = 150_000;
 const CONTINUATION_TIMEOUT_MS = 60_000;
+/* The runner keeps its own clock from the caller's providerDeadlineAt: it stops acting ten seconds
+ * before that instant, closes the browser, and publishes a result or an error that names what it
+ * was doing. The host used to wait a flat 150s, which is SHORTER than the 280s window litos-api
+ * grants a prepare fill, so a long action (measured 2026-09-01 on a Recruitee dial-code picker:
+ * the fill sat in phase 0 for the full 150s) was killed by the host with only a progress stage to
+ * show for it, and nothing anywhere said which control it was stuck on. The host now waits until
+ * the runner's own deadline has passed plus a return margin, so the runner's account of the run
+ * always arrives first. Bounded above so a malformed deadline cannot hold a slot for an hour. */
+const HOST_WAIT_AFTER_DEADLINE_MS = 5_000;
+const MAX_RUN_TIMEOUT_MS = 330_000;
+
+export function runTimeoutMsFor(providerDeadlineAt, now = Date.now()) {
+  const deadlineMs = typeof providerDeadlineAt === 'string' ? Date.parse(providerDeadlineAt) : NaN;
+  if (!Number.isFinite(deadlineMs)) return RUN_TIMEOUT_MS;
+  return Math.min(MAX_RUN_TIMEOUT_MS, Math.max(RUN_TIMEOUT_MS, deadlineMs - now + HOST_WAIT_AFTER_DEADLINE_MS));
+}
 const MAX_CONCURRENT_RUNS = Math.max(1, Number(process.env.MANAGED_CONCURRENCY || 2));
 const sessions = new Map();
 const active = new Set();
@@ -171,7 +187,12 @@ async function startRun(input) {
     session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
   });
 
-  const produced = await waitForFile(directory, ['stratus-result-0.json', 'stratus-error.json'], RUN_TIMEOUT_MS, child);
+  const produced = await waitForFile(
+    directory,
+    ['stratus-result-0.json', 'stratus-error.json'],
+    runTimeoutMsFor(context.providerDeadlineAt),
+    child,
+  );
   if (!produced) {
     const runProgress = await readProgress(directory, session.submissionAttempt);
     await cleanup(session);
