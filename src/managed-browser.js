@@ -5094,6 +5094,47 @@ let terminalFailureInput = null;
     };
     const declineMatches = (candidate, wanted) =>
       DECLINE_TO_STATE.test(normalized(candidate)) && DECLINE_TO_STATE.test(normalized(wanted));
+    /* THE NOUN THE ROWS ARE ABOUT, AND WHETHER THE QUESTION ASKED ABOUT IT.
+     *
+     * Mapping a stored yes or no onto a negated statement is only sound when the statement negates
+     * THE QUESTION'S predicate, and nothing in the SHAPE of a list can say whether it does. Two
+     * rows reading "I require sponsorship to work in the United States" and "I do not require
+     * sponsorship to work in the United States" are a clean yes/no pair by construction; under the
+     * question "Are you legally authorized to work in the United States?" a stored "No" means NOT
+     * AUTHORISED, and the negated row states that no sponsorship is needed - the opposite claim,
+     * ticked under her name and never looked at again. Row polarity is not question polarity.
+     *
+     * So the tie is made on WORDS. The noun the two rows share - "veteran", "disability",
+     * "sponsorship", "authorized" - has to be a noun the question asked about, and the noise list
+     * is what makes that a test rather than a coincidence: a question and an unrelated pair of
+     * rows share plenty of words that are not the predicate, and on the pair above the shared
+     * words are "work", "united" and "states". Strike those and the question is about
+     * "authorized" while the rows are about "sponsorship", which is exactly the disagreement the
+     * tier must refuse; leave them in and it fires on it.
+     *
+     * Four letters minimum, for the same reason: "us", "the", "not" and "one" carry no predicate
+     * at all, and a two-letter overlap is what a coincidence is made of.
+     *
+     * The list is grammar, the words a form uses about ITSELF, and the words every employment
+     * question shares - where the work happens, who the employer is, when. It is deliberately not
+     * a stoplist of EEO vocabulary: "veteran", "disability", "sponsorship", "citizen",
+     * "authorized" and their like must survive it, because they are the whole test. */
+    const PREDICATE_NOISE = new Set([
+      'this', 'that', 'these', 'those', 'they', 'them', 'their', 'there', 'here', 'with',
+      'from', 'your', 'yours', 'have', 'having', 'been', 'being', 'will', 'would', 'shall',
+      'should', 'could', 'does', 'than', 'then', 'what', 'when', 'where', 'which', 'while',
+      'about', 'above', 'below', 'into', 'over', 'under', 'only', 'also', 'ever', 'never',
+      'same', 'such', 'more', 'most', 'other', 'others', 'some', 'none', 'both', 'each',
+      'very', 'just', 'like', 'made', 'take', 'well',
+      'work', 'working', 'employment', 'employer', 'employee', 'company', 'organization',
+      'organisation', 'position', 'role', 'roles', 'application', 'applicant', 'apply',
+      'form', 'question', 'answer', 'wish', 'prefer', 'decline', 'choose', 'select',
+      'following', 'option', 'options', 'please', 'check', 'boxes', 'listed',
+      'current', 'future', 'past', 'time', 'year', 'years', 'date',
+      'united', 'states', 'state', 'country', 'countries', 'america', 'national'
+    ]);
+    const predicateNouns = (text) => new Set(normalized(text).split(' ')
+      .filter((word) => word.length >= 4 && !PREDICATE_NOISE.has(word)));
     /* A YES OR NO AGAINST TWO STATEMENTS, ONE OF WHICH SAYS "NOT".
      *
      * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: the stored answer is
@@ -5126,10 +5167,24 @@ let terminalFailureInput = null;
      * refusal onto them.
      *
      * The negation is anchored at the START of the normalised text, deliberately: "Yes, I have
-     * not yet graduated" is not a negated row, and reading "not" anywhere would make it one. */
-    const yesNoNegationIndex = (texts, wanted) => {
+     * not yet graduated" is not a negated row, and reading "not" anywhere would make it one.
+     *
+     * AND THE ROW'S POLARITY IS NOT THE QUESTION'S POLARITY, which is the correction this tier
+     * needed and did not have. See PREDICATE_NOISE below: the tier is handed the question label
+     * and refuses unless the noun the two rows share is a noun the question asked about. */
+    const yesNoNegationIndex = (texts, wanted, question) => {
       const want = normalized(wanted);
       if (want !== 'no' && want !== 'yes') return -1;
+      /* NEVER OVER A LITERAL OR A NORMALISED-EXACT ROW, and the guard is repeated INSIDE the tier
+       * rather than left to the caller's ordering. chooseOptionIndex does run both exact tiers
+       * first, but a tier whose safety is a property of where it is called from is one call site
+       * away from not having it, and the unit suites execute this function on its own. */
+      for (const option of answerOptions(wanted)) {
+        const literal = clean(option).toLowerCase();
+        const exact = normalized(option);
+        if (texts.some((text) => (literal && clean(text).toLowerCase() === literal)
+          || (exact && normalized(text) === exact))) return -1;
+      }
       const statements = [];
       let optOuts = 0;
       for (let index = 0; index < texts.length; index += 1) {
@@ -5139,10 +5194,34 @@ let terminalFailureInput = null;
         if (DECLINE_TO_STATE.test(text)) optOuts += 1;
         else statements.push(index);
       }
+      /* TWO REAL ROWS, NEVER THREE. A third statement is a third claim about her, and which of
+       * them a bare "yes" or "no" belongs to stops being a property of the list. */
       if (statements.length !== 2 || optOuts === 0) return -1;
-      const negated = statements.filter((index) => /^(?:i am not|i do not|i don t|no)\b/.test(normalized(texts[index])));
+      const opens = (index, pattern) => pattern.test(normalized(texts[index]));
+      const negated = statements.filter((index) => opens(index, /^(?:i am not|i do not|i don t|no)\b/));
       if (negated.length !== 1) return -1;
-      return want === 'no' ? negated[0] : statements.find((index) => index !== negated[0]);
+      const other = statements.find((index) => index !== negated[0]);
+      /* HOW THE ROWS SAY THEIR OWN POLARITY, and only these two readings are admitted.
+       *   - STATED: the negated row opens with a literal "no" token and its counterpart with a
+       *     literal "yes" token, so neither half of the mapping is inferred at all. Breezy's
+       *     disability group is this shape.
+       *   - IMPLIED: neither row opens with a literal yes or no, and exactly one opens with a
+       *     negation phrase, so the pair is a statement and its negation. Breezy's veteran group
+       *     is this shape, and it is the case this tier exists for.
+       * A list that MIXES them - a literal "No, ..." row against a bare affirmative statement - is
+       * refused: the affirmative half would be read by inference on a list that has just shown, on
+       * the other row, that it spells polarity out when it means it. */
+      const stated = opens(negated[0], /^no\b/) && opens(other, /^yes\b/);
+      const implied = !opens(negated[0], /^(?:yes|no)\b/) && !opens(other, /^(?:yes|no)\b/);
+      if (!stated && !implied) return -1;
+      /* AND THE QUESTION HAS TO BE ASKING ABOUT WHAT THE ROWS ARE ABOUT. No question label, no
+       * tier: every caller that cannot name the question it is filling gets the refusal. */
+      const asked = predicateNouns(question);
+      if (!asked.size) return -1;
+      const counterpart = predicateNouns(texts[other]);
+      const shared = [...predicateNouns(texts[negated[0]])].filter((word) => counterpart.has(word));
+      if (!shared.some((word) => asked.has(word))) return -1;
+      return want === 'no' ? negated[0] : other;
     };
     /* THE FIRST OF SEVERAL IS NEVER AN ANSWER, and this is the one place that rule is written down.
      *
@@ -5178,7 +5257,7 @@ let terminalFailureInput = null;
      * clicked here goes straight into filledFields and is never looked at again. Exact, an
      * unambiguous refusal, or nothing.
      */
-    const chooseOptionIndex = (texts, wanted) => {
+    const chooseOptionIndex = (texts, wanted, question) => {
       if (!clean(wanted)) return -1;
       /* THE LITERAL MATCH IS TAKEN BEFORE ANYTHING IS NORMALISED, and that ordering is the whole of
        * this tier's safety. normalized() keeps only [a-z0-9], which is what lets "Yes," reach a
@@ -5229,8 +5308,10 @@ let terminalFailureInput = null;
       if (datePart !== -1) return datePart;
       /* After every exact and widened tier, and before the refusal tier: a list that offers a
        * literal "No" is answered by it above, and a stored refusal is still carried below. Only a
-       * bare yes/no against two statements reaches this, and yesNoNegationIndex says when. */
-      const yesNo = yesNoNegationIndex(texts, wanted);
+       * bare yes/no against two statements reaches this, and yesNoNegationIndex says when - which
+       * now includes whether the question this list belongs to asked about what the rows state. A
+       * caller with no question label to hand gets a refusal from the tier, never a guess. */
+      const yesNo = yesNoNegationIndex(texts, wanted, question);
       if (yesNo !== -1) return yesNo;
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
@@ -7440,7 +7521,7 @@ let terminalFailureInput = null;
      * to search - reuse this same read-every-label-then-tick-then-read-back discipline instead of
      * growing a second, unverified copy of it. Every existing call site passes a scope and is
      * unchanged. */
-    const pickRadioOption = async (scope, wanted, directChoices = null) => {
+    const pickRadioOption = async (scope, wanted, directChoices = null, question = '') => {
       if (!clean(wanted)) return 'no-answer';
       const choices = directChoices || scope.locator('input[type=checkbox], input[type=radio]');
       const total = await choices.count();
@@ -7452,7 +7533,7 @@ let terminalFailureInput = null;
       for (let index = 0; index < total; index += 1) {
         texts.push(await optionTextOf(choices.nth(index)));
       }
-      const chosen = chooseOptionIndex(texts, wanted);
+      const chosen = chooseOptionIndex(texts, wanted, question);
       if (chosen === -1) {
         const near = texts.filter((text) => text && optionMatches(text, wanted)).length;
         if (!near) return 'no-option';
@@ -15723,7 +15804,7 @@ let terminalFailureInput = null;
               intendedChoice || nativeChoiceGroup.inputs.first(),
               exactBinding?.rootBinding?.formHandle || exactActionRootBinding?.formHandle || null
             );
-            const outcome = await pickRadioOption(locator, wanted, nativeChoiceGroup.inputs);
+            const outcome = await pickRadioOption(locator, wanted, nativeChoiceGroup.inputs, action.label || '');
             if (outcome === 'checked') {
               successfulMutation = true;
               if (action.label) filledFields.push(action.label);
@@ -16496,7 +16577,7 @@ let terminalFailureInput = null;
             }
             continue;
           }
-          const outcome = await pickRadioOption(scope, wanted);
+          const outcome = await pickRadioOption(scope, wanted, null, action.text || action.label || '');
           if (outcome === 'checked') {
             successfulMutation = true;
             if (action.label) filledFields.push(action.label);
