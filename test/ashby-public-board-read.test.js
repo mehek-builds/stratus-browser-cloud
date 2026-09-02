@@ -54,8 +54,11 @@ test('the read proof survives how a client serializes a document', () => {
 test('the read proof still refuses anything it cannot prove is a read', () => {
   assert.equal(isGraphqlReadDocument('mutation M($i: I!) { submitApplication(input: $i) { id } }'), false);
   assert.equal(isGraphqlReadDocument('subscription S { x }'), false);
-  // A mutation smuggled in behind a legitimate query is still a mutation.
+  // A mutation smuggled in behind a legitimate query is still a mutation, whatever separates the
+  // two: whitespace, a closing brace, or a comma (an insignificant token in GraphQL).
   assert.equal(isGraphqlReadDocument('query A { x }\nmutation B { submitApplication { id } }'), false);
+  assert.equal(isGraphqlReadDocument('query A { x },mutation B { submitApplication { id } }'), false);
+  assert.equal(isGraphqlReadDocument('query A { x }mutation B { submitApplication { id } }'), false);
   // Shorthand anonymous and Automatic Persisted Query bodies carry no proof, so they stay blocked.
   assert.equal(isGraphqlReadDocument('{ x }'), false);
   assert.equal(isGraphqlReadDocument(undefined), false);
