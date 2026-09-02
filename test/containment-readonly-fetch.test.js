@@ -28,8 +28,13 @@ test('the upload allowance is scoped to the armed window, employer-bound POST/PU
   // after the upload keep it open because the page's upload XHR starts on the change event.
   assert.match(source, /if \(action\.type === 'upload'\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = true;/);
   assert.match(source, /\} else if \(!\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = false;/);
-  // The allowance itself: employer-bound POST/PUT xhr/fetch and nothing wider.
-  assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& employerBoundTransport\(request\)\) \{\s*\n\s*return route\.fallback\(\);/);
+  // The allowance itself: employer-bound POST/PUT xhr/fetch, plus the board's own resume store
+  // (Greenhouse's eager S3 upload - see isBoardResumeStorageUploadHost), and nothing wider.
+  assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{\s*\n\s*return route\.fallback\(\);/);
+  // The store helper is gated inside that armed branch only: it appears in the template exactly
+  // once outside its own definition, so it cannot silently widen any other admission.
+  const uses = source.match(/boardResumeStorageUpload\(request\)/g) || [];
+  assert.equal(uses.length, 1, 'the store admission is called from the armed upload branch and nowhere else');
 });
 
 test('only employer-bound blocked transport is run-fatal; third-party blocks are aborted quietly', () => {

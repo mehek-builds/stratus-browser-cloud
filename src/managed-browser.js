@@ -145,6 +145,29 @@ export const isEmployerTelemetryPath = (url) => {
   return EMPLOYER_TELEMETRY_PATH_SEGMENTS.includes(last);
 };
 
+/* THE BOARD'S OWN RESUME STORE IS A THIRD PARTY, and the upload window must admit it.
+ *
+ * Greenhouse's file input uploads eagerly to a Greenhouse-named Amazon S3 bucket the moment the
+ * resume is attached (measured 2026-09-02 on the live Hudson River Trading fill: POST
+ * https://grnhse-prod-jben-us-east-1.s3.amazonaws.com/... aborted by the containment; the XHR
+ * never settled, React unmounted the file input into a perpetual progress bar, and the form's own
+ * readiness scan read "Resume/CV is required and is still empty" while filled_fields listed
+ * resume). The upload allowance (UPLOAD-ALLOWANCE decision record, 2026-09-01) admits
+ * employer-bound POST/PUT while the reviewed packet's upload action is armed; the store lives on
+ * amazonaws.com, so it was never employer-bound and the admission never applied.
+ *
+ * Storing bytes in a document bucket cannot file an application - Greenhouse's submit later
+ * references the stored document, it does not carry the bytes - so the bucket is admitted under
+ * EXACTLY the same arming as the employer-bound case: only while the upload action is in flight,
+ * only POST/PUT, only xhr/fetch. The host must be a Greenhouse-named bucket on Amazon S3
+ * (virtual-hosted style, with or without a region infix) and nothing else; amazonaws.com in
+ * general stays third-party-blocked, and outside the armed window this host is blocked exactly as
+ * before. */
+export const isBoardResumeStorageUploadHost = (hostname) => {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  return /^grnhse-[a-z0-9-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(host);
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1741,6 +1764,12 @@ let terminalFailureInput = null;
       const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
       const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
       const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
+      const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
+      /* The board's own resume store, admitted only inside the armed upload window below. See
+       * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
+      const boardResumeStorageUpload = (request) => {
+        try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
+      };
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
@@ -1833,7 +1862,7 @@ let terminalFailureInput = null;
         if (containment.uploadActionArmed
           && (method === 'POST' || method === 'PUT')
           && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
-          && employerBoundTransport(request)) {
+          && (employerBoundTransport(request) || boardResumeStorageUpload(request))) {
           return route.fallback();
         }
         if (transportTypes.has(request.resourceType())) {
