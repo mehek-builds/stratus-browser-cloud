@@ -16,6 +16,7 @@ import {
   SANDBOX_RUNNER,
   graphqlLexicalSkeleton,
   graphqlSingleMutationRootSelection,
+  graphqlTopLevelOperationDefinitions,
   isAshbyPublicBoardDraftWrite,
   isGraphqlSingleMutationNamed,
 } from '../src/managed-browser.js';
@@ -29,6 +30,9 @@ const printed = (name) => FIXTURE.documents[name].printed;
 const stripped = (name) => FIXTURE.documents[name].stripped;
 const SET_FORM_VALUE = printed('ApiSetFormValue');
 const SUBMIT = printed('ApiSubmitSingleApplicationFormAction');
+/* The root field the whole allowance exists to keep out, with the arguments Ashby's own submit
+ * carries, inlined so it needs no variables of its own. */
+const SUBMIT_SELECTION = 'submitSingleApplicationFormAction(organizationHostedJobsPageName: "cartesia", jobPostingId: "j", formRenderIdentifier: "r", formDefinitionIdentifier: "d", actionIdentifier: "submit", recaptchaToken: "tok") { ok }';
 const VARIABLES = {
   organizationHostedJobsPageName: 'cartesia',
   formRenderIdentifier: 'abc',
@@ -135,6 +139,54 @@ test('a second operation is counted whatever separates it, including a comma', (
   assert.equal(isGraphqlSingleMutationNamed('query ApiSetFormValue { x }', 'ApiSetFormValue'), false);
   assert.equal(isGraphqlSingleMutationNamed('', 'ApiSetFormValue'), false);
   assert.equal(isGraphqlSingleMutationNamed(SET_FORM_VALUE, ''), false);
+});
+
+/* ROUND 3, DEFECT A. The definition counter ran on the strict grammar, whose tail is [({], so an
+ * operation definition carrying a directive and no variable definitions matched it ZERO times.
+ * `mutation Evil @cached { submitSingleApplicationFormAction ... }` and the anonymous
+ * `mutation @cached { ... }` were therefore invisible to it: a document carrying one of them beside
+ * the real draft operation counted ONE definition, satisfied the single-definition rule, and was
+ * admitted with a second, unread operation in it. Measured by the round-3 probe over 64 request
+ * shapes, which admitted six. */
+const DIRECTIVE_SECOND_OPERATIONS = [
+  ['a named operation carrying a directive', 'mutation Evil @cached { ' + SUBMIT_SELECTION + ' }'],
+  ['an anonymous operation carrying a directive', 'mutation @cached { ' + SUBMIT_SELECTION + ' }'],
+  ['a named operation carrying an argumented directive', 'mutation Evil @skip(if: false) { ' + SUBMIT_SELECTION + ' }'],
+  ['an anonymous operation carrying an argumented directive', 'mutation @skip(if: false) { ' + SUBMIT_SELECTION + ' }'],
+  ['a named operation carrying two directives', 'mutation Evil @a @b { ' + SUBMIT_SELECTION + ' }'],
+  ['a directive on its own line', 'mutation Evil\n@cached\n{ ' + SUBMIT_SELECTION + ' }'],
+  ['a query carrying a directive', 'query Evil @cached { ' + SUBMIT_SELECTION + ' }'],
+  ['a subscription carrying a directive', 'subscription Evil @cached { ' + SUBMIT_SELECTION + ' }'],
+];
+
+test('A DEFINITION CARRYING A DIRECTIVE IS STILL A DEFINITION AND IS COUNTED', () => {
+  for (const [what, second] of DIRECTIVE_SECOND_OPERATIONS) {
+    assert.equal(isGraphqlSingleMutationNamed(SET_FORM_VALUE + '\n' + second, 'ApiSetFormValue'), false, what);
+    verdict('the draft then ' + what, request({ postData: body({ query: SET_FORM_VALUE + '\n' + second }) }), false);
+    verdict(what + ' then the draft', request({ postData: body({ query: second + '\n' + SET_FORM_VALUE }) }), false);
+    verdict('the draft comma-joined to ' + what, request({ postData: body({ query: SET_FORM_VALUE + ',' + second }) }), false);
+    verdict('the draft brace-joined to ' + what, request({ postData: body({ query: SET_FORM_VALUE + second }) }), false);
+    verdict('a one-line draft then ' + what, request({ postData: body({ query: 'mutation ApiSetFormValue { setFormValue { ok } }\n' + second }) }), false);
+    verdict('the draft then ' + what + ', behind a comment', request({ postData: body({ query: SET_FORM_VALUE + ' # x\n' + second }) }), false);
+  }
+  verdict('the printed submit re-headed with a directive', request({ postData: body({ query: SET_FORM_VALUE + '\n' + SUBMIT.replace('mutation ApiSubmitSingleApplicationFormAction(', 'mutation Evil @cached (') }) }), false);
+  /* Alone, such a document is the single counted definition, and then it is refused for carrying a
+   * directive on the operation rather than for the count. Both are fail-closed. */
+  verdict('a directive-carrying draft name over the submit', request({ postData: body({ query: 'mutation ApiSetFormValue @cached { ' + SUBMIT_SELECTION + ' }' }) }), false);
+  verdict('a directive-carrying anonymous operation alone', request({ postData: body({ query: 'mutation @cached { ' + SUBMIT_SELECTION + ' }' }) }), false);
+  verdict('a directive-carrying draft over the real draft field', request({ postData: body({ query: 'mutation ApiSetFormValue @cached { setFormValue { ok } }' }) }), false);
+  // The counter reads the skeleton, so a directive quoted inside a string is not a definition.
+  verdict('a directive-carrying operation quoted inside a string', request({ postData: body({ query: 'mutation ApiSetFormValue { setFormValue(path: "mutation Evil @cached { ' + 'submitSingleApplicationFormAction' + ' }") { ok } }' }) }), true);
+  assert.deepEqual(
+    graphqlTopLevelOperationDefinitions(graphqlLexicalSkeleton('mutation A @cached { x }\nmutation B { y }')),
+    [{ keyword: 'mutation', name: 'A', index: 0 }, { keyword: 'mutation', name: 'B', index: 25 }],
+  );
+  assert.deepEqual(
+    graphqlTopLevelOperationDefinitions(graphqlLexicalSkeleton('mutation @cached { x }')),
+    [{ keyword: 'mutation', name: undefined, index: 0 }],
+  );
+  assert.deepEqual(graphqlTopLevelOperationDefinitions(graphqlLexicalSkeleton('{ x }')), []);
+  assert.equal(graphqlTopLevelOperationDefinitions(null), null);
 });
 
 test('variables fail closed', () => {
@@ -245,6 +297,7 @@ function runnerDeclarationOf(name) {
 }
 const RUNNER_CHAIN = [
   'GRAPHQL_OPERATION_DEFINITION_NAMED',
+  'GRAPHQL_OPERATION_DEFINITION_COUNTED',
   'ASHBY_PUBLIC_BOARD_SITE',
   'ASHBY_PUBLIC_BOARD_GRAPHQL_PATH',
   'ASHBY_PUBLIC_BOARD_HOST',
@@ -252,6 +305,7 @@ const RUNNER_CHAIN = [
   'ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS',
   'transportRegistrableSuffix',
   'graphqlLexicalSkeleton',
+  'graphqlTopLevelOperationDefinitions',
   'isGraphqlSingleMutationNamed',
   'graphqlSingleMutationRootSelection',
   'isAshbyPublicBoardDraftWrite',

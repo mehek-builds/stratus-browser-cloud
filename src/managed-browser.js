@@ -158,8 +158,23 @@ export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
  * evidence, and this is a boundary where absence of evidence must read as absence of permission.
  * Both fail closed and name their operation in the log. */
 const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s},])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
-/* The same grammar with the operation NAME captured, for the one rule that must pin it. */
+/* The same grammar with the operation NAME captured, for the one rule that must pin it. Its tail
+ * is strict: it matches only a definition that runs straight from its optional name into its
+ * variable definitions or its selection set, which is the only header a selection set can be read
+ * from. Locating a header is all it is for; counting definitions with it is the round-3 defect
+ * below. */
 const GRAPHQL_OPERATION_DEFINITION_NAMED = '(?:^|[\\s},])(query|mutation|subscription)\\s*([A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+/* The same grammar with a tail that also admits a directive on the operation, and that consumes no
+ * tail character, for COUNTING definitions.
+ *
+ * ROUND 3, DEFECT A. The strict tail is blind to an operation definition carrying a directive and
+ * no variable definitions: `mutation Evil @cached { submitSingleApplicationFormAction ... }` and
+ * the anonymous `mutation @cached { ... }` match it ZERO times. A document carrying one of those
+ * beside a real draft operation therefore counted exactly ONE definition, satisfied the
+ * single-definition rule, and was admitted with a second, entirely unread operation in it. A
+ * definition carrying a directive is still a definition, so it is counted here and the existing
+ * single-definition rule refuses the document. */
+const GRAPHQL_OPERATION_DEFINITION_COUNTED = GRAPHQL_OPERATION_DEFINITION_NAMED.replace('[({]', '(?=[({@])');
 
 export const isGraphqlReadDocument = (document) => {
   if (typeof document !== 'string' || !document) return false;
@@ -268,12 +283,43 @@ export const graphqlLexicalSkeleton = (document) => {
   return out;
 };
 
+/* Every operation definition in the skeleton, as { keyword, name, index }, or null when one of them
+ * sits below the document's top level.
+ *
+ * A definition belongs to the DOCUMENT. A keyword found inside a selection set, an argument list, a
+ * list literal or a variable definition's default value is not one, and Ashby's own six documents
+ * each carry exactly one header, at depth 0. Such a document is refused outright rather than read
+ * past, because a nested header is the lever defect B pulled: located by regex alone it was trusted
+ * as the operation's own, and the selection set read below it belonged to the decoy while the
+ * operation's real root selection, which can be the submit, was never read at all. */
+export const graphqlTopLevelOperationDefinitions = (skeleton) => {
+  if (typeof skeleton !== 'string') return null;
+  const definitions = [];
+  let depth = 0;
+  let cursor = 0;
+  for (const match of skeleton.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION_COUNTED, 'g'))) {
+    /* The prefix the grammar consumes is one of start-of-document, whitespace, a comma or a closing
+     * brace, never a letter, so the keyword begins at the first index of match[1] in match[0]. The
+     * walk below covers that closing brace, which is what keeps a comma-joined or brace-joined
+     * second definition at depth 0. */
+    const index = match.index + match[0].indexOf(match[1]);
+    for (; cursor < index; cursor += 1) {
+      const ch = skeleton[cursor];
+      if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+      else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    }
+    if (depth !== 0) return null;
+    definitions.push({ keyword: match[1], name: match[2], index });
+  }
+  return definitions;
+};
+
 export const isGraphqlSingleMutationNamed = (document, name) => {
   const skeleton = graphqlLexicalSkeleton(document);
   if (skeleton === null || typeof name !== 'string' || !name) return false;
-  const definitions = [...skeleton.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION_NAMED, 'g'))];
-  if (definitions.length !== 1) return false;
-  return definitions[0][1] === 'mutation' && definitions[0][2] === name;
+  const definitions = graphqlTopLevelOperationDefinitions(skeleton);
+  if (definitions === null || definitions.length !== 1) return false;
+  return definitions[0].keyword === 'mutation' && definitions[0].name === name;
 };
 
 /* The one root selection of the single mutation named `name`, as { alias, field }, or null when the
@@ -284,6 +330,10 @@ export const graphqlSingleMutationRootSelection = (document, name) => {
   if (!isGraphqlSingleMutationNamed(document, name)) return null;
   const skeleton = graphqlLexicalSkeleton(document);
   const header = skeleton.match(new RegExp(GRAPHQL_OPERATION_DEFINITION_NAMED));
+  /* With a directive-carrying definition now counted, a document whose one definition carries a
+   * directive on the operation reaches here and finds no strict header at all. It is refused for
+   * the same reason a directive after the variable definitions is: it can change what executes. */
+  if (!header) return null;
   const closingBracket = (from) => {
     let depth = 0;
     for (let i = from; i < skeleton.length; i += 1) {
@@ -1928,7 +1978,9 @@ let terminalFailureInput = null;
       const ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS)};
       const ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS)};
       const GRAPHQL_OPERATION_DEFINITION_NAMED = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION_NAMED)};
+      const GRAPHQL_OPERATION_DEFINITION_COUNTED = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION_COUNTED)};
       const graphqlLexicalSkeleton = ${graphqlLexicalSkeleton.toString()};
+      const graphqlTopLevelOperationDefinitions = ${graphqlTopLevelOperationDefinitions.toString()};
       const isGraphqlSingleMutationNamed = ${isGraphqlSingleMutationNamed.toString()};
       const graphqlSingleMutationRootSelection = ${graphqlSingleMutationRootSelection.toString()};
       const isAshbyPublicBoardDraftWrite = ${isAshbyPublicBoardDraftWrite.toString()};
