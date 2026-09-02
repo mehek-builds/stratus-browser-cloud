@@ -14483,6 +14483,74 @@ let terminalFailureInput = null;
               });
               const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
+              /* A BARE LIST OF OPTIONS IS NAMED BY THE HEADING BEFORE IT, NOT BY ITS FIRST ROW.
+               *
+               * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: each veteran
+               * and disability radio sits in its own bare <li> under a <ul> with no fieldset,
+               * class or role, and its label[for] names that ONE option. So blockOf fell back to
+               * the option's own row, the owner search above found only a label that speaks for
+               * one option, and the join below welded the option text to the name and id: the
+               * stored question was "i identify as one or more of the classifications of
+               * protected veteran listed above eeoc.veteran_status vet_yes". No stored answer
+               * anchors to that, the fillByLabelText lookup cannot find those words on the page,
+               * and a saved "No" was never pressed.
+               *
+               * THREE GATES, each about the shape and none about the board:
+               *   - the block fell back to the option's own row (it holds this one choice input
+               *     and no other), so no fieldset, group or provider block has already spoken;
+               *   - the label element speaks for this input alone, so its text is the option's
+               *     and not the question's;
+               *   - the input has two or more same-name peers in its form, so there IS a group,
+               *     and the smallest ancestor holding every peer is where that group begins.
+               * The heading is then read the way the Rippling combobox arm reads its label: the
+               * preceding siblings of that group ancestor, then of its parent, and so on, where a
+               * sibling holding a visible control is the PREVIOUS question and ends the walk. At
+               * the first level that says anything, a heading (h1-h6 or legend) wins over prose,
+               * because Breezy puts two paragraphs of preamble between the heading and the rows;
+               * failing a heading, the nearest short text is the label, which is the "Gender"
+               * span on the same page. Levels are not pooled: pooling would let the section
+               * heading two levels above "Gender" outrank the span and name two groups alike. */
+              const optionRowOnly = Boolean(owner) && (owner === el.parentElement || owner === el)
+                && owner.querySelectorAll('input[type="radio"], input[type="checkbox"]').length === 1;
+              const labelSpeaksForThisOptionAlone = Boolean(labelEl)
+                && (labelEl.getAttribute('for') === el.id || labelEl.contains(el))
+                && labelEl.querySelectorAll('input:not([type="hidden"]), select, textarea').length
+                  <= (labelEl.contains(el) ? 1 : 0);
+              if (optionRowOnly && labelSpeaksForThisOptionAlone && sameNamePeers.length >= 2) {
+                let groupRoot = sameNamePeers[0].parentElement;
+                while (groupRoot && !sameNamePeers.every((peer) => groupRoot.contains(peer))) {
+                  groupRoot = groupRoot.parentElement;
+                }
+                const VISIBLE_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], button';
+                const holdsControls = (node) => Boolean(node && node.matches
+                  && (node.matches(VISIBLE_CONTROLS) || node.querySelector(VISIBLE_CONTROLS)));
+                const HEADINGS = 'h1, h2, h3, h4, h5, h6, legend';
+                const shortText = (node) => {
+                  const text = clean(renderedText(node));
+                  return text && text.length <= 200 && !genericControlText(text) ? text.toLowerCase() : '';
+                };
+                let above = groupRoot;
+                for (let depth = 0; above && depth < 12 && above !== el.form && above !== document.body;
+                  depth += 1, above = above.parentElement) {
+                  let heading = '';
+                  let nearest = '';
+                  let bounded = false;
+                  for (let beside = above.previousElementSibling; beside; beside = beside.previousElementSibling) {
+                    if (holdsControls(beside)) {
+                      bounded = true;
+                      break;
+                    }
+                    const headingNode = beside.matches(HEADINGS) ? beside : beside.querySelector(HEADINGS);
+                    if (!heading && headingNode) heading = shortText(headingNode);
+                    if (!nearest) nearest = shortText(beside);
+                  }
+                  if (heading) return heading;
+                  if (nearest) return nearest;
+                  // The previous question sits right there: climbing past it would borrow a wider
+                  // heading that names both questions, and a wrong question is worse than a handle.
+                  if (bounded) break;
+                }
+              }
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
              *
