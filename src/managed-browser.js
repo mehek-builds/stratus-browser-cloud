@@ -5214,8 +5214,43 @@ let terminalFailureInput = null;
       const stated = opens(negated[0], /^no\b/) && opens(other, /^yes\b/);
       const implied = !opens(negated[0], /^(?:yes|no)\b/) && !opens(other, /^(?:yes|no)\b/);
       if (!stated && !implied) return -1;
-      /* AND THE QUESTION HAS TO BE ASKING ABOUT WHAT THE ROWS ARE ABOUT. No question label, no
-       * tier: every caller that cannot name the question it is filling gets the refusal. */
+      /* THE NEGATED ROW MUST BE THE BARE NEGATION OF ITS COUNTERPART, and a residue test is how
+       * that is checked rather than assumed. "I do not require sponsorship now, but will in the
+       * future" opens with a negation and is NOT the negation of "I require sponsorship now": it
+       * adds a temporal claim of its own, and pressing it for a flat "No" files a declaration
+       * that she WILL require future sponsorship (executed in the round-2 review, on the exact
+       * vocabulary the containment post-mortem below quotes as live). So:
+       *   - strip the opening negation (and a stated "No," prefix) from the negated row;
+       *   - the residue may carry NO negation of its own ("I am not unable to..." is a double
+       *     negative, not a bare negation, and its polarity is not this tier's to read);
+       *   - every predicate word left in the residue must already be in the counterpart, with the
+       *     temporal qualifiers (now/will/future/current/past) made VISIBLE for this test, since
+       *     the general noise list hides exactly the words a compound row differs by. Extra words
+       *     in the COUNTERPART are fine - Breezy's affirmative veteran row carries list
+       *     boilerplate ("identify as one or more of the classifications... listed above") that a
+       *     bare negation legitimately drops.
+       * The counterpart must be negation-free too: a pair whose affirmative half says "without"
+       * is not a statement and its negation, whatever the openings say. */
+      const NEGATION_TOKEN = /(?:^|\s)(?:no|not|never|without|nor|unable|cannot)(?:\s|$)|\wn t(?:\s|$)/;
+      const TEMPORAL_QUALIFIERS = new Set(['will', 'current', 'currently', 'future', 'past', 'later', 'previously', 'longer']);
+      const residueNouns = (text) => new Set(text.split(' ')
+        .filter((word) => word && (TEMPORAL_QUALIFIERS.has(word)
+          || (word.length >= 4 && !PREDICATE_NOISE.has(word)))));
+      const strippedNegated = normalized(texts[negated[0]])
+        .replace(/^(?:no\s+)?(?:i am not|i do not|i don t|no)\b/, '').trim();
+      const counterpartText = normalized(texts[other]).replace(/^yes\b/, '').trim();
+      if (NEGATION_TOKEN.test(strippedNegated) || NEGATION_TOKEN.test(counterpartText)) return -1;
+      const counterpartResidue = residueNouns(counterpartText);
+      if ([...residueNouns(strippedNegated)].some((word) => !counterpartResidue.has(word))) return -1;
+      /* AND THE QUESTION HAS TO BE ASKING ABOUT WHAT THE ROWS ARE ABOUT - AFFIRMATIVELY. The
+       * mapping "no takes the negated row" is defined for an affirmatively phrased question and
+       * for nothing else: under "Are you authorized to work in the United States WITHOUT
+       * sponsorship?" or "Please confirm that you will NOT require sponsorship", the stored
+       * yes/no answers the question's own negation and the row mapping inverts (executed in the
+       * round-2 review). A question carrying any negation token is refused whole; one click of
+       * hers against a wrong tick filed under her name. No question label, no tier: every caller
+       * that cannot name the question it is filling gets the refusal. */
+      if (NEGATION_TOKEN.test(normalized(question))) return -1;
       const asked = predicateNouns(question);
       if (!asked.size) return -1;
       const counterpart = predicateNouns(texts[other]);

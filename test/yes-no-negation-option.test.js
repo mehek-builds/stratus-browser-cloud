@@ -170,3 +170,68 @@ test('the exact tiers still win: a list that literally offers "No" is answered b
   assert.equal(yesNoNegationIndex(['No', 'I am not a protected veteran', "I don't wish to answer"], 'no', VETERAN_QUESTION), -1);
   assert.equal(yesNoNegationIndex(['I am a protected veteran', 'I am not a protected veteran', 'No.', "I don't wish to answer"], 'no', VETERAN_QUESTION), -1);
 });
+
+/* ROUND 3: the two executed wrong presses from the round-2 review, pinned as refusals.
+ *
+ * 1. A row that OPENS with a negation and then adds a claim of its own is not the negation of its
+ *    counterpart. "I do not require sponsorship now, but will in the future" pressed for a flat
+ *    "No" files a declaration that she WILL require future sponsorship - on vocabulary this file's
+ *    own containment post-mortem quotes as live Lever/Greenhouse wording.
+ * 2. The tier's mapping (no -> the negated row) is defined for affirmatively phrased questions
+ *    only. Under "...WITHOUT sponsorship?" or "confirm that you will NOT require...", the stored
+ *    yes/no answers the question's own negation and the mapping inverts.
+ * Both refuse now; one click of hers where a wrong tick was a false declaration. */
+
+const COMPOUND_SPONSORSHIP = [
+  'I require sponsorship now',
+  'I do not require sponsorship now, but will in the future',
+  'Prefer not to answer',
+];
+
+test('a compound negated row is never the "No" of a flat question', () => {
+  assert.equal(yesNoNegationIndex(COMPOUND_SPONSORSHIP, 'No', SPONSORSHIP_QUESTION), -1);
+  assert.equal(yesNoNegationIndex(COMPOUND_SPONSORSHIP, 'Yes', SPONSORSHIP_QUESTION), -1);
+  assert.equal(chooseOptionIndex(COMPOUND_SPONSORSHIP, 'No', SPONSORSHIP_QUESTION), -1);
+});
+
+test('a negatively phrased question refuses the tier whole', () => {
+  const SPONSOR_ROWS = [
+    'I require sponsorship to work in the United States',
+    'I do not require sponsorship to work in the United States',
+    'Prefer not to say',
+  ];
+  assert.equal(
+    yesNoNegationIndex(SPONSOR_ROWS, 'Yes', 'Are you authorized to work in the United States without sponsorship?'),
+    -1,
+  );
+  assert.equal(
+    yesNoNegationIndex(SPONSOR_ROWS, 'Yes', 'Please confirm that you will not require sponsorship'),
+    -1,
+  );
+  assert.equal(
+    yesNoNegationIndex(SPONSOR_ROWS, 'No', "Don't you require sponsorship?"),
+    -1,
+  );
+  // The affirmative phrasing of the same pair still answers.
+  assert.equal(
+    yesNoNegationIndex(SPONSOR_ROWS, 'No', 'Do you require sponsorship to work in the United States?'),
+    1,
+  );
+});
+
+test('a double negative is not a bare negation', () => {
+  const DOUBLE = [
+    'I am unable to perform the essential functions of this role',
+    'I am not unable to perform the essential functions of this role',
+    'I prefer not to answer',
+  ];
+  assert.equal(yesNoNegationIndex(DOUBLE, 'No', 'Are you able to perform the essential functions of this role?'), -1);
+  assert.equal(yesNoNegationIndex(DOUBLE, 'Yes', 'Are you able to perform the essential functions of this role?'), -1);
+});
+
+test('the Zeus shapes survive every round-3 refusal', () => {
+  assert.equal(chooseOptionIndex(VETERAN, 'No', VETERAN_QUESTION), 1);
+  assert.equal(chooseOptionIndex(VETERAN, 'Yes', VETERAN_QUESTION), 0);
+  assert.equal(chooseOptionIndex(DISABILITY, 'No', DISABILITY_QUESTION), 1);
+  assert.equal(chooseOptionIndex(DISABILITY, 'Yes', DISABILITY_QUESTION), 0);
+});
