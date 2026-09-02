@@ -7586,20 +7586,40 @@ let terminalFailureInput = null;
        * name. That is the group wherever the wrappers sit, and it is stamped so the caller scopes
        * every later read and tick to it.
        *
-       * Bounded three ways. The first following element that is a control OR a heading or legend
+       * Bounded four ways. The first following element that is a control OR a heading or legend
        * is taken, so a heading that belongs to the NEXT question ends the search before its rows
        * are reached; the ancestor must hold exactly one radio or checkbox name, the same
-       * one-name-one-question rule radioGroupNames enforces on the caller; and a control that is
-       * not a named radio or checkbox with peers falls straight back to the container the caller
-       * already resolved, so no other shape changes. */
+       * one-name-one-question rule radioGroupNames enforces on the caller; a control that is not a
+       * named radio or checkbox with peers falls straight back to the container the caller already
+       * resolved, so no other shape changes; and - the fourth, and the one the first three do not
+       * cover - THE GROUP HAS TO BE NAMED BY THIS ANCHOR.
+       *
+       * WHY THE FOURTH IS NOT OPTIONAL. Stopping at headings only bounds the search when the next
+       * question HAS a heading, and on this very page one does not: Breezy names its gender group
+       * with a bare <span>Gender</span>. So a heading whose own rows were removed - an employer
+       * that keeps the veteran preamble and drops the radios - walked past the span and stamped
+       * the NEXT question's group, and a stored "No" was then pressed on it and reported filled
+       * under the heading it did not belong to. A wrong question answered under her name is worse
+       * than a question left for her, which is the rule the whole file is built on.
+       *
+       * The naming walk is the one questionLabel's bare-list arm makes, in the same order and with
+       * the same bound: previous siblings of the group, then of its parent, and so on; a sibling
+       * holding a visible control is the PREVIOUS question and ends the walk; at the first level
+       * that says anything, a heading beats prose. Whatever that level names has to BE this
+       * anchor, or contain it - the caller's getByText can land on a <strong> inside the <h3> -
+       * and anything else means the group is somebody else's. */
       const following = anchor.locator(
         'xpath=following::*[(self::input and not(@type="hidden")) or self::select or self::textarea'
         + ' or self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6 or self::legend][1]'
       ).first();
-      const anchored = (await following.count()) > 0 && await following.evaluate((element) => {
+      const anchorHandle = (await following.count()) > 0
+        ? await anchor.elementHandle().catch(() => null)
+        : null;
+      const anchored = Boolean(anchorHandle) && await following.evaluate((element, anchorEl) => {
         for (const stale of document.querySelectorAll('[data-litos-anchored-group]')) {
           stale.removeAttribute('data-litos-anchored-group');
         }
+        if (!anchorEl) return false;
         if (!(element instanceof HTMLInputElement)) return false;
         if (element.type !== 'radio' && element.type !== 'checkbox') return false;
         if (!element.name) return false;
@@ -7612,9 +7632,38 @@ let terminalFailureInput = null;
         const names = new Set([...group.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
           .map((input) => input.name || ''));
         if (names.size !== 1) return false;
+        const CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], button';
+        const HEADINGS = 'h1, h2, h3, h4, h5, h6, legend';
+        const words = (node) => String((node && node.textContent) || '').replace(/\s+/g, ' ').trim();
+        const holdsControls = (node) => Boolean(node && node.matches
+          && (node.matches(CONTROLS) || node.querySelector(CONTROLS)));
+        let namedByAnchor = false;
+        let above = group;
+        for (let depth = 0; above && depth < 12 && above !== document.body; depth += 1, above = above.parentElement) {
+          let heading = null;
+          let nearest = null;
+          let bounded = false;
+          for (let beside = above.previousElementSibling; beside; beside = beside.previousElementSibling) {
+            if (holdsControls(beside)) {
+              bounded = true;
+              break;
+            }
+            const headingNode = beside.matches(HEADINGS) ? beside : beside.querySelector(HEADINGS);
+            if (!heading && headingNode && words(headingNode)) heading = headingNode;
+            if (!nearest && words(beside)) nearest = beside;
+          }
+          const naming = heading || nearest;
+          if (naming) {
+            namedByAnchor = naming === anchorEl || naming.contains(anchorEl);
+            break;
+          }
+          if (bounded) break;
+        }
+        if (!namedByAnchor) return false;
         group.setAttribute('data-litos-anchored-group', '');
         return true;
-      }).catch(() => false);
+      }, anchorHandle).catch(() => false);
+      if (anchorHandle) await anchorHandle.dispose().catch(() => undefined);
       if (anchored) return page.locator('[data-litos-anchored-group]').first();
       return fallback;
     };
