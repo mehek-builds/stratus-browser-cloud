@@ -28,6 +28,7 @@ export const CHOOSER_NAMES = [
   'AFFIRMATIVE_ANSWER', 'soleOptionIndex',
   'gradedValueWithScale', 'parseBand', 'gradedBandIndex',
   'MONTH_NAMES', 'monthIndexOf', 'datePartsOf', 'dateComponentIndex',
+  'yesNoNegationIndex',
   'chooseOptionIndex',
 ];
 

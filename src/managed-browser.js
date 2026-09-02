@@ -5094,6 +5094,56 @@ let terminalFailureInput = null;
     };
     const declineMatches = (candidate, wanted) =>
       DECLINE_TO_STATE.test(normalized(candidate)) && DECLINE_TO_STATE.test(normalized(wanted));
+    /* A YES OR NO AGAINST TWO STATEMENTS, ONE OF WHICH SAYS "NOT".
+     *
+     * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: the stored answer is
+     * "No" and the rows are "I identify as one or more of the classifications of protected
+     * veteran listed above", "I am not a protected veteran" and "I don't wish to answer"; the
+     * disability group offers "Yes, I have a disability...", "No, I don't have a disability" and
+     * the same refusal. Neither exact tier can reach "No" there, the containment tier that once
+     * might have was removed on purpose (see the chooser's own note), so the answer sat in the
+     * packet and the run reported that no option matched.
+     *
+     * WHAT MAKES THIS SAFE WHERE CONTAINMENT WAS NOT. Containment took the one row that CONTAINED
+     * the answer, and on the sponsorship vocabulary that is the false row. This tier reads no
+     * containment at all: it fires only when the answer is exactly "yes" or "no", only when the
+     * list minus its refusals is exactly two statements, and only when exactly one of the two
+     * opens with a negation ("I am not", "I do not", "I don't", "No"). Two statements of which
+     * one negates are a yes/no pair by construction, so "no" is the negated one and "yes" is the
+     * other. Two negations, three statements, or a negation sitting mid-sentence all refuse, and
+     * a refusal costs her one click where a wrong tick would be a false declaration.
+     *
+     * AND THE LIST MUST CARRY AN OPT-OUT ROW, which is what keeps this from touching the case
+     * soleOptionIndex refuses on purpose. Optiver's "I am NOT currently in process for another
+     * Optiver role" / "I am currently in process..." is a two-statement pair with one negation,
+     * and the "Yes" stored against it is a consent-class affirmative, not her answer to "are you
+     * in process": choosing there would state something about her that nobody asked her. A pair
+     * that comes with "I don't wish to answer" is a self-identification question, the stored
+     * yes/no is her answer to that question (the held-declaration veto upstream never replays a
+     * consent into an EEO list), and the opt-out is the employer saying the pair is hers to
+     * answer or not. The refusal rows are set aside from the count rather than matched, because a
+     * refusal is not a claim about her; the decline tier after this one still carries a stored
+     * refusal onto them.
+     *
+     * The negation is anchored at the START of the normalised text, deliberately: "Yes, I have
+     * not yet graduated" is not a negated row, and reading "not" anywhere would make it one. */
+    const yesNoNegationIndex = (texts, wanted) => {
+      const want = normalized(wanted);
+      if (want !== 'no' && want !== 'yes') return -1;
+      const statements = [];
+      let optOuts = 0;
+      for (let index = 0; index < texts.length; index += 1) {
+        const text = normalized(texts[index]);
+        // An empty row cannot be read, and a list this tier cannot read in full is refused whole.
+        if (!text) return -1;
+        if (DECLINE_TO_STATE.test(text)) optOuts += 1;
+        else statements.push(index);
+      }
+      if (statements.length !== 2 || optOuts === 0) return -1;
+      const negated = statements.filter((index) => /^(?:i am not|i do not|i don t|no)\b/.test(normalized(texts[index])));
+      if (negated.length !== 1) return -1;
+      return want === 'no' ? negated[0] : statements.find((index) => index !== negated[0]);
+    };
     /* THE FIRST OF SEVERAL IS NEVER AN ANSWER, and this is the one place that rule is written down.
      *
      * The exact tier is ranked by what the CALLER asked for rather than by where the employer put
@@ -5177,6 +5227,11 @@ let terminalFailureInput = null;
        * answered by the whole date, and only a list asking for one part reaches here. */
       const datePart = dateComponentIndex(texts, wanted);
       if (datePart !== -1) return datePart;
+      /* After every exact and widened tier, and before the refusal tier: a list that offers a
+       * literal "No" is answered by it above, and a stored refusal is still carried below. Only a
+       * bare yes/no against two statements reaches this, and yesNoNegationIndex says when. */
+      const yesNo = yesNoNegationIndex(texts, wanted);
+      if (yesNo !== -1) return yesNo;
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
         if (declineMatches(texts[index], wanted)) refusals.push(index);
