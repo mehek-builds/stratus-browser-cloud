@@ -103,6 +103,48 @@ export const isEmployerDomainTelemetryHost = (hostname) => {
   );
 };
 
+/* A BEACON ON THE EMPLOYER'S OWN HOST IS STILL ONLY A BEACON, when its path says so.
+ *
+ * Teamtailor's application page posts a page-view beacon to the tenant host itself:
+ * "POST https://tixtrack.teamtailor.com/pageview". That host IS the employer's registrable site,
+ * isEmployerDomainTelemetryHost is keyed on hosts, so the run died for it every time (measured
+ * 2026-09-01 on the live TixTrack fill, two seconds after the page loaded, before a single field
+ * was touched). The path is the only thing that distinguishes it, and an application submit never
+ * lives at a path whose last segment is a page-view or analytics collector.
+ *
+ * SAME CONTRACT AS THE HOST LIST: this changes fatality only. The request is still aborted by the
+ * same block() and reaches nobody; the run stops dying for it. And the same #129 caveat: a path
+ * spared here is also refused by the upload window, which is right for a collector and would be
+ * wrong for a board whose resume upload lived at one of these names. None does. Matching is on the
+ * last path segment, exact names only, optional extension, never a substring: /pageview and
+ * /js/pageview.gif match, /pageview/submit and /api/pageview-settings do not. */
+/* ADMISSION RULE, the same as the host list's: a segment enters with a measured capture of a
+ * collector at that name on an employer host (pageview: TixTrack, 2026-09-01) or on a third-party
+ * host already spared by suffix (rum: browser-intake-datadoghq.com; beacon, telemetry, analytics,
+ * metrics, pageviews: the generic collector names those vendors serve). Unlike a host, a segment is
+ * global to every employer host on every board, so an English verb a board could plausibly name a
+ * form route ("collect", "ping") is refused until measured. */
+export const EMPLOYER_TELEMETRY_PATH_SEGMENTS = Object.freeze([
+  'pageview', 'pageviews', 'analytics', 'beacon', 'telemetry', 'rum', 'metrics'
+]);
+
+/* Cloudflare's reserved prefix on every site it fronts: challenge-platform (the JavaScript
+ * detection beacon), rum, beacon, trace. Measured 2026-09-01 on the live Apollo Research fill:
+ * "POST https://jobs.lever.co/cdn-cgi/challenge-platform/h/b/jsd/oneshot/..." killed the run before
+ * a field was touched. No application submit lives under /cdn-cgi/; Cloudflare owns the prefix. */
+export const CLOUDFLARE_RESERVED_PATH_PREFIX = '/cdn-cgi/';
+
+export const isEmployerTelemetryPath = (url) => {
+  let pathname = '';
+  try { pathname = new URL(String(url)).pathname; } catch { return false; }
+  const lower = pathname.toLowerCase();
+  if (lower.startsWith(CLOUDFLARE_RESERVED_PATH_PREFIX)) return true;
+  const segments = lower.split('/').filter(Boolean);
+  if (segments.length === 0) return false;
+  const last = segments[segments.length - 1].replace(/\.[a-z0-9]{1,5}$/, '');
+  return EMPLOYER_TELEMETRY_PATH_SEGMENTS.includes(last);
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1696,6 +1738,9 @@ let terminalFailureInput = null;
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
+      const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
+      const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
+      const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
@@ -1709,6 +1754,9 @@ let terminalFailureInput = null;
           // A collector on the employer's own registrable domain is still only a collector. See
           // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
           // which is aborted exactly as before and reaches nobody.
+          // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
+          // contract: the request is still aborted; only the run is spared.
+          if (isEmployerTelemetryPath(request.url())) return false;
           if (isEmployerDomainTelemetryHost(hostname)) return false;
           return registrableSuffix(hostname) === applicationTransportSite;
         } catch { return true; }
@@ -14021,8 +14069,22 @@ let terminalFailureInput = null;
     successfulAddressIntegrityFailure = false;
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
+    let actionIndex = -1;
     for (const action of currentInput.actions || []) {
+     actionIndex += 1;
      assertProviderActionWindow();
+     /* WHICH ACTION THE RUN IS ON, persisted before the action runs, so a run that dies mid-action
+      * (the provider deadline closing the browser, a host timeout, a crash) leaves behind the
+      * action it was on and not only the phase. Measured 2026-09-01 on a Recruitee fill that sat
+      * in phase 0 for the host's whole budget: the progress said phase_started and nothing else.
+      * Index, type and the action's own label (a question's employer text), never a value. */
+     recordCrashProgress({
+       action: {
+         index: actionIndex,
+         type: String(action.type || '').slice(0, 40),
+         label: String(action.label || '').slice(0, 200)
+       }
+     });
      assertManagedMutationTransportClean();
      if (managedMutationTransportContainment) {
        /* The upload allowance is scoped to the upload action itself plus any read-only actions
@@ -18095,6 +18157,15 @@ export function normalizeManagedBrowserProgress(parsed, expectedSubmissionAttemp
   const validSecurityCodeOutcome = parsed?.securityCodeOutcome == null
     || ['accepted', 'rejected', 'no_control', 'not_entered'].includes(parsed.securityCodeOutcome);
   const finalProgress = parsed?.stage === 'result_ready' || parsed?.stage === 'result_written';
+  /* The action in flight, when the runner recorded one. Malformed is treated as absent rather than
+   * invalidating the progress: the fields above are the employer-outcome authority, this is a
+   * diagnostic pointer. */
+  const action = parsed?.action && typeof parsed.action === 'object'
+    && Number.isInteger(parsed.action.index) && parsed.action.index >= 0
+    && typeof parsed.action.type === 'string' && parsed.action.type.length <= 40
+    && typeof parsed.action.label === 'string' && parsed.action.label.length <= 200
+    ? { index: parsed.action.index, type: parsed.action.type, label: parsed.action.label }
+    : null;
   if (parsed?.version !== 1
     || !Number.isInteger(parsed?.phase) || parsed.phase < 0 || parsed.phase > 1
     || !validStage || typeof parsed?.submitPressed !== 'boolean'
@@ -18119,7 +18190,8 @@ export function normalizeManagedBrowserProgress(parsed, expectedSubmissionAttemp
       ? { requiredFieldConfirmationStatus: parsed.requiredFieldConfirmationStatus }
       : {}),
     ...(parsed.securityCodeOutcome != null ? { securityCodeOutcome: parsed.securityCodeOutcome } : {}),
-    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {})
+    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {}),
+    ...(action ? { action } : {})
   };
   return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
 }
