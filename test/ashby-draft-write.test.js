@@ -189,6 +189,47 @@ test('A DEFINITION CARRYING A DIRECTIVE IS STILL A DEFINITION AND IS COUNTED', (
   assert.equal(graphqlTopLevelOperationDefinitions(null), null);
 });
 
+/* ROUND 3, DEFECT B. graphqlSingleMutationRootSelection trusted the first header the strict grammar
+ * found anywhere in the document, without asserting it sat at brace depth 0. A decoy header nested
+ * inside an argument list, a list literal, a variable default or another selection set was read as
+ * the operation header, its inner selection set answered as the root selection, and the operation's
+ * real root selection, the submit, was never read. Every shape below carries the submit as the
+ * document's actual root field. */
+const NESTED_DECOY = 'mutation ApiSetFormValue { setFormValue }';
+const NESTED_SHAPES = [
+  ['inside the directive arguments of the outer operation', 'mutation ApiSetFormValue @cached(note: X, decoy: { ' + NESTED_DECOY + ' }) { ' + SUBMIT_SELECTION + ' }'],
+  ['inside a list literal', 'mutation ApiSetFormValue @cached(l: [ ' + NESTED_DECOY + ' ]) { ' + SUBMIT_SELECTION + ' }'],
+  ['inside a variable definition default', 'mutation ApiSetFormValue @cached($x: Input = { ' + NESTED_DECOY + ' }) { ' + SUBMIT_SELECTION + ' }'],
+  ['two levels down an argument object', 'mutation ApiSetFormValue @cached(a: { b: { ' + NESTED_DECOY + ' } }) { ' + SUBMIT_SELECTION + ' }'],
+  ['inside a nested selection set', 'mutation ApiSetFormValue @cached { submitSingleApplicationFormAction(actionIdentifier: "submit") { ok ' + NESTED_DECOY + ' } }'],
+  ['inside a nested field argument', 'mutation ApiSetFormValue @cached { submitSingleApplicationFormAction(actionIdentifier: "submit", meta: { ' + NESTED_DECOY + ' }) { ok } }'],
+  ['inside a fragment definition after the operation', 'mutation ApiSetFormValue @cached { ' + SUBMIT_SELECTION + ' }\nfragment F on Mutation { ' + NESTED_DECOY + ' }'],
+  ['inside a bare block after the operation', 'mutation ApiSetFormValue @cached { ' + SUBMIT_SELECTION + ' }\n{ ' + NESTED_DECOY + ' }'],
+  ['inside a bare block before the operation', '{ ' + NESTED_DECOY + ' }\nmutation ApiSetFormValue @cached { ' + SUBMIT_SELECTION + ' }'],
+  ['inside a block string that is not one', 'mutation ApiSetFormValue @cached(d: [[ ' + NESTED_DECOY + ' ]]) { ' + SUBMIT_SELECTION + ' }'],
+];
+
+test('A HEADER BELOW THE TOP LEVEL IS NOT THE OPERATION HEADER', () => {
+  for (const [where, query] of NESTED_SHAPES) {
+    assert.equal(graphqlSingleMutationRootSelection(query, 'ApiSetFormValue'), null, where);
+    verdict('a decoy header ' + where, request({ postData: body({ query }) }), false);
+  }
+  // The same nesting under the aliased pair, so the alias branch is proved too.
+  verdict('an aliased decoy header inside the directive arguments', request({ postData: body({
+    operationName: 'ApiAddManyFilesToFormValue',
+    query: 'mutation ApiAddManyFilesToFormValue @cached(d: { mutation ApiAddManyFilesToFormValue { formRender: addManyFilesToFormValue } }) { ' + SUBMIT_SELECTION + ' }',
+  }) }), false);
+  // A decoy nested under a counted top-level definition is refused by the count, not by the anchor.
+  assert.equal(graphqlTopLevelOperationDefinitions(graphqlLexicalSkeleton('mutation ApiSetFormValue { setFormValue { ' + NESTED_DECOY + ' } }')), null);
+  verdict('a decoy nested under a strict top-level header', request({ postData: body({ query: 'mutation ApiSetFormValue { setFormValue { ' + NESTED_DECOY + ' } }' }) }), false);
+  // The real documents keep their header at depth 0, so the anchor never touches them.
+  for (const operationName of ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS) {
+    const definitions = graphqlTopLevelOperationDefinitions(graphqlLexicalSkeleton(printed(operationName)));
+    assert.equal(definitions.length, 1, operationName);
+    assert.deepEqual(definitions[0], { keyword: 'mutation', name: operationName, index: 0 });
+  }
+});
+
 test('variables fail closed', () => {
   verdict('the real variables', request(), true);
   verdict('a value that merely contains a submit variable name', request({ postData: body({ variables: { ...VARIABLES, path: 'fields.actionIdentifier' } }) }), true);

@@ -334,6 +334,20 @@ export const graphqlSingleMutationRootSelection = (document, name) => {
    * directive on the operation reaches here and finds no strict header at all. It is refused for
    * the same reason a directive after the variable definitions is: it can change what executes. */
   if (!header) return null;
+  /* ROUND 3, DEFECT B. The header is trusted only once it is proved to sit at the top level of the
+   * document. Located by regex alone it can be one nested inside an argument list, a list literal,
+   * a variable default or another selection set, and then the selection set read below belongs to
+   * that decoy while the real root selection, which can be the submit, is never read at all. The
+   * counter above already refuses a document carrying a nested header, so this is the second and
+   * independent assertion: the header this function reads is never trusted on the counter alone. */
+  const keywordIndex = header.index + header[0].indexOf(header[1]);
+  let headerDepth = 0;
+  for (let i = 0; i < keywordIndex; i += 1) {
+    const ch = skeleton[i];
+    if (ch === '(' || ch === '[' || ch === '{') headerDepth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') headerDepth -= 1;
+  }
+  if (headerDepth !== 0) return null;
   const closingBracket = (from) => {
     let depth = 0;
     for (let i = from; i < skeleton.length; i += 1) {
