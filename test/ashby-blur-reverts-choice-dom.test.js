@@ -47,7 +47,11 @@ const SUPPORT_NAMES = [
   'readChoiceState', 'readCommittedSearchInputValue', 'refuseChoice', 'nearMissChoiceReason',
   'verifyChoiceInContainer', 'settleVerified',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
-  'withdrawRefusedChoice', 'blurDrivenChoiceControl', 'choiceLanded',
+  'withdrawRefusedChoice', 'blurDrivenChoiceControl',
+  // choiceLanded's form confirmation and the sentence it speaks. Both are reached from
+  // choiceLanded itself, so a harness that omits them executes a different function.
+  'formRefusedChoiceReason', 'formStillRequiresChoice',
+  'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
   'fillCustomChoice',
 ];
@@ -73,6 +77,7 @@ function build() {
     let lastChoiceRefusal = '';
     let choiceRefusals = 0;
     let lastChoiceUnreadable = false;
+    let lastChoiceRejectedByForm = false;
     const tracksChoiceFailures = false;
     ${SRC}
     return {
@@ -269,6 +274,13 @@ test('the post-blur reread gets the same retry budget as the read it follows, an
     'the pre-blur poll read is still a bare await; the post-blur one now goes through settleVerified');
   assert.match(body, /await blurDrivenChoiceControl\(container, directControl\);\n\s+if \(await settleVerified\(\(\) => verifyChoiceInContainer\(/,
     'blur is followed immediately by a settleVerified-wrapped reread, not a fixed wait');
-  assert.equal((body.match(/await settleVerified\(/g) || []).length, 1,
-    'settleVerified runs exactly once per landed call, immediately after the blur');
+  /* TWO settles now, and they are two different questions asked in a fixed order: the post-blur
+   * reread pinned just above, and then the form's own confirmation that follows it. Everything this
+   * test exists to protect still holds - one blur, fired only after a verified read, followed
+   * immediately by a settleVerified reread rather than a fixed wait - and the count is pinned at two
+   * so a third poll loop cannot be added here without saying so. */
+  assert.equal((body.match(/await settleVerified\(/g) || []).length, 2,
+    'the post-blur reread and the form confirmation are the only settles in this function');
+  assert.match(body, /if \(await settleVerified\(async \(\) => !\(await formStillRequiresChoice\(container\)\)\)\) \{/,
+    'the form confirmation is a settle of its own, after the reread, never folded into it');
 });
