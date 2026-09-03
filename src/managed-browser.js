@@ -8989,6 +8989,29 @@ let terminalFailureInput = null;
        * reads this arm's message for the unknown state, so downstream cannot mistake it for a
        * confirmation. This is how an unsupported board such as Breezy can produce the ground truth
        * needed for a dedicated arm instead of another silent unverified dead end. */
+      /* A BARE RECEIPT PAGE IS A CONFIRMATION, AND THE LINE IT SHOWS IS THE MESSAGE.
+       *
+       * Many boards land the applicant on a page that is nothing but one sentence - "Thank you",
+       * "Application received", "Thanks, we'll be in touch" - with no form, no ATS hook and none
+       * of the fuller phrases CONFIRMED_TEXT expects. Every arm above needs a phrase or a hook, so
+       * that page fell through to 'unknown' and the send was recorded as "never showed a
+       * confirmation it could read" while the confirmation was the only thing on screen.
+       *
+       * The counter-witness rules are unchanged and do the safety work: the form must be GONE
+       * (formStillPresent reads every visible field and every submit-shaped button on the page),
+       * so a thank-you footer under a live form, or a toast over a still-filled form, still
+       * confirms nothing. Two more bounds keep this to the bare receipt it is written for: the whole
+       * visible page is short (a posting, a careers site or a marketing page with a thank-you in
+       * its footer runs far past 400 characters), and no doubt cue sits beside the thanks - an
+       * error page ("Something went wrong. Thank you for your patience. Try again."), a session
+       * wall, a validation notice or a challenge are all read as unknown, exactly as before. The
+       * message is the WHOLE line, so the applicant and the ledger see what the page said. */
+      const BARE_RECEIPT_CUE = /\b(?:thank you|thanks|application (?:received|complete|completed|submitted|sent)|received your application|successfully (?:submitted|applied|sent)|we(?:'ll| will) be in touch|has been submitted|been received)\b/i;
+      const BARE_RECEIPT_DOUBT = /\b(?:error|went wrong|try again|problem|fail(?:ed|ure)?|unable|could ?n[o']?t|not (?:be )?(?:submitted|sent|received|processed)|expired|sign in|log in|invalid|required|captcha|robot|verify (?:you|that you|your))\b/i;
+      if (!formStillPresent && body.length > 0 && body.length <= 400
+        && BARE_RECEIPT_CUE.test(body) && !BARE_RECEIPT_DOUBT.test(body)) {
+        return { state: 'confirmed', source: 'page_text', evidence: 'body_bare_receipt', message: body, formStillPresent };
+      }
       return { state: 'unknown', source: 'unmatched_page_text', evidence: location.href, message: body.slice(0, 600) || null, formStillPresent };
     }).catch(() => ({ state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }));
 

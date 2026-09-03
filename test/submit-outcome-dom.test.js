@@ -363,3 +363,38 @@ test('a link that merely mentions applying does not resurrect a submitted form',
   assert.equal(outcome.formStillPresent, false);
   assert.equal(outcome.state, 'confirmed');
 });
+
+/* A BARE RECEIPT PAGE. See the arm in readSubmitOutcome: a page that is nothing but one line of
+ * thanks, with no form left on it, is the confirmation many boards actually render, and it used to
+ * fall through to 'unknown' because no fuller phrase and no ATS hook was present. The safety
+ * asymmetry above still rules: every ambiguous shape here must stay 'unknown'. */
+test('a page that is only "Thank you" with no form is a confirmation, and the line is the message', async () => {
+  const outcome = await read('<main><h1>Thank you</h1></main>');
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.evidence, 'body_bare_receipt');
+  assert.equal(outcome.message, 'Thank you');
+  assert.equal(outcome.formStillPresent, false);
+});
+
+test('a page that is only "Application received" confirms with that line', async () => {
+  const outcome = await read('<p>Application received</p><p>We will be in touch.</p>');
+  assert.equal(outcome.state, 'confirmed');
+  assert.match(outcome.message, /Application received/);
+});
+
+test('"Thank you" beside a live form is NOT a confirmation', async () => {
+  const outcome = await read(`<p>Thank you</p>${FORM}`);
+  assert.equal(outcome.state, 'unknown');
+  assert.equal(outcome.formStillPresent, true);
+});
+
+test('a short error page that says thank you is NOT a confirmation', async () => {
+  const outcome = await read('<p>Something went wrong. Thank you for your patience. Please try again.</p>');
+  assert.equal(outcome.state, 'unknown');
+});
+
+test('a long page with a thank-you footer and no form is NOT a bare receipt', async () => {
+  const filler = '<p>' + 'Join our team and build the future of logistics with us. '.repeat(20) + '</p>';
+  const outcome = await read(`${filler}<footer>Thank you for visiting</footer>`);
+  assert.equal(outcome.state, 'unknown');
+});
