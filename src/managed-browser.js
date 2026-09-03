@@ -7362,6 +7362,16 @@ let terminalFailureInput = null;
      * focused by the click that drove the fill, and it needs no shape list to enumerate. Scoped to
      * 'container' so a focus that has already moved elsewhere on the page - a description this
      * fill never touched - is not blurred on this control's behalf. */
+    const blurDrivenChoiceControl = async (container, directControl) => {
+      if (directControl) {
+        await directControl.evaluate((element) => element.blur()).catch(() => undefined);
+        return;
+      }
+      await container.evaluate((element) => {
+        const active = element.ownerDocument && element.ownerDocument.activeElement;
+        if (active && element.contains(active)) active.blur();
+      }).catch(() => undefined);
+    };
     /* WHAT THE EMPLOYER'S FORM ITSELF SAYS ABOUT THIS FIELD, which is the only party whose opinion
      * decides whether an application can be sent.
      *
@@ -7417,16 +7427,6 @@ let terminalFailureInput = null;
       }
       return false;
     }).catch(() => false);
-    const blurDrivenChoiceControl = async (container, directControl) => {
-      if (directControl) {
-        await directControl.evaluate((element) => element.blur()).catch(() => undefined);
-        return;
-      }
-      await container.evaluate((element) => {
-        const active = element.ownerDocument && element.ownerDocument.activeElement;
-        if (active && element.contains(active)) active.blur();
-      }).catch(() => undefined);
-    };
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
      * this and none of them calls the verifier directly: the defect that made this necessary is
