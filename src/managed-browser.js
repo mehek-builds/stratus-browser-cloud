@@ -294,6 +294,14 @@ export const isAshbyPublicBoardRead = ({
  * (b816a61). Ashby's field writes are the sixth, and they surfaced on the first Ashby fill
  * attempted since, because 3c4ea81 only ever got the form to RENDER.
  *
+ * AND IT FIXES THE SEND, NOT ONLY THE FILL, because this is the only containment an Ashby run ever
+ * meets. The v4 pre-submit containment is stricter still - locked mode there aborts EVERY request,
+ * reads included, and any abort raises submit_transport_unpinned - and an Ashby fill would die
+ * against it too. It never gets the chance: v4 is armed only for a confirmAndSubmit action carrying
+ * chooserPolicy version 4, and the backend's managedApplicationUsesAtomicSubmitV4 grants that
+ * version only on Workable's native apply.workable.com route, returning false for every other
+ * family. So an Ashby fill run and an Ashby send run both land on the containment below.
+ *
  * WHY THIS IS A SECOND PREDICATE AND NOT A WIDER ENTRY IN THE READ LIST ABOVE. The two allowances
  * need different gates, so they must not share a constant. The read allowance is consulted in both
  * initial_navigation and locked mode, because the form cannot render without it. This one is
