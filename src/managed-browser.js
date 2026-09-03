@@ -14468,6 +14468,35 @@ let terminalFailureInput = null;
               : (semanticLabels.length === 0 && explicitLabels.length === 1 ? explicitLabels[0] : null);
             const labelText = renderedText(labelEl);
             const ariaLabel = el.getAttribute('aria-label') || '';
+            /* A FIELD WRAPPER THAT LEADS WITH A BOLD NAME IS THE QUESTION.
+             *
+             * Crelate renders every custom question as div.cr-form-item -> <strong>{{Name}}</strong>
+             * -> a red '*' span when required -> span.cr-help-text{{HelpText}} -> the control, whose
+             * id and name are GUIDs and which carries no <label for>, no aria and the help text as
+             * its placeholder (read from jobs.crelate.com/dist/candidateportal/main.bundle.js,
+             * 2026-09-02). Measured on Prediktive (packet da59781b) and Blueprint Hires (e3a22025):
+             * the stored questions were "maximum 400 characters short-", "enter a number number-"
+             * and "yesno-" - the placeholder welded to the type-prefixed handle - and a second
+             * control had no text at all, because nothing above reads a <strong>.
+             *
+             * Bounded like nearestQuestionText: the block must hold no control but this one, and
+             * the bold name must be the block's FIRST element, so a bold word inside a paragraph or
+             * a section heading over several questions never names a control. */
+            const leadingBoldName = (() => {
+              let block = el.parentElement;
+              for (let depth = 0; block && depth < 4; depth += 1, block = block.parentElement) {
+                if (!block.matches('div, section, li, fieldset')) continue;
+                if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+                const lead = block.firstElementChild;
+                if (lead && /^(?:STRONG|B)$/.test(lead.tagName)) {
+                  const text = clean(renderedText(lead)).replace(/\s*\*\s*$/, '');
+                  if (text && !genericControlText(text.toLowerCase())) return text.toLowerCase();
+                }
+                if (lead) return '';
+              }
+              return '';
+            })();
+            if (!clean(labelText) && !clean(ariaLabel) && leadingBoldName) return leadingBoldName;
             /* A BARE LISTBOX BUTTON WITH ONE EXACT LABEL IS ALREADY FULLY NAMED.
              *
              * Recruitee's CBS salutation opener is a button with aria-haspopup=listbox, an exact
