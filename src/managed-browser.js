@@ -311,7 +311,15 @@ export const isAshbyPublicBoardRead = ({
  * decision record, 2026-09-01): Ashby carries a separate submit control, and this operation sets
  * one value at a time. That is a reading of the operation's name and of the form's shape, not a
  * live measurement of Ashby's server, because this project never opens an employer portal to find
- * out. */
+ * out.
+ *
+ * THE TRADEOFF THAT IS LEFT, stated because the upload window's was put to Mehek explicitly and
+ * this one has not been. On a fill-only run - the dashboard's "fill form" with no send - Ashby now
+ * receives every value the packet writes, as it is written. No arming window changes that: a
+ * narrower one (armed per fill action, the way uploadActionArmed is) would admit exactly the same
+ * values, because writing them IS the fill. The choice is between Ashby receiving the values and
+ * Ashby not being fillable, and the containment's job is to stop an application being FILED
+ * without authority, which the pinned operation still cannot do. */
 export const ASHBY_FORM_VALUE_WRITE_OPERATIONS = Object.freeze(['ApiSetFormValue']);
 
 /* The read regex's admission rule with the operation's NAME captured, so a document can be held to
