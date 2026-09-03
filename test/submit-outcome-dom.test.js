@@ -435,3 +435,17 @@ test('the genuine bare receipts still confirm', async () => {
     assert.ok(['body', 'body_bare_receipt'].includes(outcome.evidence), `${html}: ${outcome.evidence}`);
   }
 });
+
+test('a form hidden from view still refuses the bare arm', async () => {
+  for (const style of ['display:none', 'visibility:hidden']) {
+    const outcome = await read(`<p>Thank you</p><div style="${style}">${FORM}</div>`);
+    assert.notEqual(outcome.state, 'confirmed', style);
+  }
+});
+
+test('"successfully submitted" must name the application', async () => {
+  for (const html of ['<p>Your message was successfully sent</p>', '<p>Feedback successfully submitted</p>', '<p>Your resume was successfully submitted</p>']) {
+    assert.notEqual((await read(html)).state, 'confirmed', html);
+  }
+  assert.equal((await read('<p>Your application was successfully submitted</p>')).state, 'confirmed');
+});

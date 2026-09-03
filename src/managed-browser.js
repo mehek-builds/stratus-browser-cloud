@@ -9012,14 +9012,18 @@ let terminalFailureInput = null;
        * you, but we are not currently hiring", "Thanks! Please check your email to confirm your
        * address", "Thank you. Your session has timed out", "Page not found. Thanks for visiting"). */
       const BARE_RECEIPT_ONLY = /^(?:success[!.]?\s*)?(?:thank you|thanks)(?:\s+for\s+(?:applying|your\s+application|submitting))?[!.]?(?:\s+we(?:'ll| will) be in touch(?: (?:soon|shortly))?[!.]?)?$/i;
-      const BARE_RECEIPT_CUE = /\b(?:application (?:has been |was )?(?:successfully )?(?:received|complete|completed|submitted|sent)|received your application|successfully (?:submitted|applied|sent)|thank you for your application|thanks for your application)\b/i;
+      const BARE_RECEIPT_CUE = /\b(?:(?:your )?application (?:has been |was )?(?:successfully )?(?:received|complete|completed|submitted|sent)|received your application|successfully (?:submitted|sent) your application|successfully applied|thank you for your application|thanks for your application)\b/i;
       /* Every doubt cue the refutation executed. Closures, gates, interstitials, wizard steps,
        * transients and consent screens all wear a thank-you; none is a receipt. */
       const BARE_RECEIPT_DOUBT = /\b(?:error|went wrong|try again|problem|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|not (?:be )?(?:submitted|sent|received|processed|accepted|eligible|found|available)|no longer|closed|unfortunately|declined|denied|forbidden|expired|timed? out|sign(?:ed)? in|log(?:ged)? in|invalid|required|captcha|robot|verify|confirm your|check your (?:email|inbox)|complete (?:the|your)|finish(?:ing)? your|next step|continue|assessment|questionnaire|draft|saved|already applied|redirect(?:ed|ing)?|partner|talent (?:network|community|pool)|newsletter|subscribe|cookies?|page not found|404|maintenance|too many|please wait|one moment|submitting|processing|loading|uploading|not currently|not hiring|do(?:es)? not meet|minimum requirements|apply (?:through|via|on)|withdrawn|filled)\b/i;
       /* A wizard step is not a receipt: any visible field, an iframe (a form the main frame cannot
        * see), or a Next/Continue/Upload-shaped control is the page saying there is more to do. */
       const NEXT_SHAPED_BUTTON = /^(?:next|continue|proceed|start|begin|confirm|upload(?:\s+\w+)?)$/i;
-      const bareArmCounterWitness = visibleOne('input:not([type=hidden]):not([type=search]), select, textarea, iframe')
+      /* VISIBILITY-INDEPENDENT for this arm: a bare receipt page has no reason to carry a form in
+       * its DOM at all, so a form hidden by display:none or visibility:hidden (the two shapes the
+       * form counter-witness cannot see, and the two the round-2 pass still confirmed) refuses it. */
+      const bareArmCounterWitness = document.querySelector('form, input[type=file], input[type=email], textarea, input[type=submit], button[type=submit]')
+        || visibleOne('input:not([type=hidden]):not([type=search]), select, textarea, iframe')
         || [...document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a')]
           .some((node) => isVisible(node) && NEXT_SHAPED_BUTTON.test(clean(node.innerText || node.value || '')));
       if (!formStillPresent && !bareArmCounterWitness && body.length > 0 && body.length <= 400
