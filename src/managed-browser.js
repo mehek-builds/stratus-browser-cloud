@@ -14459,7 +14459,7 @@ let terminalFailureInput = null;
              * nothing (holdsAnotherQuestion, isSubmitSection). */
             const fieldsetOwnsChoice = choice && fieldsetNames.size <= 1 && Boolean(fieldset)
               && !holdsAnotherQuestion(fieldset, el, sameNamePeers)
-              && !(isSubmitSection(fieldset) && controlHasOwnLabel(el, sameNamePeers));
+              && !(isSubmitSection(fieldset) && legendIsCaption(fieldset) && controlHasOwnLabel(el, sameNamePeers));
             const legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
             const legendText = clean(renderedText(legend));
             if (legendText) return legendText.toLowerCase();
@@ -14518,7 +14518,7 @@ let terminalFailureInput = null;
                * legend is never searched now, and neither is the submit section's caption. */
               const questionCandidate = (candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
-                if (candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset')) && controlHasOwnLabel(el, sameNamePeers)) return false;
+                if (candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset')) && legendIsCaption(candidate.closest('fieldset')) && controlHasOwnLabel(el, sameNamePeers)) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
                 const target = document.getElementById(named);
@@ -14527,7 +14527,7 @@ let terminalFailureInput = null;
               const owner = blockOf(el);
               const questionBlocks = ownBlocksOf(el, sameNamePeers);
               if (owner && !questionBlocks.includes(owner) && owner !== el
-                && !holdsAnotherQuestion(owner, el, sameNamePeers) && !(isSubmitSection(owner) && controlHasOwnLabel(el, sameNamePeers))) {
+                && !holdsAnotherQuestion(owner, el, sameNamePeers) && !(isSubmitSection(owner) && legendIsCaption(owner) && controlHasOwnLabel(el, sameNamePeers))) {
                 questionBlocks.push(owner);
               }
               for (const questionBlock of questionBlocks) {
@@ -14540,7 +14540,16 @@ let terminalFailureInput = null;
                * and whose blocks hold no heading is UNNAMED, not named "yes" by its first option:
                * the misname is the defect the Breezy test forbids, and an unnamed control is what
                * the backend files honestly as missing_question_text. */
-              if (fieldset && !fieldsetOwnsChoice && !controlHasOwnLabel(el, sameNamePeers)) return '';
+              /* NEVER DROP THE ROW. Returning '' here made the scan loop skip the control
+               * entirely (the scan skips a control with an empty label), so a choice group inside a
+               * section fieldset with no heading of its own vanished from discovery - unanswerable
+               * rather than merely misnamed. The section's own legend is the honest fallback, with
+               * the group's name appended so two groups under one caption stay two records rather
+               * than collapsing into one (Pinpoint's "3. Questions" holds two boolean pairs). */
+              if (fieldset && !fieldsetOwnsChoice && !controlHasOwnLabel(el, sameNamePeers)) {
+                const sectionLegend = clean(renderedText(fieldset.querySelector('legend'))).toLowerCase();
+                if (sectionLegend) return el.name ? sectionLegend + ' ' + el.name.toLowerCase() : sectionLegend;
+              }
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
              *
@@ -14874,6 +14883,16 @@ let terminalFailureInput = null;
            * button is the send area; Pinpoint captions it "4. Submit Application" over the privacy
            * consent checkbox, and discovery stored that caption as a required checkbox question. The
            * checkbox keeps its own label, which is the statement the consent-tick plan reads. */
+          /* A caption names a SECTION ("4. Submit Application"); a question names a question ("Do
+           * you agree to our terms and privacy policy?"). Only a caption is withheld from a control,
+           * so a consent checkbox whose fieldset happens to hold the submit button keeps its own
+           * statement. */
+          const CAPTION_SHAPE = /^\s*\d+\s*[.)]|^(?:submit|apply|send|next|continue|finish|complete)\b/i;
+          function legendIsCaption(fieldset) {
+            if (!fieldset || typeof fieldset.querySelector !== 'function') return false;
+            const legendText = clean(renderedText(fieldset.querySelector('legend')));
+            return Boolean(legendText) && CAPTION_SHAPE.test(legendText);
+          }
           function isSubmitSection(fieldset) {
             if (!fieldset || typeof fieldset.querySelectorAll !== 'function') return false;
             /* A type-less <button> is ordinary widget furniture (a "?" tooltip, an icon) far more
@@ -14889,10 +14908,17 @@ let terminalFailureInput = null;
            * the fieldset (a wizard step). */
           function controlHasOwnLabel(el, peers) {
             if (!el || !el.getAttribute) return false;
-            /* A radio or checkbox that has same-name peers is labelled by its OPTION, not by a
-             * question of its own; a lone checkbox's wrapping label IS its statement (Pinpoint's
-             * "Allow us to process your personal information."). */
-            if ((el.type === 'radio' || el.type === 'checkbox') && peers && peers.length > 1) return false;
+            /* A radio or checkbox that belongs to a MULTI-OPTION GROUP is labelled by its OPTION,
+             * not by a question of its own - by its same-name peers, or, where every row carries its
+             * own name (Workable's multi-select, "Internship / Full-time / Contract"), by the
+             * same-type choices sharing its fieldset. A LONE checkbox's wrapping label IS its
+             * statement (Pinpoint's "Allow us to process your personal information."). */
+            if (el.type === 'radio' || el.type === 'checkbox') {
+              if (peers && peers.length > 1) return false;
+              const groupBox = el.closest && el.closest('fieldset, [role="group"], [role="radiogroup"]');
+              if (groupBox && typeof groupBox.querySelectorAll === 'function'
+                && [...groupBox.querySelectorAll('input[type="' + el.type + '"]')].length > 1) return false;
+            }
             if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) return true;
             if (el.labels && el.labels.length > 0) return true;
             return Boolean(el.id && document.querySelector && document.querySelector('label[for="' + CSS.escape(el.id) + '"]'));
@@ -15180,7 +15206,17 @@ let terminalFailureInput = null;
             const blockIsSection = !explicitGroup && holdsAnotherQuestion(block, el, peersInForm);
             const ownBlocks = blockIsSection ? ownBlocksOf(el, peersInForm) : [];
             const outermostOwn = ownBlocks.length > 0 ? ownBlocks[ownBlocks.length - 1] : null;
+            /* CLAMPED TO A BLOCK THAT STILL HOLDS THE WHOLE GROUP. Workable gives every row of one
+             * multi-select its own name, so ownBlocksOf can narrow to a single checkbox's wrapping
+             * label and the question would be stored with one option and its own row as the label.
+             * Pinpoint still narrows correctly: each boolean pair's own div contains both of its
+             * radios and neither of the other pair's. */
+            const groupMembers = peersInForm.length > 1
+              ? peersInForm
+              : [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+                .filter((input) => input.type === el.type);
             const scope = outermostOwn && block.contains(outermostOwn) && outermostOwn !== block
+              && groupMembers.every((member) => outermostOwn.contains(member))
               ? outermostOwn
               : block;
             const blockChoices = [...scope.querySelectorAll('input[type="radio"], input[type="checkbox"]')];

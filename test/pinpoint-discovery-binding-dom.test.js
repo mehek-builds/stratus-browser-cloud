@@ -393,5 +393,51 @@ test('a refused legend never falls through to the first option\'s own label', as
       <label><input type="radio" name="q1" value="y">Yes</label><label><input type="radio" name="q1" value="n">No</label>
       <label for="years">Years of Python</label><input id="years" type="number">
       <label for="years2">Years of SQL</label><input id="years2" type="number"></fieldset></form>`);
-  for (const row of rowsNamed(rows, 'q1')) assert.doesNotMatch(row.label, /^yes\b/);
+  const q1 = rowsNamed(rows, 'q1');
+  assert.ok(q1.length >= 1, `the group must still be discovered: ${JSON.stringify(rows.map((r) => [r.label, r.durableSelector]))}`);
+  for (const row of q1) assert.doesNotMatch(row.label, /^yes\b/);
+});
+
+/* THE ROUND-2 REVIEW'S OWN FIXTURES. F4 was masked by a literal count of one open control; F5 was
+ * untouched; and the refused-legend guard dropped whole groups from discovery. */
+test('unique-name checkboxes keep the whole list beside TWO labelled controls', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>Which programs are you interested in?</legend>
+      <label><input type="checkbox" id="a1" name="internship" value="1">Internship</label>
+      <label><input type="checkbox" id="a2" name="fulltime" value="1">Full-time</label>
+      <label><input type="checkbox" id="a3" name="contract" value="1">Contract</label>
+      <label for="w">When can you start?</label><input id="w" name="whenstart" type="text">
+      <label for="s">Salary</label><input id="s" name="sal" type="number"></fieldset></form>`);
+  const boxes = rows.filter((row) => row.inputType === 'checkbox');
+  assert.ok(boxes.length >= 1, JSON.stringify(rows.map((r) => [r.label, r.options])));
+  for (const box of boxes) {
+    assert.deepEqual(box.options, ['Internship', 'Full-time', 'Contract'], box.label);
+    assert.doesNotMatch(box.label, /^internship\b|^full-time\b|^contract\b/);
+  }
+});
+
+test('a consent question keeps its own statement when its fieldset holds the submit button', async () => {
+  for (const consent of [
+    '<label><input type="checkbox" name="agree" required>I agree to the terms</label>',
+    '<label for="ag">I agree to the terms</label><input id="ag" type="checkbox" name="agree" required>',
+  ]) {
+    const rows = await discover(`
+      <form><fieldset><legend>Do you agree to our terms and privacy policy?</legend>
+        ${consent}<button type="submit">Submit application</button></fieldset></form>`);
+    const box = rows.find((row) => row.inputType === 'checkbox');
+    assert.ok(box, JSON.stringify(rows.map((r) => [r.label, r.inputType])));
+    assert.equal(box.label, 'do you agree to our terms and privacy policy?');
+  }
+});
+
+test('a choice group inside a section fieldset is still discovered, named by the section', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>Additional information</legend>
+      <label for="q1l">Are you willing to relocate?</label>
+      <label><input type="radio" name="reloc" value="y">Yes</label><label><input type="radio" name="reloc" value="n">No</label>
+      <label for="c">Country</label><select id="c" name="country"><option>US</option><option>UK</option></select>
+      <label for="n">Notes</label><input id="n" name="notes" type="text"></fieldset></form>`);
+  const group = rowsNamed(rows, 'reloc');
+  assert.ok(group.length >= 1, `the group must not vanish: ${JSON.stringify(rows.map((r) => [r.label, r.durableSelector]))}`);
+  for (const row of group) assert.ok(row.label && !/^yes\b/.test(row.label), row.label);
 });
