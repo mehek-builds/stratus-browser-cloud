@@ -55,7 +55,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SANDBOX_RUNNER } from '../src/managed-browser.js';
+import { ATOMIC_SUBMIT_POLICY, SANDBOX_RUNNER } from '../src/managed-browser.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
@@ -64,13 +64,14 @@ import {
   fixture,
   GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL, LANGUAGE_LABEL
 } from './fixtures/greenhouse/hrt-required-select.mjs';
+import { staleErrorFixture, STALE_LABEL, STALE_ID } from './fixtures/greenhouse/stale-required-error.mjs';
 
 let server;
 let workDir;
 test.before(async () => {
   server = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', connection: 'close' });
-    response.end(fixture);
+    response.end(request.url.startsWith('/stale') ? staleErrorFixture : fixture);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-gh-required-'));
@@ -93,13 +94,20 @@ function waitForRunner(child, timeoutMs = 120_000) {
   });
 }
 
-async function run(actions) {
+async function run(actions, { path: urlPath = '/', allowSubmit = false } = {}) {
   fs.rmSync(resultPath(), { force: true });
   fs.rmSync(path.join(workDir, 'stratus-error.json'), { force: true });
   fs.writeFileSync(path.join(workDir, 'stratus-input.json'), JSON.stringify({
-    url: `http://127.0.0.1:${server.address().port}/`,
+    url: `http://127.0.0.1:${server.address().port}${urlPath}`,
     actions,
-    allowSubmit: false,
+    allowSubmit,
+    ...(allowSubmit ? {
+      submissionAttempt: {
+        runId: '11111111-1111-4111-8111-111111111111',
+        claimId: '22222222-2222-4222-8222-222222222222',
+        executionId: '33333333-3333-4333-8333-333333333333'
+      }
+    } : {}),
     providerDeadlineAt: providerDeadlineAt(),
     screenshot: false,
     waitUntil: 'networkidle',
@@ -276,4 +284,44 @@ test('no run reports a field both filled and blocked, and a refused one holds th
     assert.ok(!result.blockers.some((blocker) => blocker.includes(named)),
       `"${label}" reached the form, so nothing may still block over it`);
   }
+});
+
+test('an answer the form accepted is not re-driven over an error the page never took back', async () => {
+  /* THE MEASURED HUDSON RIVER TRADING STATE, driven all the way to the press. Greenhouse renders
+   * "This field is required." once, on a field that was empty at the time, and never clears it or
+   * aria-invalid when the field is answered afterwards. Read live on 2026-09-04: chip "Woman",
+   * RequiredInput GONE, aria-invalid still "true", sentence still under the control.
+   *
+   * The required-field scan read exactly those two things, called an answered control affected,
+   * and sent it down the re-drive path that can end a run "still_requires_answer". The browser
+   * would have submitted it. */
+  const result = await run([
+    { type: 'fill', selector: `[id="${STALE_ID}"]`, value: 'Woman', label: STALE_LABEL, optional: true },
+    { type: 'extract', selector: `[id="${STALE_ID}-error"]`, optional: true },
+    { type: 'extract', selector: `.select:has(input[id="${STALE_ID}"]) input[required][aria-hidden="true"]`, attribute: 'class', optional: true },
+    {
+      type: 'confirmAndSubmit',
+      selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+      chooserPolicy: ATOMIC_SUBMIT_POLICY,
+      label: 'final_submit',
+      optional: false,
+      maxRetries: 1,
+      contractVersion: 2,
+      submitKind: 'application'
+    },
+    { type: 'extract', selector: '#submitted', optional: true }
+  ], { path: '/stale', allowSubmit: true });
+
+  // The page really is in the measured state: the sentence is still there, the backing is not.
+  assert.equal(valueOf(result, `[id="${STALE_ID}-error"]`), 'This field is required.',
+    'the fixture must keep the stale sentence, or this proves nothing');
+  assert.equal(formStillRequires(result, STALE_ID), false,
+    'and the form must actually be satisfied');
+  // So the run must treat it as committed and press.
+  assert.ok(result.filledFields.includes(STALE_LABEL));
+  assert.deepEqual(result.blockers, [], 'a stale sentence may not hold a form the browser would submit');
+  assert.equal(result.blockedSubmits, 0);
+  assert.equal(result.submitOutcome?.pressed, true, 'the submit must actually be pressed');
+  assert.equal(result.requiredFieldConfirmation?.status, 'confirmed');
+  assert.equal(valueOf(result, '#submitted'), 'submitted');
 });

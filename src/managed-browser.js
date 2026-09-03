@@ -12831,6 +12831,50 @@ let terminalFailureInput = null;
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
           return nativeMissing || element.getAttribute?.('aria-invalid') === 'true';
         };
+        /* GREENHOUSE NEVER TAKES ITS ERROR BACK, and this scan believed it.
+         *
+         * Measured on the live Hudson River Trading form (job-boards.greenhouse.io, 2026-09-04) in
+         * three reads of the same page: pristine, after one validation pass on an empty form, and
+         * after answering each control correctly by clicking its own option row.
+         *
+         *   control          shown           RequiredInput   aria-invalid   error text
+         *   gender           "Woman"         GONE            "true"         "This field is required."
+         *   veteran          "No"            GONE            "true"         "This field is required."
+         *   race/ethnicity   "South Asian"   GONE            "true"         "This field is required."
+         *   GPA              "3.76 - 4.0"    GONE            "true"         "This field is required."
+         *
+         * The answers are on the form and the browser will submit them: react-select unmounts its
+         * RequiredInput the moment it holds a value, which is the form's own live statement. What
+         * never clears is aria-invalid and the sentence under the control, and BOTH of the readings
+         * above are made of exactly those two. So a correctly answered control came back
+         * affected:true, went down the re-drive path instead of already_committed, and could end
+         * the run 'still_requires_answer' over an answer that was sitting on the form.
+         *
+         * This also explains the shape of the report that started this, where six of sixteen
+         * comboboxes wore the red sentence and ten did not, with no pattern in widget type, chips,
+         * block or position: an error renders only for the fields that were EMPTY at the moment
+         * some earlier validation pass ran, and never clears afterwards. It is fill order against
+         * one stray validation, not a fill failure. This file's own pre-submit gate already
+         * documents the same Greenhouse behaviour from the live Redwood Materials form on
+         * 2026-08-08, where six stale "is required" messages stood under correct answers and the
+         * form then submitted cleanly with zero errors.
+         *
+         * So a widget that publishes a chosen value and no longer carries an unsatisfied required
+         * backing is not affected, whatever the page still says in words. Bounded to a recognised
+         * select shell, because the RequiredInput contract is what makes the absence meaningful:
+         * on any other markup the absence proves nothing and nothing here changes. */
+        const backingSatisfied = (widget) => {
+          const shell = widget?.querySelector?.('[class*="select-shell"], [class*="select__container"]')
+            || widget?.closest?.('[class*="select-shell"], [class*="select__container"]');
+          if (!shell) return false;
+          const holdsValue = shell.querySelector(
+            '[class*="select__single-value"], [class*="select__multi-value__label"]'
+          );
+          if (!holdsValue) return false;
+          return ![...shell.querySelectorAll('input[required], select[required], textarea[required]')]
+            .some((control) => !control.matches?.(':disabled')
+              && control.validity && control.validity.valueMissing);
+        };
         const belongsToRoot = (element) => {
           if (!element) return false;
           if (!(root instanceof HTMLFormElement)) return root.contains(element);
@@ -13055,7 +13099,9 @@ let terminalFailureInput = null;
             fieldType: type === 'combobox' ? 'react-select' : type,
             answered: chosenValue(element, widget)
               || [...validationSources].some((source) => chosenValue(source, widget)),
-            affected: [...validationSources].some(hasValidationIssue) || errorText(widget)
+            affected: backingSatisfied(widget)
+              ? false
+              : ([...validationSources].some(hasValidationIssue) || errorText(widget))
           });
           directElements.push(element);
           directOpeners.push(select2?.opener || null);
