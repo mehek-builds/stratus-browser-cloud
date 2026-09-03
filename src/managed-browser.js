@@ -14803,9 +14803,16 @@ let terminalFailureInput = null;
              * exact CSS, page.locator() accepts it, and the backend's durablePortalSelector and
              * controlIdFromDiscoveredSelector both read it. Named ids keep the '#' form every
              * existing consumer already parses. */
-            const idSelector = (id) => (/^[0-9]/.test(id)
-              ? '[id="' + id.replace(/["\\]/g, '\\$&') + '"]'
-              : '#' + CSS.escape(id));
+            const idSelector = (id) => {
+              // Parity with quotedSelector's refusal further down: a line break inside a quoted
+              // attribute string is BADSTRING to the selector parser, and a selector that cannot
+              // parse is worse than none (the readiness scan and the backend both fall through
+              // to name / field-path / stable-id when there is no selector).
+              if (/[\r\n\f]/.test(id)) return null;
+              return /^[0-9]/.test(id)
+                ? '[id="' + id.replace(/["\\]/g, '\\$&') + '"]'
+                : '#' + CSS.escape(id);
+            };
             if (el.id) return idSelector(el.id);
             const name = el.getAttribute && el.getAttribute('name');
             if (name) return '[name="' + name.replace(/["\\]/g, '\\$&') + '"]';
