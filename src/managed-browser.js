@@ -270,8 +270,19 @@ export const isAshbyPublicBoardRead = ({
  * WHY IT HAPPENS. Ashby does not post the form at submit time. It writes each field value to its
  * own GraphQL endpoint AS THE FIELD IS FILLED, one ApiSetFormValue per value, on the same host and
  * the same path its reads already use. On this one family the ordinary fill phase therefore
- * performs employer transport, so the containment counted every typed value as a violation and
- * killed the run at the next action, before a screenshot existed.
+ * performs employer transport, so the containment counted the first typed value as a violation and
+ * the very next assertManagedMutationTransportClean killed the run - and one of those runs after
+ * every mutation action as well as before the next, so the run never got far enough to be
+ * photographed.
+ *
+ * WHAT THAT ONE SENTENCE ALREADY PROVES ABOUT THE REQUEST, which is more than it looks.
+ * ashbyPublicBoardOperationName reads the operation out of the POST BODY, never out of the ?op=
+ * query label, because #127 strips query strings from the violation sentence. For it to have
+ * printed op=ApiSetFormValue on 2026-09-03 the body had to parse as JSON, be a non-array object,
+ * and carry operationName exactly "ApiSetFormValue" - and the host and path had to be this exact
+ * endpoint. Envelope, host, path and name are therefore measured, and the pin below will match.
+ * The single unmeasured input this allowance rests on is the document in body.query, which is why
+ * a refusal on that one proof names itself in the log rather than reading like this regression.
  *
  * THIS IS A REGRESSION, NOT A NEW GAP. The same account has a completed Ashby submission from
  * before the containment existed: packet 13bccb2d-d726-4c47-80bc-e8090ae1463e (Skydio, Ashby)
@@ -1945,11 +1956,13 @@ let terminalFailureInput = null;
               url: request.url(),
               postData: request.postData()
             });
-            /* An operation that IS on the field-value write allowlist and was blocked anyway was
-             * refused by one of the proofs around the name, and the document proof is the only one
-             * of those that rests on a shape this file has never measured (Ashby's own
-             * ApiSetFormValue body). Saying so keeps that 502 one measurement from a fix instead of
-             * reading identically to the 2026-09-03 regression this allowance closes. */
+            /* An operation that IS on the field-value write allowlist and was blocked anyway got
+             * past the host, the path and the name - reading the name out of the body proves all
+             * three - so what refused it was the resource type, the method, the scheme, or the
+             * document proof. The document is the only one of those this file has never measured
+             * on a live Ashby request, so it is by far the likeliest, and saying so keeps that 502
+             * one measurement from a fix instead of reading identically to the 2026-09-03
+             * regression this allowance closes. */
             const allowListedWriteRefused = Boolean(operationName)
               && ASHBY_FORM_VALUE_WRITE_OPERATIONS.includes(operationName);
             containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target
