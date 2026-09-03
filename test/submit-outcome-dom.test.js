@@ -449,3 +449,9 @@ test('"successfully submitted" must name the application', async () => {
   }
   assert.equal((await read('<p>Your application was successfully submitted</p>')).state, 'confirmed');
 });
+
+test('"successfully applied" must be about an application, not a coupon', async () => {
+  assert.notEqual((await read('<p>Coupon successfully applied</p>')).state, 'confirmed');
+  assert.notEqual((await read('<p>Discount successfully applied</p>')).state, 'confirmed');
+  assert.equal((await read('<p>You successfully applied for this role</p>')).state, 'confirmed');
+});
