@@ -10394,11 +10394,16 @@ let terminalFailureInput = null;
            * file input, returned zero blockers, while the same field carrying a for= attribute
            * returned the correct '"CV or resume" is required and is still empty'.
            *
-           * This runner is the path that matters for that failure. DSI Innovations (packet
-           * a34e5ce2) went to Recruitee through a managed run on 2026-09-02 with an empty required
-           * "CV or resume": the upload action reported success because setInputFiles returned
-           * cleanly, this gate stayed silent, the run pressed submit, and the form had nothing to
-           * accept - which comes back as no_confirmation_state and an unverified submission.
+           * FOUND WHILE READING THE DSI INNOVATIONS FAILURE, and this runner is the path that run
+           * took - so it is worth stating exactly what it does and does not establish. Packet
+           * a34e5ce2 went to Recruitee on 2026-09-02, came back no_confirmation_state, and its
+           * post-run screenshot shows every text field filled and the required "CV or resume"
+           * empty. That screenshot is taken AFTER the submit press, and a browser never
+           * repopulates a file input across a rejected submit, so it does NOT prove the control
+           * was empty when this gate ran - the upload action verifies the file into the input by
+           * name, size and sha256 before it. What it does establish is that this gate had nothing
+           * to say about that field either way, on a form where it was the one required thing that
+           * could go missing.
            *
            * LAST in the chain, after the widget fallback, so this adds an arm exactly where the
            * value was null and changes the target on no path that already had one.
