@@ -7584,21 +7584,32 @@ let terminalFailureInput = null;
              * safe to run on every choice on every board: it is only ever paid by a control the
              * form has ALREADY refused, and a control the form accepted never reaches this line. */
             let accepted = await settleVerified(async () => !(await formStillRequiresChoice(container)));
+            /* A NUDGE THAT DID NOT LEAVE HER ANSWER ON THE CONTROL IS NOT A REPAIR, and it is not a
+             * form refusal either. A form that re-evaluates can also COERCE - accept the field while
+             * snapping it to a neighbouring option - and calling that "the form still reports the
+             * field as required and empty" would be a false sentence about a control she is looking
+             * at, which is the exact mistake the aria-invalid arm was removed for. So the widget is
+             * re-read first, and a control that is no longer holding her answer leaves this loop to
+             * the withdrawal below: the same path, the same sentence and the same restoration any
+             * other lost value gets. */
+            let nudgeDisturbedTheControl = false;
             for (let pass = 0; !accepted && pass < 2; pass += 1) {
               if (!await nudgeChoiceControl(container)) break;
-              accepted = await settleVerified(() => verifyChoiceInContainer(
+              if (!await settleVerified(() => verifyChoiceInContainer(
                 container,
                 expected,
                 lastClickedOptionText,
                 lastClickedOptionAnswer,
                 lastChooserTierAnswer,
                 directControl,
-              )) && await settleVerified(async () => !(await formStillRequiresChoice(container)));
+              ))) { nudgeDisturbedTheControl = true; break; }
+              accepted = await settleVerified(async () => !(await formStillRequiresChoice(container)));
             }
             if (accepted) {
               await unmarkChoice(container);
               return true;
             }
+            if (nudgeDisturbedTheControl) break;
             lastChoiceRejectedByForm = true;
             lastChoiceUnreadable = false;
             lastChoiceRefusal = formRefusedChoiceReason;

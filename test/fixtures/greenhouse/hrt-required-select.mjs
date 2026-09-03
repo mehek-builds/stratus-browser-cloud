@@ -14,6 +14,9 @@ const RACE_LABEL = 'What is your race/ethnicity?';
 const GENDER_LABEL = 'What is your gender?';
 // Genuinely optional on the live form, and it carries no RequiredInput there either.
 const DEADLINE_LABEL = 'Do you have any upcoming offer deadlines?';
+/* From the same measured packet, and the case for a form that looks again and snaps the answer to
+ * a neighbour rather than keeping it. */
+const LANGUAGE_LABEL = 'What is your preferred coding language?';
 
 const GPA_OPTIONS = ['3.26 - 3.50', '3.51 - 3.75', '3.76 - 4.0'];
 const SCALE_OPTIONS = ['0.0 - 4.0', '0.0 - 5.0', 'UK Grading Scale'];
@@ -21,15 +24,16 @@ const YES_NO = ['Yes', 'No', 'I prefer not to answer'];
 const RACE_OPTIONS = ['South Asian', 'East Asian', 'White', 'Black or African American'];
 const GENDER_OPTIONS = ['Woman', 'Man', 'Non-binary'];
 const DEADLINE_OPTIONS = ['Less than 2 weeks', '2 to 4 weeks', 'More than 4 weeks'];
+const LANGUAGE_OPTIONS = ['Python', 'Java', 'C++', 'Rust'];
 
 /* Transcribed from the live HRT form, one question. 'multi' reproduces the
  * 'select__value-container--is-multi' the demographic gender and race controls carry. 'stale'
  * marks a control that commits its value and never asks the form to look at the field again, and
  * 'stuck' one that never re-evaluates however it is touched. */
-const question = ({ id, label, options, multi = false, stale = false, stuck = false, required = true }) => `
+const question = ({ id, label, options, multi = false, stale = false, stuck = false, coerces = '', required = true }) => `
   <div class="field-wrapper"><div class="select"><div class="select__container select__container--outside-label">
     <label id="${id}-label" for="${id}" class="label select__label select__label--outside-label">${label}${required ? '<span aria-hidden="true">*</span>' : ''}</label>
-    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${stale ? ' data-stale="1"' : ''}${stuck ? ' data-stuck="1"' : ''}${required ? ' data-required="1"' : ''}>
+    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${stale ? ' data-stale="1"' : ''}${stuck ? ' data-stuck="1"' : ''}${coerces ? ` data-coerces="${coerces}"` : ''}${required ? ' data-required="1"' : ''}>
       <span id="react-select-${id}-live-region" class="remix-css-7pg0cj-a11yText"></span>
       <span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log" class="remix-css-7pg0cj-a11yText"></span>
       <div><div class="select__control--outside-label select__control remix-css-13cymwt-control">
@@ -61,6 +65,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Job Application at 
 <form id="application-form" action="/candidates" method="post" novalidate>
 ${question({ id: 'question_67889507', label: GPA_LABEL, options: GPA_OPTIONS, stale: true })}
 ${question({ id: 'question_67889508', label: SCALE_LABEL, options: SCALE_OPTIONS, stale: true })}
+${question({ id: 'question_67889530', label: LANGUAGE_LABEL, options: LANGUAGE_OPTIONS, stale: true, coerces: 'Java' })}
 ${question({ id: 'question_67889515', label: DEADLINE_LABEL, options: DEADLINE_OPTIONS, stale: true, required: false })}
 <hr/>
 <div id="demographic-section" class="demographic--container">
@@ -95,6 +100,7 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
     var stale = shell.getAttribute('data-stale') === '1';
     var required = shell.getAttribute('data-required') === '1';
     var stuck = shell.getAttribute('data-stuck') === '1';
+    var coerces = shell.getAttribute('data-coerces') || '';
     var control = shell.querySelector('.select__control');
     var valueContainer = shell.querySelector('.select__value-container');
     var inputContainer = shell.querySelector('.select__input-container');
@@ -189,6 +195,9 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
     }
     function revalidate() {
       if (stuck) return;
+      // A form that looks again can also decide the answer should be a different one. It accepts
+      // the field, and what it accepted is not what she said.
+      if (coerces && state.values.length > 0) { state.values = [coerces]; render(); }
       state.committed = state.values.slice();
       syncRequiredInput();
       if (errorNode) errorNode.textContent = state.committed.length > 0 ? '' : 'This field is required.';
@@ -311,6 +320,6 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
 
 export {
   fixture,
-  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL,
-  GPA_OPTIONS, SCALE_OPTIONS, YES_NO, RACE_OPTIONS, GENDER_OPTIONS, DEADLINE_OPTIONS
+  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL, LANGUAGE_LABEL,
+  GPA_OPTIONS, SCALE_OPTIONS, YES_NO, RACE_OPTIONS, GENDER_OPTIONS, DEADLINE_OPTIONS, LANGUAGE_OPTIONS
 };

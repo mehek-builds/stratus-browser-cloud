@@ -62,7 +62,7 @@ const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
 
 import {
   fixture,
-  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL
+  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL, LANGUAGE_LABEL
 } from './fixtures/greenhouse/hrt-required-select.mjs';
 
 let server;
@@ -236,6 +236,28 @@ test('a control the form has no requirement on is judged exactly as it was befor
   assert.equal(nudgesFor(result, 'question_67889515'), 0);
   assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), []);
   assert.deepEqual(result.filledFields, [DEADLINE_LABEL]);
+});
+
+test('a nudge that lands a different answer than she gave is refused, and said so accurately', async () => {
+  /* A form that looks at the field again can also COERCE: accept it, and snap the value to a
+   * neighbouring option. The form is then satisfied and the control is holding something she never
+   * said, so the repair must not report this filled - and it must not say the form still reports
+   * the field empty either, because that would be a false sentence about a control she is looking
+   * at. It falls to the ordinary lost-value path instead. */
+  const result = await run([
+    fillAction('question_67889530', 'Python', LANGUAGE_LABEL),
+    formStateProbe('question_67889530'), shownProbe('question_67889530')
+  ]);
+  assert.equal(formStillRequires(result, 'question_67889530'), false,
+    'the form must have accepted the field, or this proves nothing about coercion');
+  assert.equal(shownFor(result, 'question_67889530'), 'Java',
+    'and the control must be holding the answer the form snapped it to, not hers');
+  assert.ok(!result.filledFields.includes(LANGUAGE_LABEL),
+    'an answer she did not give may never be reported as her filled answer');
+  const sentence = result.skipped.find((entry) => entry.startsWith(LANGUAGE_LABEL + ':')) || '';
+  assert.ok(sentence, 'she must be told about it');
+  assert.doesNotMatch(sentence, /still reports the field as required and empty/,
+    'the form accepted this field, so the run may not tell her the form called it empty');
 });
 
 test('no run reports a field both filled and blocked, and a refused one holds the run', async () => {
