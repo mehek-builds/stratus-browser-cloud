@@ -25,23 +25,23 @@
  * required. Gender and race are therefore the SAME control shape with opposite outcomes, which is
  * what rules out "the runner uses a wholly wrong approach for chips".
  *
- * WHAT THE RUNNER WAS READING. On this widget an uncommitted control renders no
- * select__single-value, no select__multi-value__label AND no select__placeholder - react-select
- * drops the placeholder as soon as its search input holds text - so readChoiceState returns
- * 'unknown', and verifyChoiceInContainer's committed-search-input rule then accepts
- * input.select__input's own text as the committed value because it equals the row this call
- * clicked. When the row click is lost, that text is the runner's own keystrokes. The field goes
- * into filledFields, the required gate sees nothing to report, and the packet looks complete while
- * the employer's form holds nothing.
+ * WHAT THE RUNNER WAS READING, and it is never the form. Every verification in managed-browser.js
+ * reads what the WIDGET is rendering: readChoiceState, the clicked-row rules,
+ * readCommittedSearchInputValue, readCommittedOpenerText. That is the right thing to read and it
+ * is not sufficient, because a widget's display and the value its form holds are separate state.
+ * When they disagree, choiceLanded returns true, the label goes into filledFields, the readiness
+ * scan sees a control that is no longer showing a placeholder, and the packet reads as complete
+ * while the employer's form is holding nothing.
  *
- * WHY THE CLICK IS LOST, and why a second interaction commits it: this widget's menu is portalled
- * to '#react-portal-mount-point' (Greenhouse sets menuPortalTarget) and the portal wrapper does
- * not preventDefault on mousedown, so a pointer sequence that presses before it clicks blurs the
- * search input, the blur closes and unmounts the menu, and the 'click' never reaches the row. The
- * next interaction starts with the menu already reopening under its own mousedown, so the row
- * survives to receive the click - which is the "sometimes it just requires an extra click" the
- * applicant reported. The fixture reproduces that exactly, per control, so a sound control and a
- * racing control can be driven through the same runner in the same run.
+ * WHAT THIS FIXTURE PINS, AND WHAT IT DOES NOT CLAIM. The shipped runner was driven against the
+ * LIVE form this session and committed all sixteen of its select controls cleanly, twice, so the
+ * lost commit is intermittent and its micro-cause is not pinned here and is not asserted anywhere
+ * below. What the photograph does prove, and what this fixture reproduces, is the disagreement
+ * itself: a control showing the applicant's answer while the form's own RequiredInput sits under
+ * it. The fixture's 'racing' controls reach the DISPLAY on their first commit and the FORM's value
+ * on a later one, which is the applicant's own description ("sometimes it just requires an extra
+ * click for the answer to go through") stated as a rule rather than as a timing, so the same run
+ * can drive a sound control and a racing one and the tests never depend on a race.
  *
  * Every test here spawns the shipped runner (same runner string, same file protocol as production)
  * against a served page and asserts on what happened to the form and to result.filledFields.
