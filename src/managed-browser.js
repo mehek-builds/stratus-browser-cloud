@@ -10401,15 +10401,21 @@ let terminalFailureInput = null;
            * accept - which comes back as no_confirmation_state and an unverified submission.
            *
            * LAST in the chain, after the widget fallback, so this adds an arm exactly where the
-           * value was null and changes the target on no path that already had one. note() then
-           * asks hasAnswer, which reads a file input through uploadHasFile - a file in the input,
-           * or the block's rendered filename - so an uploader that consumes the file and resets
-           * its own input stays silent, and so does an upload the employer never marked.
+           * value was null and changes the target on no path that already had one.
+           *
+           * THE BLOCK IS THE TARGET, NOT THE INPUT, and that is the difference that matters here.
+           * note() judges the element it is handed, and hasAnswer reads a file INPUT against
+           * uploadHasFile(element.parentElement) - the input's immediate parent. A dropzone that
+           * wraps the input while the filename chip renders as the dropzone's SIBLING would then
+           * read as empty on a form where the upload worked, and this gate would refuse a correct
+           * send. Handing it the block instead takes hasAnswer's container arm, uploadHasFile(
+           * element), which reads the whole block - the same scope the backend's widgetHasAnswer
+           * reads, so the two copies answer one form the same way.
            *
            * Kept in step with the backend's noteMarkedLabel, loop for loop, as the comment above
            * requires: two copies of this gate disagreeing about one form is the drift they exist
            * to avoid. */
-          || widget.querySelector('input[type="file"]:not([disabled])');
+          || (widget.querySelector('input[type="file"]:not([disabled])') ? widget : null);
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
