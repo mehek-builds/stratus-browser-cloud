@@ -10383,7 +10383,33 @@ let terminalFailureInput = null;
           // first-control fallback for zero or multiple marked descendants.
           || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
           || controls[0]
-          || (widgetFallback ? widget : null);
+          || (widgetFallback ? widget : null)
+          /* A STARRED BLOCK WHOSE ONLY CONTROL IS THE UPLOAD STILL HAS TO BE JUDGED.
+           *
+           * Excluding the file input from the controls list picks a better target when the block
+           * holds one, and that much is right. But when the upload is the ONLY control, it left
+           * target null on the asterisk arm, which passes no widget fallback - so the field was not
+           * reported empty, it was never looked at. Measured 2026-09-03 against the backend's copy
+           * of this script: a Recruitee shaped block, a starred "CV or resume" label over a bare
+           * file input, returned zero blockers, while the same field carrying a for= attribute
+           * returned the correct '"CV or resume" is required and is still empty'.
+           *
+           * This runner is the path that matters for that failure. DSI Innovations (packet
+           * a34e5ce2) went to Recruitee through a managed run on 2026-09-02 with an empty required
+           * "CV or resume": the upload action reported success because setInputFiles returned
+           * cleanly, this gate stayed silent, the run pressed submit, and the form had nothing to
+           * accept - which comes back as no_confirmation_state and an unverified submission.
+           *
+           * LAST in the chain, after the widget fallback, so this adds an arm exactly where the
+           * value was null and changes the target on no path that already had one. note() then
+           * asks hasAnswer, which reads a file input through uploadHasFile - a file in the input,
+           * or the block's rendered filename - so an uploader that consumes the file and resets
+           * its own input stays silent, and so does an upload the employer never marked.
+           *
+           * Kept in step with the backend's noteMarkedLabel, loop for loop, as the comment above
+           * requires: two copies of this gate disagreeing about one form is the drift they exist
+           * to avoid. */
+          || widget.querySelector('input[type="file"]:not([disabled])');
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
