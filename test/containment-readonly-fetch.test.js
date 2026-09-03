@@ -24,10 +24,16 @@ test('everything else in the contained set stays blocked', () => {
 });
 
 test('the upload allowance is scoped to the armed window, employer-bound POST/PUT xhr/fetch only', () => {
-  // Armed exactly by an upload action, disarmed by the next mutation action; read-only actions
-  // after the upload keep it open because the page's upload XHR starts on the change event.
-  assert.match(source, /if \(action\.type === 'upload'\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = true;/);
-  assert.match(source, /\} else if \(!\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = false;/);
+  /* Armed exactly by an upload action, disarmed by the next mutation action; read-only actions
+   * after the upload keep it open because the page's upload XHR starts on the change event.
+   *
+   * The arming moved on 2026-09-03 from the top of the action loop to just below the optional
+   * pre-check, so that a mutation action the run STEPS OVER no longer closes the window - see
+   * upload-transport-settle.test.js for that ordering pin and for why it mattered on Recruitee.
+   * These two still say the same thing about which action types arm and disarm it. */
+  assert.match(source, /if \(\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{/);
+  assert.match(source, /uploadTransportWatch\.armed = action\.type === 'upload';/);
+  assert.match(source, /managedMutationTransportContainment\.uploadActionArmed = uploadTransportWatch\.armed;/);
   // The allowance itself: employer-bound POST/PUT xhr/fetch, plus the board's own resume store
   // (Greenhouse's eager S3 upload - see isBoardResumeStorageUploadHost), and nothing wider.
   assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{\s*\n\s*return route\.fallback\(\);/);
