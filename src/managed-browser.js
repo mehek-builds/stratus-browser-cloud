@@ -14983,6 +14983,34 @@ let terminalFailureInput = null;
             if (wrapping && wrapping.querySelectorAll(
               'input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
             ).length === 1 && hasRequiredMarker(wrapping)) return true;
+            /* A DOCUMENT CONTROL'S REQUIRED MARKER IS ON ITS BLOCK'S OWN LABEL, and the two arms
+             * above cannot reach it. Measured on the DSI Innovations Recruitee form (packet
+             * a34e5ce2, 2026-09-03): the block is a starred label, a styled dropzone, and a bare
+             * input[type=file] with no id for a label[for] to name and no wrapping label either, so
+             * both arms decline and the one required control on that form reported optional.
+             *
+             * The rule is the same statement the two arms above make, "the one label that speaks
+             * for this one control", asked of the block when the block holds exactly one label and
+             * exactly this one control and nothing else fillable. That is the same reading the
+             * readiness scan already acts on for this exact control class (#151, the starred
+             * "CV or resume" block), so the two agree about one form rather than disagreeing.
+             *
+             * Deliberately narrowed to file controls, so no existing question changes its required
+             * flag. A document control is the one kind with no value any other gate can read, which
+             * is why its label is the only place the employer's "this one in particular" is
+             * written; a text input in the same shape is still judged by the two arms above. */
+            if (el.type === 'file' && block && block.querySelectorAll) {
+              const blockLabels = [...block.querySelectorAll('label, legend')];
+              const blockFiles = [...block.querySelectorAll('input[type="file"]')];
+              const blockOthers = [...block.querySelectorAll(
+                'input:not([type="file"]):not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
+              )];
+              if (blockLabels.length === 1
+                && blockFiles.length === 1
+                && blockFiles[0] === el
+                && blockOthers.length === 0
+                && hasRequiredMarker(blockLabels[0])) return true;
+            }
             return false;
           }
           // A stable way back to this control on a LATER page load. The marker attribute below is
@@ -15287,7 +15315,7 @@ let terminalFailureInput = null;
           const els = Array.prototype.slice
             .call(document.querySelectorAll(
               'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"],'
-              + ' input[type="date"], input[type="radio"], input[type="checkbox"], input:not([type]), textarea, select,'
+              + ' input[type="date"], input[type="radio"], input[type="checkbox"], input[type="file"], input:not([type]), textarea, select,'
               + ' [role="combobox"]:not(input):not(select):not(textarea),'
               + ' [aria-haspopup="listbox"]:not(input):not(select):not(textarea)'
             ))
@@ -15298,6 +15326,15 @@ let terminalFailureInput = null;
             .filter((el) => {
               if (el.closest('[id*="litos"]') || el.disabled) return false;
               const choice = el.type === 'radio' || el.type === 'checkbox';
+              /* A DOCUMENT CONTROL IS EXEMPT FROM THE VISIBILITY AND HONEYPOT TESTS FOR EXACTLY THE
+               * REASON A CHOICE INPUT IS. Every styled uploader on every board hides its real
+               * input[type=file] behind a dropzone: Recruitee, Greenhouse, Workable, Lever and
+               * Ashby all render a zero-box or display:none input and paint their own drop target
+               * over it. That input is the only DOM node that names the question, so requiring it
+               * to have a box is requiring the question not to exist, and a zero-box input is what
+               * isHoneypot is built to reject. Its BLOCK still has to be visible, which is the
+               * honest form of the same check and the same one the choice arm makes. */
+              const documentControl = el.type === 'file';
               const choiceOpener = el.getAttribute('role') === 'combobox'
                 || el.getAttribute('aria-haspopup') === 'listbox';
               // A non-form-tag opener that holds a real form control inside it is a WRAPPER, and
@@ -15322,9 +15359,9 @@ let terminalFailureInput = null;
                 'input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select:not([aria-hidden="true"])'
               )) return false;
               if (bareOpener && el.querySelector('[role="combobox"], [aria-haspopup="listbox"]')) return false;
-              if (!choice && ((!choiceOpener && el.readOnly) || !isVisible(el))) return false;
-              if (choice && !isVisible(blockOf(el))) return false;
-              return !isHoneypot(el) || choice;
+              if (!choice && !documentControl && ((!choiceOpener && el.readOnly) || !isVisible(el))) return false;
+              if ((choice || documentControl) && !isVisible(blockOf(el))) return false;
+              return !isHoneypot(el) || choice || documentControl;
             });
           const out = [];
           const seenBlocks = new Set();
