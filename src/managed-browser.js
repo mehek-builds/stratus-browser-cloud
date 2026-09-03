@@ -12831,11 +12831,10 @@ let terminalFailureInput = null;
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
           return nativeMissing || element.getAttribute?.('aria-invalid') === 'true';
         };
-        /* GREENHOUSE NEVER TAKES ITS ERROR BACK, and this scan believed it.
-         *
-         * Measured on the live Hudson River Trading form (job-boards.greenhouse.io, 2026-09-04) in
-         * three reads of the same page: pristine, after one validation pass on an empty form, and
-         * after answering each control correctly by clicking its own option row.
+        /* GREENHOUSE NEVER TAKES ITS ERROR BACK, and both readings above are made of what it
+         * leaves behind. Measured live on the Hudson River Trading form (2026-09-04) in three
+         * reads of the same page: pristine, after one validation pass on an empty form, and after
+         * answering each control correctly by clicking its own option row.
          *
          *   control          shown           RequiredInput   aria-invalid   error text
          *   gender           "Woman"         GONE            "true"         "This field is required."
@@ -12844,37 +12843,19 @@ let terminalFailureInput = null;
          *   GPA              "3.76 - 4.0"    GONE            "true"         "This field is required."
          *
          * The answers are on the form and the browser will submit them: react-select unmounts its
-         * RequiredInput the moment it holds a value, which is the form's own live statement. What
-         * never clears is aria-invalid and the sentence under the control, and BOTH of the readings
-         * above are made of exactly those two. So a correctly answered control came back
-         * affected:true, went down the re-drive path instead of already_committed, and could end
-         * the run 'still_requires_answer' over an answer that was sitting on the form.
+         * RequiredInput the moment it holds a value. What never clears is aria-invalid and the
+         * sentence under the control. So a correctly answered Greenhouse control comes back
+         * affected:true and takes the re-drive path rather than already_committed.
          *
-         * This also explains the shape of the report that started this, where six of sixteen
-         * comboboxes wore the red sentence and ten did not, with no pattern in widget type, chips,
-         * block or position: an error renders only for the fields that were EMPTY at the moment
-         * some earlier validation pass ran, and never clears afterwards. It is fill order against
-         * one stray validation, not a fill failure. This file's own pre-submit gate already
-         * documents the same Greenhouse behaviour from the live Redwood Materials form on
-         * 2026-08-08, where six stale "is required" messages stood under correct answers and the
-         * form then submitted cleanly with zero errors.
-         *
-         * So a widget that publishes a chosen value and no longer carries an unsatisfied required
-         * backing is not affected, whatever the page still says in words. Bounded to a recognised
-         * select shell, because the RequiredInput contract is what makes the absence meaningful:
-         * on any other markup the absence proves nothing and nothing here changes. */
-        const backingSatisfied = (widget) => {
-          const shell = widget?.querySelector?.('[class*="select-shell"], [class*="select__container"]')
-            || widget?.closest?.('[class*="select-shell"], [class*="select__container"]');
-          if (!shell) return false;
-          const holdsValue = shell.querySelector(
-            '[class*="select__single-value"], [class*="select__multi-value__label"]'
-          );
-          if (!holdsValue) return false;
-          return ![...shell.querySelectorAll('input[required], select[required], textarea[required]')]
-            .some((control) => !control.matches?.(':disabled')
-              && control.validity && control.validity.valueMissing);
-        };
+         * LEFT ALONE ON PURPOSE, and the measurement is why. The re-drive was run against this
+         * exact state through the shipped runner, single and multi value, and it preserved the
+         * answer and confirmed every time ('confirmed', both chips intact, submit pressed). A
+         * short-circuit here would save that work and nothing else, and it would do so by teaching
+         * this gate to ignore an employer's own words on the strength of one board's habit. The
+         * cost of being wrong in that direction is a sent application with an empty required field.
+         * See test/greenhouse-required-backing-commit-dom.test.js for the pin that this state must
+         * not block a send.
+         */
         const belongsToRoot = (element) => {
           if (!element) return false;
           if (!(root instanceof HTMLFormElement)) return root.contains(element);
@@ -13099,9 +13080,7 @@ let terminalFailureInput = null;
             fieldType: type === 'combobox' ? 'react-select' : type,
             answered: chosenValue(element, widget)
               || [...validationSources].some((source) => chosenValue(source, widget)),
-            affected: backingSatisfied(widget)
-              ? false
-              : ([...validationSources].some(hasValidationIssue) || errorText(widget))
+            affected: [...validationSources].some(hasValidationIssue) || errorText(widget)
           });
           directElements.push(element);
           directOpeners.push(select2?.opener || null);

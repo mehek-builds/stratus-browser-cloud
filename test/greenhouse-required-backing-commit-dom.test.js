@@ -286,15 +286,19 @@ test('no run reports a field both filled and blocked, and a refused one holds th
   }
 });
 
-test('an answer the form accepted is not re-driven over an error the page never took back', async () => {
+test('a stale Greenhouse error does not hold a form the browser would submit', async () => {
   /* THE MEASURED HUDSON RIVER TRADING STATE, driven all the way to the press. Greenhouse renders
    * "This field is required." once, on a field that was empty at the time, and never clears it or
    * aria-invalid when the field is answered afterwards. Read live on 2026-09-04: chip "Woman",
-   * RequiredInput GONE, aria-invalid still "true", sentence still under the control.
+   * RequiredInput GONE, aria-invalid still "true", sentence still under the control. That is what
+   * the photograph behind this whole investigation actually shows, and the fields in it were
+   * filled.
    *
-   * The required-field scan read exactly those two things, called an answered control affected,
-   * and sent it down the re-drive path that can end a run "still_requires_answer". The browser
-   * would have submitted it. */
+   * A REGRESSION GUARD, not proof of a fix. The run already handles this correctly: the required
+   * scan calls the control affected, takes the re-drive path, preserves the answer and confirms.
+   * Nothing in this PR changes that, and this pins it so nothing later does, because the failure
+   * it would guard against is silent - a run that holds a send over a sentence the employer's own
+   * form stopped meaning. */
   const result = await run([
     { type: 'fill', selector: `[id="${STALE_ID}"]`, value: 'Woman', label: STALE_LABEL, optional: true },
     { type: 'extract', selector: `[id="${STALE_ID}-error"]`, optional: true },
@@ -317,11 +321,12 @@ test('an answer the form accepted is not re-driven over an error the page never 
     'the fixture must keep the stale sentence, or this proves nothing');
   assert.equal(formStillRequires(result, STALE_ID), false,
     'and the form must actually be satisfied');
-  // So the run must treat it as committed and press.
+  // So the run must not hold the send over it.
   assert.ok(result.filledFields.includes(STALE_LABEL));
   assert.deepEqual(result.blockers, [], 'a stale sentence may not hold a form the browser would submit');
   assert.equal(result.blockedSubmits, 0);
   assert.equal(result.submitOutcome?.pressed, true, 'the submit must actually be pressed');
   assert.equal(result.requiredFieldConfirmation?.status, 'confirmed');
+  assert.deepEqual(result.requiredFieldConfirmation?.passes?.[0]?.unresolved, []);
   assert.equal(valueOf(result, '#submitted'), 'submitted');
 });
