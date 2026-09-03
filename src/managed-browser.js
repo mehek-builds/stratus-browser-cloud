@@ -14387,6 +14387,10 @@ let terminalFailureInput = null;
              * \p{L} and not [a-z]: a Japanese or Arabic label is a label. */
             function isProviderHandleOnly(value) {
               const strippers = [
+                /* Crelate names every custom control <type>-<uuid> (short-, number-, yesno-, single-,
+                 * date-, rating-); the type prefix must go BEFORE the uuid strip, or 'short-' survives
+                 * as a word and the handle reads as text. */
+                /\b[a-z]+-(?=[0-9a-f]{8}-[0-9a-f]{4}-)/gi,
                 /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
                 /\bquestion_\d+\b/gi,
                 /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/gi,
@@ -14483,16 +14487,33 @@ let terminalFailureInput = null;
              * the bold name must be the block's FIRST element, so a bold word inside a paragraph or
              * a section heading over several questions never names a control. */
             const leadingBoldName = (() => {
+              /* Only a control whose own name and id are provider handles may take the bold name:
+               * a control called linkedin_url or placeholder-named "Full name" already carries its
+               * text, and the review measured the arm renaming such controls "personal details",
+               * "about you", "required", "note:" from a bold heading above them. */
+              const handle = clean([el.getAttribute('name') || '', el.id || ''].join(' '));
+              if (!handle || !isProviderHandleOnly(handle)) return '';
               let block = el.parentElement;
               for (let depth = 0; block && depth < 4; depth += 1, block = block.parentElement) {
                 if (!block.matches('div, section, li, fieldset')) continue;
-                if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+                /* Count QUESTIONS, not inputs: a Kendo multiselect (Crelate's yes/no and picklists)
+                 * or datepicker renders its hidden backing input beside a visible one, and a radio
+                 * group is one question however many rows it has. */
+                const owners = new Set([...block.querySelectorAll(
+                  'input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
+                )].map((c) => c.closest('[class*="k-multiselect"], [class*="k-datepicker"], [class*="k-combobox"], [class*="k-dropdown"], .select2-container, .chosen-container')
+                  || ((c.type === 'radio' || c.type === 'checkbox') && c.name ? 'name:' + c.name : c)));
+                if (owners.size > 1) return '';
                 const lead = block.firstElementChild;
                 if (lead && /^(?:STRONG|B)$/.test(lead.tagName)) {
                   const text = clean(renderedText(lead)).replace(/\s*\*\s*$/, '');
-                  if (text && !genericControlText(text.toLowerCase())) return text.toLowerCase();
+                  if (text && !genericControlText(text.toLowerCase())
+                    && !/^(?:note|notes|required|optional|important|tip|hint|warning|n\.?b\.?|please note)\s*[:.!]?$/i.test(text)) return text.toLowerCase();
+                  return '';
                 }
-                if (lead) return '';
+                // A text-less wrapper shell (Kendo's span, a bare div) is walked through; a wrapper
+                // with its own text is a different shape and the arm stands down.
+                if (lead && clean(renderedText(block))) return '';
               }
               return '';
             })();
