@@ -6,6 +6,7 @@ import {
   EMPLOYER_DOMAIN_TELEMETRY_HOSTS,
   isEmployerTelemetryPath,
   EMPLOYER_TELEMETRY_PATH_SEGMENTS,
+  isBoardResumeStorageUploadHost,
 } from '../src/managed-browser.js';
 
 /* Greenhouse serves its Snowplow collector from c.spl.greenhouse.io, inside the same registrable
@@ -77,8 +78,14 @@ test('a telemetry host is refused admission to the #129 upload window', () => {
    * changes. A refactor that moved the telemetry check into block() alone would keep every other
    * test green while re-admitting Snowplow POSTs through the upload window. */
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
-  // The upload window still requires employer-bound, so the predicate governs it too.
-  assert.match(source, /containment\.uploadActionArmed[\s\S]{0,240}?&& employerBoundTransport\(request\)\) \{/);
+  /* The window now has TWO admission arms: employer-bound transport, and the board's own resume
+   * store (added deliberately by #145 so Greenhouse's eager S3 upload can complete). The pin reads
+   * both, because the safety property this test exists for - a telemetry host is never admitted -
+   * has to hold across every arm, not just the first one. */
+  assert.match(
+    source,
+    /containment\.uploadActionArmed[\s\S]{0,240}?&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{/,
+  );
   // And the telemetry check sits inside employerBoundTransport, so both callers see it.
   const fn = source.slice(source.indexOf('const employerBoundTransport = (request) => {'));
   const body = fn.slice(0, fn.indexOf('\n      };'));
@@ -87,10 +94,19 @@ test('a telemetry host is refused admission to the #129 upload window', () => {
     'the telemetry check must live inside employerBoundTransport so the upload gate sees it too'
   );
 
-  // Behavioural equivalent of what that gate computes, for the hosts that matter.
-  const admittedByUploadWindow = (host) => !isEmployerDomainTelemetryHost(host);
+  // Behavioural equivalent of what that gate computes, for the hosts that matter. Both arms are
+  // asked, so a beacon cannot be re-admitted by widening either one.
+  const admittedByUploadWindow = (host) => !isEmployerDomainTelemetryHost(host)
+    || isBoardResumeStorageUploadHost(host);
   assert.equal(admittedByUploadWindow('c.spl.greenhouse.io'), false, 'a beacon may not ride an upload');
+  assert.equal(admittedByUploadWindow('spl.greenhouse.io'), false, 'nor may the collector apex');
   assert.equal(admittedByUploadWindow('job-boards.greenhouse.io'), true, 'a real upload must still be admitted');
+  // The second arm is a Greenhouse-named S3 bucket and nothing wider: amazonaws.com in general,
+  // and any other bucket, stay outside it.
+  assert.equal(isBoardResumeStorageUploadHost('grnhse-prod-jben-us-east-1.s3.amazonaws.com'), true);
+  assert.equal(isBoardResumeStorageUploadHost('evil.s3.amazonaws.com'), false);
+  assert.equal(isBoardResumeStorageUploadHost('s3.amazonaws.com'), false);
+  assert.equal(isBoardResumeStorageUploadHost('c.spl.greenhouse.io'), false, 'a beacon is not a resume store');
 });
 
 /* The Teamtailor page-view beacon lives on the employer's own host, so the host rule cannot spare

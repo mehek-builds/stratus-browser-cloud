@@ -369,9 +369,12 @@ test('a discovered control reports an identity that survives the next page load'
   );
   // Nothing durable is reported rather than something invented, so the label fallback still runs.
   assert.equal(durableSelectorOf({ id: '', getAttribute: () => null }, { getAttribute: () => null }), null);
-  // An id starting with a digit is not a valid bare CSS id selector, so it is declined rather than
-  // emitted as a selector that throws inside page.locator().
-  assert.equal(durableSelectorOf({ id: '9lives', getAttribute: () => null }, { getAttribute: () => null }), null);
+  // An id starting with a digit is not a valid bare `#` selector, so it is reported in the exact
+  // attribute form page.locator() accepts. Greenhouse's demographic react-selects are numbered this
+  // way (245/248/249/250 on Hudson River Trading, 2026-09-02) and declining them cost four required
+  // controls their only durable name. See numeric-id-durable-selector-dom.test.js.
+  assert.equal(durableSelectorOf({ id: '9lives', getAttribute: () => null }, { getAttribute: () => null }), '[id="9lives"]');
+  assert.equal(durableSelectorOf({ id: '248', getAttribute: () => null }, { getAttribute: () => null }), '[id="248"]');
 });
 
 test('an option pill is only reported as filled once the selection is readable', () => {
