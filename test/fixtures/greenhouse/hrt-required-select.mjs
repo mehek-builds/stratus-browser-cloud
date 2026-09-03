@@ -30,11 +30,13 @@ const LANGUAGE_OPTIONS = ['Python', 'Java', 'C++', 'Rust'];
 /* Transcribed from the live HRT form, one question. 'multi' reproduces the
  * 'select__value-container--is-multi' the demographic gender and race controls carry.
  * 'losesCommit' marks a control whose option-row click does not select, which leaves the widget in
- * the measured 'typed, not selected' state described on the commit function below. */
-const question = ({ id, label, options, multi = false, losesCommit = false, mutatesOnInput = false, required = true }) => `
+ * the measured 'typed, not selected' state described on the commit function below. 'staleBacking'
+ * marks one that DOES select and whose form never looks at the field again, which is the state any
+ * repair would be aimed at; see syncRequiredInput. */
+const question = ({ id, label, options, multi = false, losesCommit = false, staleBacking = false, mutatesOnInput = false, required = true }) => `
   <div class="field-wrapper"><div class="select"><div class="select__container select__container--outside-label">
     <label id="${id}-label" for="${id}" class="label select__label select__label--outside-label">${label}${required ? '<span aria-hidden="true">*</span>' : ''}</label>
-    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${losesCommit ? ' data-loses-commit="1"' : ''}${mutatesOnInput ? ' data-mutates-on-input="1"' : ''}${required ? ' data-required="1"' : ''}>
+    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${losesCommit ? ' data-loses-commit="1"' : ''}${staleBacking ? ' data-stale-backing="1"' : ''}${mutatesOnInput ? ' data-mutates-on-input="1"' : ''}${required ? ' data-required="1"' : ''}>
       <span id="react-select-${id}-live-region" class="remix-css-7pg0cj-a11yText"></span>
       <span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log" class="remix-css-7pg0cj-a11yText"></span>
       <div><div class="select__control--outside-label select__control remix-css-13cymwt-control">
@@ -67,7 +69,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Job Application at 
 ${question({ id: 'question_67889507', label: GPA_LABEL, options: GPA_OPTIONS, losesCommit: true })}
 ${question({ id: 'question_67889508', label: SCALE_LABEL, options: SCALE_OPTIONS, losesCommit: true })}
 ${question({ id: 'question_67889515', label: DEADLINE_LABEL, options: DEADLINE_OPTIONS, losesCommit: true, required: false })}
-${question({ id: 'question_67889530', label: LANGUAGE_LABEL, options: LANGUAGE_OPTIONS, multi: true, mutatesOnInput: true })}
+${question({ id: 'question_67889530', label: LANGUAGE_LABEL, options: LANGUAGE_OPTIONS, multi: true, staleBacking: true, mutatesOnInput: true })}
 <hr/>
 <div id="demographic-section" class="demographic--container">
 <h3 class="section-header">Voluntary Self-Identification</h3>
@@ -99,6 +101,7 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, l
     var options = shell.getAttribute('data-options').split('|');
     var multi = shell.getAttribute('data-multi') === '1';
     var losesCommit = shell.getAttribute('data-loses-commit') === '1';
+    var staleBacking = shell.getAttribute('data-stale-backing') === '1';
     var mutatesOnInput = shell.getAttribute('data-mutates-on-input') === '1';
     var required = shell.getAttribute('data-required') === '1';
     var control = shell.querySelector('.select__control');
@@ -112,6 +115,12 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, l
     function syncRequiredInput() {
       var existing = requiredInput();
       if (!required) return;
+      /* THE ONE STATE A REPAIR WOULD BE AIMED AT. The widget holds the value and renders it, so
+       * readChoiceState says 'chosen'; the form has not looked at the field again, so its own
+       * required backing is still there and formStillRequiresChoice says the field is empty. Those
+       * two together were exactly the removed nudge's precondition, and any future repair aims at
+       * this state by definition, because it is the only one where the run has something to fix. */
+      if (staleBacking) return;
       if (state.values.length > 0) { if (existing) existing.remove(); return; }
       if (existing) return;
       var sentinel = document.createElement('input');

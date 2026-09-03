@@ -250,29 +250,38 @@ test('no run reports a field both filled and blocked, and a refused one holds th
 });
 
 test('nothing touches a control again once its answer has been verified', async () => {
-  /* THE R-004 GUARD, and it is here because the verifier cannot enforce it for itself.
+  /* THE R-004 GUARD, on the one state a repair would ever be aimed at.
    *
-   * readChoiceState reads chosenNodes[0] and nothing else, so on an isMulti control a chip appended
-   * at index 1 leaves its reported value byte-identical: a second race declaration the applicant
-   * never made is INVISIBLE to every rule that compares the rendered value against the row that was
-   * clicked. Any write this runner makes to a control after verifying it can therefore change the
-   * answer without changing what the verifier sees.
+   * This control's row click SELECTS: the chip renders, so readChoiceState says 'chosen'. Its form
+   * never looks at the field again, so the RequiredInput is still there and formStillRequiresChoice
+   * says the field is empty. Those two together are exactly what the removed nudge required, and
+   * they are what any future repair must find in order to have anything to repair. A guard built on
+   * a control that committed cleanly would never be reached by such a repair at all, and would pass
+   * while the repair corrupted the form.
    *
-   * So the property is pinned from outside the verifier: this control appends a second option on
-   * any input or change event it receives while holding a value, and the run must leave it holding
-   * exactly one. A repair, a nudge, a re-press or a retry added later without a guard over the FULL
-   * rendered selection fails here, on a required multi, which is the control this whole
-   * investigation is named for. */
+   * The control appends a second option on any input or change event it receives while holding a
+   * value. That is the R-004 shape the review measured on the nudge: a second race declaration the
+   * applicant never made, invisible to every rule in the verifier because readChoiceState reads
+   * chosenNodes[0] and the containment rule accepts any two-character substring of the clicked row.
+   *
+   * So the run must leave it holding exactly one value, and must report it refused rather than
+   * filled, because the form still says the field is empty. Both halves matter: the first is the
+   * property, the second is what makes this the reachable state rather than a comfortable one. */
   const result = await run([
     fillAction('question_67889530', 'Python', LANGUAGE_LABEL),
     { type: 'extract', selector: '.select-shell[data-question="question_67889530"]', attribute: 'data-values', optional: true },
     formStateProbe('question_67889530')
   ]);
+  // The page is in the state a repair would aim at: the widget holds the answer, the form does not.
+  assert.ok(formStillRequires(result, 'question_67889530'),
+    'the fixture must leave the form still requiring it, or no repair would ever reach this control');
+  // THE PROPERTY. Nothing may have written to this control after the answer was verified.
   assert.equal(valueOf(result, '.select-shell[data-question="question_67889530"]'), 'Python',
     'the employer must receive exactly the one answer she gave, and no second one');
-  assert.equal(formStillRequires(result, 'question_67889530'), false);
-  assert.deepEqual(result.filledFields, [LANGUAGE_LABEL]);
-  assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), []);
+  // And the verdict, which is the honest one for a control the form has not accepted.
+  assert.ok(!result.filledFields.includes(LANGUAGE_LABEL));
+  assert.ok(result.skipped.some((sentence) => sentence.startsWith(LANGUAGE_LABEL + ':')
+    && /still reports the field as required and empty/.test(sentence)));
 });
 
 test('a stale Greenhouse error does not hold a form the browser would submit', async () => {

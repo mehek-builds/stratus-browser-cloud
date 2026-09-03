@@ -7500,20 +7500,6 @@ let terminalFailureInput = null;
           ))) {
             /* AND THE FORM ITSELF HAS TO AGREE, or this run has no business calling the field
              * filled. Everything above has established that the WIDGET is holding the answer; this
-             * asks the one party whose refusal actually stops an application. A field the employer's
-             * form still marks required is a field that was not filled, whatever the DOM shows.
-             *
-             * It gets the same bounded window every other read here gets, and for the same reason:
-             * a form's own validation can land a render behind the commit that satisfied it, and
-             * penalising an honest control for being a tick slow would be the mirror of the defect
-             * this exists to close. What it will not do is wait out a commit that never happened.
-             *
-             * A refusal here leaves the control exactly as it is. There is nothing to withdraw -
-             * the widget is showing what she asked for - and clearing it would replace a field she
-             * can finish in one click with an empty one she has to find. It is marked instead, so
-             * the pre-submit gate holds the run, and the sentence below tells her which control. */
-            /* AND THE FORM ITSELF HAS TO AGREE, or this run has no business calling the field
-             * filled. Everything above has established that the WIDGET is holding the answer; this
              * asks the one party whose refusal actually stops an application.
              *
              * It gets the same bounded window every other read here gets, because a form's own
