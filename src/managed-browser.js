@@ -1853,6 +1853,130 @@ let terminalFailureInput = null;
           : null;
       }, { method, args: v4UtilityValue(args) });
     };
+    /* ONE HOST RELATION, TWO READERS, AND IT IS DEFINED ONCE.
+     *
+     * These used to live inside the "if (managedMutationContainmentRequired)" block below, which is
+     * the only place that needed them. The upload settle further down needs the SAME relation - the
+     * one that separates the employer's own upload POST from a chat widget's heartbeat - and a run
+     * without containment (a self-hosted run, any run without exactMutationAuthority) still uploads.
+     * A second copy of this relation for the settle to use would be two copies of one question, and
+     * the drift between two copies is the failure this file spends most of its comments on. So they
+     * are hoisted, defined once, and read by both.
+     *
+     * The interpolation discipline is unchanged and is not optional: see the comment on the
+     * remaining injected definitions below. A bare module identifier inside this template is a
+     * ReferenceError at run time. */
+    const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
+    const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
+    const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
+    const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
+    const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
+    const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
+    const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
+    /* The board's own resume store, admitted only inside the armed upload window below. See
+     * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
+    const boardResumeStorageUpload = (request) => {
+      try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
+    };
+    const registrableSuffix = transportRegistrableSuffix;
+    const applicationTransportSite = (() => {
+      try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
+    })();
+    /* Whether a blocked transport could have been the employer's own. An unparseable or
+     * schemeless target counts as employer-bound, fail-closed. */
+    const employerBoundTransport = (request) => {
+      if (!applicationTransportSite) return true;
+      try {
+        const { hostname } = new URL(request.url());
+        // A collector on the employer's own registrable domain is still only a collector. See
+        // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
+        // which is aborted exactly as before and reaches nobody.
+        // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
+        // contract: the request is still aborted; only the run is spared.
+        if (isEmployerTelemetryPath(request.url())) return false;
+        if (isEmployerDomainTelemetryHost(hostname)) return false;
+        return registrableSuffix(hostname) === applicationTransportSite;
+      } catch { return true; }
+    };
+    /* THE SETTLE WAITS ON THE BOARD'S OWN UPLOAD AND ON NOTHING ELSE.
+     *
+     * setInputFiles returns long before the board has filed the bytes anywhere: the board's change
+     * handler starts an XHR at that instant, and this run used to walk straight on to the next
+     * action. Two measured consequences are already written down in this file - the Greenhouse S3
+     * upload that "never settled" (isBoardResumeStorageUploadHost) and the Teamtailor
+     * waitForSelector the backend has to push because Teamtailor uploads asynchronously after
+     * setInputFiles returns.
+     *
+     * The relation below is the containment's, exactly: POST or PUT, xhr or fetch, and either
+     * employer-bound or the board's own resume store. That matters twice. It is the set that can
+     * BE an upload, so waiting on it is waiting on the upload. And it is narrow enough that a
+     * third-party analytics POST or a chat widget's heartbeat cannot consume the wait, which is
+     * what makes the budget below honest rather than a per-action tax. A per-action settle GRACE
+     * with no such predicate was measured on two live Greenhouse forms earlier in this file, cost
+     * about +4.3 seconds each for identical results, and was removed; this is not that. It grants
+     * nothing: admission is still decided only by the containment's route handler.
+     *
+     * Budget: a free managed run has 60 seconds (FREE_MANAGED_LIMITS) and at most three uploads are
+     * ever queued (resume, cover letter, transcript). A board that starts no upload pays only the
+     * grace, so the worst case for a lazily-uploading form is 3 x 300ms. A board that does start
+     * one pays the settle only while its own POST is actually open, capped at 3 x 4.3s, and that is
+     * the case where waiting is the entire point. Both are clamped to providerActionDeadlineMs
+     * below, so neither can eat the window the submit needs. */
+    const UPLOAD_TRANSPORT_START_GRACE_MS = 300;
+    const UPLOAD_TRANSPORT_SETTLE_MS = 4000;
+    const uploadBoundWriteTransport = (request) => {
+      try {
+        const method = String(request.method() || '').toUpperCase();
+        if (method !== 'POST' && method !== 'PUT') return false;
+        const resourceType = request.resourceType();
+        if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+        return employerBoundTransport(request) || boardResumeStorageUpload(request);
+      } catch { return false; }
+    };
+    /* Listeners live exactly as long as one upload action, and #152's rejected shape is the reason.
+     * A run-long "armed" flag has to be disarmed by something, that disarm has to sit somewhere in
+     * a loop body with seven exits, and the version that moved it below those exits left the window
+     * open to the end of the run. A watch that is created before setInputFiles and torn down in a
+     * finally cannot leak into the next action, whatever that action does or throws. Nothing here
+     * touches containment.uploadActionArmed, which stays exactly where it was. */
+    const watchUploadTransport = () => {
+      const inFlight = new Set();
+      const remember = (request) => {
+        // Bounded so a page that opens write-shaped requests in a loop cannot grow this set without
+        // limit; past the bound the run stops waiting for the surplus, which is what it did before
+        // this watch existed.
+        if (inFlight.size >= 32) return;
+        if (uploadBoundWriteTransport(request)) inFlight.add(request);
+      };
+      const forget = (request) => { inFlight.delete(request); };
+      page.on('request', remember);
+      page.on('requestfinished', forget);
+      page.on('requestfailed', forget);
+      // A plain timer, not page.waitForTimeout: when the provider deadline closes the browser
+      // mid-settle, page.waitForTimeout rejects instantly and a loop that swallows that rejection
+      // busy-spins on Date.now() for the rest of its budget.
+      const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+      const clamped = (budgetMs) => Math.min(Date.now() + budgetMs, providerActionDeadlineMs);
+      return {
+        settle: async () => {
+          const graceDeadline = clamped(UPLOAD_TRANSPORT_START_GRACE_MS);
+          while (inFlight.size === 0 && !providerDeadlineExpired && Date.now() < graceDeadline) {
+            await pause(25);
+          }
+          const settleDeadline = clamped(UPLOAD_TRANSPORT_SETTLE_MS);
+          while (inFlight.size > 0 && !providerDeadlineExpired && Date.now() < settleDeadline) {
+            await pause(50);
+          }
+          return inFlight.size === 0;
+        },
+        stop: () => {
+          page.off('request', remember);
+          page.off('requestfinished', forget);
+          page.off('requestfailed', forget);
+          inFlight.clear();
+        }
+      };
+    };
     let managedMutationTransportContainment = null;
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
@@ -1884,44 +2008,12 @@ let terminalFailureInput = null;
       const ASHBY_PUBLIC_BOARD_SITE = ${JSON.stringify(ASHBY_PUBLIC_BOARD_SITE)};
       const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = ${JSON.stringify(ASHBY_PUBLIC_BOARD_GRAPHQL_PATH)};
       const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
-      const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const GRAPHQL_NAMED_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_NAMED_OPERATION_DEFINITION)};
       const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
       const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
       const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
-      const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
-      const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
-      const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
-      const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
-      const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
-      const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
-      /* The board's own resume store, admitted only inside the armed upload window below. See
-       * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
-      const boardResumeStorageUpload = (request) => {
-        try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
-      };
-      const registrableSuffix = transportRegistrableSuffix;
-      const applicationTransportSite = (() => {
-        try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
-      })();
-      /* Whether a blocked transport could have been the employer's own. An unparseable or
-       * schemeless target counts as employer-bound, fail-closed. */
-      const employerBoundTransport = (request) => {
-        if (!applicationTransportSite) return true;
-        try {
-          const { hostname } = new URL(request.url());
-          // A collector on the employer's own registrable domain is still only a collector. See
-          // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
-          // which is aborted exactly as before and reaches nobody.
-          // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
-          // contract: the request is still aborted; only the run is spared.
-          if (isEmployerTelemetryPath(request.url())) return false;
-          if (isEmployerDomainTelemetryHost(hostname)) return false;
-          return registrableSuffix(hostname) === applicationTransportSite;
-        } catch { return true; }
-      };
       /* The one same-site write-shaped transport that is a read, decided from the request body.
        * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
       const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
@@ -10155,6 +10247,15 @@ let terminalFailureInput = null;
       // Greenhouse's uploader REMOVES the file input once the upload finishes and replaces it with a
       // filename chip, so "no input[type=file] with files" is true of a block already given a file.
       // On the embed form the input survives instead and carries the file, so both are checked.
+      //
+      // KNOWN AND DELIBERATELY LEFT ALONE: the files.length arm below is true of a control this run
+      // wrote to whether or not the board ever read the change event, because setInputFiles
+      // populates element.files itself. So this gate cannot see the DSI Innovations failure either.
+      // The reading that CAN see it is the upload action's own evidence read (see "WHAT
+      // filled_fields IS ALLOWED TO CLAIM ABOUT AN ATTACHMENT"), which drops the filled_fields claim
+      // before this gate ever runs. Teaching this scan the same counter-evidence would make a board
+      // that keeps its dropzone prompt beside a successful upload block a complete form, and this
+      // gate withholds submits, so that change needs its own measured capture first.
       const uploadHasFile = (scope) => {
         if (!scope) return false;
         if (scope.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
@@ -16682,13 +16783,239 @@ let terminalFailureInput = null;
           exactActionContext ? exactBinding.targetHandle : uploadTarget,
           exactBinding?.rootBinding?.formHandle || null
         );
-        await uploadTarget.setInputFiles({
-          name: action.file.name,
-          mimeType: action.file.mimeType,
-          buffer: Buffer.from(action.file.base64, 'base64')
-        });
-        successfulMutation = true;
-        if (action.label) filledFields.push(action.label);
+        /* WHAT filled_fields IS ALLOWED TO CLAIM ABOUT AN ATTACHMENT.
+         *
+         * It used to claim that setInputFiles returned, and nothing more. That is a fact about this
+         * process, not about the employer's form, and the backend reads it as the latter: a missing
+         * 'resume' is the one thing filledFieldBlockers refuses a send for (volley-backend
+         * portalSubmission.ts). Packet a34e5ce2 went to a Recruitee board twice, 2026-09-02 and
+         * 2026-09-03, and both runs reported resume and cover_letter attached with no failed field
+         * and no skipped reason, while the 2026-09-03 post-fill screenshot shows both dropzones
+         * still rendering the empty "Upload a file or drag and drop here" prompt with no filename
+         * anywhere at native 1440px. The 09-02 attempt pressed submit and came back
+         * no_confirmation_state. Two real attempts on one employer for a claim nothing measured.
+         *
+         * THE ARMS BELOW ARE ABOUT THE FORM, AND THE ONE THAT IS NOT IS DELIBERATELY ABSENT.
+         * "The control still holds the file" is not evidence: setInputFiles populates element.files
+         * itself, so asking the control this run just wrote to whether it holds the document is a
+         * tautology that answers yes unless the page actively cleared input.value. Measured in real
+         * Chromium against this exact DSI shape, that reading returns files=1 on a visibly empty
+         * form. Worse, when the plan's selector picks a decoy or duplicate input[type=file] - routine
+         * on Recruitee and Greenhouse - the run writes to input A while visible dropzone B stays
+         * empty, and a tautological reading of input A can never notice. Every arm here is a thing
+         * the EMPLOYER'S PAGE renders, so a write nobody read produces none of them.
+         *
+         * The block is captured BEFORE setInputFiles, because a working uploader is allowed to take
+         * the control away: Greenhouse removes its file input on completion and Workable remounts
+         * its own on parse. Reading the block afterwards is how a consumed control can still be
+         * judged by what replaced it. */
+        const uploadControlHandle = exactActionContext
+          ? exactBinding.targetHandle
+          : await uploadTarget.elementHandle().catch(() => null);
+        const uploadOwnedControlHandle = exactActionContext ? null : uploadControlHandle;
+        /* THE CONTROL'S OWN LABELLED QUESTION BLOCK, and the widening stops on what the page says
+         * rather than on a step count. A fixed ancestor climb is what let #152 satisfy an empty
+         * cover-letter control with the resume chip four levels above it, and its FORM/BODY/HTML
+         * stop never fired at all on a formless board, a shape this repo has a whole test file for.
+         *
+         * Three stops, and each of them is the sentence "this ancestor is no longer only my
+         * question": it holds a second file control, or it holds another question's control, or it
+         * holds more than one label. Any of those means the ancestor is the CARD around this
+         * question and its neighbour, and a neighbour's filename is not evidence about this one.
+         * Body, the document element, a form and a main are hard walls on top of that, so the
+         * formless case cannot widen into the page. */
+        const uploadBlockHandle = uploadControlHandle
+          ? await uploadControlHandle.evaluateHandle((control) => {
+            const LABELS = 'label, legend';
+            const OTHER_CONTROLS = 'input:not([type="file"]):not([type="hidden"]), textarea, select';
+            const hasOwnLabel = (node) => Boolean(node && node.querySelector && node.querySelector(LABELS));
+            const onlyMyQuestion = (node, allowSiblingFileInputs) => {
+              if (!node || !node.querySelectorAll) return false;
+              // A second document control means the node is the card around two questions. The one
+              // exception is the node the control already sits in: an uploader is allowed to keep a
+              // hidden duplicate input beside its real one, and both belong to this question.
+              if (!allowSiblingFileInputs
+                && [...node.querySelectorAll('input[type="file"]')].some((other) => other !== control)) return false;
+              if (node.querySelectorAll(OTHER_CONTROLS).length > 0) return false;
+              if (node.querySelectorAll(LABELS).length > 1) return false;
+              return true;
+            };
+            const canWiden = (parent) => {
+              if (!parent || !parent.querySelectorAll) return false;
+              if (parent === document.body || parent === document.documentElement) return false;
+              if (['FORM', 'MAIN', 'BODY', 'HTML'].includes(parent.tagName)) return false;
+              return onlyMyQuestion(parent, false);
+            };
+            let block = control && control.parentElement;
+            if (!block) return control || null;
+            /* The STARTING block is judged by the same rule, not accepted because it happens to be
+             * where the control lives. A form that lays its controls out as flat siblings gives
+             * every input the same parent, and reading that parent would let any question's filename
+             * satisfy any other. When it fails, the control itself is the only honest scope: that
+             * reads back as no evidence, which keeps the claim and says so out loud, rather than
+             * borrowing a neighbour's. */
+            if (!onlyMyQuestion(block, true)) return control || null;
+            let steps = 0;
+            while (!hasOwnLabel(block) && canWiden(block.parentElement) && steps < 12) {
+              block = block.parentElement;
+              steps += 1;
+            }
+            if (block === document.body || block === document.documentElement) return control || null;
+            return block;
+          }).catch(() => null)
+          : null;
+        const uploadTransport = watchUploadTransport();
+        let uploadTransportSettled = true;
+        let uploadEvidence = null;
+        // The watch and both handles are torn down here whatever happens, including the throw from
+        // setInputFiles itself, so a failed upload cannot leave a listener or a page handle behind.
+        try {
+          await uploadTarget.setInputFiles({
+            name: action.file.name,
+            mimeType: action.file.mimeType,
+            buffer: Buffer.from(action.file.base64, 'base64')
+          });
+          // The bytes are in the control and the board's change handler has fired. Let whatever the
+          // board started finish before this run reads the form and moves on.
+          uploadTransportSettled = await uploadTransport.settle();
+          uploadEvidence = uploadControlHandle
+            ? await page.evaluate((probe) => {
+              const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+              const control = probe.control;
+              const block = probe.block;
+              const controlConnected = Boolean(control && control.isConnected);
+              if (!block || !block.isConnected) {
+                return {
+                  readable: false, controlConnected, emptyPrompt: false, failure: false,
+                  progress: false, named: false, chip: false, attached: false, text: ''
+                };
+              }
+              /* THE EMPTY-STATE PROMPT, which is the whole measured case and was the one signal #152
+               * never read. A dropzone still asking for a file is the form saying it has none.
+               *
+               * The vocabulary is the Recruitee prompt captured on packet a34e5ce2 plus the
+               * drag-and-drop family every styled uploader shares, and it is deliberately not
+               * widened past that: a board whose empty state is worded some other way falls through
+               * to the ambiguous arm below, which KEEPS the claim and says the form showed no sign
+               * of the document, rather than dropping a send on a guess. Silence is the one outcome
+               * that is no longer possible. */
+              const EMPTY_PROMPT = /drag\s*(?:and|&|or)?\s*-?\s*drop|drop\s+(?:your\s+|the\s+)?(?:file|files|cv|resume|document)|upload\s+a\s+file|choose\s+a\s+file|select\s+a\s+file|browse\s+files?|attach\s+a\s+file/i;
+              /* THE VOCABULARY THAT MAKES A FILENAME NOT AN ATTACHMENT, spelled out rather than left
+               * to a substring test over the block. Boards print the filename exactly when they are
+               * reporting a problem with it: "Mehek_Mandal_Resume.pdf could not be uploaded. Please
+               * try again." and "Uploading Mehek_Mandal_Resume.pdf 0%" are both the board saying the
+               * document is NOT attached, and an unanchored indexOf over textContent reads both as
+               * proof that it is. The Greenhouse S3 case earlier in this file is exactly the second
+               * one: the XHR never settled and React left a perpetual progress bar naming the file. */
+              const FAILURE = /could\s+not|couldn'?t|cannot|can'?t|unable|fail(?:ed|s|ure)?|error|invalid|not\s+supported|unsupported|too\s+(?:large|big)|exceeds|try\s+again|rejected/i;
+              const PROGRESS = /uploading|in\s+progress|processing|please\s+wait|\d{1,3}\s?%/i;
+              // And the board describing what it accepts, which is where a static "resume.pdf" lives.
+              const HINT = /accepted|acceptable|supported|allowed|permitted|format|extension|max(?:imum)?\b|e\.g\.|for\s+example|must\s+be/i;
+              const FILE_TOKEN = /[^\s/\\:*?"<>|]{1,120}\.(?:pdf|docx?|rtf|txt|odt|pages|md)\b/gi;
+              const blockText = clean(block.textContent);
+              const emptyPrompt = EMPTY_PROMPT.test(blockText);
+              const failure = FAILURE.test(blockText);
+              const progress = PROGRESS.test(blockText);
+              const chip = Boolean(block.querySelector
+                && block.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]'));
+              const wanted = clean(probe.expectedName).toLowerCase();
+              let named = false;
+              let attached = false;
+              const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+              while (walker.nextNode()) {
+                const node = walker.currentNode;
+                const own = clean(node.nodeValue);
+                if (!own) continue;
+                // The statement a filename sits in, plus one level out, so that a sentence's own
+                // <strong> around the filename cannot hide the sentence that condemns it. Bounded at
+                // the block, so no statement is ever the whole card.
+                const holder = node.parentElement;
+                const statement = clean(holder ? holder.textContent : own) || own;
+                const outer = holder && holder !== block && holder.parentElement
+                  ? clean(holder.parentElement.textContent)
+                  : '';
+                if (FAILURE.test(statement) || PROGRESS.test(statement)) continue;
+                if (outer && (FAILURE.test(outer) || PROGRESS.test(outer))) continue;
+                if (HINT.test(statement)) continue;
+                /* The exact name this run uploaded. No prompt or hint a board ships can contain the
+                 * name of a file this run generated, so unlike the token arm below this one is not
+                 * vetoed by the empty prompt: a board that renders the filename INSIDE its dropzone,
+                 * next to the prompt it did not clear, has still shown the applicant her document. */
+                if (wanted && statement.toLowerCase().indexOf(wanted) >= 0) named = true;
+                if (EMPTY_PROMPT.test(statement)) continue;
+                /* One document-shaped token and only one. This is the arm that saves a working
+                 * uploader whose chip class this file does not know and whose filename it truncated.
+                 * Two or more tokens in one statement is a list of accepted formats, not a document. */
+                const tokens = statement.match(FILE_TOKEN) || [];
+                if (tokens.length === 1) attached = true;
+              }
+              return {
+                readable: true, controlConnected, emptyPrompt, failure, progress,
+                named, chip, attached, text: blockText.slice(0, 160)
+              };
+            }, {
+              control: uploadControlHandle,
+              block: uploadBlockHandle,
+              expectedName: action.file.name
+            }).catch(() => null)
+            : null;
+        } finally {
+          uploadTransport.stop();
+          await uploadBlockHandle?.dispose?.().catch(() => undefined);
+          await uploadOwnedControlHandle?.dispose?.().catch(() => undefined);
+        }
+        /* THE VERDICT, and the asymmetry it is built around. Refusing a correct send costs Mehek an
+         * application she was entitled to; keeping a claim the form never took costs a REAL
+         * application to a real employer, which cannot be undone. So the claim is dropped only when
+         * the form has SAID something - it is still asking for a file, or it says the upload failed
+         * - and every genuinely ambiguous reading keeps the claim and names the ambiguity instead of
+         * dropping it silently. An empty prompt is not ambiguous. */
+        const documentShown = Boolean(uploadEvidence?.readable)
+          && (uploadEvidence.named || uploadEvidence.chip || uploadEvidence.attached);
+        const documentRefused = Boolean(uploadEvidence?.readable)
+          && !documentShown
+          && (uploadEvidence.emptyPrompt || uploadEvidence.failure);
+        /* successfulMutation, so filled_fields and successful_addresses cannot disagree about one
+         * upload. The witness records that this run addressed a control on the employer's form; a
+         * dropped claim says the form did not take what was written to it, and recording that as a
+         * successful address would leave the two halves of the result contradicting each other over
+         * the same action. On a v4 run this raises successfulAddressIntegrityFailure, which withholds
+         * the submit, and that is the correct direction for a form with no resume in it. */
+        successfulMutation = !documentRefused;
+        if (action.label) {
+          if (!documentRefused) filledFields.push(action.label);
+          else {
+            skipped.push(action.label
+              + ': the file was set into ' + action.selector
+              + ' and the form did not take it - '
+              + (uploadEvidence.failure
+                ? 'the block reports the upload failed'
+                : 'the block is still asking for a file')
+              + (uploadEvidence.controlConnected ? '' : ', and the control is gone')
+              + (uploadEvidence.text ? ' (block reads "' + uploadEvidence.text + '")' : ''));
+          }
+        }
+        /* Said out loud whichever way the verdict went, because these are the only account anyone
+         * gets of a form that could not be read. Neither is by itself a refusal: see the asymmetry
+         * above. */
+        if (uploadEvidence && !uploadEvidence.readable) {
+          skipped.push((action.label || action.type)
+            + ': the upload was claimed without evidence - the question block was replaced during'
+            + ' the upload, so nothing could be read back about the document');
+        } else if (!uploadEvidence) {
+          skipped.push((action.label || action.type)
+            + ': the upload was claimed without evidence - the form could not be read back at all');
+        } else if (!documentShown && !documentRefused) {
+          skipped.push((action.label || action.type)
+            + ': the upload was claimed without evidence - the block shows no filename, no'
+            + ' filename chip and no empty-file prompt'
+            + (uploadEvidence.progress ? ', only an upload still in progress' : '')
+            + (uploadEvidence.text ? ' (block reads "' + uploadEvidence.text + '")' : ''));
+        }
+        if (!uploadTransportSettled) {
+          skipped.push((action.label || action.type)
+            + ': the board still had upload transport in flight after ' + UPLOAD_TRANSPORT_SETTLE_MS + 'ms');
+        }
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
       if (action.type === 'press') {

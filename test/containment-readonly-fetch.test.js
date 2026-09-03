@@ -34,10 +34,17 @@ test('the upload allowance is scoped to the armed window, employer-bound POST/PU
   // The allowance itself: employer-bound POST/PUT xhr/fetch, plus the board's own resume store
   // (Greenhouse's eager S3 upload - see isBoardResumeStorageUploadHost), and nothing wider.
   assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{\s*\n\s*return route\.fallback\(\);/);
-  // The store helper is gated inside that armed branch only: it appears in the template exactly
-  // once outside its own definition, so it cannot silently widen any other admission.
+  /* The store helper has exactly two readers, and only one of them admits anything.
+   *
+   * The first is the armed branch pinned above, which is the admission. The second is
+   * uploadBoundWriteTransport, added 2026-09-03, which decides what the upload SETTLE is allowed to
+   * wait for and routes to no route handler at all - it cannot admit, block or abort a request. The
+   * settle deliberately shares this relation rather than carrying its own: a wait that used a wider
+   * relation would let a third-party POST consume the upload's budget. A third occurrence is a new
+   * admission until someone proves otherwise. */
   const uses = source.match(/boardResumeStorageUpload\(request\)/g) || [];
-  assert.equal(uses.length, 1, 'the store admission is called from the armed upload branch and nowhere else');
+  assert.equal(uses.length, 2, 'the armed admission, and the settle relation that admits nothing');
+  assert.match(source, /const uploadBoundWriteTransport = \(request\) => \{[\s\S]{0,400}?return employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\);/);
 });
 
 test('only employer-bound blocked transport is run-fatal; third-party blocks are aborted quietly', () => {
