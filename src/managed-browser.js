@@ -14452,7 +14452,13 @@ let terminalFailureInput = null;
              * unknown control called Meine Daten and dropped it. Only a radio or checkbox group
              * may take the legend before its control-level label. An unlabeled ordinary control
              * can still reach the same legend through the bounded fallback walk below. */
-            const fieldsetOwnsChoice = choice && fieldsetNames.size <= 1;
+            /* AND ONLY WHEN THE FIELDSET IS THE GROUP'S OWN. Pinpoint's "3. Questions" fieldset
+             * holds every custom question of the section; with one boolean among number inputs
+             * the single-name test above holds and the legend named the pair. A fieldset holding
+             * another labelled question is a section, and the submit section's caption names
+             * nothing (holdsAnotherQuestion, isSubmitSection). */
+            const fieldsetOwnsChoice = choice && fieldsetNames.size <= 1 && Boolean(fieldset)
+              && !holdsAnotherQuestion(fieldset, el, sameNamePeers) && !isSubmitSection(fieldset);
             const legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
             const legendText = clean(renderedText(legend));
             if (legendText) return legendText.toLowerCase();
@@ -14486,7 +14492,6 @@ let terminalFailureInput = null;
             // prefers the group's own text for exactly this reason; discovery has to agree with it,
             // or the same control is called two different things by two halves of one run.
             if (el.type === 'radio' || el.type === 'checkbox') {
-              const owner = blockOf(el);
               // A label that speaks for ONE option is disqualified, however it says so: by wrapping
               // the input, or by naming a choice input in its "for". What is left is the block's own
               // heading. Without this test the search finds a SIBLING option's label and calls the
@@ -14503,15 +14508,32 @@ let terminalFailureInput = null;
                * below", which the tenant auto-disqualifies, so a group labeled by its first option
                * asks the applicant to disqualify herself. An h3 inside ONE question's own block is
                * that question's heading; the generic walk already trusts h3 for the same reason. */
-              const ownerLabel = owner && [...owner.querySelectorAll('label, legend, .application-label, h3')].find((candidate) => {
+              /* SEARCHED BLOCK BY BLOCK FROM THE CONTROL OUTWARD, through the blocks that hold this
+               * group and nothing else's (ownBlocksOf), then through blockOf's wrapper only when
+               * that wrapper is not a section. The owner used to be blockOf alone, which on
+               * Pinpoint is the "3. Questions" fieldset holding every custom question, and the
+               * first label in it was the legend: both boolean pairs were stored as "3.Questions"
+               * and their real questions were lost (packet c9b0c807, 2026-09-02). A section's
+               * legend is never searched now, and neither is the submit section's caption. */
+              const questionCandidate = (candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
+                if (candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset'))) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
                 const target = document.getElementById(named);
                 return !(target && (target.type === 'radio' || target.type === 'checkbox'));
-              });
-              const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
-              if (ownerText && !genericControlText(ownerText)) return ownerText;
+              };
+              const owner = blockOf(el);
+              const questionBlocks = ownBlocksOf(el, sameNamePeers);
+              if (owner && !questionBlocks.includes(owner) && owner !== el
+                && !holdsAnotherQuestion(owner, el, sameNamePeers) && !isSubmitSection(owner)) {
+                questionBlocks.push(owner);
+              }
+              for (const questionBlock of questionBlocks) {
+                const ownerLabel = [...questionBlock.querySelectorAll('label, legend, .application-label, h3')].find(questionCandidate);
+                const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
+                if (ownerText && !genericControlText(ownerText)) return ownerText;
+              }
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
              *
@@ -14578,11 +14600,29 @@ let terminalFailureInput = null;
                 if (besideText) break;
               }
             }
+            /* AND ONLY THE BLOCKS THAT ARE THIS CONTROL'S OWN. Pinpoint's address inputs carry a
+             * <label> with no "for" and sit in the "1. Personal Details" fieldset with every other
+             * identity control; blockOf was that fieldset, its first label-or-legend was the
+             * section legend, and the stored question was "1.personal details we'll need these
+             * details in order to be able to contact you. apply with linkedin" - which the resolver
+             * read as a LinkedIn question and answered into #postcode (packet c9b0c807,
+             * 2026-09-02). Searched innermost-first through the blocks holding no other control,
+             * the label in the input's own row is found first; blockOf's wrapper is searched after
+             * them only when it is not a section. */
             if (!clean(labelText) && !clean(ariaLabel)) {
               const owner = blockOf(el);
-              const ownerLabel = owner && owner.querySelector('label, legend');
-              const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
-              if (ownerText && !genericControlText(ownerText)) return ownerText;
+              const questionBlocks = ownBlocksOf(el, [el]);
+              if (owner && !questionBlocks.includes(owner) && owner !== el
+                && !holdsAnotherQuestion(owner, el, [el]) && !isSubmitSection(owner)) {
+                questionBlocks.push(owner);
+              }
+              for (const questionBlock of questionBlocks) {
+                const ownerLabel = [...questionBlock.querySelectorAll('label, legend')].find((candidate) => (
+                  !(candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset')))
+                ));
+                const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
+                if (ownerText && !genericControlText(ownerText)) return ownerText;
+              }
             }
             /* A PLACEHOLDER IS NOT PART OF A QUESTION'S NAME, unless it is all the control has.
              *
@@ -14736,6 +14776,89 @@ let terminalFailureInput = null;
               + ' [data-input-type], [class*="_fieldEntry_"], [class*="select__container"], .field, .field-wrapper,'
               + ' li.application-question, li.question'
             ) || el.parentElement || el;
+          }
+          /* THE BLOCKS THAT HOLD THIS QUESTION AND NOTHING ELSE'S, innermost first.
+           *
+           * blockOf names the nearest fieldset, group or field wrapper, and on most boards that is
+           * one question's own box. Pinpoint renders one <fieldset> per numbered SECTION - measured
+           * on confluence.pinpointhq.com (packet c9b0c807, 2026-09-02): "3. Questions" holds two
+           * boolean radio pairs and three number inputs, "1. Personal Details" holds every identity
+           * and address input - so blockOf handed each control the whole section, and everything
+           * read off it belonged to a neighbour. The number inputs carried ["Yes", "No"] harvested
+           * from the radio pairs beside them and the dashboard drew radios on a salary field; both
+           * pairs were labelled "3.Questions", so the backend kept one record and lost the other;
+           * every identity input carried the address finder's "Start typing an address" as its
+           * options; and the address inputs, whose <label> has no "for", were labelled by the
+           * section legend, whose text ends in "Apply with LinkedIn" - which is how her LinkedIn URL
+           * came to be typed into #postcode.
+           *
+           * The bound is structural, not textual. Walking up from the control, every ancestor that
+           * holds no control other than this one and its same-name peers is a block of this
+           * question; the first ancestor holding a FOREIGN control is shared with another question
+           * and ends the walk. A heading is therefore reachable only by a control that has its
+           * block to itself, which is exactly the shape where the heading IS the question: Breezy's
+           * <h3> inside li.question, a Greenhouse legend over one group. A heading over several
+           * questions is a section title, and no control can reach it.
+           *
+           * Which controls count. Hidden inputs are nobody's question and never end the walk
+           * (Pinpoint keeps the question title in one beside every control). A display:none control
+           * still counts: Ashby's yes/no mirror input is hidden by design and is the only node
+           * naming its pill group, so two pill groups side by side stay two blocks. A control that
+           * WRAPS this one (an older React-Select shell carrying role=combobox around its input)
+           * is this control's own widget. A widget-backing control marked aria-hidden belongs to
+           * the widget it backs. Submit, reset and button inputs ask nothing. */
+          function ownBlocksOf(el, peers) {
+            const controls = 'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]),'
+              + ' textarea, select, [role="combobox"], [aria-haspopup="listbox"]';
+            const own = new Set(peers && peers.length > 0 ? peers : []);
+            own.add(el);
+            const blocks = [];
+            let block = el.parentElement;
+            for (let depth = 0; block && block !== document.body && depth < 24; depth += 1, block = block.parentElement) {
+              const foreign = [...block.querySelectorAll(controls)].some((control) => !own.has(control)
+                && !control.contains(el)
+                && control.getAttribute('aria-hidden') !== 'true');
+              if (foreign) break;
+              blocks.push(block);
+            }
+            return blocks;
+          }
+          /* A FIELDSET THAT HOLDS ANOTHER QUESTION IS A SECTION, and its legend names no control.
+           *
+           * Another question is a control outside this group that carries a label of its own - a
+           * <label for>, an aria-label or an aria-labelledby - or a choice input under another
+           * name. That is deliberately looser than ownBlocksOf's "any foreign control": an
+           * unlabelled text box under a radio group ("Other, please specify") is part of the
+           * group's question, and the legend still stands over it. On Pinpoint the number inputs
+           * beside a lone boolean each carry a <label for>, so a section with one radio name still
+           * reads as a section - the old fieldsetNames.size <= 1 test alone would have let the
+           * legend name that pair. */
+          function holdsAnotherQuestion(block, el, peers) {
+            const controls = 'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]),'
+              + ' textarea, select, [role="combobox"], [aria-haspopup="listbox"]';
+            const own = new Set(peers && peers.length > 0 ? peers : []);
+            own.add(el);
+            return [...block.querySelectorAll(controls)].some((control) => {
+              if (own.has(control) || control.contains(el)) return false;
+              if (control.getAttribute('aria-hidden') === 'true') return false;
+              /* A radio under another name is another question: radios of one question share a
+               * name. Checkboxes do not have to - Workable gives every row of one multi-select
+               * its own name - so a checkbox beside a checkbox is the same question, and only a
+               * checkbox beside a radio (or the reverse) is a second one. */
+              if (control.type === 'radio') return (control.name || '') !== (el.name || '');
+              if (control.type === 'checkbox') return el.type !== 'checkbox';
+              if (control.getAttribute('aria-label') || control.getAttribute('aria-labelledby')) return true;
+              return Boolean(control.id) && Boolean(document.querySelector('label[for="' + CSS.escape(control.id) + '"]'));
+            });
+          }
+          /* THE SUBMIT SECTION'S LEGEND NAMES NO CONTROL. The fieldset holding the form's submit
+           * button is the send area; Pinpoint captions it "4. Submit Application" over the privacy
+           * consent checkbox, and discovery stored that caption as a required checkbox question. The
+           * checkbox keeps its own label, which is the statement the consent-tick plan reads. */
+          function isSubmitSection(fieldset) {
+            return Boolean(fieldset && fieldset.querySelector && fieldset.querySelector(
+              'button[type="submit"], button:not([type]), input[type="submit"]'
+            ));
           }
           function choiceQuestionKey(el, block) {
             const semanticGroup = el.closest(
@@ -14975,7 +15098,16 @@ let terminalFailureInput = null;
               || el.getAttribute('role') === 'combobox'
               || el.getAttribute('role') === 'listbox'
               || el.getAttribute('aria-haspopup') === 'listbox';
-            if (!block) return { values, complete: closedChoice ? false : null };
+            /* AN OPEN CONTROL HAS NO OPTIONS, EVER. Options belong to a control only when they are
+             * its own: a <select>'s rows, the listbox it controls (both handled above), or the
+             * radio and checkbox rows of its own group (below). A number, text, date or textarea
+             * control offers nothing to choose between, so nothing below may run for it - the
+             * block harvest that follows used to, and on Pinpoint (packet c9b0c807, 2026-09-02)
+             * it gave the salary and years-of-experience NUMBER inputs the ["Yes", "No"] of the
+             * boolean pairs beside them and every identity input the address finder's button text,
+             * and the dashboard draws radios wherever options exist. */
+            if (!closedChoice) return { values, complete: null };
+            if (!block) return { values, complete: false };
             /* A NAMED RADIO OR CHECKBOX GROUP IS ITS SAME-NAME PEERS, wherever the markup put them.
              * The block is the right scope for a group with no name; for a named group the HTML
              * semantics already say which inputs are one question (one name, one form), and
@@ -14988,7 +15120,33 @@ let terminalFailureInput = null;
              * because its <li class="option"> rows share one parent div. Same-name peers are the
              * rule the backend's own discovery already uses (questionDiscovery.ts). */
             const nativeChoice = el.type === 'radio' || el.type === 'checkbox';
-            const blockChoices = [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+            const peersInForm = nativeChoice && el.name
+              ? [...(el.form || document).querySelectorAll(
+                'input[type="radio"][name="' + CSS.escape(el.name) + '"], input[type="checkbox"][name="' + CSS.escape(el.name) + '"]'
+              )].filter((input) => input.name === el.name && input.form === el.form)
+              : [];
+            /* THE BLOCK READ IS THIS QUESTION'S OWN, never a section's. blockOf is the nearest
+             * fieldset or field wrapper; where that wrapper holds other questions (Pinpoint's
+             * "3. Questions" fieldset holds every custom question, "1. Personal Details" every
+             * identity control and the address finder's button) the read is narrowed to the
+             * outermost block that holds only this control and its same-name peers
+             * (ownBlocksOf). Where the wrapper is already narrower - Ashby's [data-field-path]
+             * entry, Lever's li.application-question - it stays the scope. Measured 2026-09-02:
+             * the country combobox and every text input in Pinpoint's details section carried
+             * ["Start typing an address"], harvested from a button three questions away. */
+            /* Narrowed only when the wrapper IS a section. An explicit group (role=group,
+             * role=radiogroup) is one question by declaration, and a fieldset or field wrapper
+             * that holds no other question is one question too - Workable's multi-select gives
+             * every checkbox row its own name, and reading only this row's block would leave the
+             * group with one option. */
+            const explicitGroup = block.matches && block.matches('[role="group"], [role="radiogroup"]');
+            const blockIsSection = !explicitGroup && holdsAnotherQuestion(block, el, peersInForm);
+            const ownBlocks = blockIsSection ? ownBlocksOf(el, peersInForm) : [];
+            const outermostOwn = ownBlocks.length > 0 ? ownBlocks[ownBlocks.length - 1] : null;
+            const scope = outermostOwn && block.contains(outermostOwn) && outermostOwn !== block
+              ? outermostOwn
+              : block;
+            const blockChoices = [...scope.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
             /* A semantic group or a fieldset that already holds two or more of this name is the
              * group, and it wins over the name: the readiness reader treats a same-name input
              * outside a labelled group as foreign, two fieldsets can legitimately share a name
@@ -14998,12 +15156,16 @@ let terminalFailureInput = null;
               'fieldset, [role="group"][aria-labelledby], [role="group"][aria-label],'
               + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
             )) && blockChoices.filter((input) => input.name === el.name).length > 1;
-            const sameNamePeers = nativeChoice && el.name && !blockIsGroup
-              ? [...(el.form || document).querySelectorAll(
-                'input[type="radio"][name="' + CSS.escape(el.name) + '"], input[type="checkbox"][name="' + CSS.escape(el.name) + '"]'
-              )].filter((input) => input.name === el.name && input.form === el.form)
-              : [];
-            const choiceInputs = sameNamePeers.length > 1 ? sameNamePeers : blockChoices;
+            const sameNamePeers = nativeChoice && el.name && !blockIsGroup ? peersInForm : [];
+            /* A LABELLED GROUP THAT HOLDS THIS NAME TWICE OR MORE IS READ AS THIS NAME'S ROWS ONLY.
+             * A fieldset holding two named pairs is one block; reading every choice in it gave
+             * Pinpoint's first boolean pair the second pair's Yes and No as duplicate rows and
+             * marked its inventory incomplete. A block holding this name once - Workable's
+             * checkbox group with a unique name per row, a lone consent checkbox - still reads
+             * the whole block, as before. */
+            const choiceInputs = sameNamePeers.length > 1
+              ? sameNamePeers
+              : (blockIsGroup ? blockChoices.filter((input) => input.name === el.name) : blockChoices);
             for (const [index, input] of choiceInputs.entries()) {
               const byFor = input.id && document.querySelector('label[for="' + CSS.escape(input.id) + '"]');
               const wrapping = input.closest('label');
@@ -15022,7 +15184,7 @@ let terminalFailureInput = null;
                 complete = false;
               }
             }
-            for (const [index, button] of [...block.querySelectorAll('button')].entries()) {
+            for (const [index, button] of [...scope.querySelectorAll('button')].entries()) {
               // The control under discovery can itself be a button-shaped or div-shaped combobox
               // opener now that non-form tags are scanned; its own furniture text ("Select") is
               // what it looks like closed, not one of the choices it offers.
