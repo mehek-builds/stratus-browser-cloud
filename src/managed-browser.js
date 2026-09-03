@@ -14624,6 +14624,7 @@ let terminalFailureInput = null;
                 questionBlocks.push(owner);
               }
               for (const questionBlock of questionBlocks) {
+                if (!questionBlock || typeof questionBlock.querySelectorAll !== 'function') continue;
                 const ownerLabel = [...questionBlock.querySelectorAll('label, legend')].find((candidate) => (
                   !(candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset')))
                 ));
