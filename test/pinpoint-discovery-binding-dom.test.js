@@ -331,3 +331,67 @@ test('two radio pairs sharing one plain fieldset with no legend are still two qu
   ]);
   assert.equal(rows[0].optionsComplete, true);
 });
+
+/* THE ROUND-1 REVIEW'S REGRESSIONS, pinned: a question's fieldset is not a section because of a
+ * type-less icon button, a wizard's Next button, a labelled "please specify" box, or sibling
+ * unique-name checkboxes; and a refused legend never falls through to an option's own label. */
+const labelsOf = (rows, selector) => rows.filter((row) => row.durableSelector && new RegExp(selector).test(row.durableSelector)).map((row) => row.label);
+const rowsNamed = (rows, name) => rows.filter((row) => (row.durableSelector || '').includes('name="' + name + '"') || (row.durableSelector || '').includes(name));
+
+test('a type-less icon button inside a question fieldset does not make it a submit section', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>Are you authorized to work in the UK?</legend><button aria-label="More information">?</button>
+      <label><input type="radio" name="auth" value="y">Yes</label><label><input type="radio" name="auth" value="n">No</label></fieldset>
+    <button type="submit">Submit application</button></form>`);
+  const auth = rowsNamed(rows, 'auth');
+  assert.ok(auth.length >= 1, JSON.stringify(rows.map((r) => [r.label, r.durableSelector])));
+  for (const row of auth) assert.equal(row.label, 'are you authorized to work in the uk?');
+});
+
+test('a wizard step keeps its legend when the Next button shares the fieldset', async () => {
+  const rows = await discover(`
+    <form><fieldset class="step"><legend>Are you willing to relocate?</legend>
+      <label><input type="radio" name="relocate" value="y">Yes</label><label><input type="radio" name="relocate" value="n">No</label>
+      <div class="nav"><button type="button">Back</button><button type="submit">Next</button></div></fieldset></form>`);
+  const relocate = rowsNamed(rows, 'relocate');
+  assert.ok(relocate.length >= 1, JSON.stringify(rows.map((r) => [r.label, r.durableSelector])));
+  for (const row of relocate) assert.equal(row.label, 'are you willing to relocate?');
+});
+
+test('a labelled "please specify" box beside a radio group is part of the group', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>How did you hear about this role?</legend>
+      <label><input type="radio" name="source" value="linkedin">LinkedIn</label><label><input type="radio" name="source" value="other">Other</label>
+      <label for="source_other">Please specify</label><input id="source_other" type="text"></fieldset></form>`);
+  const source = rowsNamed(rows, 'source"');
+  assert.ok(source.length >= 1, JSON.stringify(rows.map((r) => [r.label, r.durableSelector])));
+  for (const row of source) assert.equal(row.label, 'how did you hear about this role?');
+  const specify = rows.find((row) => (row.durableSelector || '').includes('source_other'));
+  assert.ok(specify);
+  assert.match(specify.label, /^please specify\b/);
+  assert.ok(!specify.options || specify.options.length === 0, 'the specify box borrows no options');
+});
+
+test('unique-name checkboxes under one legend stay one question with the whole list', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>Which of the following apply to you?</legend>
+      <label><input type="checkbox" name="a1" value="Internship">Internship</label>
+      <label><input type="checkbox" name="a2" value="Hackathon">Hackathon</label>
+      <label><input type="checkbox" name="a3" value="Open source">Open source</label>
+      <label for="notes">Anything else?</label><input id="notes" type="text"></fieldset></form>`);
+  const boxes = rows.filter((row) => row.inputType === 'checkbox');
+  assert.ok(boxes.length >= 1, JSON.stringify(rows.map((r) => [r.label, r.durableSelector, r.options])));
+  for (const box of boxes) {
+    assert.equal(box.label, 'which of the following apply to you?');
+    assert.deepEqual(box.options, ['Internship', 'Hackathon', 'Open source']);
+  }
+});
+
+test('a refused legend never falls through to the first option\'s own label', async () => {
+  const rows = await discover(`
+    <form><fieldset><legend>3. Questions</legend>
+      <label><input type="radio" name="q1" value="y">Yes</label><label><input type="radio" name="q1" value="n">No</label>
+      <label for="years">Years of Python</label><input id="years" type="number">
+      <label for="years2">Years of SQL</label><input id="years2" type="number"></fieldset></form>`);
+  for (const row of rowsNamed(rows, 'q1')) assert.doesNotMatch(row.label, /^yes\b/);
+});

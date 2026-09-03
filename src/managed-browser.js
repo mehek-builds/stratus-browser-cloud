@@ -14458,7 +14458,8 @@ let terminalFailureInput = null;
              * another labelled question is a section, and the submit section's caption names
              * nothing (holdsAnotherQuestion, isSubmitSection). */
             const fieldsetOwnsChoice = choice && fieldsetNames.size <= 1 && Boolean(fieldset)
-              && !holdsAnotherQuestion(fieldset, el, sameNamePeers) && !isSubmitSection(fieldset);
+              && !holdsAnotherQuestion(fieldset, el, sameNamePeers)
+              && !(isSubmitSection(fieldset) && controlHasOwnLabel(el, sameNamePeers));
             const legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
             const legendText = clean(renderedText(legend));
             if (legendText) return legendText.toLowerCase();
@@ -14517,7 +14518,7 @@ let terminalFailureInput = null;
                * legend is never searched now, and neither is the submit section's caption. */
               const questionCandidate = (candidate) => {
                 if (candidate.querySelector('input, textarea, select')) return false;
-                if (candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset'))) return false;
+                if (candidate.tagName === 'LEGEND' && isSubmitSection(candidate.closest('fieldset')) && controlHasOwnLabel(el, sameNamePeers)) return false;
                 const named = candidate.getAttribute && candidate.getAttribute('for');
                 if (!named) return true;
                 const target = document.getElementById(named);
@@ -14526,14 +14527,20 @@ let terminalFailureInput = null;
               const owner = blockOf(el);
               const questionBlocks = ownBlocksOf(el, sameNamePeers);
               if (owner && !questionBlocks.includes(owner) && owner !== el
-                && !holdsAnotherQuestion(owner, el, sameNamePeers) && !isSubmitSection(owner)) {
+                && !holdsAnotherQuestion(owner, el, sameNamePeers) && !(isSubmitSection(owner) && controlHasOwnLabel(el, sameNamePeers))) {
                 questionBlocks.push(owner);
               }
               for (const questionBlock of questionBlocks) {
+                if (!questionBlock || typeof questionBlock.querySelectorAll !== 'function') continue;
                 const ownerLabel = [...questionBlock.querySelectorAll('label, legend, .application-label, h3')].find(questionCandidate);
                 const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
                 if (ownerText && !genericControlText(ownerText)) return ownerText;
               }
+              /* NEVER THE OPTION'S OWN LABEL. A choice row whose legend was refused as a section's
+               * and whose blocks hold no heading is UNNAMED, not named "yes" by its first option:
+               * the misname is the defect the Breezy test forbids, and an unnamed control is what
+               * the backend files honestly as missing_question_text. */
+              if (fieldset && !fieldsetOwnsChoice && !controlHasOwnLabel(el, sameNamePeers)) return '';
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
              *
@@ -14815,7 +14822,9 @@ let terminalFailureInput = null;
             const blocks = [];
             let block = el.parentElement;
             for (let depth = 0; block && block !== document.body && depth < 24; depth += 1, block = block.parentElement) {
+              if (typeof block.querySelectorAll !== 'function') break;
               const foreign = [...block.querySelectorAll(controls)].some((control) => !own.has(control)
+                && !(el.type === 'checkbox' && control.type === 'checkbox')
                 && !control.contains(el)
                 && control.getAttribute('aria-hidden') !== 'true');
               if (foreign) break;
@@ -14838,7 +14847,16 @@ let terminalFailureInput = null;
               + ' textarea, select, [role="combobox"], [aria-haspopup="listbox"]';
             const own = new Set(peers && peers.length > 0 ? peers : []);
             own.add(el);
-            return [...block.querySelectorAll(controls)].some((control) => {
+            if (!block || typeof block.querySelectorAll !== 'function') return false;
+            const elIsChoice = el.type === 'radio' || el.type === 'checkbox';
+            const foreign = [...block.querySelectorAll(controls)].filter((control) => !own.has(control)
+              && !(elIsChoice && el.type === 'checkbox' && control.type === 'checkbox')
+              && !control.contains(el) && control.getAttribute('aria-hidden') !== 'true');
+            /* ONE open control beside a choice group is the group's "please specify" box, labelled
+             * or not ("Other - please specify", "If yes, give details"): the legend still stands over
+             * the group. Two or more, or another choice group, is a section. */
+            if (elIsChoice && foreign.length === 1 && foreign[0].type !== 'radio' && foreign[0].type !== 'checkbox') return false;
+            return foreign.some((control) => {
               if (own.has(control) || control.contains(el)) return false;
               if (control.getAttribute('aria-hidden') === 'true') return false;
               /* A radio under another name is another question: radios of one question share a
@@ -14856,9 +14874,27 @@ let terminalFailureInput = null;
            * consent checkbox, and discovery stored that caption as a required checkbox question. The
            * checkbox keeps its own label, which is the statement the consent-tick plan reads. */
           function isSubmitSection(fieldset) {
-            return Boolean(fieldset && fieldset.querySelector && fieldset.querySelector(
-              'button[type="submit"], button:not([type]), input[type="submit"]'
-            ));
+            if (!fieldset || typeof fieldset.querySelectorAll !== 'function') return false;
+            /* A type-less <button> is ordinary widget furniture (a "?" tooltip, an icon) far more
+             * often than a submit; it counts here only when it SAYS submit, apply, send or next. */
+            const SUBMIT_LEXICON = /^(?:submit|apply|send|next|continue|finish|complete)\b/i;
+            return [...fieldset.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type])')]
+              .some((node) => (node.getAttribute('type') || '').toLowerCase() === 'submit'
+                || SUBMIT_LEXICON.test(clean(node.innerText || node.textContent || node.value || '')));
+          }
+          /* A control that carries its OWN label (label[for], aria-label, aria-labelledby) is a
+           * question by itself; only such a control loses a submit section's caption. A radio group
+           * whose only text is its legend keeps that legend even when the form's Next button shares
+           * the fieldset (a wizard step). */
+          function controlHasOwnLabel(el, peers) {
+            if (!el || !el.getAttribute) return false;
+            /* A radio or checkbox that has same-name peers is labelled by its OPTION, not by a
+             * question of its own; a lone checkbox's wrapping label IS its statement (Pinpoint's
+             * "Allow us to process your personal information."). */
+            if ((el.type === 'radio' || el.type === 'checkbox') && peers && peers.length > 1) return false;
+            if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')) return true;
+            if (el.labels && el.labels.length > 0) return true;
+            return Boolean(el.id && document.querySelector && document.querySelector('label[for="' + CSS.escape(el.id) + '"]'));
           }
           function choiceQuestionKey(el, block) {
             const semanticGroup = el.closest(

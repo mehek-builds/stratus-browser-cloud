@@ -130,6 +130,9 @@ function sandboxQuestionLabel() {
   // its placeholder, so the two are built together.
   const source = extractFunctionSource('questionLabel');
   const blockOfSource = extractFunctionSource('blockOf');
+  const ownBlocksOfSource = extractFunctionSource('ownBlocksOf');
+  const holdsAnotherQuestionSource = extractFunctionSource('holdsAnotherQuestion');
+  const isSubmitSectionSource = extractFunctionSource('isSubmitSection');
   const renderedTextSource = extractFunctionSource('renderedText');
   const labelledByTextSource = extractFunctionSource('labelledByText');
   const clean = (value) => (value == null ? '' : value).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -137,7 +140,7 @@ function sandboxQuestionLabel() {
   const fakeCss = { escape: (value) => String(value) };
   return Function(
     'clean', 'document', 'CSS',
-    `${renderedTextSource}\n${labelledByTextSource}\n${blockOfSource}\nreturn (${source});`,
+    `${renderedTextSource}\n${labelledByTextSource}\n${blockOfSource}\n${ownBlocksOfSource}\n${holdsAnotherQuestionSource}\n${isSubmitSectionSource}\nreturn (${source});`,
   )(clean, fakeDocument, fakeCss);
 }
 
