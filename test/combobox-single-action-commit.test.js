@@ -36,7 +36,7 @@ const SUPPORT_NAMES = [
   'withdrawRefusedChoice', 'blurDrivenChoiceControl',
   // choiceLanded's form confirmation and the sentence it speaks. Both are reached from
   // choiceLanded itself, so a harness that omits them executes a different function.
-  'formRefusedChoiceReason', 'formStillRequiresChoice', 'nudgeChoiceControl',
+  'formRefusedChoiceReason', 'formStillRequiresChoice',
   'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
   'fillCustomChoice',

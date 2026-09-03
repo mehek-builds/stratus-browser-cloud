@@ -7389,8 +7389,15 @@ let terminalFailureInput = null;
      * on that form on 2026-09-03: present on all 14 required controls before any fill, absent on
      * both optional ones, and gone on all 16 after a committed fill. willValidate plus
      * validity.valueMissing is the browser's own answer to "will this form submit", asked of the
-     * exact node the widget put there to be asked. Workday's hidden required input and any hidden
-     * '<select required>' answer the same question the same way. It is a fact, not a reading.
+     * exact node the widget put there to be asked. It is a fact, not a reading.
+     *
+     * WHAT ELSE CAN ANSWER IT, precisely, because the honesty of this function rests on what
+     * constraint validation can and cannot see. A CSS-hidden or visually-hidden '<select required>'
+     * or text input is a validation candidate and answers exactly as react-select's sentinel does.
+     * An '<input type="hidden">' is NOT: the spec bars hidden inputs from constraint validation
+     * outright, so willValidate is false for one however it is marked, and a widget backed only by
+     * a hidden input is a widget this function has no opinion about. That is the correct outcome
+     * and not a gap to paper over: silence here means no opinion, never "fine".
      *
      * WHAT IS DELIBERATELY NOT READ: aria-invalid plus the sentence in the node aria-errormessage
      * names. That is where the photograph's "This field is required." lives, and it looked like the
@@ -7430,71 +7437,6 @@ let terminalFailureInput = null;
       }
       return false;
     }).catch(() => false);
-    /* THE LITTLE CHANGE THAT MAKES THE FORM LOOK AGAIN.
-     *
-     * The applicant's own account of what she does by hand when this happens: "All that was
-     * required was one extra click from me into that box and reselecting the option, or just
-     * retyping a blank space and going back. All they needed was just some little input or some
-     * little change here to register that there is something input in that text box."
-     *
-     * That is a precise description of a stale validation, and it is what the measured page shows.
-     * On the Hudson River Trading packet the widget IS holding the answer - the value renders, the
-     * chip renders - while the form's own required backing still reports the field empty, because
-     * the form last evaluated this field when it WAS empty and nothing has asked it to look again.
-     * Gender ("Woman") and race ("South Asian") are the same chip control in the same block on the
-     * same form, and only one of them stuck: not because chips fail, but because one of them got a
-     * re-evaluation and the other did not. A nudge is what supplies the missing one.
-     *
-     * WHAT IT DOES, AND WHY IT CANNOT CHANGE AN ANSWER.
-     *
-     *   - It runs ONLY when readChoiceState says 'chosen'. The widget is publishing its choice as
-     *     its own node, which is what proves the input this touches is a SEARCH box and not the
-     *     place the answer lives. On a control whose input IS the answer there is no such node and
-     *     this never fires.
-     *   - It writes through the native value setter, because React tracks the last value it saw and
-     *     ignores an assignment that bypasses that tracker - the same rule this codebase already
-     *     records for driving a React select - and it dispatches 'input' and 'change' with
-     *     bubbles: true so the form's own listeners, wherever they are mounted, actually receive it.
-     *   - It puts the input back to the exact string it found, byte for byte, and returns false if
-     *     it did not. A nudge that could not restore what it touched is not a nudge.
-     *   - It never opens a menu, never clicks a row and never touches a selection, so it cannot
-     *     deselect a chip. That matters: react-select's own selectOption REMOVES an option that is
-     *     already selected when isMulti is set, so "just re-pick it" is a removal on the race
-     *     control and would take a visibly correct answer off the form.
-     *
-     * Exactly one non-hidden input may be in the shell, or this refuses: two inputs are two things
-     * to nudge and a control that cannot be attributed is not one this may touch.
-     */
-    const nudgeChoiceControl = async (container) => {
-      if ((await readChoiceState(container)).kind !== 'chosen') return false;
-      return await container.evaluate((element) => {
-        const SHELL = '[class*="select__container"], [class*="select-shell"]';
-        const shell = element.querySelector?.(SHELL) || element.closest?.(SHELL) || element;
-        const inputs = [...shell.querySelectorAll('input:not([type="hidden"]):not([aria-hidden="true"])')];
-        if (inputs.length !== 1) return false;
-        const input = inputs[0];
-        const before = String(input.value ?? '');
-        const setter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, 'value'
-        )?.set;
-        const write = (value) => { if (setter) setter.call(input, value); else input.value = value; };
-        try {
-          input.focus();
-          write(before + ' ');
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          write(before);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          input.blur();
-        } catch (error) {
-          write(before);
-          return false;
-        }
-        // The whole point is that nothing was left behind. Say so, and let the caller's own re-read
-        // of the widget be the second opinion on it.
-        return String(input.value ?? '') === before;
-      }).catch(() => false);
-    };
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
      * this and none of them calls the verifier directly: the defect that made this necessary is
@@ -7570,46 +7512,22 @@ let terminalFailureInput = null;
              * the widget is showing what she asked for - and clearing it would replace a field she
              * can finish in one click with an empty one she has to find. It is marked instead, so
              * the pre-submit gate holds the run, and the sentence below tells her which control. */
-            /* ASK THE FORM, AND IF IT SAYS NO, MAKE IT LOOK AGAIN BEFORE BELIEVING IT.
+            /* AND THE FORM ITSELF HAS TO AGREE, or this run has no business calling the field
+             * filled. Everything above has established that the WIDGET is holding the answer; this
+             * asks the one party whose refusal actually stops an application.
              *
-             * Two nudges at most, and every one of them is followed by BOTH reads again: the widget
-             * must still be holding her answer, and the form must have stopped calling the field
-             * empty. Neither read is skipped because a nudge "should" have worked - a nudge that
-             * changed the control into something else is refused exactly as the first attempt was,
-             * and a control the nudge cannot reach falls through to the honest skip below, which is
-             * the same sentence and the same block it got before this loop existed.
+             * It gets the same bounded window every other read here gets, because a form's own
+             * validation can land a render behind the commit that satisfied it. What it will not do
+             * is wait out a commit that never happened.
              *
-             * Two rather than one because the applicant reports needing more than a single touch on
-             * some controls, and two rather than many because a bounded cost is what makes this
-             * safe to run on every choice on every board: it is only ever paid by a control the
-             * form has ALREADY refused, and a control the form accepted never reaches this line. */
-            let accepted = await settleVerified(async () => !(await formStillRequiresChoice(container)));
-            /* A NUDGE THAT DID NOT LEAVE HER ANSWER ON THE CONTROL IS NOT A REPAIR, and it is not a
-             * form refusal either. A form that re-evaluates can also COERCE - accept the field while
-             * snapping it to a neighbouring option - and calling that "the form still reports the
-             * field as required and empty" would be a false sentence about a control she is looking
-             * at, which is the exact mistake the aria-invalid arm was removed for. So the widget is
-             * re-read first, and a control that is no longer holding her answer leaves this loop to
-             * the withdrawal below: the same path, the same sentence and the same restoration any
-             * other lost value gets. */
-            let nudgeDisturbedTheControl = false;
-            for (let pass = 0; !accepted && pass < 2; pass += 1) {
-              if (!await nudgeChoiceControl(container)) break;
-              if (!await settleVerified(() => verifyChoiceInContainer(
-                container,
-                expected,
-                lastClickedOptionText,
-                lastClickedOptionAnswer,
-                lastChooserTierAnswer,
-                directControl,
-              ))) { nudgeDisturbedTheControl = true; break; }
-              accepted = await settleVerified(async () => !(await formStillRequiresChoice(container)));
-            }
-            if (accepted) {
+             * A refusal here leaves the control exactly as it is. There is nothing to withdraw and
+             * clearing it would replace a field she can finish in one click with an empty one she
+             * has to find. It is marked instead, so the pre-submit gate holds the run, and the
+             * sentence below tells her which control and who refused it. */
+            if (await settleVerified(async () => !(await formStillRequiresChoice(container)))) {
               await unmarkChoice(container);
               return true;
             }
-            if (nudgeDisturbedTheControl) break;
             lastChoiceRejectedByForm = true;
             lastChoiceUnreadable = false;
             lastChoiceRefusal = formRefusedChoiceReason;

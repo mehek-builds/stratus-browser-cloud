@@ -14,9 +14,6 @@ const RACE_LABEL = 'What is your race/ethnicity?';
 const GENDER_LABEL = 'What is your gender?';
 // Genuinely optional on the live form, and it carries no RequiredInput there either.
 const DEADLINE_LABEL = 'Do you have any upcoming offer deadlines?';
-/* From the same measured packet, and the case for a form that looks again and snaps the answer to
- * a neighbour rather than keeping it. */
-const LANGUAGE_LABEL = 'What is your preferred coding language?';
 
 const GPA_OPTIONS = ['3.26 - 3.50', '3.51 - 3.75', '3.76 - 4.0'];
 const SCALE_OPTIONS = ['0.0 - 4.0', '0.0 - 5.0', 'UK Grading Scale'];
@@ -24,16 +21,20 @@ const YES_NO = ['Yes', 'No', 'I prefer not to answer'];
 const RACE_OPTIONS = ['South Asian', 'East Asian', 'White', 'Black or African American'];
 const GENDER_OPTIONS = ['Woman', 'Man', 'Non-binary'];
 const DEADLINE_OPTIONS = ['Less than 2 weeks', '2 to 4 weeks', 'More than 4 weeks'];
+/* The R-004 shape, on a required multi: a control that answers any event by adding a second value.
+ * An employer receiving two race declarations, one she never gave, is the cost of getting this
+ * wrong, so it is pinned on a control of exactly that kind. */
+const LANGUAGE_LABEL = 'What is your preferred coding language?';
 const LANGUAGE_OPTIONS = ['Python', 'Java', 'C++', 'Rust'];
 
 /* Transcribed from the live HRT form, one question. 'multi' reproduces the
- * 'select__value-container--is-multi' the demographic gender and race controls carry. 'stale'
- * marks a control that commits its value and never asks the form to look at the field again, and
- * 'stuck' one that never re-evaluates however it is touched. */
-const question = ({ id, label, options, multi = false, stale = false, stuck = false, coerces = '', required = true }) => `
+ * 'select__value-container--is-multi' the demographic gender and race controls carry.
+ * 'losesCommit' marks a control whose option-row click does not select, which leaves the widget in
+ * the measured 'typed, not selected' state described on the commit function below. */
+const question = ({ id, label, options, multi = false, losesCommit = false, mutatesOnInput = false, required = true }) => `
   <div class="field-wrapper"><div class="select"><div class="select__container select__container--outside-label">
     <label id="${id}-label" for="${id}" class="label select__label select__label--outside-label">${label}${required ? '<span aria-hidden="true">*</span>' : ''}</label>
-    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${stale ? ' data-stale="1"' : ''}${stuck ? ' data-stuck="1"' : ''}${coerces ? ` data-coerces="${coerces}"` : ''}${required ? ' data-required="1"' : ''}>
+    <div class="select-shell remix-css-b62m3t-container" data-question="${id}" data-options="${options.join('|')}"${multi ? ' data-multi="1"' : ''}${losesCommit ? ' data-loses-commit="1"' : ''}${mutatesOnInput ? ' data-mutates-on-input="1"' : ''}${required ? ' data-required="1"' : ''}>
       <span id="react-select-${id}-live-region" class="remix-css-7pg0cj-a11yText"></span>
       <span aria-live="polite" aria-atomic="false" aria-relevant="additions text" role="log" class="remix-css-7pg0cj-a11yText"></span>
       <div><div class="select__control--outside-label select__control remix-css-13cymwt-control">
@@ -63,17 +64,17 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Job Application at 
 <div id="react-portal-mount-point"></div>
 <main class="main">
 <form id="application-form" action="/candidates" method="post" novalidate>
-${question({ id: 'question_67889507', label: GPA_LABEL, options: GPA_OPTIONS, stale: true })}
-${question({ id: 'question_67889508', label: SCALE_LABEL, options: SCALE_OPTIONS, stale: true })}
-${question({ id: 'question_67889530', label: LANGUAGE_LABEL, options: LANGUAGE_OPTIONS, stale: true, coerces: 'Java' })}
-${question({ id: 'question_67889515', label: DEADLINE_LABEL, options: DEADLINE_OPTIONS, stale: true, required: false })}
+${question({ id: 'question_67889507', label: GPA_LABEL, options: GPA_OPTIONS, losesCommit: true })}
+${question({ id: 'question_67889508', label: SCALE_LABEL, options: SCALE_OPTIONS, losesCommit: true })}
+${question({ id: 'question_67889515', label: DEADLINE_LABEL, options: DEADLINE_OPTIONS, losesCommit: true, required: false })}
+${question({ id: 'question_67889530', label: LANGUAGE_LABEL, options: LANGUAGE_OPTIONS, multi: true, mutatesOnInput: true })}
 <hr/>
 <div id="demographic-section" class="demographic--container">
 <h3 class="section-header">Voluntary Self-Identification</h3>
 ${question({ id: '245', label: GENDER_LABEL, options: GENDER_OPTIONS, multi: true })}
-${question({ id: '248', label: VETERAN_LABEL, options: YES_NO, stale: true })}
-${question({ id: '249', label: DISABILITY_LABEL, options: YES_NO, stuck: true })}
-${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, stale: true })}
+${question({ id: '248', label: VETERAN_LABEL, options: YES_NO, losesCommit: true })}
+${question({ id: '249', label: DISABILITY_LABEL, options: YES_NO })}
+${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, losesCommit: true })}
 </div>
 <button id="submit" type="submit">Submit application</button>
 </form>
@@ -97,22 +98,21 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
     var id = shell.getAttribute('data-question');
     var options = shell.getAttribute('data-options').split('|');
     var multi = shell.getAttribute('data-multi') === '1';
-    var stale = shell.getAttribute('data-stale') === '1';
+    var losesCommit = shell.getAttribute('data-loses-commit') === '1';
+    var mutatesOnInput = shell.getAttribute('data-mutates-on-input') === '1';
     var required = shell.getAttribute('data-required') === '1';
-    var stuck = shell.getAttribute('data-stuck') === '1';
-    var coerces = shell.getAttribute('data-coerces') || '';
     var control = shell.querySelector('.select__control');
     var valueContainer = shell.querySelector('.select__value-container');
     var inputContainer = shell.querySelector('.select__input-container');
     var input = shell.querySelector('input.select__input');
     var errorNode = document.getElementById(id + '-error');
-    var state = { values: [], committed: [], menu: null, nudges: 0 };
+    var state = { values: [], menu: null };
 
     function requiredInput() { return shell.querySelector('input.remix-css-1a0ro4n-requiredInput'); }
     function syncRequiredInput() {
       var existing = requiredInput();
       if (!required) return;
-      if (state.committed.length > 0) { if (existing) existing.remove(); return; }
+      if (state.values.length > 0) { if (existing) existing.remove(); return; }
       if (existing) return;
       var sentinel = document.createElement('input');
       sentinel.required = true;
@@ -154,7 +154,7 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
         valueContainer.insertBefore(placeholder, inputContainer);
       }
       inputContainer.setAttribute('data-value', input.value);
-      shell.setAttribute('data-nudges', String(state.nudges));
+      shell.setAttribute('data-values', state.values.join('|'));
       syncRequiredInput();
     }
     function closeMenu() {
@@ -165,57 +165,44 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
       input.removeAttribute('aria-controls');
       input.setAttribute('aria-activedescendant', '');
     }
-    /* THE DISPLAY AND THE FORM'S VERDICT ARE TWO PIECES OF STATE, and this is where they part.
+    /* THE FOUR STATES THIS WIDGET CAN BE IN, read off the live Hudson River Trading form on
+     * 2026-09-04 by driving one required control ('Are you a veteran?') through each of them:
      *
-     * show() is what the applicant sees: the chosen value replaces the placeholder, the chip
-     * renders, the search box empties. revalidate() is the form looking at the field again and
-     * deciding whether it is still missing: the RequiredInput unmounts and the error clears.
+     *   state                  valueNode  placeholder  searchBox  RequiredInput
+     *   pristine               false      true         ""         true
+     *   typed, not selected    false      false        "No"       TRUE
+     *   selected               true       false        ""         false
+     *   typed over a commit    false      false        "Yes"      false
      *
-     * A sound control does both on commit. A 'stale' control commits the value and never asks the
-     * form to look again, which is the measured Hudson River Trading state: six required controls
-     * displaying the applicant's answer under the form's own red "This field is required.", while
-     * gender and the office preference, the same widgets on the same page, show no error at all.
-     * It re-evaluates when it receives an input or a change event while it is holding a value,
-     * which is the applicant's own description of the manual fix: "just some little input or some
-     * little change here to register that there is something input in that text box."
+     * Row two is the one that matters and it is the one this fixture reproduces. The runner types
+     * the answer to filter the list and then clicks the matching row; if that click does not
+     * select, the widget is left showing the typed text with no chosen value and no placeholder,
+     * so readChoiceState reads 'unknown' and the committed-search-input rule then accepts the
+     * search box's own text because it equals the row this call clicked. That is the runner reading
+     * back its own keystrokes, and the RequiredInput sitting there is the form saying so.
      *
-     * A 'stuck' control never re-evaluates however it is touched. An extra click is not a cure for
-     * every lost commit, and a control that cannot be repaired must still be reported honestly.
-     *
-     * Note what does NOT revalidate a stale control: a blur. The runner already blurs every control
-     * it drives, so if a blur alone were enough there would be nothing here to fix.
+     * 'losesCommit' is that click failing to select. The fixture does not claim a mechanism for
+     * why it fails, because none was measured; it reproduces the state, which is what the contract
+     * under test is about.
      */
-    function show(value) {
+    function commit(value) {
+      if (losesCommit) {
+        /* Clicked, menu dismissed, nothing selected. The typed query is all that is left on the
+         * control, and with the menu closed that query is exactly what
+         * readCommittedSearchInputValue offers the verifier as evidence of a commit. */
+        input.value = value;
+        closeMenu();
+        render();
+        return;
+      }
       if (multi) { if (state.values.indexOf(value) === -1) state.values.push(value); }
       else state.values = [value];
       input.value = '';
+      if (errorNode) errorNode.textContent = '';
+      input.setAttribute('aria-invalid', 'false');
       render();
       if (!multi) closeMenu();
       else if (state.menu) renderRows();
-    }
-    function revalidate() {
-      if (stuck) return;
-      // A form that looks again can also decide the answer should be a different one. It accepts
-      // the field, and what it accepted is not what she said.
-      if (coerces && state.values.length > 0) { state.values = [coerces]; render(); }
-      state.committed = state.values.slice();
-      syncRequiredInput();
-      if (errorNode) errorNode.textContent = state.committed.length > 0 ? '' : 'This field is required.';
-      input.setAttribute('aria-invalid', state.committed.length > 0 ? 'false' : 'true');
-    }
-    function commit(value) {
-      show(value);
-      if (!stale) revalidate();
-    }
-    /* COUNTED, AND PUBLISHED ON THE SHELL. A repair that works by nudging every control is not the
-     * same fix as one that nudges only the controls the form refused, and from the outside the two
-     * look identical: both end with everything filled. This is what tells them apart, so the
-     * gender-versus-race pair can be asserted as a pair - the one that committed on its own must
-     * come out of the run untouched. */
-    function nudged() {
-      state.nudges += 1;
-      shell.setAttribute('data-nudges', String(state.nudges));
-      revalidate();
     }
     function renderRows() {
       if (!state.menu) return;
@@ -255,36 +242,28 @@ ${question({ id: '250', label: RACE_LABEL, options: RACE_OPTIONS, multi: true, s
       input.focus();
       openMenu();
     });
-    /* REACT'S VALUE TRACKER, MODELLED, because without it this fixture would accept a write no real
-     * React control accepts.
+    input.addEventListener('input', function () { openMenu(); render(); mutate(); });
+    input.addEventListener('change', function () { mutate(); });
+    /* A CONTROL THAT ANSWERS AN EVENT BY CHANGING WHAT IT HOLDS.
      *
-     * React installs its own 'value' property on the input INSTANCE and remembers the last value it
-     * saw there. An assignment through that property updates the memory in lockstep, so React
-     * concludes nothing changed and fires no onChange; a write through the PROTOTYPE's native setter
-     * bypasses the instance property, leaves the memory stale, and is seen as a real change. That is
-     * the whole reason a driver has to reach for the native setter, and modelling it here is what
-     * makes that line in the runner load-bearing rather than decorative.
-     */
-    var nativeValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-    var tracked = nativeValue.get.call(input);
-    Object.defineProperty(input, 'value', {
-      configurable: true,
-      get: function () { return nativeValue.get.call(input); },
-      set: function (next) { tracked = String(next); nativeValue.set.call(input, next); }
-    });
-    var sawMutation = false;
-    input.addEventListener('input', function () {
-      openMenu();
+     * Not a hypothetical. react-select's own selectOption REMOVES an already-selected option when
+     * isMulti is set, employer typeaheads commit on blur, and a form that re-evaluates on an input
+     * can snap or extend its own value. What they have in common is that ANY write this runner
+     * makes to a control after it has verified the answer can change the answer, and on a multi the
+     * change is invisible to the verifier by construction: readChoiceState reads chosenNodes[0]
+     * only, so a chip appended at index 1 leaves state.value identical.
+     *
+     * This control appends a second option on any input or change event it receives while it is
+     * holding a value. If anything in the runner ever touches a verified control again, the test
+     * that reads this shell's data-values will say so, and it will say so in the one shape the
+     * verifier cannot see for itself. */
+    function mutate() {
+      if (!mutatesOnInput || state.values.length === 0) return;
+      var next = options.filter(function (option) { return state.values.indexOf(option) === -1; })[0];
+      if (!next) return;
+      state.values.push(next);
       render();
-      var now = nativeValue.get.call(input);
-      if (now !== tracked) { sawMutation = true; tracked = now; }
-    });
-    // The little change that makes the form look at this field again, and it takes a real change:
-    // a change event with no mutation behind it is the page telling itself nothing happened.
-    input.addEventListener('change', function () {
-      if (sawMutation && state.values.length > 0) nudged();
-      sawMutation = false;
-    });
+    }
     /* react-select's own Menu calls preventDefault on mousedown so the search box never blurs while
      * a row is being pressed, which is what lets the row's click land. Kept, so the fill path here
      * behaves like the real widget and the only thing under test is what reaches the FORM. */

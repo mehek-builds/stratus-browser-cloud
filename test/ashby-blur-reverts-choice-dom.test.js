@@ -50,7 +50,7 @@ const SUPPORT_NAMES = [
   'withdrawRefusedChoice', 'blurDrivenChoiceControl',
   // choiceLanded's form confirmation and the sentence it speaks. Both are reached from
   // choiceLanded itself, so a harness that omits them executes a different function.
-  'formRefusedChoiceReason', 'formStillRequiresChoice', 'nudgeChoiceControl',
+  'formRefusedChoiceReason', 'formStillRequiresChoice',
   'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
   'fillCustomChoice',
@@ -274,23 +274,13 @@ test('the post-blur reread gets the same retry budget as the read it follows, an
     'the pre-blur poll read is still a bare await; the post-blur one now goes through settleVerified');
   assert.match(body, /await blurDrivenChoiceControl\(container, directControl\);\n\s+if \(await settleVerified\(\(\) => verifyChoiceInContainer\(/,
     'blur is followed immediately by a settleVerified-wrapped reread, not a fixed wait');
-  /* FOUR settles now, and they are the same two questions asked twice: the post-blur reread pinned
-   * just above and the form's own confirmation, and then both of them again after a nudge. What
-   * this test exists to protect is untouched - ONE blur, fired only after a verified read, followed
-   * immediately by a settleVerified reread rather than a fixed wait - and the count is pinned so a
-   * further poll loop cannot be added here without saying so.
-   *
-   * WHY THE SECOND PAIR IS CORRECT. A form that refuses a committed choice is repaired by nudging
-   * the control and asking again, and the repair is worth nothing unless the answer is re-read
-   * afterwards: the widget must still hold what she asked for AND the form must have stopped
-   * calling the field empty. Skipping either read after a nudge is how a repair turns into a
-   * second, quieter way of reporting an unfilled field as filled. */
-  assert.equal((body.match(/await settleVerified\(/g) || []).length, 4,
-    'the reread and the form confirmation, once before the nudge and once after it');
-  assert.match(body, /await settleVerified\(async \(\) => !\(await formStillRequiresChoice\(container\)\)\)/,
+  /* TWO settles, and they are two different questions asked in a fixed order: the post-blur reread
+   * pinned just above, and then the form's own confirmation that follows it. Everything this test
+   * exists to protect is untouched - ONE blur, fired only after a verified read, followed
+   * immediately by a settleVerified reread rather than a fixed wait - and the count is pinned at
+   * two so a third poll loop cannot be added here without saying so. */
+  assert.equal((body.match(/await settleVerified\(/g) || []).length, 2,
+    'the post-blur reread and the form confirmation are the only settles in this function');
+  assert.match(body, /if \(await settleVerified\(async \(\) => !\(await formStillRequiresChoice\(container\)\)\)\) \{/,
     'the form confirmation is a settle of its own, after the reread, never folded into it');
-  assert.match(body, /if \(!await nudgeChoiceControl\(container\)\) break;/,
-    'a nudge that cannot reach the control ends the repair rather than looping');
-  assert.equal((body.match(/pass < 2/g) || []).length, 1,
-    'the repair is capped, and the cap is visible in the function that pays for it');
 });
