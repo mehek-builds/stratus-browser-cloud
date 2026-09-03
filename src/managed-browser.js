@@ -14792,7 +14792,28 @@ let terminalFailureInput = null;
           // matching by label text. An id, a name, or Ashby's own data-field-path survives the
           // reload and gives that fallback something better to use.
           function durableSelectorOf(el, block) {
-            if (el.id && !/^[0-9]/.test(el.id)) return '#' + CSS.escape(el.id);
+            /* A DIGIT-LEADING ID IS A VALID ATTRIBUTE SELECTOR, AND IT IS THE ONLY DURABLE NAME
+             * GREENHOUSE'S DEMOGRAPHIC REACT-SELECTS HAVE. Measured on Hudson River Trading
+             * (job-boards.greenhouse.io, packet 4a79eec1, 2026-09-02): "What is your gender?",
+             * "Are you a veteran?", "Do you have a disability?" and "What is your race/ethnicity?"
+             * render as <input id="245|248|249|250" role="combobox">. '#248' is not CSS, which is
+             * why this used to decline them - and declining them shipped four required controls
+             * with no durable selector, so the backend filed missing_exact_options with
+             * portal_selector null and could not store a question row at all. '[id="248"]' is
+             * exact CSS, page.locator() accepts it, and the backend's durablePortalSelector and
+             * controlIdFromDiscoveredSelector both read it. Named ids keep the '#' form every
+             * existing consumer already parses. */
+            const idSelector = (id) => {
+              // Parity with quotedSelector's refusal further down: a line break inside a quoted
+              // attribute string is BADSTRING to the selector parser, and a selector that cannot
+              // parse is worse than none (the readiness scan and the backend both fall through
+              // to name / field-path / stable-id when there is no selector).
+              if (/[\r\n\f]/.test(id)) return null;
+              return /^[0-9]/.test(id)
+                ? '[id="' + id.replace(/["\\]/g, '\\$&') + '"]'
+                : '#' + CSS.escape(id);
+            };
+            if (el.id) return idSelector(el.id);
             const name = el.getAttribute && el.getAttribute('name');
             if (name) return '[name="' + name.replace(/["\\]/g, '\\$&') + '"]';
             const path = block && block.getAttribute && block.getAttribute('data-field-path');
@@ -14824,7 +14845,7 @@ let terminalFailureInput = null;
               const openerIsItsWidget = Boolean(widget && (widget === el || widget.contains(el)));
               const backingName = openerIsItsWidget && backing.getAttribute('name');
               if (backingName) return '[name="' + backingName.replace(/["\\]/g, '\\$&') + '"]';
-              if (openerIsItsWidget && backing.id && !/^[0-9]/.test(backing.id)) return '#' + CSS.escape(backing.id);
+              if (openerIsItsWidget && backing.id) return idSelector(backing.id);
             }
             return null;
           }
