@@ -1504,7 +1504,15 @@ test('a widget that renders its answer shorter than the row that set it is not a
   // The row hint is passed by the ONE helper every call site goes through, rather than spelled out
   // at each of them. That is not tidiness: the call site that spelled it out wrongly was the one
   // that did not verify at all, and test/choice-parity-replay.mjs measures what it let through.
-  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected, directControl = null\) => \{\n\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\([\s\S]*?directControl,[\s\S]*?\)\)/);
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected, directControl = null\) => \{\n(?:.*\n)*?\s+\/\/ React-controlled choices[\s\S]*?for \(let elapsed = 0; elapsed <= 500; elapsed \+= 50\) \{\n\s+if \(await verifyChoiceInContainer\([\s\S]*?directControl,[\s\S]*?\)\)/);
+  /* AND THE ONE THING THAT MAY PRECEDE THAT LOOP IS THE FLAG RESET, in this function and nowhere
+   * else. lastChoiceRejectedByForm decides which sentence four separate call sites speak, so a
+   * refusal that survived into the next control would put a form's refusal on a field no form ever
+   * refused. It is a per-call flag reset by its own function's entry; the per-action reset below
+   * clears lastChoiceRefusal and lastChoiceOffersEvidence and never sees this one. */
+  assert.match(SANDBOX_RUNNER, /const choiceLanded = async \(container, expected, directControl = null\) => \{\n(?:.*\n)*?\s+lastChoiceRejectedByForm = false;\n(?:.*\n)*?\s+for \(let elapsed = 0;/);
+  assert.equal((SANDBOX_RUNNER.match(/lastChoiceRejectedByForm = false;/g) || []).length, 2,
+    'declared once and reset once, and the reset is choiceLanded\'s own');
   // 2026-08-21: a code review of the Ashby fix (PR #98) found that choiceLanded's blurDrivenChoiceControl
   // fallback searched the whole container for the first node matching a fixed selector, in DOM order,
   // rather than asking the page what was actually focused - silently no-op'ing the whole fix on any

@@ -62,7 +62,7 @@ const providerDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
 
 import {
   fixture,
-  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL, HIGH_SCHOOL_LABEL
+  GPA_LABEL, SCALE_LABEL, VETERAN_LABEL, DISABILITY_LABEL, RACE_LABEL, GENDER_LABEL, DEADLINE_LABEL
 } from './fixtures/greenhouse/hrt-required-select.mjs';
 
 let server;
@@ -131,106 +131,127 @@ const formStateProbe = (id) => ({
   attribute: 'class',
   optional: true
 });
-const formStillRequires = (result, id) => result.extracted
-  .some((entry) => entry.selector.includes(`"${id}"`) && entry.value);
+const formStillRequires = (result, id) => Boolean(result.extracted
+  .find((entry) => entry.selector === formStateProbe(id).selector)?.value);
 
-const RACING = [
+/* WHAT EACH CONTROL ON THE FIXTURE IS FOR.
+ *
+ * All of them commit their value into the widget on the first press. They differ only in what it
+ * takes for the FORM to look at the field again:
+ *   - STALE: the form evaluated this field when it was empty and nothing has asked it to look
+ *     since. The measured Hudson River Trading state, and what the nudge is for.
+ *   - SOUND: the form re-evaluated on the commit itself. Gender and the office preference on that
+ *     same page. Nothing here may touch it.
+ *   - STUCK: the form never re-evaluates however the control is touched. An extra click is not a
+ *     cure for every lost commit, and this is what must still be reported honestly.
+ */
+const STALE_SINGLE = [
   ['question_67889507', '3.76 - 4.0', GPA_LABEL],
   ['question_67889508', '0.0 - 4.0', SCALE_LABEL],
-  ['248', 'No', VETERAN_LABEL],
-  ['249', 'No', DISABILITY_LABEL],
-  ['250', 'South Asian', RACE_LABEL]
+  ['248', 'No', VETERAN_LABEL]
 ];
+const STALE_CHIPS = ['250', 'South Asian', RACE_LABEL];
+const SOUND_CHIPS = ['245', 'Woman', GENDER_LABEL];
+const STUCK = ['249', 'No', DISABILITY_LABEL];
 
-test('a control that shows the answer while the form still requires it is not reported filled', async () => {
+const shownProbe = (id) => ({
+  type: 'extract', selector: `.select:has(input[id="${id}"]) .select__value-container`, optional: true
+});
+const nudgeProbe = (id) => ({
+  type: 'extract', selector: `.select-shell[data-question="${id}"]`, attribute: 'data-nudges', optional: true
+});
+const searchBoxProbe = (id) => ({ type: 'extract', selector: `[id="${id}"]`, attribute: 'value', optional: true });
+const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
+const shownFor = (result, id) => valueOf(result, `.select:has(input[id="${id}"]) .select__value-container`);
+const nudgesFor = (result, id) => Number(valueOf(result, `.select-shell[data-question="${id}"]`) || 0);
+
+test('the two chips controls tell the whole story: one committed on its own, one was repaired', async () => {
+  /* THE ORACLE. Gender and race are the same required multi select in the same block on the same
+   * form, and on the measured packet only gender stuck. A fix that cannot tell them apart is not
+   * the fix, and a fix that "works" by nudging everything is not it either. */
+  const [raceId, raceValue, raceLabel] = STALE_CHIPS;
+  const [genderId, genderValue, genderLabel] = SOUND_CHIPS;
   const result = await run([
-    ...RACING.map(([id, value, label]) => fillAction(id, value, label)),
-    ...RACING.map(([id]) => formStateProbe(id))
+    fillAction(genderId, genderValue, genderLabel),
+    fillAction(raceId, raceValue, raceLabel),
+    formStateProbe(genderId), formStateProbe(raceId),
+    shownProbe(genderId), shownProbe(raceId),
+    nudgeProbe(genderId), nudgeProbe(raceId)
   ]);
-  for (const [id, value, label] of RACING) {
-    // The page really is in the photographed state: the control is showing her answer and the
-    // form's own RequiredInput is still sitting under it.
-    assert.ok(formStillRequires(result, id),
-      `the fixture must leave "${label}" showing ${value} with the form still requiring it`);
-    // The production defect: all five went into filledFields, nothing went into skipped, and the
-    // packet then read as complete while the employer's form held nothing.
-    assert.ok(!result.filledFields.includes(label),
-      `"${label}" was reported filled while the form still marks it required`);
-    assert.ok(result.skipped.some((sentence) => sentence.startsWith(label + ':')
-      && /still reports the field as required and empty/.test(sentence)),
-      `"${label}" must be named in skipped, with the reason the form gave`);
-  }
+  // Both end accepted by the form and both are reported filled.
+  assert.equal(formStillRequires(result, genderId), false);
+  assert.equal(formStillRequires(result, raceId), false);
+  assert.deepEqual(result.filledFields, [genderLabel, raceLabel]);
+  assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), []);
+  // The one that committed on its own was never touched again; the one the form refused was.
+  assert.equal(nudgesFor(result, genderId), 0,
+    'a control the form already accepted must come out of the run untouched');
+  assert.ok(nudgesFor(result, raceId) > 0, 'the refused control must actually have been nudged');
+  // And the chip is still there. react-select removes an already-selected option when it is picked
+  // again on a multi, so a repair that worked by re-picking would have taken this answer off.
+  assert.match(shownFor(result, raceId) || '', new RegExp('^' + raceValue),
+    'the chip must survive the repair: nothing may have re-picked it');
+  assert.match(shownFor(result, genderId) || '', new RegExp('^' + genderValue));
 });
 
-test('the same required multi select that does commit is still reported filled', async () => {
-  // Gender and race are the same required multi select on the same form. A confirmation that
-  // refused both would be useless, and the photograph shows gender committing.
+test('single selects the form refused are repaired and reported filled', async () => {
   const result = await run([
-    fillAction('245', 'Woman', GENDER_LABEL),
-    formStateProbe('245')
+    ...STALE_SINGLE.map(([id, value, label]) => fillAction(id, value, label)),
+    ...STALE_SINGLE.flatMap(([id]) => [formStateProbe(id), shownProbe(id), searchBoxProbe(id)])
   ]);
-  assert.equal(formStillRequires(result, '245'), false,
-    'gender must genuinely commit, or this test proves nothing about the confirmation');
-  assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), [],
-    'a control that the form accepted may not be skipped');
-  assert.deepEqual(result.filledFields, [GENDER_LABEL]);
+  for (const [id, value, label] of STALE_SINGLE) {
+    assert.equal(formStillRequires(result, id), false,
+      `the form must have accepted "${label}" after the repair`);
+    assert.ok(result.filledFields.includes(label));
+    assert.equal(shownFor(result, id), value, 'and the control must still be showing her answer');
+    // The nudge writes into the widget's own search box and puts it back byte for byte.
+    assert.equal(valueOf(result, `[id="${id}"]`), '', 'the nudge may leave nothing behind');
+  }
+  assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), []);
+});
+
+test('a control the nudge cannot repair is reported honestly, not quietly filled', async () => {
+  const [id, value, label] = STUCK;
+  const result = await run([fillAction(id, value, label), formStateProbe(id), shownProbe(id)]);
+  // The photographed state: the control is showing her answer and the form still requires it.
+  assert.ok(formStillRequires(result, id));
+  assert.equal(shownFor(result, id), value);
+  // The production defect: this went into filledFields, nothing went into skipped, and the packet
+  // then read as complete while the employer's form held nothing.
+  assert.ok(!result.filledFields.includes(label));
+  assert.ok(result.skipped.some((sentence) => sentence.startsWith(label + ':')
+    && /still reports the field as required and empty/.test(sentence)),
+    'the applicant must be told, with the reason the form gave');
 });
 
 test('a control the form has no requirement on is judged exactly as it was before', async () => {
-  /* The confirmation may only speak when the FORM speaks. This control races its commit exactly
-   * like the five above, and it is optional, so it carries no RequiredInput and the form has no
-   * opinion to offer. Silence must mean "no opinion", never "not filled": the verdict here has to
-   * be the one the widget reading alone already produced. */
+  /* The confirmation may only speak when the FORM speaks. This control is stale exactly like the
+   * ones above, and it is optional, so it carries no RequiredInput and the form has no opinion to
+   * offer. Silence must mean "no opinion", never "not filled", and nothing may be nudged over it. */
   const result = await run([
     fillAction('question_67889515', '2 to 4 weeks', DEADLINE_LABEL),
-    formStateProbe('question_67889515')
+    formStateProbe('question_67889515'), nudgeProbe('question_67889515')
   ]);
   assert.equal(formStillRequires(result, 'question_67889515'), false);
+  assert.equal(nudgesFor(result, 'question_67889515'), 0);
   assert.deepEqual(result.skipped.filter((sentence) => !sentence.startsWith('extract:')), []);
   assert.deepEqual(result.filledFields, [DEADLINE_LABEL]);
 });
 
-test('a form that states the requirement only in words is believed too', async () => {
-  /* Not every portal expresses "required" through the browser. This control carries no native
-   * required node at all: the whole statement is aria-invalid plus the sentence the form renders
-   * into the node its aria-errormessage names, which is the message in the photograph. A
-   * confirmation that only read constraint validation would report this one filled. */
-  const result = await run([
-    fillAction('question_67889512', 'South America', HIGH_SCHOOL_LABEL),
-    { type: 'extract', selector: '[id="question_67889512-error"]', optional: true },
-    { type: 'extract', selector: '.select:has(input[id="question_67889512"]) .select__value-container', optional: true }
-  ]);
-  assert.equal(
-    result.extracted.find((entry) => entry.selector === '[id="question_67889512-error"]')?.value,
-    'This field is required.',
-    'the fixture must leave the form saying, in words, that this field is empty'
-  );
-  assert.equal(
-    result.extracted.find((entry) => entry.selector.includes('value-container'))?.value,
-    'South America',
-    'and the control must be showing the answer while it says so'
-  );
-  assert.ok(!result.filledFields.includes(HIGH_SCHOOL_LABEL));
-  assert.ok(result.skipped.some((sentence) => sentence.startsWith(HIGH_SCHOOL_LABEL + ':')
-    && /still reports the field as required and empty/.test(sentence)));
-});
-
-test('the run that lost five required answers does not present itself as a complete fill', async () => {
-  // What the backend reads. filled_fields is a statement about the employer's form, so a run in
-  // this state must not be able to produce one that contradicts its own required-field gate.
-  const result = await run(RACING.map(([id, value, label]) => fillAction(id, value, label)));
-  for (const [, , label] of RACING) {
-    const claimed = result.filledFields.includes(label);
-    const blocked = result.blockers.some((blocker) => blocker.startsWith('"' + label.replace(/[:?]$/, '')));
-    assert.ok(!(claimed && blocked),
-      `"${label}" was reported filled and blocked by the same run`);
-    // And the run has to HOLD over it, not merely stay quiet: a choice the form refused is marked,
-    // so the pre-submit gate blocks, and the sentence says which party refused it.
-    // The readiness scan reads the label off the page, which drops a trailing colon.
+test('no run reports a field both filled and blocked, and a refused one holds the run', async () => {
+  // What the backend reads. filled_fields is a statement about the employer's form, so a run must
+  // not be able to produce one that contradicts its own required-field gate.
+  const result = await run([STUCK, STALE_CHIPS, SOUND_CHIPS, ...STALE_SINGLE]
+    .map(([id, value, label]) => fillAction(id, value, label)));
+  const [, , stuckLabel] = STUCK;
+  assert.ok(!result.filledFields.includes(stuckLabel));
+  assert.ok(result.blockers.some((blocker) => blocker.includes(stuckLabel)
+    && /still reports it as required and empty, so the answer was not accepted/.test(blocker)),
+    'a control the repair could not reach must block the run, with the reason the form gave');
+  for (const [, , label] of [STALE_CHIPS, SOUND_CHIPS, ...STALE_SINGLE]) {
     const named = label.replace(/:$/, '');
-    assert.ok(result.blockers.some((blocker) => blocker.includes(named)
-      && /still reports it as required and empty, so the answer was not accepted/.test(blocker)),
-      `"${label}" must block the run with the reason the form gave`);
+    assert.ok(result.filledFields.includes(label), `"${label}" must be reported filled`);
+    assert.ok(!result.blockers.some((blocker) => blocker.includes(named)),
+      `"${label}" reached the form, so nothing may still block over it`);
   }
-  assert.equal(result.filledFields.length, 0);
 });
