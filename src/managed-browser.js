@@ -215,13 +215,31 @@ export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
  *
  * The proof instead requires the document to DEFINE at least one `query` operation and to define no
  * `mutation` and no `subscription`. An operation definition keyword is preceded by the start of the
- * document, whitespace or a closing brace, and followed by an optional name and then `(` or `{`, so
- * a field or argument that merely contains the word does not match. Two shapes stay blocked on
+ * document, whitespace, a comma (an insignificant token in GraphQL, so `},mutation B {` is two
+ * definitions) or a closing brace, and followed by an optional name and then `(` or `{`, so a field
+ * or argument that merely contains the word does not match. Two shapes stay blocked on
  * purpose: a shorthand anonymous document (`{ x }`, carrying no keyword to prove anything with) and
  * an Automatic Persisted Query body carrying only a hash and no document at all. Neither offers
  * evidence, and this is a boundary where absence of evidence must read as absence of permission.
  * Both fail closed and name their operation in the log. */
-const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s}])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+const GRAPHQL_OPERATION_DEFINITION = '(?:^|[\\s},])(query|mutation|subscription)\\s*(?:[A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+/* The same grammar with the operation NAME captured, for the one rule that must pin it. Its tail
+ * is strict: it matches only a definition that runs straight from its optional name into its
+ * variable definitions or its selection set, which is the only header a selection set can be read
+ * from. Locating a header is all it is for; counting definitions with it is the round-3 defect
+ * below. */
+const GRAPHQL_OPERATION_DEFINITION_NAMED = '(?:^|[\\s},])(query|mutation|subscription)\\s*([A-Za-z_][A-Za-z0-9_]*)?\\s*[({]';
+/* The same grammar with a tail that also admits a directive on the operation, and that consumes no
+ * tail character, for COUNTING definitions.
+ *
+ * ROUND 3, DEFECT A. The strict tail is blind to an operation definition carrying a directive and
+ * no variable definitions: `mutation Evil @cached { submitSingleApplicationFormAction ... }` and
+ * the anonymous `mutation @cached { ... }` match it ZERO times. A document carrying one of those
+ * beside a real draft operation therefore counted exactly ONE definition, satisfied the
+ * single-definition rule, and was admitted with a second, entirely unread operation in it. A
+ * definition carrying a directive is still a definition, so it is counted here and the existing
+ * single-definition rule refuses the document. */
+const GRAPHQL_OPERATION_DEFINITION_COUNTED = GRAPHQL_OPERATION_DEFINITION_NAMED.replace('[({]', '(?=[({@])');
 
 export const isGraphqlReadDocument = (document) => {
   if (typeof document !== 'string' || !document) return false;
@@ -230,6 +248,282 @@ export const isGraphqlReadDocument = (document) => {
     defined.add(match[1]);
   }
   return defined.has('query') && !defined.has('mutation') && !defined.has('subscription');
+};
+
+/* ASHBY KEEPS THE APPLICATION'S VALUES ON THE SERVER, NOT IN THE SUBMIT.
+ *
+ * Read from Ashby's own public board bundle (cdn.ashbyprd.com/frontend_non_user, 2026-09-01): the
+ * final submit, ApiSubmitSingleApplicationFormAction, carries organizationHostedJobsPageName,
+ * jobPostingId, formRenderIdentifier, formDefinitionIdentifier, actionIdentifier, recaptchaToken,
+ * sourceAttributionCode, viewedAutomatedProcessingLegalNoticeRuleId, deviceFingerprint and
+ * applicationRequestId, and not one field value. Every value typed into the form is persisted as it
+ * is typed by ApiSetFormValue (path, value), a file by ApiSetFormValueToFile (path, fileHandle),
+ * both keyed on the same formRenderIdentifier the submit names. Measured live on the Cartesia fill
+ * the same day: the containment killed the run at the first field on "POST
+ * jobs.ashbyhq.com/api/non-user-graphql op=ApiSetFormValue", and had it merely spared the run and
+ * aborted the write, the submit would have filed a blank application under her name, which is the
+ * exact harm the fatality exists to prevent, arriving from the other side.
+ *
+ * So these four are ADMITTED during the fill, under the same discipline as the #129 upload window,
+ * and pinned to the DOCUMENT Ashby ships rather than to the name it labels it with, because a
+ * GraphQL server executes the selection set and the operation name is only a client's label for
+ * it. The pin, each clause fail-closed:
+ *   - only on Ashby's public board host (jobs.ashbyhq.com, or the application page's own host),
+ *     with no port and no userinfo, only its one GraphQL path, only xhr/fetch POST over https;
+ *   - only a body whose operationName is one of the four, whose query defines exactly one
+ *     operation, a mutation of that name with no directive on it, and whose top-level selection
+ *     set is exactly one field carrying exactly the alias Ashby prints (none for setFormValue and
+ *     setFormValueToFile, formRender for the two file operations) and exactly the root field that
+ *     operation exists for; no second root field, no fragment spread or inline fragment at the
+ *     root. The four fragment definitions Ashby prints after the operation are not operations and
+ *     do not count;
+ *   - only when variables, if present, is a plain object naming neither actionIdentifier nor
+ *     recaptchaToken at any depth (the submit's own variables, which no draft carries), and only a
+ *     body with no extensions key, because a persisted-query envelope lets the server choose the
+ *     document by hash, which this predicate cannot read;
+ *   - only in locked mode and only while the packet's own value actions have armed it (see
+ *     draftWritesArmed in the containment): never during initial navigation, never after the
+ *     final action.
+ * The read allowance proves its documents from the operation keywords alone; this one reads the
+ * selection set, so it first blanks string contents and comments (graphqlLexicalSkeleton) and only
+ * then counts keywords and walks brackets. The final submit still requires its exact literal
+ * authority; a document admitted here selects no root field that can file. */
+export const ASHBY_PUBLIC_BOARD_HOST = 'jobs.ashbyhq.com';
+export const ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS = Object.freeze({
+  ApiSetFormValue: Object.freeze({ alias: null, field: 'setFormValue' }),
+  ApiSetFormValueToFile: Object.freeze({ alias: null, field: 'setFormValueToFile' }),
+  ApiAddManyFilesToFormValue: Object.freeze({ alias: 'formRender', field: 'addManyFilesToFormValue' }),
+  ApiRemoveFileFromFormValue: Object.freeze({ alias: 'formRender', field: 'removeFileFromFormValue' })
+});
+export const ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS = Object.freeze(
+  Object.keys(ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS)
+);
+
+/* The document with the contents of every string and every comment replaced by spaces, at the same
+ * length, so a keyword or a bracket inside a string value or a # comment cannot be read as grammar.
+ * Null for anything that is not a non-empty string, or that leaves a string unterminated. */
+export const graphqlLexicalSkeleton = (document) => {
+  if (typeof document !== 'string' || !document) return null;
+  let out = '';
+  let i = 0;
+  while (i < document.length) {
+    const ch = document[i];
+    if (ch === '#') {
+      while (i < document.length && document[i] !== '\n' && document[i] !== '\r') {
+        out += ' ';
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      const block = document.startsWith('"""', i);
+      const quote = block ? '"""' : '"';
+      const escape = block ? '\\"""' : '\\';
+      out += quote;
+      i += quote.length;
+      let closed = false;
+      while (i < document.length) {
+        if (document.startsWith(escape, i)) {
+          const width = Math.min(escape.length + (block ? 0 : 1), document.length - i);
+          out += ' '.repeat(width);
+          i += width;
+          continue;
+        }
+        if (document.startsWith(quote, i)) {
+          out += quote;
+          i += quote.length;
+          closed = true;
+          break;
+        }
+        if (!block && (document[i] === '\n' || document[i] === '\r')) break;
+        out += ' ';
+        i += 1;
+      }
+      if (!closed) return null;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+};
+
+/* Every operation definition in the skeleton, as { keyword, name, index }, or null when one of them
+ * sits below the document's top level.
+ *
+ * A definition belongs to the DOCUMENT. A keyword found inside a selection set, an argument list, a
+ * list literal or a variable definition's default value is not one, and Ashby's own six documents
+ * each carry exactly one header, at depth 0. Such a document is refused outright rather than read
+ * past, because a nested header is the lever defect B pulled: located by regex alone it was trusted
+ * as the operation's own, and the selection set read below it belonged to the decoy while the
+ * operation's real root selection, which can be the submit, was never read at all. */
+export const graphqlTopLevelOperationDefinitions = (skeleton) => {
+  if (typeof skeleton !== 'string') return null;
+  const definitions = [];
+  let depth = 0;
+  let cursor = 0;
+  for (const match of skeleton.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION_COUNTED, 'g'))) {
+    /* The prefix the grammar consumes is one of start-of-document, whitespace, a comma or a closing
+     * brace, never a letter, so the keyword begins at the first index of match[1] in match[0]. The
+     * walk below covers that closing brace, which is what keeps a comma-joined or brace-joined
+     * second definition at depth 0. */
+    const index = match.index + match[0].indexOf(match[1]);
+    for (; cursor < index; cursor += 1) {
+      const ch = skeleton[cursor];
+      if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+      else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    }
+    if (depth !== 0) return null;
+    definitions.push({ keyword: match[1], name: match[2], index });
+  }
+  return definitions;
+};
+
+export const isGraphqlSingleMutationNamed = (document, name) => {
+  const skeleton = graphqlLexicalSkeleton(document);
+  if (skeleton === null || typeof name !== 'string' || !name) return false;
+  const definitions = graphqlTopLevelOperationDefinitions(skeleton);
+  if (definitions === null || definitions.length !== 1) return false;
+  return definitions[0].keyword === 'mutation' && definitions[0].name === name;
+};
+
+/* The one root selection of the single mutation named `name`, as { alias, field }, or null when the
+ * document is not that: a directive on the operation, more than one root selection, a fragment
+ * spread or an inline fragment at the root, an empty selection set, or a bracket that never
+ * closes. */
+export const graphqlSingleMutationRootSelection = (document, name) => {
+  if (!isGraphqlSingleMutationNamed(document, name)) return null;
+  const skeleton = graphqlLexicalSkeleton(document);
+  const header = skeleton.match(new RegExp(GRAPHQL_OPERATION_DEFINITION_NAMED));
+  /* With a directive-carrying definition now counted, a document whose one definition carries a
+   * directive on the operation reaches here and finds no strict header at all. It is refused for
+   * the same reason a directive after the variable definitions is: it can change what executes. */
+  if (!header) return null;
+  /* ROUND 3, DEFECT B. The header is trusted only once it is proved to sit at the top level of the
+   * document. Located by regex alone it can be one nested inside an argument list, a list literal,
+   * a variable default or another selection set, and then the selection set read below belongs to
+   * that decoy while the real root selection, which can be the submit, is never read at all. The
+   * counter above already refuses a document carrying a nested header, so this is the second and
+   * independent assertion: the header this function reads is never trusted on the counter alone. */
+  const keywordIndex = header.index + header[0].indexOf(header[1]);
+  let headerDepth = 0;
+  for (let i = 0; i < keywordIndex; i += 1) {
+    const ch = skeleton[i];
+    if (ch === '(' || ch === '[' || ch === '{') headerDepth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') headerDepth -= 1;
+  }
+  if (headerDepth !== 0) return null;
+  const closingBracket = (from) => {
+    let depth = 0;
+    for (let i = from; i < skeleton.length; i += 1) {
+      const ch = skeleton[i];
+      if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+      else if (ch === ')' || ch === ']' || ch === '}') {
+        depth -= 1;
+        if (depth === 0) return i;
+        if (depth < 0) return -1;
+      }
+    }
+    return -1;
+  };
+  let open = header.index + header[0].length - 1;
+  if (skeleton[open] === '(') {
+    const close = closingBracket(open);
+    if (close < 0) return null;
+    open = close + 1;
+    while (open < skeleton.length && /[\s,]/.test(skeleton[open])) open += 1;
+    /* Anything but the selection set after the variable definitions is a directive on the
+     * operation, and a directive can change what executes. */
+    if (skeleton[open] !== '{') return null;
+  }
+  const close = closingBracket(open);
+  if (close < 0) return null;
+  const tokens = [];
+  let token = '';
+  let depth = 0;
+  const flush = () => {
+    if (token) tokens.push(token);
+    token = '';
+  };
+  for (let i = open; i <= close; i += 1) {
+    const ch = skeleton[i];
+    if (ch === '(' || ch === '[' || ch === '{') {
+      flush();
+      depth += 1;
+      continue;
+    }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      flush();
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 1) continue;
+    if (/[\s,]/.test(ch)) {
+      flush();
+      continue;
+    }
+    if (ch === ':') {
+      flush();
+      tokens.push(':');
+      continue;
+    }
+    token += ch;
+  }
+  const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  if (tokens.length === 1 && NAME.test(tokens[0])) return { alias: null, field: tokens[0] };
+  if (tokens.length === 3 && tokens[1] === ':' && NAME.test(tokens[0]) && NAME.test(tokens[2])) {
+    return { alias: tokens[0], field: tokens[2] };
+  }
+  return null;
+};
+
+export const isAshbyPublicBoardDraftWrite = ({
+  applicationSite,
+  applicationHostname,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password || parsed.port) return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  const ownHost = typeof applicationHostname === 'string' && applicationHostname !== ''
+    && parsed.hostname === applicationHostname;
+  if (parsed.hostname !== ASHBY_PUBLIC_BOARD_HOST && !ownHost) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (Object.prototype.hasOwnProperty.call(body, 'extensions')) return false;
+  if (typeof body.operationName !== 'string'
+    || !Object.prototype.hasOwnProperty.call(ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS, body.operationName)) {
+    return false;
+  }
+  const expected = ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS[body.operationName];
+  const root = graphqlSingleMutationRootSelection(body.query, body.operationName);
+  if (!root || root.alias !== expected.alias || root.field !== expected.field) return false;
+  if (Object.prototype.hasOwnProperty.call(body, 'variables')) {
+    const variables = body.variables;
+    if (!variables || typeof variables !== 'object' || Array.isArray(variables)) return false;
+    const pending = [variables];
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (!Array.isArray(node) && (Object.prototype.hasOwnProperty.call(node, 'actionIdentifier')
+        || Object.prototype.hasOwnProperty.call(node, 'recaptchaToken'))) {
+        return false;
+      }
+      for (const value of Object.values(node)) {
+        if (value && typeof value === 'object') pending.push(value);
+      }
+    }
+  }
+  return true;
 };
 
 export const isAshbyPublicBoardRead = ({
@@ -1737,6 +2031,7 @@ let terminalFailureInput = null;
         blockedReason: null,
         blockedThirdPartyCount: 0,
         uploadActionArmed: false,
+        draftWritesArmed: false,
         handler: null
       };
       /* The last two host labels of the page this run is authorized to fill. Everything the
@@ -1758,6 +2053,16 @@ let terminalFailureInput = null;
       const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
       const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
+      const ASHBY_PUBLIC_BOARD_HOST = ${JSON.stringify(ASHBY_PUBLIC_BOARD_HOST)};
+      const ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_DRAFT_ROOT_FIELDS)};
+      const ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_DRAFT_OPERATIONS)};
+      const GRAPHQL_OPERATION_DEFINITION_NAMED = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION_NAMED)};
+      const GRAPHQL_OPERATION_DEFINITION_COUNTED = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION_COUNTED)};
+      const graphqlLexicalSkeleton = ${graphqlLexicalSkeleton.toString()};
+      const graphqlTopLevelOperationDefinitions = ${graphqlTopLevelOperationDefinitions.toString()};
+      const isGraphqlSingleMutationNamed = ${isGraphqlSingleMutationNamed.toString()};
+      const graphqlSingleMutationRootSelection = ${graphqlSingleMutationRootSelection.toString()};
+      const isAshbyPublicBoardDraftWrite = ${isAshbyPublicBoardDraftWrite.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
@@ -1773,6 +2078,11 @@ let terminalFailureInput = null;
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
         try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
+      })();
+      /* The exact host of the page this run is authorized to fill, for the one allowance that pins
+       * a host rather than a suffix. See isAshbyPublicBoardDraftWrite. */
+      const applicationTransportHostname = (() => {
+        try { return new URL(input.url).hostname; } catch { return null; }
       })();
       /* Whether a blocked transport could have been the employer's own. An unparseable or
        * schemeless target counts as employer-bound, fail-closed. */
@@ -1794,6 +2104,15 @@ let terminalFailureInput = null;
        * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
       const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
         applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
+      /* The draft-value writes Ashby's own submit depends on. See isAshbyPublicBoardDraftWrite. */
+      const ashbyPublicBoardDraftWrite = (request) => isAshbyPublicBoardDraftWrite({
+        applicationSite: applicationTransportSite,
+        applicationHostname: applicationTransportHostname,
         method: request.method(),
         resourceType: request.resourceType(),
         url: request.url(),
@@ -1863,6 +2182,15 @@ let terminalFailureInput = null;
           && (method === 'POST' || method === 'PUT')
           && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
           && (employerBoundTransport(request) || boardResumeStorageUpload(request))) {
+          return route.fallback();
+        }
+        /* ASHBY'S DRAFT WRITES CARRY THE VALUES THE SUBMIT WILL FILE. Admitted only in locked mode
+         * (the branches above already handled activation and initial navigation), only while the
+         * packet's own actions have armed it, only for the four pinned draft documents, and never
+         * for the submit action, which stays behind its exact literal authority. See
+         * isAshbyPublicBoardDraftWrite and draftWritesArmed. */
+        if (containment.mode === 'locked' && containment.draftWritesArmed
+          && ashbyPublicBoardDraftWrite(request)) {
           return route.fallback();
         }
         if (transportTypes.has(request.resourceType())) {
@@ -4110,6 +4438,7 @@ let terminalFailureInput = null;
         );
       }
       managedMutationTransportContainment.allowedNavigationUrl = null;
+      managedMutationTransportContainment.draftWritesArmed = false;
       managedMutationTransportContainment.mode = 'activation';
     };
     const prepareManagedReadOnlyClick = async (runInput, action, matches) => {
@@ -14124,6 +14453,18 @@ let terminalFailureInput = null;
        } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
          managedMutationTransportContainment.uploadActionArmed = false;
        }
+       /* ASHBY'S DRAFT WRITES ARM ON THE PACKET'S FIRST NON-FINAL MUTATION ACTION and stay armed
+        * until the final action takes its authority, because a value write can land on the blur a
+        * later action causes, not only on the keystroke that typed it. Before the first such action
+        * nothing has been typed and no draft write is owed; from the final action on, every write is
+        * the submit's or nobody's: authorizeManagedFinalTransport disarms and leaves 'locked', and
+        * the arming below cannot re-open outside 'locked', so no action after the press can rearm.
+        * See isAshbyPublicBoardDraftWrite. */
+       if (managedMutationTransportContainment.mode === 'locked'
+         && !hasExactFinalActionAuthority(currentInput, action)
+         && !['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
+         managedMutationTransportContainment.draftWritesArmed = true;
+       }
      }
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
@@ -16675,6 +17016,7 @@ let terminalFailureInput = null;
     }
     if (managedMutationTransportContainment?.mode === 'activation') {
       managedMutationTransportContainment.mode = 'locked';
+      managedMutationTransportContainment.draftWritesArmed = false;
       managedMutationTransportContainment.allowedNavigationUrl = null;
     }
     const observeForResult = async (reader, fallback) => {
