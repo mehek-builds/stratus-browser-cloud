@@ -379,6 +379,8 @@ test('a page that is only "Thank you" with no form is a confirmation, and the li
 test('a page that is only "Application received" confirms with that line', async () => {
   const outcome = await read('<p>Application received</p><p>We will be in touch.</p>');
   assert.equal(outcome.state, 'confirmed');
+  // The fuller phrase arm already owns this line (evidence 'body'); the bare arm is its backstop.
+  assert.ok(['body', 'body_bare_receipt'].includes(outcome.evidence), outcome.evidence);
   assert.match(outcome.message, /Application received/);
 });
 
@@ -397,4 +399,39 @@ test('a long page with a thank-you footer and no form is NOT a bare receipt', as
   const filler = '<p>' + 'Join our team and build the future of logistics with us. '.repeat(20) + '</p>';
   const outcome = await read(`${filler}<footer>Thank you for visiting</footer>`);
   assert.equal(outcome.state, 'unknown');
+});
+
+/* THE REFUTATION OF THE FIRST CUT, pinned. Every one of these wears a thank-you and none is a
+ * receipt; each must stay unknown, and the asymmetry in this file's header is the reason. */
+for (const [name, html] of [
+  ['a closed posting', '<p>Thanks for your interest. This position is no longer accepting applications.</p>'],
+  ['not hiring', '<p>Thank you, but we are not currently hiring.</p>'],
+  ['an email-verification interstitial', '<p>Thanks! Please check your email to confirm your address.</p>'],
+  ['a timed-out session', '<p>Thank you. Your session has timed out.</p>'],
+  ['a not-found page', '<h1>Page not found</h1><p>Thanks for visiting.</p>'],
+  ['an assessment gate', '<p>Thank you. Please complete the assessment to finish your application</p>'],
+  ['a talent-network join', '<p>Thanks, we\'ll be in touch about our talent network</p>'],
+  ['a saved draft', '<p>Thanks! Your application has been saved as a draft.</p><button>Continue</button>'],
+  ['a wizard step with a Next button', '<p>Thanks! Step 1 of 3 complete.</p><button>Next</button>'],
+  ['a filled position', '<p>Thank you for your interest, but this position has been filled.</p>'],
+  ['a withdrawn application', '<p>Your application has been withdrawn. Thank you.</p>'],
+  ['a cookie-consent screen', '<p>We use cookies. Thanks for understanding.</p><button>Accept</button><button>Reject</button>'],
+  ['a submitting spinner', '<p>Thanks, submitting your application...</p>'],
+  ['a processing transient', '<p>Thank you! Processing...</p>'],
+  ['a form living in an iframe', '<p>Join us. Thanks for your interest!</p><iframe src="about:blank" style="width:300px;height:200px"></iframe>'],
+  ['a declined application', '<p>Thank you. Your application has been declined.</p>'],
+]) {
+  test(`${name} that says thank you is NOT a bare receipt`, async () => {
+    const outcome = await read(html);
+    assert.notEqual(outcome.state, 'confirmed', name);
+  });
+}
+
+test('the genuine bare receipts still confirm', async () => {
+  for (const html of ['<h1>Thank you</h1>', '<p>Thanks! We\'ll be in touch.</p>', '<p>Thanks for applying</p>',
+    '<p>Thank you for your application</p>', '<p>Thank you! Your application has been sent.</p>']) {
+    const outcome = await read(html);
+    assert.equal(outcome.state, 'confirmed', html);
+    assert.ok(['body', 'body_bare_receipt'].includes(outcome.evidence), `${html}: ${outcome.evidence}`);
+  }
 });

@@ -9006,10 +9006,25 @@ let terminalFailureInput = null;
        * error page ("Something went wrong. Thank you for your patience. Try again."), a session
        * wall, a validation notice or a challenge are all read as unknown, exactly as before. The
        * message is the WHOLE line, so the applicant and the ledger see what the page said. */
-      const BARE_RECEIPT_CUE = /\b(?:thank you|thanks|application (?:received|complete|completed|submitted|sent)|received your application|successfully (?:submitted|applied|sent)|we(?:'ll| will) be in touch|has been submitted|been received)\b/i;
-      const BARE_RECEIPT_DOUBT = /\b(?:error|went wrong|try again|problem|fail(?:ed|ure)?|unable|could ?n[o']?t|not (?:be )?(?:submitted|sent|received|processed)|expired|sign in|log in|invalid|required|captcha|robot|verify (?:you|that you|your))\b/i;
-      if (!formStillPresent && body.length > 0 && body.length <= 400
-        && BARE_RECEIPT_CUE.test(body) && !BARE_RECEIPT_DOUBT.test(body)) {
+      /* Tier 1: the page IS the receipt line and nothing else. Tier 2: an application-anchored
+       * receipt phrase - a bare "thanks" never qualifies here, because the adversarial pass that
+       * refuted the first cut confirmed 22 of 25 short non-receipt pages on the word alone ("Thank
+       * you, but we are not currently hiring", "Thanks! Please check your email to confirm your
+       * address", "Thank you. Your session has timed out", "Page not found. Thanks for visiting"). */
+      const BARE_RECEIPT_ONLY = /^(?:success[!.]?\s*)?(?:thank you|thanks)(?:\s+for\s+(?:applying|your\s+application|submitting))?[!.]?(?:\s+we(?:'ll| will) be in touch(?: (?:soon|shortly))?[!.]?)?$/i;
+      const BARE_RECEIPT_CUE = /\b(?:application (?:has been |was )?(?:successfully )?(?:received|complete|completed|submitted|sent)|received your application|successfully (?:submitted|applied|sent)|thank you for your application|thanks for your application)\b/i;
+      /* Every doubt cue the refutation executed. Closures, gates, interstitials, wizard steps,
+       * transients and consent screens all wear a thank-you; none is a receipt. */
+      const BARE_RECEIPT_DOUBT = /\b(?:error|went wrong|try again|problem|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|not (?:be )?(?:submitted|sent|received|processed|accepted|eligible|found|available)|no longer|closed|unfortunately|declined|denied|forbidden|expired|timed? out|sign(?:ed)? in|log(?:ged)? in|invalid|required|captcha|robot|verify|confirm your|check your (?:email|inbox)|complete (?:the|your)|finish(?:ing)? your|next step|continue|assessment|questionnaire|draft|saved|already applied|redirect(?:ed|ing)?|partner|talent (?:network|community|pool)|newsletter|subscribe|cookies?|page not found|404|maintenance|too many|please wait|one moment|submitting|processing|loading|uploading|not currently|not hiring|do(?:es)? not meet|minimum requirements|apply (?:through|via|on)|withdrawn|filled)\b/i;
+      /* A wizard step is not a receipt: any visible field, an iframe (a form the main frame cannot
+       * see), or a Next/Continue/Upload-shaped control is the page saying there is more to do. */
+      const NEXT_SHAPED_BUTTON = /^(?:next|continue|proceed|start|begin|confirm|upload(?:\s+\w+)?)$/i;
+      const bareArmCounterWitness = visibleOne('input:not([type=hidden]):not([type=search]), select, textarea, iframe')
+        || [...document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a')]
+          .some((node) => isVisible(node) && NEXT_SHAPED_BUTTON.test(clean(node.innerText || node.value || '')));
+      if (!formStillPresent && !bareArmCounterWitness && body.length > 0 && body.length <= 400
+        && !BARE_RECEIPT_DOUBT.test(body)
+        && (BARE_RECEIPT_ONLY.test(body) || BARE_RECEIPT_CUE.test(body))) {
         return { state: 'confirmed', source: 'page_text', evidence: 'body_bare_receipt', message: body, formStillPresent };
       }
       return { state: 'unknown', source: 'unmatched_page_text', evidence: location.href, message: body.slice(0, 600) || null, formStillPresent };
@@ -9311,6 +9326,14 @@ let terminalFailureInput = null;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
         const outcome = await readSubmitOutcome();
+        /* THE BARE-RECEIPT ARM IS THE ONE ARM THAT CAN FIRE ON A TRANSIENT - a "Thanks, submitting…"
+         * toast, a thank-you shown while the form is torn down 50 ms before an error renders - so
+         * its verdict has to hold across a second read half a second later, byte for byte. */
+        if (outcome.state === 'confirmed' && outcome.evidence === 'body_bare_receipt') {
+          await page.waitForTimeout(500).catch(() => undefined);
+          const again = await readSubmitOutcome();
+          if (again.state !== 'confirmed' || again.evidence !== 'body_bare_receipt' || again.message !== outcome.message) continue;
+        }
         if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
         await page.waitForTimeout(50).catch(() => undefined);
       }
