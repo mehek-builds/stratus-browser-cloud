@@ -116,8 +116,10 @@ test('the containment consults the allowance in both modes, and nowhere else', (
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
   // The form has to render before discovery can enumerate anything, so initial_navigation counts.
   assert.match(source, /return readOnlyMethod \|\| ashbyPublicBoardRead\(request\)\s*\n\s*\? route\.fallback\(\)/);
-  // And the locked-mode data-fetch branch, which is where a fill-time autocomplete lands.
-  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\)\) \{/);
+  // And the locked-mode data-fetch branch, which is where a fill-time autocomplete lands. The
+  // field-value write allowance joined this same branch on 2026-09-03, and only this one: see
+  // ashby-form-value-write.test.js, which holds that predicate to its own single call site.
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{/);
   // The violation assert is untouched: an employer-bound block that is not this read is still fatal.
   assert.match(source, /A non-submit action attempted employer transport without exact final authority/);
   // "and nowhere else" has to be measured, or a third call site could widen this silently.

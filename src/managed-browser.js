@@ -254,6 +254,134 @@ export const isAshbyPublicBoardRead = ({
   return isGraphqlReadDocument(body.query);
 };
 
+/* AN ASHBY FIELD WRITE IS NOT A FILING, and refusing it took the whole family down.
+ *
+ * Measured twice in a row on 2026-09-03, pressing "Approve packet and fill form" on the Exa
+ * "Software Engineer, Intern" packet (backend packet id begins 73768339, ats ashby). The run died
+ * before it could take even its preview screenshot, with
+ *
+ *   A non-submit action attempted employer transport without exact final authority
+ *   (fetch transport: POST https://jobs.ashbyhq.com/api/non-user-graphql op=ApiSetFormValue)
+ *
+ * Deterministic, not transient: the retry produced the identical sentence. At least six Ashby
+ * packets on this account (Exa, Notion twice, Cartesia, OpenAI, deepgram) sit behind it, and ashby
+ * is one of the seven statically autonomous families.
+ *
+ * WHY IT HAPPENS. Ashby does not post the form at submit time. It writes each field value to its
+ * own GraphQL endpoint AS THE FIELD IS FILLED, one ApiSetFormValue per value, on the same host and
+ * the same path its reads already use. On this one family the ordinary fill phase therefore
+ * performs employer transport, so the containment counted the first typed value as a violation and
+ * the very next assertManagedMutationTransportClean killed the run - and one of those runs after
+ * every mutation action as well as before the next, so the run never got far enough to be
+ * photographed.
+ *
+ * WHAT THAT ONE SENTENCE ALREADY PROVES ABOUT THE REQUEST, which is more than it looks.
+ * ashbyPublicBoardOperationName reads the operation out of the POST BODY, never out of the ?op=
+ * query label, because #127 strips query strings from the violation sentence. For it to have
+ * printed op=ApiSetFormValue on 2026-09-03 the body had to parse as JSON, be a non-array object,
+ * and carry operationName exactly "ApiSetFormValue" - and the host and path had to be this exact
+ * endpoint. Envelope, host, path and name are therefore measured, and the pin below will match.
+ * The single unmeasured input this allowance rests on is the document in body.query, which is why
+ * a refusal on that one proof names itself in the log rather than reading like this regression.
+ *
+ * THIS IS A REGRESSION, NOT A NEW GAP. The same account has a completed Ashby submission from
+ * before the containment existed: packet 13bccb2d-d726-4c47-80bc-e8090ae1463e (Skydio, Ashby)
+ * filled name, email, phone and resume and pressed Send, measured 2026-08-09 and written up in the
+ * backend's EEO resolver. The containment landed three weeks later, 2026-08-31 (81d6fc1, "Contain
+ * generic mutation transport"), and 2026-09-01 then spent five commits giving back the legitimate
+ * fills it had taken: read-only data fetches (c5e05a3), third-party blocks no longer run-fatal
+ * (9d8cbe9), Ashby's POST reads (3c4ea81), the upload window (a51d906), the sandbox injection
+ * (b816a61). Ashby's field writes are the sixth, and they surfaced on the first Ashby fill
+ * attempted since, because 3c4ea81 only ever got the form to RENDER.
+ *
+ * AND IT FIXES THE SEND, NOT ONLY THE FILL, because this is the only containment an Ashby run ever
+ * meets. The v4 pre-submit containment is stricter still - locked mode there aborts EVERY request,
+ * reads included, and any abort raises submit_transport_unpinned - and an Ashby fill would die
+ * against it too. It never gets the chance: v4 is armed only for a confirmAndSubmit action carrying
+ * chooserPolicy version 4, and the backend's managedApplicationUsesAtomicSubmitV4 grants that
+ * version only on Workable's native apply.workable.com route, returning false for every other
+ * family. So an Ashby fill run and an Ashby send run both land on the containment below.
+ *
+ * WHY THIS IS A SECOND PREDICATE AND NOT A WIDER ENTRY IN THE READ LIST ABOVE. The two allowances
+ * need different gates, so they must not share a constant. The read allowance is consulted in both
+ * initial_navigation and locked mode, because the form cannot render without it. This one is
+ * consulted only in locked mode, the phase in which the run is executing the reviewed packet's own
+ * actions. Before that the page is still loading and nothing Litos does needs to write a value, so
+ * a write in that window is the page moving on its own and stays fatal. Widening
+ * ASHBY_PUBLIC_BOARD_READ_OPERATIONS would have handed the write both gates, and would not have
+ * worked anyway, because isGraphqlReadDocument refuses a mutation document by construction.
+ *
+ * WHY THIS CANNOT LET AN UNAUTHORIZED SUBMIT THROUGH. The allowance is an allowlist of ONE exact
+ * operation name, and it is not the submit operation. Ashby's submit operation is not named in this
+ * file and is not known to it, which is the whole point: everything that is not literally
+ * ApiSetFormValue is blocked and run-fatal exactly as it was yesterday, so a submit cannot be
+ * admitted by omission, by a rename, or by a new operation Ashby ships next week. On top of the
+ * name the DOCUMENT has to prove itself, more strictly than a read has to: exactly one operation
+ * definition, that definition a mutation, and its name equal to the operationName the body claims.
+ * A GraphQL server that honours operationName runs the operation with that name; a server that
+ * ignores operationName and runs the document's sole operation runs that same one. Both readings
+ * therefore execute ApiSetFormValue, and a body that lies about its own contents cannot steer
+ * either onto a submit. The final gate is untouched: authorizeManagedFinalTransport still demands
+ * literal allowSubmit plus exactFinalActionAuthority, and still asserts the containment is clean
+ * before it opens, which it now is, because an admitted field write is never counted as a block.
+ *
+ * A held field value is not an application, in the same sense the upload window already accepted
+ * for the resume bytes ("Attaching a document is not filing an application", UPLOAD-ALLOWANCE
+ * decision record, 2026-09-01): Ashby carries a separate submit control, and this operation sets
+ * one value at a time. That is a reading of the operation's name and of the form's shape, not a
+ * live measurement of Ashby's server, because this project never opens an employer portal to find
+ * out.
+ *
+ * THE TRADEOFF THAT IS LEFT, stated because the upload window's was put to Mehek explicitly and
+ * this one has not been. On a fill-only run - the dashboard's "fill form" with no send - Ashby now
+ * receives every value the packet writes, as it is written. No arming window changes that: a
+ * narrower one (armed per fill action, the way uploadActionArmed is) would admit exactly the same
+ * values, because writing them IS the fill. The choice is between Ashby receiving the values and
+ * Ashby not being fillable, and the containment's job is to stop an application being FILED
+ * without authority, which the pinned operation still cannot do. */
+export const ASHBY_FORM_VALUE_WRITE_OPERATIONS = Object.freeze(['ApiSetFormValue']);
+
+/* The read regex's admission rule with the operation's NAME captured, so a document can be held to
+ * the name its body claims. Anonymous definitions deliberately do not match this one: they are
+ * caught by the count taken with GRAPHQL_OPERATION_DEFINITION, which does match them, and an
+ * anonymous operation carries no name to check against anything. */
+const GRAPHQL_NAMED_OPERATION_DEFINITION = '(?:^|[\\s}])(query|mutation|subscription)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*[({]';
+
+/* Stricter than isGraphqlReadDocument on purpose. A read is proved by what the document does NOT
+ * define; a write has to be proved by what it DOES define, and by the fact that there is nothing
+ * else in the document for a server to pick instead. */
+export const isGraphqlSoleNamedMutation = (document, operationName) => {
+  if (typeof document !== 'string' || !document) return false;
+  if (typeof operationName !== 'string' || !operationName) return false;
+  const definitions = [...document.matchAll(new RegExp(GRAPHQL_OPERATION_DEFINITION, 'g'))];
+  if (definitions.length !== 1) return false;
+  const named = [...document.matchAll(new RegExp(GRAPHQL_NAMED_OPERATION_DEFINITION, 'g'))];
+  if (named.length !== 1) return false;
+  return named[0][1] === 'mutation' && named[0][2] === operationName;
+};
+
+export const isAshbyFormValueWrite = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (!ASHBY_FORM_VALUE_WRITE_OPERATIONS.includes(body.operationName)) return false;
+  return isGraphqlSoleNamedMutation(body.query, body.operationName);
+};
+
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
@@ -1759,6 +1887,10 @@ let terminalFailureInput = null;
       const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
+      const GRAPHQL_NAMED_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_NAMED_OPERATION_DEFINITION)};
+      const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
+      const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
+      const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
       const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
@@ -1799,6 +1931,19 @@ let terminalFailureInput = null;
         url: request.url(),
         postData: request.postData()
       });
+      /* The one same-site write-shaped transport that is a FIELD VALUE rather than a filing. See
+       * isAshbyFormValueWrite: Ashby saves each value to its own API as it is typed, so without
+       * this an Ashby form renders (3c4ea81) and then cannot be filled at all. Deliberately a
+       * second predicate with a second gate: this one is consulted only in the locked fill phase
+       * below, never during initial navigation, and it pins one exact operation name whose document
+       * has to prove it is that operation and nothing else. */
+      const ashbyFormValueWrite = (request) => isAshbyFormValueWrite({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
       /* Every blocked request is aborted either way - nothing ever reaches anyone. What differs is
        * whether the run must DIE for it. It must when the blocked transport was bound for the
        * employer's own site, because then the page's fill semantics may depend on it and a later
@@ -1819,8 +1964,18 @@ let terminalFailureInput = null;
               url: request.url(),
               postData: request.postData()
             });
+            /* An operation that IS on the field-value write allowlist and was blocked anyway got
+             * past the host, the path and the name - reading the name out of the body proves all
+             * three - so what refused it was the resource type, the method, the scheme, or the
+             * document proof. The document is the only one of those this file has never measured
+             * on a live Ashby request, so it is by far the likeliest, and saying so keeps that 502
+             * one measurement from a fix instead of reading identically to the 2026-09-03
+             * regression this allowance closes. */
+            const allowListedWriteRefused = Boolean(operationName)
+              && ASHBY_FORM_VALUE_WRITE_OPERATIONS.includes(operationName);
             containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target
-              + (operationName ? ' op=' + operationName : '');
+              + (operationName ? ' op=' + operationName : '')
+              + (allowListedWriteRefused ? ' (allow-listed field-value write failed its proof)' : '');
           } else {
             containment.blockedThirdPartyCount += 1;
           }
@@ -1879,7 +2034,14 @@ let terminalFailureInput = null;
            * method is still counted and fatal. */
           const readOnlyDataFetch = readOnlyMethod
             && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch');
-          if (!readOnlyDataFetch && !ashbyPublicBoardRead(request)) {
+          /* AND ASHBY'S FIELD-VALUE WRITE, which is the same premise one step further: a form whose
+           * every value is held on the employer's own server as it is typed cannot be filled at all
+           * without it, measured 2026-09-03 on the Exa packet. This is the ONLY place the write
+           * allowance is consulted. It is not on the initial_navigation branch above, which sees a
+           * page that is still loading and has no reviewed value to write, and it cannot reach the
+           * activation branch, which returned before either of these. See isAshbyFormValueWrite for
+           * why one pinned operation with a proved document cannot carry a submit. */
+          if (!readOnlyDataFetch && !ashbyPublicBoardRead(request) && !ashbyFormValueWrite(request)) {
             return block(route, request.resourceType() + ' transport');
           }
           return route.fallback();
