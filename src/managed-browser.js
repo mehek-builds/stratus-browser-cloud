@@ -168,6 +168,91 @@ export const isBoardResumeStorageUploadHost = (hostname) => {
   return /^grnhse-[a-z0-9-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(host);
 };
 
+/* THE HUMAN-CHECK WIDGET IS A THIRD-PARTY FRAME, AND THE CONTAINMENT WAS BREAKING IT.
+ *
+ * Litos does not solve, bypass or auto-complete a challenge, and this changes none of that. It
+ * lets the employer's own widget LOAD, so the form stops reporting a fault Litos caused and so a
+ * real challenge can be seen and handed to the applicant instead of being invisible.
+ *
+ * MEASURED 2026-09-03 on the live Hudson River Trading Greenhouse form
+ * (job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083). The board declares
+ * GOOGLE_RECAPTCHA_ENDPOINT https://www.recaptcha.net/recaptcha/enterprise.js with an invisible
+ * key and disable_captcha false. Loading it makes exactly one request the locked containment
+ * refuses: the widget's own anchor frame,
+ *
+ *   GET https://www.recaptcha.net/recaptcha/enterprise/anchor?ar=1&k=...
+ *   resourceType "document", isNavigationRequest() true, frame() !== page.mainFrame()
+ *
+ * which fell to `if (navigation) return block(route, 'navigation transport')`. Every other piece
+ * reaches Google untouched: enterprise.js and the gstatic release bundle are scripts, the widget's
+ * stylesheet, worker script, logo and font are ordinary subresources, and no POST happens at all
+ * during load. Aborting that ONE navigation and nothing else is what renders the sentence the
+ * applicant saw at the bottom of the evidence screenshot, "Could not connect to the reCAPTCHA
+ * service. Please check your internet connection and reload to get a reCAPTCHA challenge.", which
+ * is Google's own copy out of recaptcha__en.js. Four blocking shapes were run against the live
+ * page: only this one produces that sentence. Blocking the gstatic bundle is silent, and blocking
+ * the whole www.recaptcha.net host (what a real egress failure looks like) is silent too, because
+ * then window.grecaptcha never exists to report anything. So the sentence is a SIGNATURE of this
+ * abort, not of a network fault, and reading it as a Railway egress problem sends the next
+ * operator to the wrong layer entirely.
+ *
+ * WHAT IT COST. Greenhouse's renderer swallows the failure: performAssessment() catches and returns
+ * "", the POST still goes, and the server answers code "captcha-failed" with a
+ * security_code_recipient, which is the ONLY route in that bundle to the eight-box emailed
+ * security-code screen. And on a chooser v4 run a blocked ancillary transport after applicant
+ * actions begin sets blockedTransportObserved, which becomes submit_transport_unpinned and refuses
+ * the send outright.
+ *
+ * IT IS NOT ONE BOARD. The same rule, driven against one live posting per family on 2026-09-04,
+ * aborts the widget frame on three of the four auto-submit families that could be reached:
+ * Greenhouse (1 frame, reCAPTCHA enterprise), Ashby (1 frame, www.recaptcha.net/recaptcha/api2/
+ * anchor on the live OpenAI posting), and Lever (6 frames, hCaptcha under
+ * newassets.hcaptcha.com/captcha/v1/...). Workable's posting loaded only Cloudflare Turnstile's
+ * api.js script and mounted no frame while it was watched, so no Turnstile host is on this list:
+ * a host without a measured blocked frame does not belong here, on the same rule the
+ * EMPLOYER_DOMAIN_TELEMETRY_HOSTS comment states. The google.com spellings are on the list without a
+ * capture of their own because they are the same vendor's documented endpoints for the same two
+ * frames, and the backend's own captcha selectors already read /recaptcha/api2/anchor from them.
+ *
+ * WHY ADMITTING IT IS SAFE, in the same terms as the Ashby read and the #129 upload window. A GET
+ * document navigation on a challenge vendor's own host cannot file an application with an employer:
+ * no employer host is on this list, so the request cannot reach one under any spelling. The grant is
+ * the narrowest that loads the widget - GET or HEAD only, resourceType document only, SUBFRAME only
+ * (a main-frame navigation can never match, and an absent frame answer is refused), an exact host
+ * from this table, and a path under that host's own prefix. Nothing here admits a write, and the
+ * final submit still needs its own literal authority. Hosts are matched exactly, never by suffix, so
+ * www.google.com.evil.example does not match; the per-host path prefix is what keeps www.google.com
+ * itself from becoming a general navigation target.
+ *
+ * AND IT STAYS ON THE PRODUCT'S SIDE OF THE LINE. Nothing here solves, answers or reads a challenge.
+ * The invisible widget's token is minted by the employer's own page at submit time and this runner
+ * never touches it, which is the boundary the applicant was shown verbatim in the website's
+ * captcha-consent copy. What changes is that a challenge which really does need a person can now
+ * MOUNT, so readUnresolvedCaptcha's bframe check can see it. Behind a dead anchor no bframe can ever
+ * exist, so the old behaviour reported "no captcha" on a page that was broken. */
+export const CAPTCHA_WIDGET_FRAME_ORIGINS = Object.freeze([
+  Object.freeze({ host: 'www.recaptcha.net', pathPrefix: '/recaptcha/' }),
+  Object.freeze({ host: 'recaptcha.net', pathPrefix: '/recaptcha/' }),
+  Object.freeze({ host: 'www.google.com', pathPrefix: '/recaptcha/' }),
+  Object.freeze({ host: 'recaptcha.google.com', pathPrefix: '/recaptcha/' }),
+  Object.freeze({ host: 'newassets.hcaptcha.com', pathPrefix: '/captcha/' })
+]);
+
+export const isCaptchaWidgetFrameRequest = ({ method, resourceType, url, mainFrame } = {}) => {
+  const verb = String(method || '').toUpperCase();
+  if (verb !== 'GET' && verb !== 'HEAD') return false;
+  if (resourceType !== 'document') return false;
+  // Fail closed: only a caller that PROVES this is not the main frame gets the admission.
+  if (mainFrame !== false) return false;
+  let target;
+  try { target = new URL(String(url || '')); } catch { return false; }
+  if (target.protocol !== 'https:') return false;
+  const host = target.hostname.toLowerCase().replace(/\.$/, '');
+  const origin = CAPTCHA_WIDGET_FRAME_ORIGINS.find((entry) => entry.host === host);
+  if (!origin) return false;
+  return target.pathname.startsWith(origin.pathPrefix);
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1853,6 +1938,18 @@ let terminalFailureInput = null;
           : null;
       }, { method, args: v4UtilityValue(args) });
     };
+    /* Shared by BOTH containments below, because a widget that loads on a fill run and not on a
+     * submit run is still a form that cannot mint a token. See isCaptchaWidgetFrameRequest for the
+     * measurement and for why a Google-owned reCAPTCHA frame cannot file anything with an employer.
+     * Nothing here solves a challenge; it lets one render. */
+    const CAPTCHA_WIDGET_FRAME_ORIGINS = ${JSON.stringify(CAPTCHA_WIDGET_FRAME_ORIGINS)};
+    const isCaptchaWidgetFrameRequest = ${isCaptchaWidgetFrameRequest.toString()};
+    const captchaWidgetFrame = (request) => isCaptchaWidgetFrameRequest({
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      mainFrame: request.frame() === page.mainFrame()
+    });
     let managedMutationTransportContainment = null;
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
@@ -2046,7 +2143,17 @@ let terminalFailureInput = null;
           }
           return route.fallback();
         }
-        if (navigation) return block(route, 'navigation transport');
+        /* THE ONE NAVIGATION THAT IS NOT A TRANSPORT TO THE EMPLOYER. See
+         * isCaptchaWidgetFrameRequest: a GET document subframe on a Google reCAPTCHA host, and
+         * nothing else. Blocking it is what put "Could not connect to the reCAPTCHA service" under
+         * the Submit button on the Hudson River Trading evidence screenshot, made every Greenhouse
+         * send fall to the emailed security code, and made a real challenge unobservable, because
+         * the bframe the captcha predicate looks for can never mount behind a dead anchor. */
+        if (navigation) {
+          return captchaWidgetFrame(request)
+            ? route.fallback()
+            : block(route, 'navigation transport');
+        }
         if (!readOnlyMethod) return block(route, method + ' transport');
         return route.fallback();
       };
@@ -2087,9 +2194,17 @@ let terminalFailureInput = null;
             }
           }
           if (readOnly && !navigation) return route.fallback();
+          if (captchaWidgetFrame(request)) return route.fallback();
           return route.abort('blockedbyclient');
         }
         if (containment.mode === 'activation') return route.fallback();
+        /* The same admission, and here it also stops a false accusation. reCAPTCHA re-requests its
+         * anchor after the first attempt is refused; once this containment is locked, that retry
+         * sets blockedTransportObserved, which decideSubmitTransportGate reads as
+         * submit_transport_unpinned and recordBlockedAncillaryTransport reports as "The page
+         * attempted an unbound network transport after applicant actions began". The page attempted
+         * nothing of the sort: it was reloading a widget this runner had just killed. */
+        if (captchaWidgetFrame(request)) return route.fallback();
         containment.blockedTransportObserved = true;
         return route.abort('blockedbyclient');
       };
