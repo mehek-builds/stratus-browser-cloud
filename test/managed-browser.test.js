@@ -130,6 +130,11 @@ function sandboxQuestionLabel() {
   // its placeholder, so the two are built together.
   const source = extractFunctionSource('questionLabel');
   const blockOfSource = extractFunctionSource('blockOf');
+  // ownQuestionBlock is what questionLabel now asks which part of a shared block is this control's,
+  // so it has to be built with the rest. A source list that omits a function the reader calls is
+  // not a weaker harness, it is a broken one: the reconstruction throws the moment a fixture
+  // reaches the branch, and every case that does not reach it passes while covering nothing.
+  const ownQuestionBlockSource = extractFunctionSource('ownQuestionBlock');
   const renderedTextSource = extractFunctionSource('renderedText');
   const labelledByTextSource = extractFunctionSource('labelledByText');
   const clean = (value) => (value == null ? '' : value).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -137,7 +142,7 @@ function sandboxQuestionLabel() {
   const fakeCss = { escape: (value) => String(value) };
   return Function(
     'clean', 'document', 'CSS',
-    `${renderedTextSource}\n${labelledByTextSource}\n${blockOfSource}\nreturn (${source});`,
+    `${renderedTextSource}\n${labelledByTextSource}\n${blockOfSource}\n${ownQuestionBlockSource}\nreturn (${source});`,
   )(clean, fakeDocument, fakeCss);
 }
 
@@ -2022,9 +2027,18 @@ test('a choice group is reported once, by its question, not once per option', ()
   assert.match(SANDBOX_RUNNER, /blocking: \[\.\.\.new Set\(required\.map\(\(entry\) => entry\.message\)\)\]/);
   assert.match(SANDBOX_RUNNER, /const seen = new Set\(\);/);
   // And the label for a choice control prefers the group's question over the option text: labelOf
-  // reads the widget's own legend or label, never the option the input sits beside.
-  assert.match(SANDBOX_RUNNER, /const legend = widget && widget\.querySelector\('legend'\)/);
-  assert.match(SANDBOX_RUNNER, /const own = widget && widget\.querySelector\('label, \.label, \.upload-label, legend'\)/);
+  // reads the widget's own legend or label, never the option the input sits beside. It reads them
+  // off the part of the widget that speaks for THIS control, because widgetOf matches on fieldset
+  // and a board rendering one fieldset per numbered section would otherwise hand every control in
+  // the section its header (pinpoint, "1.Personal Details We'll need these details... Apply with
+  // LinkedIn", reported for a required postcode control).
+  assert.match(SANDBOX_RUNNER, /const legend = questionLabelNode\('legend'\)/);
+  assert.match(SANDBOX_RUNNER, /const own = questionLabelNode\('label, \.label, \.upload-label, legend'\)/);
+  assert.match(SANDBOX_RUNNER, /const near = questionWidget && questionWidget\.querySelector\(selector\)/);
+  // And the wider widget is reachable only through a label that WRAPS this control, which is what
+  // keeps a composite question named while a section caption stays out of reach.
+  assert.match(SANDBOX_RUNNER, /\.find\(\(candidate\) => candidate\.contains\(element\)\)/);
+  assert.match(SANDBOX_RUNNER, /questionWidgetOf\(element, widget,\s*\n\s*Boolean\(element && \(element\.type === 'radio' \|\| element\.type === 'checkbox'\)\)\)/);
 });
 
 test('required file-upload groups are reported even when the hidden input is not required', () => {
