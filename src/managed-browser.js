@@ -10383,7 +10383,44 @@ let terminalFailureInput = null;
           // first-control fallback for zero or multiple marked descendants.
           || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
           || controls[0]
-          || (widgetFallback ? widget : null);
+          || (widgetFallback ? widget : null)
+          /* A STARRED BLOCK WHOSE ONLY CONTROL IS THE UPLOAD STILL HAS TO BE JUDGED.
+           *
+           * Excluding the file input from the controls list picks a better target when the block
+           * holds one, and that much is right. But when the upload is the ONLY control, it left
+           * target null on the asterisk arm, which passes no widget fallback - so the field was not
+           * reported empty, it was never looked at. Measured 2026-09-03 against the backend's copy
+           * of this script: a Recruitee shaped block, a starred "CV or resume" label over a bare
+           * file input, returned zero blockers, while the same field carrying a for= attribute
+           * returned the correct '"CV or resume" is required and is still empty'.
+           *
+           * FOUND WHILE READING THE DSI INNOVATIONS FAILURE, and this runner is the path that run
+           * took - so it is worth stating exactly what it does and does not establish. Packet
+           * a34e5ce2 went to Recruitee on 2026-09-02, came back no_confirmation_state, and its
+           * post-run screenshot shows every text field filled and the required "CV or resume"
+           * empty. That screenshot is taken AFTER the submit press, and a browser never
+           * repopulates a file input across a rejected submit, so it does NOT prove the control
+           * was empty when this gate ran - the upload action verifies the file into the input by
+           * name, size and sha256 before it. What it does establish is that this gate had nothing
+           * to say about that field either way, on a form where it was the one required thing that
+           * could go missing.
+           *
+           * LAST in the chain, after the widget fallback, so this adds an arm exactly where the
+           * value was null and changes the target on no path that already had one.
+           *
+           * THE BLOCK IS THE TARGET, NOT THE INPUT, and that is the difference that matters here.
+           * note() judges the element it is handed, and hasAnswer reads a file INPUT against
+           * uploadHasFile(element.parentElement) - the input's immediate parent. A dropzone that
+           * wraps the input while the filename chip renders as the dropzone's SIBLING would then
+           * read as empty on a form where the upload worked, and this gate would refuse a correct
+           * send. Handing it the block instead takes hasAnswer's container arm, uploadHasFile(
+           * element), which reads the whole block - the same scope the backend's widgetHasAnswer
+           * reads, so the two copies answer one form the same way.
+           *
+           * Kept in step with the backend's noteMarkedLabel, loop for loop, as the comment above
+           * requires: two copies of this gate disagreeing about one form is the drift they exist
+           * to avoid. */
+          || (widget.querySelector('input[type="file"]:not([disabled])') ? widget : null);
         if (!target || target.disabled) return;
         note(widget, target, 'required');
       };
