@@ -1172,11 +1172,34 @@ function persistTerminalResult(input, phase, run) {
   });
 }
 
-function persistTerminalFailure(input) {
+/* THE SECOND PLACE A TYPED REASON CAN BE LOST, and the one that matters most for a SCAN-correlated
+ * run: 'correlated' at the dispatch site (Boolean(context.submissionAttempt)) is true for the
+ * discovery pass and the prepare-path fill exactly as it is for a real durable submit, because both
+ * carry a submissionAttempt - an ephemeral scan pair for the two, a ledger-backed one for a submit.
+ * So a navigation failure on the discovery pass persists its durable envelope through THIS function,
+ * not through the plain stratus-error.json path alone, and resultFromManagedTerminalState reads its
+ * error code from THIS envelope (state.envelope.error.code), never from stratus-error.json.
+ *
+ * Before this, the error was never passed in at all - the call site had it in scope and did not hand
+ * it over - so every crash on a correlated run, typed or not, persisted the same two hardcoded
+ * strings and the caller could not tell a page that never opened from any other failure. The message
+ * half of this was invisible because resultFromManagedTerminalState separately prefers whatever
+ * stratus-error.json says once that file exists; the code half had no such rescue. */
+function persistTerminalFailure(input, error) {
   if (!input?.submissionAttempt
     || !/^[a-f0-9]{64}$/.test(input.terminalResultProjectHash || '')
     || !/^[a-f0-9]{64}$/.test(input.terminalResultRequestDigest || '')) return;
   const completedAt = new Date().toISOString();
+  /* BOTH FIELDS MOVE TOGETHER, OR NEITHER DOES. An error only earns its own message here if it
+   * also carries the typed code this convention is built around; an ordinary untyped crash keeps
+   * BOTH hardcoded strings exactly as before, byte for byte, so today's SANDBOX_RUN_FAILED readers
+   * see no change at all. Only a runner that deliberately types itself (FORM_NEVER_OPENED, and
+   * whatever is typed the same way later) gets its own words instead of the generic pair. */
+  const isTypedFailure = typeof error?.code === 'string' && error.code;
+  const errorCode = isTypedFailure ? error.code : 'SANDBOX_RUN_FAILED';
+  const errorMessage = isTypedFailure
+    ? String(error?.message || 'Managed browser run failed').split('\n')[0].slice(0, 500)
+    : 'Managed browser run failed';
   const core = {
     schemaVersion: 'stratus-terminal-result-v1',
     projectBindingHash: input.terminalResultProjectHash,
@@ -1187,8 +1210,8 @@ function persistTerminalFailure(input) {
     expiresAt: terminalExpiresAt(completedAt),
     phase: Number.isInteger(input.terminalResultPhase) ? input.terminalResultPhase : 0,
     error: {
-      code: 'SANDBOX_RUN_FAILED',
-      message: 'Managed browser run failed'
+      code: errorCode,
+      message: errorMessage
     }
   };
   const resultId = crypto.createHash('sha256')
@@ -4794,7 +4817,47 @@ let terminalFailureInput = null;
     }
     const waitUntil = input.waitUntil === 'networkidle2' || input.waitUntil === 'networkidle0' ? 'networkidle' : input.waitUntil;
     assertProviderActionWindow();
-    const navigationResponse = await page.goto(input.url, { waitUntil, timeout: 45000 });
+    const navigationTimeoutMs = 45000;
+    /* THE ONE PLACE A FORM THAT NEVER OPENS GETS A NAME AND A PICTURE, instead of falling through as
+     * a bare Playwright timeout indistinguishable from any other crash.
+     *
+     * MEASURED PRODUCTION 2026-09-04, Celerant Technologies via Paylocity: a managed fill sat at
+     * progress_stage "Opening the company form" for 9+ minutes with no submission_error and no
+     * terminal result. This navigation already carries a hard deadline - 45s, and whatever waitUntil
+     * litos-api asked for, which is 'domcontentloaded' on every managed call today
+     * (browserbase.ts runManagedBrowser) - so page.goto itself was never the unbounded wait. What was
+     * missing is what happens AFTER it throws: with no arm here, that rejection fell through to the
+     * generic top-level handler at the bottom of this file exactly like any other crash, with no
+     * code, no final URL and no screenshot, so a form the browser never reached and a browser that
+     * genuinely crashed looked identical from litos-api's side.
+     *
+     * ADDITIVE ONLY. navigationTimeoutMs and waitUntil are unchanged, so a page that opens normally
+     * takes the exact same path it always did; only a page that does not is now typed, evidenced and
+     * pictured before the error leaves this process. */
+    let navigationResponse;
+    try {
+      navigationResponse = await page.goto(input.url, { waitUntil, timeout: navigationTimeoutMs });
+    } catch (navigationError) {
+      let lastKnownUrl = input.url;
+      try {
+        lastKnownUrl = page.url() || input.url;
+      } catch { /* an unreadable url still leaves the requested one to report */ }
+      try {
+        const failureScreenshot = await page.screenshot({ fullPage: Boolean(input.fullPage), timeout: 15_000 });
+        const failureScreenshotPath = 'stratus-screenshot-0.png';
+        const failureScreenshotTemp = failureScreenshotPath + '.tmp-' + process.pid + '-'
+          + crypto.randomBytes(8).toString('hex');
+        fs.writeFileSync(failureScreenshotTemp, failureScreenshot);
+        fs.renameSync(failureScreenshotTemp, failureScreenshotPath);
+      } catch { /* the typed failure below is reported either way; its screenshot is a bonus, not a gate */ }
+      const navigationDetail = String((navigationError && navigationError.message) || navigationError).slice(0, 300);
+      throw Object.assign(
+        new Error('Litos could not open the company form within its navigation budget (waitUntil='
+          + waitUntil + ', timeoutMs=' + navigationTimeoutMs + '); last known url ' + lastKnownUrl
+          + '; ' + navigationDetail),
+        { code: 'FORM_NEVER_OPENED' }
+      );
+    }
     if (managedMutationTransportContainment) {
       managedMutationTransportContainment.mode = 'locked';
       managedMutationTransportContainment.allowedNavigationUrl = null;
@@ -18737,10 +18800,11 @@ let terminalFailureInput = null;
    * message was sitting right there went unread. The caller watches for this file alongside the
    * result and reports whichever arrives. */
   try {
-    persistTerminalFailure(terminalFailureInput);
+    persistTerminalFailure(terminalFailureInput, error);
     writeDurableJson('stratus-error.json', {
       message: detail.split('\n')[0].slice(0, 500),
-      detail: detail.slice(0, 4000)
+      detail: detail.slice(0, 4000),
+      ...(typeof error?.code === 'string' && error.code ? { code: error.code } : {})
     });
   } catch { /* the result of the run matters more than the record of why there is none */ }
   console.error(detail);
@@ -19979,14 +20043,19 @@ async function throwSandboxRunnerError(sandbox, expectedSubmissionAttempt = null
     { signal: AbortSignal.timeout(OPTIONAL_ARTIFACT_TIMEOUT_MS) }
   ).catch(() => null);
   let message = 'Sandbox browser run failed';
+  // SANDBOX_RUN_FAILED stays the answer for every crash that never typed itself - which today is
+  // most of them. A typed cause (e.g. FORM_NEVER_OPENED) is additive: only a runner that wrote one
+  // into stratus-error.json's own `code` field changes what the caller sees here.
+  let code = 'SANDBOX_RUN_FAILED';
   try {
     const parsed = JSON.parse(buffer.toString('utf8'));
     if (parsed?.message) message = String(parsed.message).slice(0, 500);
+    if (typeof parsed?.code === 'string' && parsed.code) code = parsed.code;
   } catch { /* a crash we cannot read is still a crash, and the generic message says so */ }
   const runProgress = await readSandboxRunnerProgress(sandbox, expectedSubmissionAttempt);
   throw Object.assign(new Error(message), {
     status: 502,
-    code: 'SANDBOX_RUN_FAILED',
+    code,
     ...(runProgress ? { runProgress } : {})
   });
 }
