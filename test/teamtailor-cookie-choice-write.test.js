@@ -374,6 +374,75 @@ test('every definition the admission needs is interpolated into the runner, not 
   }
 });
 
+/* -------------------------------------------------------------------------------------------- *
+ * REVIEW ROUND 1, 2026-09-05: the path check alone left the query string and fragment unexamined
+ * (a POST to .../cookie-policy/accept?candidate_email=...&resume=<3000 chars> was admitted on a
+ * minimal valid body, an unbounded smuggling channel to the employer host outside the submit gate),
+ * and visitor_uuid/referrer were only length-capped rather than shape-validated (~4 KB of free text
+ * could ride through either). (a) and (c) below are written to fail against the pre-round-1 code -
+ * that is the proof the gap was real, not merely theoretical.
+ * -------------------------------------------------------------------------------------------- */
+
+test('(a) a query string on the cookie-choice URL is refused, even carrying an otherwise-valid body', () => {
+  // The exact shape of the finding: a minimal valid decline body, with candidate data smuggled into
+  // the URL instead of the proven JSON envelope. This must fail on the pre-round-1 code - there the
+  // query string was never examined and this same call returns true.
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    url: COOKIE_URL + '?candidate_email=mehek%40usc.edu&resume=' + encodeURIComponent('x'.repeat(3000))
+  })), false);
+});
+
+test('(b) a fragment on the cookie-choice URL is refused, even carrying an otherwise-valid body', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    url: COOKIE_URL + '#resume=' + encodeURIComponent('x'.repeat(3000))
+  })), false);
+});
+
+test('(c) referrer must be empty or an actual URL - free text is refused, the measured job-page referrer and empty are admitted', () => {
+  // Free text under both the old 2000-char cap and the new 512-char cap: only the shape check added
+  // in round 1 catches this. Must fail on the pre-round-1 code, where length was the only gate.
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({ referrer: 'candidate_email=mehek@usc.edu; resume=not a url at all' })
+  })), false);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({
+      referrer: 'https://' + COVENANT_HOUSE_TENANT + '/jobs/686133-intern-finance'
+    })
+  })), true);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({ referrer: '' })
+  })), true);
+});
+
+test('(d) visitor_uuid must be UUID-shaped or empty', () => {
+  for (const badValue of [
+    'not-a-uuid',
+    'a1b2c3d4-0000-4000-8000',
+    'a1b2c3d4_0000_4000_8000_000000000000',
+    'candidate_email=mehek@usc.edu'
+  ]) {
+    assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+      postData: declineAllBody({ visitor_uuid: badValue })
+    })), false, badValue);
+  }
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({ visitor_uuid: '' })
+  })), true);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({ visitor_uuid: 'A1B2C3D4-0000-4000-8000-000000000000' })
+  })), true);
+});
+
+test('(e) the measured decline body - empty categories, a UUID visitor_uuid, the job-page referrer - is still admitted', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({
+      visitor_uuid: 'a1b2c3d4-0000-4000-8000-000000000000',
+      referrer: 'https://' + COVENANT_HOUSE_TENANT + '/jobs/686133-intern-finance',
+      categories: ''
+    })
+  })), true);
+});
+
 test('the runner carries no backtick template literals or stray interpolation markers', () => {
   // src/managed-browser.js is one String.raw`...` template; a literal backtick or ${ typed
   // directly into the runner body (rather than through the sanctioned interpolation slots above)

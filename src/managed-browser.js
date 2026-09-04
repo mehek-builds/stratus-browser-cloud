@@ -849,14 +849,26 @@ export const findAshbyFileUploadHandleUrl = (value, depth = 0) => {
  * THE ADMISSION, isTeamtailorCookieChoiceWrite below: exact host family (registrable suffix
  * teamtailor.com, checked on both the request and the run's own application site - the same double
  * pin isAshbyFormValueWrite already uses for ashbyhq.com, so this cannot fire on a run that is not
- * itself a Teamtailor application), exact path, POST, xhr/fetch only, https only, and then the BODY
- * is proved rather than merely the envelope: valid JSON under a small size cap, exactly one
- * top-level key (cookie_policy), that value a plain object whose own keys are a subset of exactly
- * {visitor_uuid, referrer, categories, same_site}, categories (if present) a comma-joined subset of
- * {analytics, marketing, preferences}, same_site (if present) the literal string "None", and
- * visitor_uuid/referrer (if present) capped strings. A body carrying a candidate field, a
- * job_application field, a file part, or any key outside that list - at the top level or nested
- * inside cookie_policy - fails the shape proof and is refused exactly as before.
+ * itself a Teamtailor application), exact path with no query string and no fragment, POST, xhr/fetch
+ * only, https only, and then the BODY is proved rather than merely the envelope: valid JSON under a
+ * small size cap, exactly one top-level key (cookie_policy), that value a plain object whose own
+ * keys are a subset of exactly {visitor_uuid, referrer, categories, same_site}, categories (if
+ * present) a comma-joined subset of {analytics, marketing, preferences}, same_site (if present) the
+ * literal string "None", visitor_uuid (if present) either empty or exactly UUID-shaped, and referrer
+ * (if present) either empty or a parseable http(s) URL with a hostname, capped at 512 characters.
+ *
+ * REVIEW ROUND 1, 2026-09-05: the path check alone left the query string and fragment unexamined, so
+ * a request to .../cookie-policy/accept?candidate_email=...&resume=<3000 chars>, carrying an
+ * otherwise-minimal valid body, was admitted - an unbounded smuggling channel to the employer host
+ * that sat entirely outside the submit gate. And visitor_uuid/referrer were only length-capped
+ * (2000), not shape-validated, which let roughly 4 KB of arbitrary free text ride through either
+ * field. Both are closed here: parsed.search and parsed.hash must both be empty, visitor_uuid must
+ * match the UUID shape Teamtailor's own analytics token actually takes (or be absent/empty), and
+ * referrer must parse as the http(s) URL with a hostname that document.referrer actually is (or be
+ * absent/empty), under a tighter 512-character cap. categories and same_site are unchanged. None of
+ * this widens the allowance: a body carrying a candidate field, a job_application field, a file part,
+ * or any key outside the closed list - at the top level or nested inside cookie_policy - still fails
+ * the shape proof and is refused exactly as before.
  *
  * WHERE THIS IS CONSULTED: its own early-return in the containment handler, structured exactly like
  * ashbyFileBindWrite's - never folded into the readOnlyDataFetch/ashbyPublicBoardRead/
@@ -880,6 +892,11 @@ export const isTeamtailorCookieChoiceWrite = ({
   url,
   postData
 } = {}) => {
+  // Local to this function on purpose: its source travels into SANDBOX_RUNNER by
+  // isTeamtailorCookieChoiceWrite.toString() interpolation, so a module-level identifier here would
+  // be the exact "not defined" ReferenceError b816a61 shipped in production 2026-09-01.
+  const VISITOR_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const MAX_REFERRER_LENGTH = 512;
   if (applicationSite !== TEAMTAILOR_SITE) return false;
   if (String(method || '').toUpperCase() !== 'POST') return false;
   if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
@@ -888,6 +905,9 @@ export const isTeamtailorCookieChoiceWrite = ({
   if (parsed.protocol !== 'https:') return false;
   if (transportRegistrableSuffix(parsed.hostname) !== TEAMTAILOR_SITE) return false;
   if (parsed.pathname !== TEAMTAILOR_COOKIE_CHOICE_PATH) return false;
+  // Round 1: the path alone was checked; a query string or fragment rode through untouched. Both
+  // must now be empty, closing the smuggling channel a candidate_email/resume query string opened.
+  if (parsed.search !== '' || parsed.hash !== '') return false;
   if (typeof postData !== 'string' || !postData) return false;
   if (postData.length > TEAMTAILOR_COOKIE_CHOICE_MAX_BODY_LENGTH) return false;
   let body;
@@ -914,10 +934,20 @@ export const isTeamtailorCookieChoiceWrite = ({
   if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid')) {
     if (typeof policy.visitor_uuid !== 'string'
       || policy.visitor_uuid.length > TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH) return false;
+    // Round 1: length alone let ~4 KB of arbitrary text through. The analytics token Teamtailor's
+    // own page assigns itself is UUID-shaped; anything else, or absent (empty), and nothing more.
+    if (policy.visitor_uuid !== '' && !VISITOR_UUID_PATTERN.test(policy.visitor_uuid)) return false;
   }
   if (Object.prototype.hasOwnProperty.call(policy, 'referrer')) {
-    if (typeof policy.referrer !== 'string'
-      || policy.referrer.length > TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH) return false;
+    if (typeof policy.referrer !== 'string' || policy.referrer.length > MAX_REFERRER_LENGTH) return false;
+    // Round 1: same length-only gap. document.referrer is always either empty or a real URL, so
+    // require it parse as one - http(s), with a hostname - rather than merely counting characters.
+    if (policy.referrer !== '') {
+      let referrerUrl;
+      try { referrerUrl = new URL(policy.referrer); } catch { return false; }
+      if (referrerUrl.protocol !== 'https:' && referrerUrl.protocol !== 'http:') return false;
+      if (!referrerUrl.hostname) return false;
+    }
   }
   return true;
 };
