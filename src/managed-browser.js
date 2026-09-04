@@ -1185,6 +1185,25 @@ let terminalFailureInput = null;
             });
           } catch { notify('unavailable'); }
         }
+        /* Window is a [Global] WebIDL interface, so 'open' is exposed as an OWN property of the
+         * global object ITSELF, not solely inherited through Window.prototype - confirmed live:
+         * with only the prototype definition below installed, window.open('about:blank') still
+         * returns a real object and Object.hasOwn(window, 'open') is true. A definition on the
+         * prototype alone therefore never runs; the own instance property shadows it on every
+         * lookup. globalThis in this realm IS that global object, so defining there is what
+         * actually intercepts the call. The prototype definition is kept alongside it, harmless
+         * and redundant, rather than removed, in case anything ever reaches for it directly. */
+        try {
+          defineProperty(globalThis, 'open', {
+            value: function litosBlockedPopup() {
+              notify('popup');
+              return null;
+            },
+            configurable: false,
+            enumerable: false,
+            writable: false
+          });
+        } catch { notify('unavailable'); }
         try {
           defineProperty(Window.prototype, 'open', {
             value: function litosBlockedPopup() {
