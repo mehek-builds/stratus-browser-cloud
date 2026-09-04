@@ -10,7 +10,9 @@ import { FunctionRuntime } from './function-runtime.js';
 import { AgentRuntime } from './agent-runtime.js';
 import { assertPublicUrl, htmlToText, textToMarkdown } from './security.js';
 import { hmac, id, json, now, readJson, redact, sha256 } from './utils.js';
-import { executeLocalManagedRun } from './local-managed-runner.js';
+import { executeLocalManagedRun, terminalResults } from './local-managed-runner.js';
+import { submissionAttemptFromRunResultQuery } from '../api/run-results.js';
+import { submissionAttemptFromAcknowledgementBody } from '../api/run-results-acknowledge.js';
 import { managedRunCompletionLogSummary, managedRunProgressLogSummary } from './run-log-summary.js';
 
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg' };
@@ -66,6 +68,38 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
         const run = await executeLocalManagedRun(runInput);
         console.log(JSON.stringify({ requestId, ...managedRunCompletionLogSummary(runInput, run, Date.now() - started) }));
         return json(res, 200, { run });
+      }
+      /* THE RESULT ENDPOINTS litos-api ALREADY POLLS. Until 2026-09-04 both fell through to
+       * serveStatic below and answered with the dashboard's index.html at 200, which litos-api
+       * read as a terminal result it could not parse ("Stratus managed browser request failed
+       * with status 200"), so every send whose caller had hung up was folded to unverified. See
+       * local-terminal-results.js for the measured run. Same authentication as /api/run. */
+      if (route === '/api/run-results' || route === '/api/run-results/acknowledge') {
+        const apiKey = req.headers['x-stratus-api-key']
+          || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (!store.authenticate(apiKey)) {
+          return json(res, 401, { error: { code: 'UNAUTHORIZED', message: 'A valid Litos service identity is required' } });
+        }
+        try {
+          if (route === '/api/run-results') {
+            if (req.method !== 'GET') {
+              res.setHeader('allow', 'GET');
+              return json(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'Use GET' } });
+            }
+            const attempt = submissionAttemptFromRunResultQuery(Object.fromEntries(url.searchParams));
+            const answer = await terminalResults.lookup(attempt);
+            return json(res, answer.status, answer.body);
+          }
+          if (req.method !== 'POST') {
+            res.setHeader('allow', 'POST');
+            return json(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'Use POST' } });
+          }
+          const { submissionAttempt, resultId } = submissionAttemptFromAcknowledgementBody(await readJson(req));
+          return json(res, 200, await terminalResults.acknowledge(submissionAttempt, resultId));
+        } catch (error) {
+          const status = Number(error?.status) || 500;
+          return json(res, status, { error: { code: error?.code || 'INTERNAL_ERROR', message: String(error?.message || 'Terminal result request failed').slice(0, 500) } });
+        }
       }
       if (route.startsWith('/artifacts/')) return serveArtifact(route, res);
       if (!route.startsWith('/v1') && !route.startsWith('/openapi')) return serveStatic(route, res);

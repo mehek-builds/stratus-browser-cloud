@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { assertPublicUrl } from './security.js';
+import { config } from './config.js';
+import { LocalTerminalResultStore } from './local-terminal-results.js';
 import {
   normalizeManagedBrowserProgress,
   normalizeManagedContinuation,
@@ -34,6 +36,11 @@ export function runTimeoutMsFor(providerDeadlineAt, now = Date.now()) {
 const MAX_CONCURRENT_RUNS = Math.max(1, Number(process.env.MANAGED_CONCURRENCY || 2));
 const sessions = new Map();
 const active = new Set();
+/* See local-terminal-results.js for why this exists. Every run that carries a durable submission
+ * attempt is retained here from before its runner is spawned until litos-api acknowledges it. */
+export const terminalResults = new LocalTerminalResultStore({
+  directory: path.join(config.dataDir, 'terminal-results'),
+});
 
 function managedError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
@@ -187,26 +194,33 @@ async function startRun(input) {
     session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
   });
 
+  const runTimeoutMs = runTimeoutMsFor(context.providerDeadlineAt);
+  await terminalResults.reservePending(session.submissionAttempt, Date.now() + runTimeoutMs);
   const produced = await waitForFile(
     directory,
     ['stratus-result-0.json', 'stratus-error.json'],
-    runTimeoutMsFor(context.providerDeadlineAt),
+    runTimeoutMs,
     child,
   );
   if (!produced) {
     const runProgress = await readProgress(directory, session.submissionAttempt);
     await cleanup(session);
-    throw Object.assign(
+    const error = Object.assign(
       managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
       runProgress ? { runProgress } : {},
     );
+    // The runner was lost before it said what it did: the outcome is unknown, not failed.
+    await terminalResults.retain(session.submissionAttempt, { state: 'indeterminate', error, runProgress });
+    throw error;
   }
   if (produced === 'stratus-error.json') {
     const error = await runnerError(directory, session.stderr, session.submissionAttempt);
     await cleanup(session);
+    await terminalResults.retain(session.submissionAttempt, { state: 'failed', error, runProgress: error.runProgress });
     throw error;
   }
   const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
+  await terminalResults.retain(session.submissionAttempt, { state: 'completed', run: result });
   if (token && continuationEligible(result, context.continuationCheckpoint)) {
     session.expiresAt = result.continuationExpiresAt || expiresAt;
     sessions.set(token, session);
