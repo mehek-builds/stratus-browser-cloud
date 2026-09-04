@@ -467,6 +467,340 @@ export const isAshbyFormValueWrite = ({
   return isGraphqlSoleNamedMutation(body.query, body.operationName);
 };
 
+/* MEASURED 2026-09-04 on production (Exa "Software Engineer, Intern", jobs.ashbyhq.com, packet
+ * 73768339-7fef-4493-aa75-1d47c61ae51f): the FILL run completed to ready_for_final_approval with
+ * resume in filled_fields and skipped_reasons empty, but the preview screenshot shows Ashby's own
+ * toast "Mehek_Mandal_Software_Engineer_Intern_Resume.pdf failed to upload", and the dashboard's
+ * Review screen reads "Resume NOT CONFIRMED: Litos says it attached this, and Litos's own
+ * application record has no resume linked to it either." Ashby does not attach a resume the way
+ * Greenhouse does. Per Ashby's own public bundle (PR #143's fixture,
+ * test/fixtures/ashby-frontend-non-user-documents.json, captured from the live board bundle):
+ *
+ *   1. ApiCreateFileUploadHandle(organizationHostedJobsPageName, fileUploadContext, filename,
+ *      contentType, contentLength) -> { fileUploadHandle { handle url fields } }, on
+ *      jobs.ashbyhq.com like every other Ashby call.
+ *   2. The browser POSTs the file bytes as multipart form-data to that returned `url` - a presigned
+ *      target on a host that is NOT jobs.ashbyhq.com.
+ *   3. ApiSetFormValueToFile(path, fileHandle) - or ApiAddManyFilesToFormValue under the formRender
+ *      alias, for a multi-file field - binds the stored handle to the draft.
+ *
+ * Reading the containment as it stood on 2026-09-04: call 1 is employer-bound and was already
+ * admitted by the #129 upload window's employerBoundTransport(request) branch below, PROVIDED the
+ * window is still armed when Ashby's own client issues it, which it is (the 'upload' action arms it
+ * and nothing disarms it until the next mutation action). Call 2 is a write-shaped xhr/fetch to a
+ * host that is neither employer-bound (a different registrable suffix than the application page)
+ * nor the Greenhouse-only store isBoardResumeStorageUploadHost admits, so it fell through both
+ * upload-window disjuncts, then through ashbyPublicBoardRead and ashbyFormValueWrite (both require
+ * the request's OWN host to be ashbyhq.com), and landed on block() as ordinary third-party traffic -
+ * aborted, and non-fatal since #169, which is why the run finished instead of dying and Ashby simply
+ * showed the toast. Call 3 is employer-bound and write-shaped exactly like ApiSetFormValue, but its
+ * operation name is not on ASHBY_FORM_VALUE_WRITE_OPERATIONS (#153 pinned that allowance to
+ * ApiSetFormValue alone), so it would be fatal if Ashby's client ever issued it outside the armed
+ * window - it evidently never did on the measured run (no second fatal block, no crash), because
+ * Ashby's own client does not call it after an upload it saw fail.
+ *
+ * THE FIX has two halves, both below: isAshbyFileUploadHandleRequest and the one-shot upload target
+ * it feeds (call 1's response names call 2's exact destination, admitted for exactly one POST/PUT
+ * and nothing wider - see the containment handler's capture branch and
+ * ashbyOneShotUploadTargetFromUrl/ashbyOneShotUploadTargetMatches) and isAshbyFileBindWrite just
+ * below (call 3, admitted in the same locked-fill gate ApiSetFormValue already uses, with its own
+ * root-field pin - see that function's comment for why a document proof alone, the way
+ * isAshbyFormValueWrite already has it, is not enough for a second admitted operation). */
+
+/* Blanks every string body (`"..."` and `"""...\"\"\"` block strings) and every `#` line comment to
+ * spaces of the SAME length, so a brace, paren or fragment keyword sitting inside quoted text or a
+ * comment cannot desynchronize a brace count taken over the result. Returns null on an unterminated
+ * string: a document this cannot fully account for proves nothing rather than being scanned
+ * partially. graphqlSoleMutationRootField is the one caller that needs exact brace positions rather
+ * than merely counting keyword occurrences the way GRAPHQL_OPERATION_DEFINITION does. */
+export const graphqlLexicalSkeleton = (document) => {
+  if (typeof document !== 'string') return null;
+  let out = '';
+  let index = 0;
+  const length = document.length;
+  while (index < length) {
+    const char = document[index];
+    if (char === '#') {
+      let end = index;
+      while (end < length && document[end] !== '\n' && document[end] !== '\r') end += 1;
+      out += ' '.repeat(end - index);
+      index = end;
+      continue;
+    }
+    if (char === '"') {
+      const block = document.startsWith('"""', index);
+      const quoteLength = block ? 3 : 1;
+      let cursor = index + quoteLength;
+      let closed = false;
+      while (cursor < length) {
+        if (document[cursor] === '\\') {
+          if (block && document.startsWith('\\"""', cursor)) { cursor += 4; continue; }
+          if (!block) { cursor += 2; continue; }
+        }
+        if (block ? document.startsWith('"""', cursor) : document[cursor] === '"') {
+          cursor += quoteLength;
+          closed = true;
+          break;
+        }
+        cursor += 1;
+      }
+      if (!closed) return null;
+      out += document.slice(index, cursor).replace(/[^\n\r]/g, ' ');
+      index = cursor;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+};
+
+/* THE ROOT FIELD OF THE SOLE NAMED MUTATION - not merely that a document proves itself the named
+ * operation (isGraphqlSoleNamedMutation), but that the one thing a GraphQL server would actually
+ * execute for it is the exact field this admission means to allow, unaliased or aliased exactly as
+ * Ashby's own bundle prints it for that operation. PR #143's round-2 adversarial review measured the
+ * gap this closes: a document can satisfy isGraphqlSoleNamedMutation - exactly one operation
+ * definition, that operation a mutation named what the body claims - while its selection set still
+ * carries a SECOND root field beside the expected one, for instance the real draft field and the
+ * submit field as siblings inside the one mutation. A GraphQL server resolves every root field in a
+ * selection set, so isGraphqlSoleNamedMutation's proof does not rule that out; this does. Callers
+ * must already have proved isGraphqlSoleNamedMutation(document, operationName) - this does not
+ * repeat that proof, only the part it does not cover - and are expected to compare the returned
+ * {alias, name} against the exact pair the operation is supposed to print. Returns null on anything
+ * this cannot fully account for: an unterminated string, a missing or unmatched operation, an
+ * unbalanced argument list or selection set, a second root field, a fragment spread, an inline
+ * fragment, a directive on the root field, or any trailing content after the one field. */
+export const graphqlSoleMutationRootField = (document, operationName) => {
+  const skeleton = graphqlLexicalSkeleton(document);
+  if (!skeleton || typeof operationName !== 'string' || !operationName) return null;
+  const matchBalanced = (from, open, close) => {
+    const skipped = /^\s*/.exec(skeleton.slice(from))[0];
+    const at = from + skipped.length;
+    if (skeleton[at] !== open) return null;
+    let depth = 0;
+    for (let cursor = at; cursor < skeleton.length; cursor += 1) {
+      if (skeleton[cursor] === open) depth += 1;
+      else if (skeleton[cursor] === close) {
+        depth -= 1;
+        if (depth === 0) return cursor + 1;
+      }
+    }
+    return null;
+  };
+  const consumeField = (from) => {
+    const head = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?/.exec(skeleton.slice(from));
+    if (!head || !head[1]) return null;
+    let alias = null;
+    let name = head[1];
+    if (head[2]) { alias = head[1]; name = head[2]; }
+    let index = from + head[0].length;
+    const afterArgs = matchBalanced(index, '(', ')');
+    if (afterArgs !== null) index = afterArgs;
+    const afterSelection = matchBalanced(index, '{', '}');
+    if (afterSelection !== null) index = afterSelection;
+    return { alias, name, nextIndex: index };
+  };
+  const definitionRe = new RegExp(GRAPHQL_NAMED_OPERATION_DEFINITION, 'g');
+  let match = definitionRe.exec(skeleton);
+  while (match && !(match[1] === 'mutation' && match[2] === operationName)) {
+    match = definitionRe.exec(skeleton);
+  }
+  if (!match) return null;
+  let braceAt;
+  if (skeleton[definitionRe.lastIndex - 1] === '{') {
+    braceAt = definitionRe.lastIndex - 1;
+  } else {
+    let depth = 1;
+    let cursor = definitionRe.lastIndex;
+    while (cursor < skeleton.length && depth > 0) {
+      if (skeleton[cursor] === '(') depth += 1;
+      else if (skeleton[cursor] === ')') depth -= 1;
+      cursor += 1;
+    }
+    if (depth !== 0) return null;
+    const brace = skeleton.indexOf('{', cursor);
+    if (brace === -1) return null;
+    braceAt = brace;
+  }
+  let depth = 0;
+  let end = -1;
+  for (let cursor = braceAt; cursor < skeleton.length; cursor += 1) {
+    if (skeleton[cursor] === '{') depth += 1;
+    else if (skeleton[cursor] === '}') {
+      depth -= 1;
+      if (depth === 0) { end = cursor; break; }
+    }
+  }
+  if (end === -1) return null;
+  const field = consumeField(braceAt + 1);
+  if (!field) return null;
+  if (skeleton.slice(field.nextIndex, end).trim() !== '') return null;
+  return { alias: field.alias, name: field.name };
+};
+
+/* A deep, bounded walk rather than #143's original two-key top-level check, which its round-2
+ * review measured missed a forbidden key nested under variables.input, a renamed variable, or an
+ * inline argument literal. This refuses one at ANY depth, under any key, inside an array. The depth
+ * bound is far past anything a real GraphQL variables object for a form field needs, so it can only
+ * ever refuse something a legitimate request would not have shaped this way in the first place. */
+export const graphqlValueContainsForbiddenKey = (value, forbiddenKeys, depth = 0) => {
+  if (depth > 12 || value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    return value.some((entry) => graphqlValueContainsForbiddenKey(entry, forbiddenKeys, depth + 1));
+  }
+  for (const key of Object.keys(value)) {
+    if (forbiddenKeys.includes(key)) return true;
+    if (graphqlValueContainsForbiddenKey(value[key], forbiddenKeys, depth + 1)) return true;
+  }
+  return false;
+};
+
+export const ASHBY_FORBIDDEN_VARIABLE_KEYS = Object.freeze(['actionIdentifier', 'recaptchaToken']);
+
+/* Exactly what Ashby's own bundle prints for each operation (PR #143's fixture,
+ * test/fixtures/ashby-frontend-non-user-documents.json, captured from the live board bundle):
+ * setFormValueToFile unaliased, addManyFilesToFormValue under the formRender alias. Neither
+ * operation is on ASHBY_FORM_VALUE_WRITE_OPERATIONS - that allowance is pinned to ApiSetFormValue
+ * alone (#153) - so these get their own map and their own root-field pin rather than widening it. */
+export const ASHBY_FILE_BIND_WRITE_ROOT_FIELDS = Object.freeze({
+  ApiSetFormValueToFile: Object.freeze({ alias: null, field: 'setFormValueToFile' }),
+  ApiAddManyFilesToFormValue: Object.freeze({ alias: 'formRender', field: 'addManyFilesToFormValue' })
+});
+export const ASHBY_FILE_BIND_WRITE_OPERATIONS = Object.freeze(Object.keys(ASHBY_FILE_BIND_WRITE_ROOT_FIELDS));
+
+/* ASHBY BINDS AN UPLOADED FILE WITH A SECOND MUTATION, NOT ApiSetFormValue - see the long comment
+ * above isAshbyFormValueWrite's sibling block for the full three-call mechanism and the 2026-09-04
+ * measurement that found it. This predicate is call 3: the employer-bound write that attaches an
+ * already-stored file handle to the draft. It needed its own gate rather than joining
+ * ASHBY_FORM_VALUE_WRITE_OPERATIONS because it needed a stronger proof than that allowance carries -
+ * see graphqlSoleMutationRootField's comment for the sibling-root-field gap #143's round-2 review
+ * measured in the document proof alone. This checks, in order: host, path, method and resource type
+ * exactly as isAshbyFormValueWrite does; no `extensions` key anywhere in the envelope (an Automatic
+ * Persisted Query body would let the server pick the document by hash instead of running the one
+ * this proof reads); the operation name is one of exactly two, each with its own expected root field
+ * and alias; if `variables` is present it must be a plain object with no actionIdentifier or
+ * recaptchaToken at any depth; the document must be isGraphqlSoleNamedMutation for that exact name;
+ * and finally its sole root field must be the exact field (and, for addManyFilesToFormValue, the
+ * exact alias) Ashby's own bundle prints for that operation - not merely a field with that operation
+ * name attached to it. ApiSubmitSingleApplicationFormAction is not one of the two root fields this
+ * admits, under any name or alias, so it cannot ride in beside a legitimate file bind either. */
+export const isAshbyFileBindWrite = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (Object.prototype.hasOwnProperty.call(body, 'extensions')) return false;
+  const spec = ASHBY_FILE_BIND_WRITE_ROOT_FIELDS[body.operationName];
+  if (!spec) return false;
+  if (body.variables !== undefined) {
+    if (!body.variables || typeof body.variables !== 'object' || Array.isArray(body.variables)) return false;
+    if (graphqlValueContainsForbiddenKey(body.variables, ASHBY_FORBIDDEN_VARIABLE_KEYS)) return false;
+  }
+  if (!isGraphqlSoleNamedMutation(body.query, body.operationName)) return false;
+  const root = graphqlSoleMutationRootField(body.query, body.operationName);
+  if (!root) return false;
+  return root.alias === spec.alias && root.name === spec.field;
+};
+
+export const ASHBY_FILE_UPLOAD_HANDLE_OPERATION = 'ApiCreateFileUploadHandle';
+
+/* Detects Ashby's file-handle-creation call (call 1 of 3 - see the mechanism comment above) so its
+ * response can be read for the presigned upload target. See ashbyOneShotUploadTargetFromUrl and the
+ * containment handler's capture branch. This does NOT decide whether the request is admitted: that
+ * stays exactly the employer-bound admission the armed upload window already grants (#129),
+ * unchanged - this only decides whether an already-admitted response gets READ. Getting this
+ * detection wrong costs nothing towards over-admission: a false negative just means the response is
+ * never read and the one-shot target never recorded, so call 2 stays blocked exactly as it is today;
+ * a false positive on some OTHER already-admitted employer POST just means an irrelevant response
+ * gets parsed and discarded the moment findAshbyFileUploadHandleUrl finds no fileUploadHandle.url in
+ * it. That asymmetry is why this checks operation name and envelope only, not the fuller root-field
+ * proof isAshbyFileBindWrite requires of what it actually admits onto the network. */
+export const isAshbyFileUploadHandleRequest = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  if (applicationSite !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== ASHBY_PUBLIC_BOARD_SITE) return false;
+  if (parsed.pathname !== ASHBY_PUBLIC_BOARD_GRAPHQL_PATH) return false;
+  let body;
+  try { body = JSON.parse(postData || ''); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  return body.operationName === ASHBY_FILE_UPLOAD_HANDLE_OPERATION;
+};
+
+/* Parses the presigned upload URL out of Ashby's ApiCreateFileUploadHandle response into the exact
+ * origin+pathname the one-shot admission compares a later POST/PUT against. https only, no
+ * userinfo, no explicit non-default port - the same discipline the read/write host checks already
+ * hold Ashby's own endpoint to, applied here to a target this file has never measured and does not
+ * otherwise control, because it is minted fresh by Ashby's own server on every upload. The query
+ * string is deliberately left out of the recorded target: a presigned POST's signature lives there,
+ * this project must not log or compare against it, and origin+pathname is already an exact target
+ * rather than a pattern, so dropping the query cannot widen what is admitted. */
+export const ashbyOneShotUploadTargetFromUrl = (candidate) => {
+  if (typeof candidate !== 'string' || !candidate) return null;
+  let parsed;
+  try { parsed = new URL(candidate); } catch { return null; }
+  if (parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  if (parsed.port) return null;
+  return { origin: parsed.origin, pathname: parsed.pathname };
+};
+
+/* Whether a live request is THE one admitted upload: same origin, same path, as the target recorded
+ * from the handle response - never a host pattern, never a prefix. See
+ * ashbyOneShotUploadTargetFromUrl for why the query string is not part of the comparison. Consuming
+ * the recorded target (setting it back to null) is the caller's job, immediately after this returns
+ * true, so a SECOND POST/PUT to the identical target is refused like anything else third-party. */
+export const ashbyOneShotUploadTargetMatches = (target, url) => {
+  if (!target || typeof target !== 'object') return false;
+  let parsed;
+  try { parsed = new URL(String(url)); } catch { return false; }
+  return parsed.origin === target.origin && parsed.pathname === target.pathname;
+};
+
+/* A bounded, shape-tolerant search for the fileUploadHandle.url Ashby's ApiCreateFileUploadHandle
+ * response carries, rather than a hard-coded path to one specific root field's name - the exact
+ * field this file has never measured, because this project never opens an employer portal to find
+ * out. Getting the path wrong only means the target is never recorded and call 2 stays exactly as
+ * blocked as it is today; this can never admit more than a real, present fileUploadHandle.url would,
+ * because the one-shot admission this feeds is refused outright whenever nothing was recorded. */
+export const findAshbyFileUploadHandleUrl = (value, depth = 0) => {
+  if (depth > 8 || value === null || typeof value !== 'object') return null;
+  if (!Array.isArray(value)) {
+    const handle = value.fileUploadHandle;
+    if (handle && typeof handle === 'object' && typeof handle.url === 'string' && handle.url) {
+      return handle.url;
+    }
+  }
+  const entries = Array.isArray(value) ? value : Object.values(value);
+  for (const entry of entries) {
+    const found = findAshbyFileUploadHandleUrl(entry, depth + 1);
+    if (found) return found;
+  }
+  return null;
+};
+
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
@@ -2108,6 +2442,9 @@ let terminalFailureInput = null;
       mainFrame: request.frame() === page.mainFrame()
     });
     let managedMutationTransportContainment = null;
+    /* No-op until an Ashby run replaces it below. Every other board keeps today's behaviour exactly:
+     * the 'upload' action returns the instant setInputFiles does, with nothing waiting on it. */
+    let waitForAshbyUploadSettle = async () => {};
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
         'fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker'
@@ -2119,6 +2456,12 @@ let terminalFailureInput = null;
         blockedReason: null,
         blockedThirdPartyCount: 0,
         uploadActionArmed: false,
+        /* The one-shot upload target the #129 window's capture branch records from Ashby's own
+         * ApiCreateFileUploadHandle response, and the observation flag its file-bind admission sets
+         * - both scoped to the CURRENT armed window, reset at every arm and disarm. See the long
+         * mechanism comment above isAshbyFileBindWrite in the module source. */
+        ashbyOneShotUpload: null,
+        ashbyFileBindWriteAdmitted: false,
         handler: null
       };
       /* The last two host labels of the page this run is authorized to fill. Everything the
@@ -2145,6 +2488,22 @@ let terminalFailureInput = null;
       const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
       const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
       const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
+      /* The 2026-09-04 resume-upload fix: Ashby stores a file in three calls, and only the first
+       * (ApiCreateFileUploadHandle) and third (the field-value write above) were ever employer-bound
+       * candidates for this containment. The second - the actual bytes, POSTed to a presigned target
+       * that is never on ashbyhq.com - had no admission at all. See the mechanism comment above
+       * isAshbyFileBindWrite in the module source for the full measured chain. */
+      const graphqlLexicalSkeleton = ${graphqlLexicalSkeleton.toString()};
+      const graphqlSoleMutationRootField = ${graphqlSoleMutationRootField.toString()};
+      const graphqlValueContainsForbiddenKey = ${graphqlValueContainsForbiddenKey.toString()};
+      const ASHBY_FORBIDDEN_VARIABLE_KEYS = ${JSON.stringify(ASHBY_FORBIDDEN_VARIABLE_KEYS)};
+      const ASHBY_FILE_BIND_WRITE_ROOT_FIELDS = ${JSON.stringify(ASHBY_FILE_BIND_WRITE_ROOT_FIELDS)};
+      const isAshbyFileBindWrite = ${isAshbyFileBindWrite.toString()};
+      const ASHBY_FILE_UPLOAD_HANDLE_OPERATION = ${JSON.stringify(ASHBY_FILE_UPLOAD_HANDLE_OPERATION)};
+      const isAshbyFileUploadHandleRequest = ${isAshbyFileUploadHandleRequest.toString()};
+      const ashbyOneShotUploadTargetFromUrl = ${ashbyOneShotUploadTargetFromUrl.toString()};
+      const ashbyOneShotUploadTargetMatches = ${ashbyOneShotUploadTargetMatches.toString()};
+      const findAshbyFileUploadHandleUrl = ${findAshbyFileUploadHandleUrl.toString()};
       const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
       const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
       const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
@@ -2198,6 +2557,50 @@ let terminalFailureInput = null;
         url: request.url(),
         postData: request.postData()
       });
+      /* Call 3 of the resume-upload fix: the mutation that binds an already-stored file handle to
+       * the draft. See isAshbyFileBindWrite for why this needed its own gate and its own root-field
+       * pin rather than joining ASHBY_FORM_VALUE_WRITE_OPERATIONS. */
+      const ashbyFileBindWrite = (request) => isAshbyFileBindWrite({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
+      /* Call 1: detects Ashby's file-handle-creation mutation so its response can be read for the
+       * presigned target call 2 needs to be admitted at all. See isAshbyFileUploadHandleRequest -
+       * this only decides whether an already-admitted response gets read, never what gets admitted. */
+      const ashbyFileUploadHandleRequest = (request) => isAshbyFileUploadHandleRequest({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
+      /* Fetches call 1's real response (unmodified, forwarded to the page exactly as received),
+       * reads the presigned target out of it, and records that target as the ONE-SHOT admission call
+       * 2 needs - scoped to this armed window, and to exactly one POST/PUT. Any failure here (a
+       * network error, a non-JSON body, a shape without fileUploadHandle.url) leaves nothing
+       * recorded, which costs nothing beyond today's status quo: call 2 stays blocked exactly as it
+       * already is. This never widens what call 1 itself is admitted for - that stays the pre-existing
+       * employer-bound armed-window admission below, unchanged. */
+      const captureAshbyOneShotUploadTarget = async (route) => {
+        let response;
+        try {
+          response = await route.fetch();
+        } catch {
+          return route.abort('blockedbyclient');
+        }
+        try {
+          const responseBody = await response.json();
+          const handleUrl = findAshbyFileUploadHandleUrl(responseBody);
+          const target = handleUrl ? ashbyOneShotUploadTargetFromUrl(handleUrl) : null;
+          if (target) containment.ashbyOneShotUpload = target;
+        } catch {
+          // The response did not parse or did not carry the expected shape. Nothing is recorded.
+        }
+        return route.fulfill({ response });
+      };
       /* Every blocked request is aborted either way - nothing ever reaches anyone. What differs is
        * whether the run must DIE for it. It must when the blocked transport was bound for the
        * employer's own site, because then the page's fill semantics may depend on it and a later
@@ -2268,10 +2671,37 @@ let terminalFailureInput = null;
          * navigations, channels, and every other method stay blocked, and the final submit still
          * requires its exact literal authority. Applied on Mehek's explicit instruction after the
          * tradeoff was put to her (see UPLOAD-ALLOWANCE decision record, 2026-09-01). */
+        const uploadWindowCandidate = containment.uploadActionArmed
+          && (method === 'POST' || method === 'PUT')
+          && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch');
+        /* ASHBY'S FILE-HANDLE CALL IS ALREADY ADMITTED BELOW (it is employer-bound, and this window
+         * is armed) - this reads its response before falling back, rather than widening what gets
+         * admitted. See captureAshbyOneShotUploadTarget and the mechanism comment above
+         * isAshbyFileBindWrite. Checked ahead of the pinned employer-bound admission immediately
+         * below so this ONE request is intercepted instead of merely falling back unread. */
+        if (uploadWindowCandidate && ashbyFileUploadHandleRequest(request)) {
+          return captureAshbyOneShotUploadTarget(route);
+        }
         if (containment.uploadActionArmed
           && (method === 'POST' || method === 'PUT')
           && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
           && (employerBoundTransport(request) || boardResumeStorageUpload(request))) {
+          return route.fallback();
+        }
+        /* THE ONE-SHOT ADMISSION THE CAPTURE ABOVE FEEDS: Ashby's presigned upload target lives off
+         * ashbyhq.com, so it satisfies neither employerBoundTransport nor boardResumeStorageUpload
+         * (that host pattern is Greenhouse-only, see isBoardResumeStorageUploadHost) and falls
+         * through the pinned admission just above exactly like any other third-party POST would.
+         * Admitted here by EXACT origin+pathname match against the target captureAshbyOneShotUploadTarget
+         * recorded above, and by that alone - never a host pattern - for exactly one request, consumed the
+         * instant it matches so a second POST/PUT at the identical target is refused like anything
+         * else third-party. Nothing here changes what happens outside an armed upload window, or for
+         * any board that never triggers the capture above: ashbyOneShotUpload stays null and this
+         * never matches. */
+        if (uploadWindowCandidate
+          && containment.ashbyOneShotUpload
+          && ashbyOneShotUploadTargetMatches(containment.ashbyOneShotUpload, request.url())) {
+          containment.ashbyOneShotUpload = null;
           return route.fallback();
         }
         if (transportTypes.has(request.resourceType())) {
@@ -2295,6 +2725,18 @@ let terminalFailureInput = null;
            * page that is still loading and has no reviewed value to write, and it cannot reach the
            * activation branch, which returned before either of these. See isAshbyFormValueWrite for
            * why one pinned operation with a proved document cannot carry a submit. */
+          /* AND THE CALL THAT BINDS AN UPLOADED FILE TO THE DRAFT, admitted in this same locked-fill
+           * gate for the same reason ApiSetFormValue is - see isAshbyFileBindWrite. Deliberately not
+           * scoped to containment.uploadActionArmed the way the one-shot upload target above is:
+           * Ashby issues this call after ITS OWN async upload settles, which can outlast the window a
+           * following fill action disarms, and the bind is exactly as safe to admit unconditionally
+           * in locked mode as ApiSetFormValue already is. Recorded on the containment so the upload
+           * action's own settle wait (see waitForAshbyUploadSettle) has a positive signal to watch
+           * for beyond the DOM. */
+          if (ashbyFileBindWrite(request)) {
+            containment.ashbyFileBindWriteAdmitted = true;
+            return route.fallback();
+          }
           if (!readOnlyDataFetch && !ashbyPublicBoardRead(request) && !ashbyFormValueWrite(request)) {
             return block(route, request.resourceType() + ' transport');
           }
@@ -2316,6 +2758,38 @@ let terminalFailureInput = null;
       };
       await browserContext.route('**/*', containment.handler);
       managedMutationTransportContainment = containment;
+      if (applicationTransportSite === ASHBY_PUBLIC_BOARD_SITE) {
+        /* ASHBY'S OWN UPLOAD SETTLES ASYNCHRONOUSLY AFTER setInputFiles RETURNS, and the very next
+         * action in the packet's own action list disarms containment.uploadActionArmed before that
+         * chain has necessarily finished - closing the one-shot upload target above while Ashby's own
+         * XHR may still be in flight. This is NOT #152/#155's general "an upload is claimed only when
+         * the form shows the document" settle (open, unmerged, board-agnostic, and about what
+         * filled_fields records); it is the narrowest Ashby-specific wait that buys the network
+         * admission above a real chance to see call 2 and call 3 happen before control returns to a
+         * loop that may disarm the window. It changes nothing about filled_fields, re-verifies
+         * nothing, and runs only on an Ashby application page.
+         *
+         * Bounded at 5 seconds, polled every 150ms, and exits early on either of two signals: the
+         * bind write above was admitted (containment.ashbyFileBindWriteAdmitted - the strongest
+         * signal this file can read, since Ashby's client only issues that call once the upload it
+         * depends on already succeeded), or the form's own failure toast is showing (a terminal
+         * state: nothing more is coming for this upload, so there is nothing left to wait for). */
+        const ASHBY_UPLOAD_SETTLE_TIMEOUT_MS = 5000;
+        const ASHBY_UPLOAD_SETTLE_POLL_MS = 150;
+        waitForAshbyUploadSettle = async () => {
+          const deadline = Date.now() + ASHBY_UPLOAD_SETTLE_TIMEOUT_MS;
+          for (;;) {
+            if (containment.ashbyFileBindWriteAdmitted) return;
+            const failureToastShown = await page.evaluate(() => {
+              const toast = document.querySelector('.ashby-application-form');
+              return Boolean(toast && /failed to upload/i.test(toast.textContent || ''));
+            }).catch(() => false);
+            if (failureToastShown) return;
+            if (Date.now() >= deadline) return;
+            await new Promise((resolve) => setTimeout(resolve, ASHBY_UPLOAD_SETTLE_POLL_MS));
+          }
+        };
+      }
     }
     let v4PreSubmitTransportContainment = null;
     let v4InitialNavigationBoundary = canonicalPageUrl(input.url);
@@ -14994,8 +15468,14 @@ let terminalFailureInput = null;
         * in flight while proofs are read. The next MUTATION action closes it. */
        if (action.type === 'upload') {
          managedMutationTransportContainment.uploadActionArmed = true;
+         // Scoped to THIS armed window only - see the containment handler's capture and one-shot
+         // admission branches, and isAshbyFileBindWrite's mechanism comment.
+         managedMutationTransportContainment.ashbyOneShotUpload = null;
+         managedMutationTransportContainment.ashbyFileBindWriteAdmitted = false;
        } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
          managedMutationTransportContainment.uploadActionArmed = false;
+         managedMutationTransportContainment.ashbyOneShotUpload = null;
+         managedMutationTransportContainment.ashbyFileBindWriteAdmitted = false;
        }
      }
      let successfulMutation = false;
@@ -16244,11 +16724,17 @@ let terminalFailureInput = null;
           try {
             if (application.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-              if (submitTransportResponseUnavailable()) {
-                markPostSubmitObservationFailed();
-              } else {
-                await waitForPostSubmitApplicationState();
-              }
+              /* A blocked write-replay is transport safety refusing to relay a redirect or
+               * response Chromium did not vouch for; it says nothing about whether the page in
+               * front of the run can still be read. waitForPostSubmitApplicationState only ever
+               * evaluates the DOM (readSubmitOutcome / readSecurityCodeChallenge) and sends
+               * nothing of its own, so it stays safe to run even once the transport is flagged.
+               * Measured 2026-09-04, Exa (Ashby) packet 73768339-7fef-4493-aa75-1d47c61ae51f: the
+               * skip here left the success-or-failure container unread, and a run that pressed
+               * Submit came back with nothing but state unknown, forty seconds after the claim,
+               * for a page that may already have confirmed. */
+              if (submitTransportResponseUnavailable()) markPostSubmitObservationFailed();
+              await waitForPostSubmitApplicationState();
             }
           } finally {
             await finishSubmitTransportGate();
@@ -17397,6 +17883,9 @@ let terminalFailureInput = null;
         });
         successfulMutation = true;
         if (action.label) filledFields.push(action.label);
+        // Ashby's own upload settles asynchronously after setInputFiles returns; a no-op on every
+        // other board. See where this is assigned, above, for the bounded wait and why it exists.
+        await waitForAshbyUploadSettle();
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
       if (action.type === 'press') {
@@ -17689,13 +18178,25 @@ let terminalFailureInput = null;
      * Only on a run that actually pressed the button. On a fill run there is nothing to confirm, and
      * a confirmation-shaped sentence already on an unsubmitted page (an employer's "Thank you for
      * your interest") must not be able to manufacture one. */
+    /* THE RECEIPT READ MUST NOT ROUTE THROUGH observeForResult'S DISPOSITION GATE.
+     *
+     * Every other post-press read below (captcha, readiness, humanVerification, title, text,
+     * links) is optional context; this one is the fact the whole run exists to establish, and
+     * readSubmitOutcome already fails closed to state unknown on its own (see its trailing catch
+     * far above, where the page.evaluate is defined) without needing observeForResult's help.
+     * Routing it through that shared gate anyway meant a blocked write-replay - a network-safety
+     * refusal that says nothing about whether the DOM can still be read - silently overwrote a
+     * real page read with the same hardcoded unknown used for a page that could not be reached at
+     * all. Measured 2026-09-04, Exa (Ashby) packet 73768339-7fef-4493-aa75-1d47c61ae51f:
+     * containment tripped after the press, this call was skipped, and the run reported unknown
+     * with nothing observed on a page that may already have confirmed. transportDisposition and
+     * observationDisposition (below) still travel on the outcome either way, so nothing about the
+     * containment event stops being visible; only the receipt itself stops being thrown away for
+     * it. */
     const submitOutcome = finalSubmitPressed
       ? {
           pressed: true,
-          ...(await observeForResult(
-            () => readSubmitOutcome(),
-            { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }
-          )),
+          ...(await readSubmitOutcome()),
           ...(submitNetwork ? { network: submitNetwork } : {}),
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
