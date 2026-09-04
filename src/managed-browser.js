@@ -1084,11 +1084,16 @@ let terminalFailureInput = null;
   const managedApplicationTransportSite = (() => {
     try { return managedTransportRegistrableSuffix(new URL(input.url).hostname); } catch { return null; }
   })();
+  /* A HOST IS REQUIRED, not merely a parseable URL. about:blank, data:, blob: and javascript: all
+   * parse and all report an EMPTY hostname, whose registrable suffix is the empty string, which
+   * equals no application site and would therefore have read as third-party and spared the run.
+   * That is the one way this discriminator could fail open, so an absent host is employer-bound. */
   const managedEmployerBoundOrigin = (value) => {
     if (!managedApplicationTransportSite) return true;
     try {
-      return managedTransportRegistrableSuffix(new URL(String(value)).hostname)
-        === managedApplicationTransportSite;
+      const { hostname } = new URL(String(value));
+      if (!hostname) return true;
+      return managedTransportRegistrableSuffix(hostname) === managedApplicationTransportSite;
     } catch { return true; }
   };
   /* 'unavailable' is the lock failing to INSTALL, not a transport being attempted. It stays fatal
