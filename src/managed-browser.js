@@ -1853,6 +1853,81 @@ let terminalFailureInput = null;
           : null;
       }, { method, args: v4UtilityValue(args) });
     };
+    /* setInputFiles RETURNS LONG BEFORE THE BOARD HAS FILED THE BYTES ANYWHERE.
+     *
+     * The upload action is one call and one line of bookkeeping: setInputFiles, then
+     * filledFields.push(action.label), with nothing between them (see the upload branch below). The
+     * board's own change handler starts an XHR at that instant - the upload window's own comment
+     * already says so - and the run then walks straight on to the next action. Two measured
+     * consequences of that gap are already written down in this file:
+     *
+     *   - Greenhouse, 2026-09-02, live Hudson River Trading fill: the eager POST to
+     *     grnhse-prod-jben-us-east-1.s3.amazonaws.com was aborted, "the XHR never settled, React
+     *     unmounted the file input into a perpetual progress bar", and the form's own readiness scan
+     *     read "Resume/CV is required and is still empty" WHILE filled_fields listed resume. See
+     *     isBoardResumeStorageUploadHost. The host is admitted now; the race that made an unsettled
+     *     upload look like a successful one is untouched.
+     *   - Teamtailor: the backend has to push a waitForSelector on a family-specific "upload
+     *     complete" row because "Teamtailor uploads the file asynchronously after setInputFiles
+     *     returns" (volley-backend portalSubmission.ts, the teamtailor branch). That is the same
+     *     fact solved once, per family, with a selector that has to be captured live first.
+     *
+     * This is the family-agnostic half of it: watch the write-shaped transport the upload action
+     * itself provokes, and do not let the run advance while it is still in flight. Requests are
+     * counted only while the upload window is armed, which is exactly the interval in which a POST
+     * or PUT can be the board filing this document. Nothing here admits or blocks anything - the
+     * containment's route handler remains the only thing that decides that - so a run without
+     * containment gets the same wait and no new authority.
+     *
+     * blockedWhileArmed exists because the abort path is otherwise SILENT. blockedThirdPartyCount
+     * has been incremented and read by nothing since it was added, so a board whose uploader posts
+     * to a store this file does not know about has its resume killed with no counter, no skipped
+     * line and no blocker anywhere in the result. That is the shape of the DSI Innovations Recruitee
+     * failure (packet a34e5ce2, 2026-09-02 and 2026-09-03) and nothing in either run's record could
+     * have told us so. Recording it against the upload action does not change one admission
+     * decision; it means the next occurrence names itself instead of having to be re-derived. */
+    const uploadTransportWatch = {
+      armed: false,
+      inFlight: new Set(),
+      blockedWhileArmed: 0
+    };
+    const uploadShapedTransport = (request) => {
+      try {
+        const method = request.method().toUpperCase();
+        if (method !== 'POST' && method !== 'PUT') return false;
+        const type = request.resourceType();
+        return type === 'xhr' || type === 'fetch';
+      } catch { return false; }
+    };
+    page.on('request', (request) => {
+      // Bounded so a page that opens write-shaped requests in a loop cannot grow this set without
+      // limit; past the bound the run simply stops waiting for the surplus, which is the same
+      // behaviour it had before this watch existed.
+      if (!uploadTransportWatch.armed || uploadTransportWatch.inFlight.size >= 32) return;
+      if (uploadShapedTransport(request)) uploadTransportWatch.inFlight.add(request);
+    });
+    const forgetUploadTransport = (request) => { uploadTransportWatch.inFlight.delete(request); };
+    page.on('requestfinished', forgetUploadTransport);
+    page.on('requestfailed', forgetUploadTransport);
+    /* A bounded wait, and both bounds are deliberately small. The grace is how long the run gives
+     * the board's change handler to START its POST at all - a board that uploads lazily on submit
+     * starts nothing and pays exactly this much - and the settle is how long it will then wait for
+     * one that did start. A free managed run has 60 seconds in total (FREE_MANAGED_LIMITS), and at
+     * most three uploads are ever queued (resume, cover letter, transcript), so the worst case a
+     * form with no eager upload can pay is 3 x 400ms. */
+    const UPLOAD_TRANSPORT_START_GRACE_MS = 400;
+    const UPLOAD_TRANSPORT_SETTLE_MS = 5000;
+    const settleUploadTransport = async () => {
+      const graceDeadline = Date.now() + UPLOAD_TRANSPORT_START_GRACE_MS;
+      while (uploadTransportWatch.inFlight.size === 0 && Date.now() < graceDeadline) {
+        await page.waitForTimeout(25).catch(() => undefined);
+      }
+      const settleDeadline = Date.now() + UPLOAD_TRANSPORT_SETTLE_MS;
+      while (uploadTransportWatch.inFlight.size > 0 && Date.now() < settleDeadline) {
+        await page.waitForTimeout(50).catch(() => undefined);
+      }
+      return uploadTransportWatch.inFlight.size === 0;
+    };
     let managedMutationTransportContainment = null;
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
@@ -1978,6 +2053,11 @@ let terminalFailureInput = null;
               + (allowListedWriteRefused ? ' (allow-listed field-value write failed its proof)' : '');
           } else {
             containment.blockedThirdPartyCount += 1;
+            /* An employer-bound block is already fatal and already names itself in blockedReason.
+             * The third-party arm is the quiet one, and inside an armed upload window it is the one
+             * way this file can kill a resume without leaving a single mark on the result. Counted
+             * here so the upload action can say so; see uploadTransportWatch. */
+            if (uploadTransportWatch.armed) uploadTransportWatch.blockedWhileArmed += 1;
           }
         }
         return route.abort('blockedbyclient');
@@ -14504,16 +14584,6 @@ let terminalFailureInput = null;
        }
      });
      assertManagedMutationTransportClean();
-     if (managedMutationTransportContainment) {
-       /* The upload allowance is scoped to the upload action itself plus any read-only actions
-        * after it, because the page's own upload XHR starts on the change event and can still be
-        * in flight while proofs are read. The next MUTATION action closes it. */
-       if (action.type === 'upload') {
-         managedMutationTransportContainment.uploadActionArmed = true;
-       } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
-         managedMutationTransportContainment.uploadActionArmed = false;
-       }
-     }
      let successfulMutation = false;
      const exactActionContext = recordsSuccessfulAddresses
        && ['fill', 'fillByLabelText', 'upload', 'select'].includes(action.type)
@@ -14610,6 +14680,37 @@ let terminalFailureInput = null;
         // 70-action Greenhouse run this turns 19 reported skips into 63.
         skipped.push((action.label || action.type) + ': nothing matched ' + action.selector);
         continue;
+      }
+      /* THE UPLOAD WINDOW IS CLOSED BY THE NEXT MUTATION, AND A SKIPPED ACTION IS NOT ONE.
+       *
+       * The allowance is scoped to the upload action itself plus any read-only actions after it,
+       * because the page's own upload XHR starts on the change event and can still be in flight
+       * while proofs are read. That part is unchanged. What moved is WHERE the disarm happens.
+       *
+       * It used to sit at the top of the loop body, above every one of the continues that mean
+       * "this action did nothing": the post-submit disposition, the terminal submit decision, the
+       * unavailable application scope, and - the one that matters here - the optional pre-check that
+       * steps over a selector nothing matched. So an optional fill that touched no control still
+       * slammed the window shut, and a builder that queues speculative alias fills after its uploads
+       * closed it within milliseconds of setInputFiles returning. Recruitee's fixed-field plan is
+       * exactly that shape (volley-backend portalSubmission.ts, the recruitee branch: name, email,
+       * phone, upload resume, upload cover letter, then the reviewed-question fills), and the DSI
+       * Innovations runs on 2026-09-02 and 2026-09-03 both came back with the resume in
+       * filled_fields and an empty "CV or resume" dropzone in the post-fill screenshot.
+       *
+       * Below the pre-check, "the next mutation closes it" means what it says: an action that is
+       * about to run closes the window, an action the run stepped over does not. This grants no new
+       * transport - every admission is still employer-bound or the board's own resume store, still
+       * POST/PUT, still xhr/fetch - it only stops the window being shut by an action that never
+       * happened. 2026-09-03. */
+      if (['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
+        // A read keeps whatever the window already was.
+      } else {
+        uploadTransportWatch.armed = action.type === 'upload';
+        if (!uploadTransportWatch.armed) uploadTransportWatch.inFlight.clear();
+        if (managedMutationTransportContainment) {
+          managedMutationTransportContainment.uploadActionArmed = uploadTransportWatch.armed;
+        }
       }
       if (isFinalSubmitAction(action)) {
         const validConfirmation = requiredFieldConfirmation
@@ -16872,13 +16973,98 @@ let terminalFailureInput = null;
           exactActionContext ? exactBinding.targetHandle : uploadTarget,
           exactBinding?.rootBinding?.formHandle || null
         );
+        const blockedBeforeUpload = uploadTransportWatch.blockedWhileArmed;
         await uploadTarget.setInputFiles({
           name: action.file.name,
           mimeType: action.file.mimeType,
           buffer: Buffer.from(action.file.base64, 'base64')
         });
+        // The bytes are in the control and the board's change handler has fired. Let whatever it
+        // started finish before this run moves on and the next mutation closes the upload window.
+        const uploadTransportSettled = await settleUploadTransport();
+        const blockedDuringUpload = uploadTransportWatch.blockedWhileArmed - blockedBeforeUpload;
+        /* WHAT filled_fields IS ALLOWED TO CLAIM ABOUT AN ATTACHMENT.
+         *
+         * It used to claim setInputFiles returned, and nothing more. That is a fact about this
+         * process, not about the employer's form, and the backend reads it as the latter: a missing
+         * 'resume' is the one thing filledFieldBlockers refuses a send for
+         * (volley-backend portalSubmission.ts). Packet a34e5ce2 went to a Recruitee board twice -
+         * 2026-09-02 and 2026-09-03 - and both runs reported resume and cover_letter attached with
+         * no failed field and no skipped reason, while the 2026-09-03 post-fill screenshot shows
+         * both dropzones still rendering their empty "Upload a file or drag and drop here" prompt
+         * and no filename anywhere. Two real attempts were spent on a claim nothing had measured.
+         *
+         * The read below is deliberately GENEROUS, because the failure direction that costs a real
+         * application is refusing a correct send, and a working uploader is allowed to look like
+         * almost anything afterwards. Any ONE of these keeps the claim:
+         *   - the control is no longer in the document. Greenhouse REMOVES its file input once the
+         *     upload finishes (the readiness scan's uploadHasFile says so in this same file), and
+         *     Workable remounts its own on parse. A control that was consumed is evidence of an
+         *     uploader that took the file, not of a lost one.
+         *   - the control still holds the file. Dropzone-style uploaders keep it.
+         *   - the block around the control displays the document's own file name. This is an EXACT
+         *     test against the name this run uploaded, not a guess at a class name, so it costs no
+         *     vocabulary and holds on any board that shows the applicant what she attached.
+         *   - the block carries one of the filename-chip markers the readiness scan already trusts.
+         *     Same three selectors, deliberately not widened: widening them here would make this
+         *     read and that gate disagree, and neither has measured evidence for a fourth spelling.
+         *
+         * Only when ALL FOUR are false does the claim go: the control is still sitting there, still
+         * a file input, still empty, inside a block that shows no sign of the document. That is not
+         * a form that took the file, and saying so out loud in skipped is what turns the DSI failure
+         * from a silent success into something the backend can refuse. 2026-09-03. */
+        const uploadEvidence = await uploadTarget.evaluate((element, expectedName) => {
+          const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+          const wanted = clean(expectedName);
+          if (!element || !element.isConnected) return { connected: false, files: 0, named: false, chip: false };
+          const files = element.files ? element.files.length : 0;
+          /* The BLOCK, not the input's immediate parent. A dropzone that wraps the input while the
+           * filename chip renders as the dropzone's SIBLING reads as empty from the parent alone -
+           * the same reasoning the starred-upload readiness arm records in this file. Bounded at
+           * four levels and stopped at the form, so this can never widen into the whole page and
+           * borrow a different field's filename. */
+          let block = element.parentElement;
+          for (let depth = 0; depth < 4 && block && block.parentElement; depth += 1) {
+            const parent = block.parentElement;
+            if (parent.tagName === 'FORM' || parent.tagName === 'BODY' || parent.tagName === 'HTML') break;
+            block = parent;
+          }
+          const scope = block || element.parentElement || element;
+          const chip = Boolean(scope.querySelector
+            && scope.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]'));
+          const named = Boolean(wanted) && clean(scope.textContent).indexOf(wanted) >= 0;
+          return { connected: true, files, named, chip };
+        }, action.file.name).catch(() => null);
+        // A read that could not be taken at all proves nothing either way, so it keeps the claim.
+        const formShowsDocument = !uploadEvidence
+          || !uploadEvidence.connected
+          || uploadEvidence.files > 0
+          || uploadEvidence.named
+          || uploadEvidence.chip;
         successfulMutation = true;
-        if (action.label) filledFields.push(action.label);
+        if (action.label) {
+          if (formShowsDocument) filledFields.push(action.label);
+          else {
+            skipped.push(action.label
+              + ': the file was set into ' + action.selector
+              + ' and the form kept no sign of it - the control is still an empty file input and'
+              + ' its block shows no file name');
+          }
+        }
+        /* Said whatever the verdict was, because these two are the only account anyone gets of a
+         * transport that was killed on the way to the board. blockedWhileArmed counts third-party
+         * aborts inside this upload's own window - the arm that is NOT run-fatal and had been
+         * recorded nowhere at all - and an unsettled window is an upload still in flight when the
+         * run gave up waiting. Neither is by itself a failure; both are the measurement the DSI runs
+         * could not produce, and they cost one skipped line each only when they actually happen. */
+        if (blockedDuringUpload > 0) {
+          skipped.push((action.label || action.type)
+            + ': ' + blockedDuringUpload + ' third-party request(s) were blocked while this upload was in flight');
+        }
+        if (!uploadTransportSettled) {
+          skipped.push((action.label || action.type)
+            + ': the page still had upload transport in flight after ' + UPLOAD_TRANSPORT_SETTLE_MS + 'ms');
+        }
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
       if (action.type === 'press') {
