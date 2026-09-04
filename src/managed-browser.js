@@ -6604,6 +6604,16 @@ let terminalFailureInput = null;
     // See fillCustomChoice: true once this call has opened a candidate control, so a caller can tell
     // a block with no drivable control from a control whose list did not carry the answer.
     let lastChoiceControlOpened = false;
+    /* WHETHER ANY CONTROL THIS CALL DROVE WAS THE GREENHOUSE LOCATION GEOCODER, and it is recorded
+     * because a geocoder is the one control whose empty menu proves nothing. Every other menu in
+     * this file is a closed list: what it does not offer does not exist on the form, so a list that
+     * offers NOTHING is not a list. A geocoder is a live server answering one query string, its
+     * empty menu means only that this query resolved nothing, and its visible box is a query box
+     * whose text the widget owns - the exact shape whose plain fill reported "location" filled on
+     * every run while the employer's validator kept calling the field empty (IMC Trading, packet
+     * measured 2026-08-20; the same shape on Ashby, packet 9f1d9e52). See typeIntoEmptyMenuControl,
+     * which refuses to write into one. */
+    let lastChoiceControlWasGeocoder = false;
     // Set only by the exact Greenhouse question probe immediately before its chooser call. Captured
     // and cleared at function entry, so no later question can inherit the one skipped opener click.
     let nextChoiceControlAlreadyOpen = false;
@@ -6694,6 +6704,86 @@ let terminalFailureInput = null;
     // this can only ever report an attempt made for THIS field.
     const unmatchedReason = (value) => lastChoiceRefusal
       || ('no option matched "' + clean(value) + '"' + choiceOffersClause() + ', left for you to choose');
+    /* A CONTROL THAT OFFERED NOTHING IS NOT A MENU, and parking over one parks over a text box.
+     *
+     * Measured in production on Hudson River Trading's Greenhouse form (packet 4a79eec1,
+     * 2026-09-02). That form asks for a GPA twice: a banded react-select ("What is your overall
+     * college/university GPA?", thirteen bands including "3.76 - 4.0") and, immediately under it, a
+     * write-in captioned "We recognize that the options above may not cover all global grading
+     * systems... write in your GPA below without conversion". The write-in wears the same widget
+     * shell as its neighbours and opens the same menu markup, and that menu holds react-select's own
+     * empty-state notice and nothing else. Every tier in this file correctly failed to find "3.89"
+     * on it, the action parked, and the run ended
+     * 'no option matched "3.89" (the list offered: "No options"), left for you to choose' with
+     * nothing reaching the employer.
+     *
+     * THE DANGEROUS DIRECTION IS THE OPPOSITE ONE, and it is what every clause below is for. A
+     * control that IS a closed menu accepts only its own options; typing into one writes nothing, or
+     * writes a string the employer never offered, and either way the answer is lost while the report
+     * claims it landed. So this is not "the answer did not match, try typing". It fires only where
+     * the control PROVED it has no options to match against. Written once and shared by both fall
+     * throughs, so the fill path and the fillByLabelText path cannot come to hold different opinions
+     * about what free entry is.
+     *
+     * THE COMPLETE SET OF STATES IN WHICH THIS WRITES, and every one of them is free entry:
+     *   1. a control was opened for this action, so the verdict rests on a menu that was seen;
+     *   2. no chooser refusal was recorded, so an ambiguous list, a near miss, a control bound to two
+     *      listboxes and every other fail-closed verdict still parks and still says why;
+     *   3. the offers evidence says the list opened and, once react-select's placeholder rows are
+     *      dropped, held ZERO real rows - and because rows beat rowlessness on that record, ONE real
+     *      row seen on ANY control of this action defeats this outright;
+     *   4. the widget rendered its own '--no-options' notice, so a menu that never appeared, one
+     *      still marked loading, and one whose markup rendered empty are all excluded;
+     *   5. no control this action drove was the Greenhouse location geocoder, whose empty menu is a
+     *      statement about one query rather than about the control;
+     *   6. the control is not already holding an answer, so nothing on the form is overwritten;
+     *   7. the element is a visible, enabled, text-shaped <input> or <textarea> - never a bare div
+     *      opener, never a radio, checkbox, file or native select;
+     *   8. the stored answer is non-empty.
+     *
+     * WHAT IT WRITES IS THE STORED ANSWER, BYTE FOR BYTE. No normalising, no widening, no rewriting
+     * of the query - those belong to the tiers that MATCH an answer against a list, and there is no
+     * list here. It types, dispatches the two events a controlled input listens for, blurs, and then
+     * reads the control's own value back and requires exact equality. The blur is the discriminator
+     * and is not decoration: a react-select search box drops its uncommitted text on blur, so a
+     * widget that only LOOKED like free entry fails the read-back and the caller reports the honest
+     * unmatched sentence it would have reported anyway. Nothing here ever clicks a row, so
+     * react-select's isMulti removal - the way a naive re-pick DELETES an answer already chosen -
+     * cannot be reached from this path at all. */
+    const typeIntoEmptyMenuControl = async (scope, target, value) => {
+      if (!target) return false;
+      if (!lastChoiceControlOpened) return false;
+      if (lastChoiceRefusal) return false;
+      if (lastChoiceControlWasGeocoder) return false;
+      const evidence = lastChoiceOffersEvidence;
+      if (!evidence || !evidence.opened) return false;
+      if (evidence.texts.length > 0 || evidence.total > 0) return false;
+      if (evidence.emptyState !== true) return false;
+      const wanted = String(value == null ? '' : value);
+      if (!wanted) return false;
+      if (scope) {
+        const held = await readChoiceState(scope);
+        if (held.kind === 'chosen') return false;
+      }
+      const writable = await target.evaluate((element) => {
+        if (element instanceof HTMLTextAreaElement) return !element.disabled && !element.readOnly;
+        if (!(element instanceof HTMLInputElement)) return false;
+        const type = String(element.type || '').toLowerCase();
+        if (!['', 'text', 'search', 'tel', 'url', 'email', 'number'].includes(type)) return false;
+        return !element.disabled && !element.readOnly;
+      }).catch(() => false);
+      if (!writable) return false;
+      if (!await target.isVisible().catch(() => false)) return false;
+      await target.fill(wanted).catch(() => undefined);
+      await target.evaluate((element) => {
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      }).catch(() => undefined);
+      await target.evaluate((element) => element.blur()).catch(() => undefined);
+      return await settleVerified(async () => await target
+        .evaluate((element, expected) => String(element.value == null ? '' : element.value) === expected, wanted)
+        .catch(() => false));
+    };
     /* A VERIFICATION THAT CAN ONLY AGREE WITH THE CHOOSER IS NOT A VERIFICATION, and this one could
      * only agree. Its first rule was optionMatches - the same bidirectional containment predicate
      * that had just chosen the row - plus a second containment clause on top of it. So on exactly
@@ -7721,6 +7811,9 @@ let terminalFailureInput = null;
       // control I can drive" from "I drove the control and its list does not carry her answer",
       // which are the same 'false' to the caller and are opposite sentences to the applicant.
       lastChoiceControlOpened = false;
+      // Cleared beside it and for the same reason: this may only ever describe a control THIS call
+      // drove, never one the question before it drove.
+      lastChoiceControlWasGeocoder = false;
       const alreadyAnswered = await readChoiceState(container);
       // Published for the withdrawal above, which has to know what "put it back" means before this
       // function has clicked anything.
@@ -8453,16 +8546,31 @@ let terminalFailureInput = null;
        * "notice" without narrowing OPTION_NODES itself, which every other tier in this file still
        * depends on staying exactly as loose as it is. Indices are returned, not a count, for the
        * same reason offeredRows returns them: the caller that wants the ONE surviving row still
-       * needs to say which one. */
+       * needs to say which one.
+       *
+       * WHICH NOTICE IT WAS IS ALSO RETURNED, and only ever as a partition of the rows this rule
+       * ALREADY dropped, so the two facts cannot disagree with each other. "There are none" and
+       * "these are still loading" are the same zero to a caller counting rows and opposite facts to
+       * a caller deciding whether the control is a menu at all: react-select renders both through
+       * the same '--loading' / '--no-options' notice slot. emptyNotices holds only the second, so a
+       * menu that had not finished loading can never be read as a menu that offered nothing. */
       const realOfferedRows = async (root) => {
         const rows = root.locator(OPTION_NODES);
         const shown = await offeredRows(rows);
-        if (shown.length === 0) return { rows, indices: shown };
+        if (shown.length === 0) return { rows, indices: shown, emptyNotices: [] };
         const isNotice = await rows.evaluateAll(
-          (nodes, indices) => indices.map((index) => /\bnotice\b/i.test(nodes[index].className || '')),
+          (nodes, indices) => indices.map((index) => {
+            const name = String(nodes[index].className || '');
+            if (!/\bnotice\b/i.test(name)) return '';
+            return /no[-_]?options/i.test(name) ? 'empty' : 'notice';
+          }),
           shown,
-        ).catch(() => shown.map(() => false));
-        return { rows, indices: shown.filter((_, position) => !isNotice[position]) };
+        ).catch(() => shown.map(() => ''));
+        return {
+          rows,
+          indices: shown.filter((_, position) => !isNotice[position]),
+          emptyNotices: shown.filter((_, position) => isNotice[position] === 'empty'),
+        };
       };
       /* ONE SHORT REMOTE-RESULT GRACE, ONLY FOR THE GREENHOUSE LOCATION FIELD.
        *
@@ -8661,14 +8769,36 @@ let terminalFailureInput = null;
        * enter the record; the one later call, after a failed search, can only replace a rowless
        * record with rows a late-rendering menu produced. typeof-guarded like
        * nextChoiceControlAlreadyOpen, because the focused suites extract this helper without the
-       * reporting scope around it, and their contracts are about choosing, not reporting. */
+       * reporting scope around it, and their contracts are about choosing, not reporting.
+       *
+       * READ THROUGH realOfferedRows, NOT offeredRows, and that asymmetry was the defect. Every
+       * CLICKING path in this file already counts rows through realOfferedRows, which drops
+       * react-select's own '<div class="select__menu-notice select__menu-notice--no-options">No
+       * options</div>' before counting, because "no-options" contains the substring "option" and
+       * OPTION_NODES is deliberately that loose. This reporting path bypassed it, so the two
+       * disagreed about the same menu: the chooser correctly saw a list with nothing on it, and the
+       * report told the applicant the list OFFERED "No options", as though the widget's way of
+       * saying it has none were one of the things it has. Measured in production on Hudson River
+       * Trading's Greenhouse form (packet 4a79eec1, 2026-09-02): a stored GPA of "3.89" came back
+       * 'no option matched "3.89" (the list offered: "No options")'. Reusing the clicking path's own
+       * helper rather than repeating its rule is what keeps the two from drifting apart again.
+       *
+       * AND WHETHER THE WIDGET ITSELF SAID IT HAS NONE rides the record, for the one caller that
+       * has to tell a control presenting an empty menu from a control whose menu never rendered.
+       * It is only ever set from rows realOfferedRows already dropped as the no-options notice, so
+       * it cannot claim emptiness for a menu that is still loading or one that rendered nothing at
+       * all. Rowless records do not overwrite each other (see publishChoiceOffers), so the flag
+       * that survives is the one read on the UNFILTERED menu, before searchFor typed anything. */
       const recordChoiceOffers = async () => {
         if (typeof publishChoiceOffers !== 'function') return;
+        let emptyState = false;
         for (const root of [menuRoot(), widenRoot()]) {
           if (!root) continue;
-          const rows = root.locator(OPTION_NODES);
-          const offers = await offeredRows(rows);
-          if (offers.length === 0) continue;
+          const { rows, indices: offers, emptyNotices } = await realOfferedRows(root);
+          if (offers.length === 0) {
+            if (emptyNotices.length > 0) emptyState = true;
+            continue;
+          }
           const texts = [];
           for (const index of offers.slice(0, 8)) {
             texts.push(clean(await rows.nth(index).textContent().catch(() => '')).slice(0, 60));
@@ -8676,7 +8806,7 @@ let terminalFailureInput = null;
           publishChoiceOffers({ opened: true, total: offers.length, texts });
           return;
         }
-        publishChoiceOffers({ opened: true, total: 0, texts: [] });
+        publishChoiceOffers({ opened: true, total: 0, texts: [], emptyState });
       };
       const total = await controls.count();
       for (let index = 0; index < total; index += 1) {
@@ -8694,6 +8824,10 @@ let terminalFailureInput = null;
         if (CLEAR_CONTROL_RE.test(clears)) continue;
         activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder(control);
         lastChoiceControlOpened = true;
+        // Sticky across the control loop on purpose: one geocoder among this question's controls is
+        // enough to make an empty menu unprovable for the whole question.
+        lastChoiceControlWasGeocoder = lastChoiceControlWasGeocoder
+          || activeControlAllowsIdenticalExactLocationRows;
         /* A role-less Greenhouse input is probed by one real pointer click before this chooser is
          * called. Clicking the same input again can toggle its menu closed, which would discard the
          * only structural evidence that separated it from a real text field. Only the exact control
@@ -16097,6 +16231,19 @@ let terminalFailureInput = null;
            * typing...". Measured end to end: filled_fields carried "location" on every run while
            * the packet's own required-field scan kept naming "Current Location" empty, from the
            * same run, every time. */
+          /* UNLESS THERE WAS NEVER A MENU TO MATCH AGAINST. Everything the comment above refuses is
+           * a control that HAS options and did not offer this answer; a control that opened and
+           * proved it has none is a text box wearing menu markup, and the whole paragraph above
+           * turns on driving "the widget's real search-and-select lifecycle" - there is no selection
+           * lifecycle on a widget with nothing to select. See typeIntoEmptyMenuControl for the eight
+           * conditions, the byte-for-byte write, and the blur-then-read-back that sends a widget
+           * which only looked like free entry straight back to the sentence below. */
+          if (await typeIntoEmptyMenuControl(container, target, action.value || '')) {
+            if (actionDiagnostic) actionDiagnostic.outcome = 'empty_menu_free_entry';
+            successfulMutation = true;
+            if (action.label) filledFields.push(action.label);
+            continue;
+          }
           if (actionDiagnostic) actionDiagnostic.outcome = state.kind === 'chosen'
             ? 'choice_already_answered'
             : 'choice_unmatched';
@@ -16546,7 +16693,28 @@ let terminalFailureInput = null;
            * "August 2028 - December 2028" - and the stored answer is the month "May 2028", which
            * genuinely is not on that list. "choice option not found" told her none of that, so a
            * report she could have cleared in one click read as a fault in Litos.
+           *
+           * UNLESS THE LIST WAS NEVER A LIST. "Not on that list" needs a list, and DV Trading's
+           * graduation ranges are one: thirteen bands, a real closed menu, and an answer that is
+           * genuinely not among them belongs to the applicant. A control that opened and showed
+           * react-select's own empty-state notice and nothing else has no list at all, and the same
+           * sentence there tells her a menu refused her answer when what actually happened is that
+           * a write-in box was never written in. See typeIntoEmptyMenuControl.
+           *
+           * The witness is pinned here rather than at the shape dispatch above, because that
+           * dispatch deliberately leaves every combobox-shaped field unpinned: until this line the
+           * field was being driven as a chooser, and a chooser commits by clicking a row, not by
+           * writing into the element the shape read resolved. This is the first moment that element
+           * is the one about to be mutated.
            */
+          if (exactActionContext) {
+            await pinSuccessfulAddressWitness(exactBinding.fieldHandle, exactBinding.formHandle || null);
+          }
+          if (await typeIntoEmptyMenuControl(questionBlock, field, action.value || '')) {
+            successfulMutation = true;
+            if (action.label) filledFields.push(action.label);
+            continue;
+          }
           if (action.label) {
             const unmatched = await readChoiceState(questionBlock);
             skipped.push(unmatched.kind === 'chosen'
