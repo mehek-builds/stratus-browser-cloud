@@ -132,6 +132,21 @@ const ACCEPTED_RECEIPT = {
   message: 'Thank you for applying.',
   formStillPresent: false,
 };
+/* Shaped exactly the way readSubmitOutcome resolves on Stratus's own synthetic stub page (the
+ * 'Submission redirect blocked' / 'Submission response unavailable' HTML settleHeldRoute
+ * route.fulfill()s in place of whatever the ATS would have rendered): no arm recognises that
+ * boilerplate, so it falls through to readSubmitOutcome's own last resort. UNREADABLE_RECEIPT
+ * above (source: null) is the OTHER no-evidence shape - what readSubmitOutcome's outer catch
+ * produces when the page's execution context was destroyed rather than merely replaced - so
+ * between the two constants both no-evidence source values Finding 1 treats as "nothing legible
+ * was read" are covered. */
+const NO_EVIDENCE_RECEIPT = {
+  state: 'unknown',
+  source: 'unmatched_page_text',
+  evidence: 'https://boards.greenhouse.io/acme/jobs/4242000',
+  message: 'Stratus blocked a write-preserving submit redirect.',
+  formStillPresent: false,
+};
 const STILL_STANDING_CHALLENGE = { kind: 'security_code', fieldCount: 8, sentTo: null, label: 'Security code' };
 
 test('a blocked write-replay after a code resubmit press no longer skips the DOM watch, and an accepted verdict survives', async () => {
@@ -225,4 +240,80 @@ test('when the resubmit press itself was never clicked, codeOutcome stays not_en
   });
   assert.equal(codeOutcome, 'not_entered');
   assert.deepEqual(calls, [], 'nothing should run when the branch guard is false: got ' + JSON.stringify(calls));
+});
+
+/* REVIEW ROUND 1 - Finding 1: a blocked transport's own stub page must not read as an accepted
+ * code. The five tests above never exercised the actual failure: the only "nothing confirms it"
+ * receipt they pair with a blocked transport (UNREADABLE_RECEIPT) is always paired with
+ * STILL_STANDING_CHALLENGE, so securityCodeVerdict's rejected-on-a-standing-challenge arm was
+ * always the one doing the work. Nobody had tested transport-unavailable together with a
+ * NON-standing challenge (null - no control found, exactly what the stub page has none of) and a
+ * receipt that matched no ATS arm either (source 'unmatched_page_text' or null) - the one
+ * combination securityCodeVerdict itself cannot distinguish from a genuinely quiet, genuinely
+ * cleared ATS page, and so resolves 'accepted' on its own "cleared control, nothing contrary"
+ * default. That is the false accept: a resubmission nobody read is reported as accepted. */
+
+test('Finding 1: transport unavailable, no challenge control found, and a receipt that matched no ATS arm (unmatched_page_text) resolves unknown, not accepted', async () => {
+  const { codeOutcome, calls } = await runSecurityCodeClickedBranch({
+    transportUnavailable: true,
+    readSubmitOutcomeResult: NO_EVIDENCE_RECEIPT,
+    readSecurityCodeChallengeResult: null,
+  });
+  assert.ok(
+    calls.includes('markPostSubmitObservationFailed'),
+    'the containment event must still be recorded: got ' + JSON.stringify(calls),
+  );
+  assert.ok(
+    calls.some((call) => Array.isArray(call) && call[0] === 'securityCodeVerdict'),
+    'securityCodeVerdict must still be consulted - the override applies to its result, not instead of calling it: '
+      + 'got ' + JSON.stringify(calls),
+  );
+  assert.equal(
+    codeOutcome,
+    'unknown',
+    'nothing legible came back from either reader (a stub page, not a quiet ATS page), so the verdict must not '
+      + 'default to accepted',
+  );
+});
+
+test('Finding 1: transport unavailable, no challenge control found, and a destroyed-context receipt (source null) also resolves unknown, not accepted', async () => {
+  const { codeOutcome } = await runSecurityCodeClickedBranch({
+    transportUnavailable: true,
+    readSubmitOutcomeResult: UNREADABLE_RECEIPT,
+    readSecurityCodeChallengeResult: null,
+  });
+  assert.equal(
+    codeOutcome,
+    'unknown',
+    'the other no-evidence shape (readSubmitOutcome\'s own outer catch, source null) must resolve the same way '
+      + 'as unmatched_page_text',
+  );
+});
+
+test('Finding 1 leaves a genuine receipt alone: transport unavailable plus a real ats_route confirmation still resolves accepted', async () => {
+  const { codeOutcome } = await runSecurityCodeClickedBranch({
+    transportUnavailable: true,
+    readSubmitOutcomeResult: ACCEPTED_RECEIPT,
+    readSecurityCodeChallengeResult: null,
+  });
+  assert.equal(
+    codeOutcome,
+    'accepted',
+    'an ats_route receipt is real evidence the employer\'s own page rendered before any transport gate fired, '
+      + 'and must survive unchanged',
+  );
+});
+
+test('Finding 1 leaves a standing challenge alone: transport unavailable plus a still-standing code control resolves rejected even when the receipt also matched no ATS arm', async () => {
+  const { codeOutcome } = await runSecurityCodeClickedBranch({
+    transportUnavailable: true,
+    readSubmitOutcomeResult: NO_EVIDENCE_RECEIPT,
+    readSecurityCodeChallengeResult: STILL_STANDING_CHALLENGE,
+  });
+  assert.equal(
+    codeOutcome,
+    'rejected',
+    'the new override only fires when the challenge reader also found nothing (still === null); a standing '
+      + 'control must keep resolving rejected the way it always has',
+  );
 });
