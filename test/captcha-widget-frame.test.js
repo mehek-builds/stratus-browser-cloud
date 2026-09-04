@@ -211,13 +211,19 @@ function fakeRoute(request) {
  * ashbyOneShotUploadTargetMatches) answer false / no-op the same way: none of this file's fixtures
  * ever arm uploadActionArmed, so none of them are reachable here, but the extracted handler source
  * still names them and a ReferenceError at call time is exactly the drift this extraction exists to
- * catch - so they get real, inert stand-ins rather than being left undefined. */
+ * catch - so they get real, inert stand-ins rather than being left undefined. teamtailorCookieChoiceWrite
+ * (the PR #180 cookie-consent admission, declared in the module source immediately beside
+ * ashbyFileBindWrite) is the same story minus the upload gating: it is consulted unconditionally in
+ * the locked-mode transport branch, so any fixture whose resourceType is in transportTypes reaches
+ * it, and answering false here is what keeps every non-Teamtailor fixture on its pre-existing
+ * block()/fallback() outcome instead of a ReferenceError. */
 const MUTATION_DEPENDENCIES = {
   transportTypes: new Set(['fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker']),
   ashbyPublicBoardRead: () => false,
   ashbyFormValueWrite: () => false,
   ashbyFileBindWrite: () => false,
   ashbyFileUploadHandleRequest: () => false,
+  teamtailorCookieChoiceWrite: () => false,
   captureAshbyOneShotUploadTarget: async (route) => route.fallback(),
   ashbyOneShotUploadTargetMatches: () => false,
   boardResumeStorageUpload: () => false,
@@ -242,9 +248,9 @@ function runMutationHandler(request, containmentOverrides = {}) {
   const source = extractHandler('const transportTypes = new Set([');
   const names = [
     'containment', 'transportTypes', 'block', 'ashbyPublicBoardRead', 'ashbyFormValueWrite',
-    'ashbyFileBindWrite', 'ashbyFileUploadHandleRequest', 'captureAshbyOneShotUploadTarget',
-    'ashbyOneShotUploadTargetMatches', 'boardResumeStorageUpload', 'employerBoundTransport',
-    'canonicalPageUrl', 'page', 'captchaWidgetFrame'
+    'ashbyFileBindWrite', 'ashbyFileUploadHandleRequest', 'teamtailorCookieChoiceWrite',
+    'captureAshbyOneShotUploadTarget', 'ashbyOneShotUploadTargetMatches', 'boardResumeStorageUpload',
+    'employerBoundTransport', 'canonicalPageUrl', 'page', 'captchaWidgetFrame'
   ];
   const handler = new Function(...names, `return ${source};`)(
     containment,
@@ -254,6 +260,7 @@ function runMutationHandler(request, containmentOverrides = {}) {
     MUTATION_DEPENDENCIES.ashbyFormValueWrite,
     MUTATION_DEPENDENCIES.ashbyFileBindWrite,
     MUTATION_DEPENDENCIES.ashbyFileUploadHandleRequest,
+    MUTATION_DEPENDENCIES.teamtailorCookieChoiceWrite,
     MUTATION_DEPENDENCIES.captureAshbyOneShotUploadTarget,
     MUTATION_DEPENDENCIES.ashbyOneShotUploadTargetMatches,
     MUTATION_DEPENDENCIES.boardResumeStorageUpload,
