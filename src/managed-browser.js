@@ -290,6 +290,45 @@ export const ashbyPublicBoardOperationName = ({ url, postData } = {}) => {
   return typeof operationName === 'string' && operationName ? operationName.slice(0, 80) : null;
 };
 
+/* THE SHAPE OF A REFUSED WRITE'S BODY, WITHOUT A BYTE OF ITS CONTENT.
+ *
+ * Measured 2026-09-04 23:31Z on Covenant House International's Intern, Finance (application
+ * c24e48a2, run 4a27b41b): six minutes after #180 deployed, the fill still died on
+ *   fetch transport: POST https://covenanthouseinternational.na.teamtailor.com/cookie-policy/accept
+ * - the exact request #180 admits, refused by a proof that reads the BODY. The public bundle says
+ * what the body should be; the sentence above cannot say what it was, so a body proof that misses
+ * the live request (a null postData, a key the bundle does not show, a value shaped differently)
+ * is indistinguishable in the logs from a deploy that has not landed. This names the body's
+ * SHAPE beside the refused URL: whether Playwright handed the runner a body at all, whether it
+ * parsed, and for JSON the keys and each value's type and length, one level into nested objects.
+ * Never a value. A cookie preference, a candidate's email and a resume all become
+ * 'json{cookie_policy:{visitor_uuid:str0,referrer:str0,categories:str0}}' or the like, which is
+ * enough to say which clause of a proof refused it and not enough to say anything about her.
+ * Diagnostics only, never authorization, same rule as ashbyPublicBoardOperationName. */
+export const refusedTransportBodyShape = (postData) => {
+  const MAX_KEYS = 12;
+  const MAX_KEY_LENGTH = 40;
+  if (postData === null || postData === undefined) return 'body=absent';
+  if (typeof postData !== 'string') return 'body=' + typeof postData;
+  if (postData === '') return 'body=empty';
+  let parsed;
+  try { parsed = JSON.parse(postData); } catch { return 'body=text' + postData.length; }
+  const describe = (value, depth) => {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'array' + value.length;
+    if (typeof value === 'string') return 'str' + value.length;
+    if (typeof value === 'number' || typeof value === 'boolean') return typeof value;
+    if (typeof value === 'object') {
+      if (depth >= 2) return 'object';
+      const keys = Object.keys(value);
+      const shown = keys.slice(0, MAX_KEYS).map((key) => key.slice(0, MAX_KEY_LENGTH) + ':' + describe(value[key], depth + 1));
+      return '{' + shown.join(',') + (keys.length > MAX_KEYS ? ',+' + (keys.length - MAX_KEYS) : '') + '}';
+    }
+    return typeof value;
+  };
+  return ('body=json' + describe(parsed, 0)).slice(0, 400);
+};
+
 /* PROVE THE DOCUMENT IS A READ, WITHOUT DEPENDING ON HOW A CLIENT SERIALIZES IT.
  *
  * An earlier form of this test asked whether the document STARTED with `query`. That is true of
@@ -2635,6 +2674,7 @@ let terminalFailureInput = null;
       const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
       const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
       const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
+      const refusedTransportBodyShape = ${refusedTransportBodyShape.toString()};
       const GRAPHQL_NAMED_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_NAMED_OPERATION_DEFINITION)};
       const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
       const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
@@ -2801,9 +2841,17 @@ let terminalFailureInput = null;
              * regression this allowance closes. */
             const allowListedWriteRefused = Boolean(operationName)
               && ASHBY_FORM_VALUE_WRITE_OPERATIONS.includes(operationName);
-            containment.blockedReason = reason + ': ' + request.method().toUpperCase() + target
+            /* Keys and lengths only, never content - see refusedTransportBodyShape. Only for a
+             * write-shaped method: a refused GET has no body worth describing, and the Ashby
+             * operation name above already says what a refused GraphQL read was. */
+            const method = request.method().toUpperCase();
+            const bodyShape = method === 'POST' || method === 'PUT' || method === 'PATCH'
+              ? ' ' + refusedTransportBodyShape(request.postData())
+              : '';
+            containment.blockedReason = reason + ': ' + method + target
               + (operationName ? ' op=' + operationName : '')
-              + (allowListedWriteRefused ? ' (allow-listed field-value write failed its proof)' : '');
+              + (allowListedWriteRefused ? ' (allow-listed field-value write failed its proof)' : '')
+              + bodyShape;
           } else {
             containment.blockedThirdPartyCount += 1;
           }
