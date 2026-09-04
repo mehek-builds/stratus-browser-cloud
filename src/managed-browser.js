@@ -16694,14 +16694,53 @@ let terminalFailureInput = null;
             try {
               if (verification.pass.submissionOutcome === 'clicked') {
                 await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-                if (submitTransportResponseUnavailable()) {
-                  markPostSubmitObservationFailed();
+                /* The same blocked-write-replay flag gates this arm too, and it needs the same fix
+                 * as the sibling application-submit arm below. A blocked write-replay is transport
+                 * safety refusing to relay a redirect or response Chromium did not vouch for; it is
+                 * not a statement that the DOM in front of the run became unreadable.
+                 * waitForPostSubmitApplicationState, readSubmitOutcome and readSecurityCodeChallenge
+                 * only ever evaluate the DOM and send nothing of their own, so they stay safe to run
+                 * even once the transport is flagged. Hardcoding codeOutcome to unknown here threw
+                 * away a genuinely accepted code resubmission the exact way the application arm did
+                 * before it was fixed - litos-api's submissionRunner.ts treats
+                 * securityCodeAttempt.outcome === 'accepted' as one of two ways a submission counts
+                 * as confirmed, so this folded an accepted Greenhouse-style resubmission into an
+                 * unverified one. The disposition itself must still be recorded, so
+                 * markPostSubmitObservationFailed() still runs; only the DOM read and
+                 * securityCodeVerdict's judgement of it are no longer skipped for it. */
+                if (submitTransportResponseUnavailable()) markPostSubmitObservationFailed();
+                await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+                const receipt = await readSubmitOutcome();
+                const still = await readSecurityCodeChallenge();
+                codeOutcome = securityCodeVerdict(receipt, still);
+                /* A STUB PAGE ALSO READS AS "A CLEARED CONTROL WITH NOTHING CONTRARY", WHICH IS
+                 * securityCodeVerdict'S OWN SAFE DEFAULT FOR THAT SHAPE: 'accepted'.
+                 *
+                 * When submitTransportResponseUnavailable() is true, settleHeldRoute has already
+                 * fulfilled the browser's own same-frame POST with a synthetic HTML stub of its own
+                 * minting ('Submission redirect blocked' or 'Submission response unavailable') in
+                 * place of whatever the ATS would have rendered: no form, no code boxes, nothing for
+                 * either reader below to find. readSecurityCodeChallenge finds no control on that
+                 * stub and returns null; readSubmitOutcome finds no arm that recognises Stratus's own
+                 * boilerplate and falls through to its own last resort, source 'unmatched_page_text'
+                 * - or, when the page's execution context was destroyed rather than merely replaced,
+                 * out through readSubmitOutcome's outer catch, source null. Either way securityCodeVerdict
+                 * cannot tell that apart from a genuinely quiet ATS page confirming nothing further
+                 * was needed, so it reaches for the same default that is safe in the ordinary case:
+                 * no rejection evidence, no standing challenge, therefore accepted. Here that default
+                 * is wrong in a way the ordinary case cannot produce - it reports acceptance of a
+                 * page nobody, human or reader, ever actually saw.
+                 *
+                 * So the correction is narrower than "transport unavailable": it only overrides the
+                 * verdict when NOTHING legible came back from either reader, which is what marks this
+                 * as the stub rather than a real ATS response. A still-standing challenge, or an
+                 * explicit rejected receipt, already resolves to 'rejected' above and is untouched. A
+                 * genuine ats_route or ats_state receipt - real evidence the employer's own page
+                 * rendered - is untouched too, transport flag or not: only the source values that
+                 * mean no ATS arm matched anything count as no evidence. */
+                if (submitTransportResponseUnavailable() && still === null
+                  && (receipt.source === null || receipt.source === 'unmatched_page_text')) {
                   codeOutcome = 'unknown';
-                } else {
-                  await waitForPostSubmitApplicationState({ securityCodeSettles: false });
-                  const receipt = await readSubmitOutcome();
-                  const still = await readSecurityCodeChallenge();
-                  codeOutcome = securityCodeVerdict(receipt, still);
                 }
               }
             } finally {

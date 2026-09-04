@@ -102,5 +102,16 @@ test('the watch is armed at both press sites and travels in submitOutcome', () =
   const legacyClick = SANDBOX_RUNNER.indexOf('await locator.click();', armSites[1]);
   assert.ok(legacyClick > armSites[1],
     'the legacy watch is armed before the final locator is clicked');
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(await observeForResult\([\s\S]*?readSubmitOutcome\(\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  /* This used to require readSubmitOutcome() to be reached through
+   * "...(await observeForResult(...readSubmitOutcome()...))". #175 deliberately removed that
+   * wrapper (see test/post-submit-observation-survives-blocked-transport.test.js): routing the
+   * receipt read through observeForResult's shared disposition gate meant a blocked-transport
+   * flag silently swapped a real 'confirmed' read for the gate's hardcoded unknown fallback,
+   * measured live on an Exa/Ashby packet that had actually gone through. readSubmitOutcome()
+   * fails closed to 'unknown' on its own and does not need that gate. The invariant this test
+   * pins - submitNetwork ends up merged into submitOutcome downstream of the real DOM receipt
+   * read - still holds in the new shape; only the obsolete observeForResult wrapping is gone, so
+   * the pattern below asserts the direct, unwrapped call instead of re-pinning the wrapper. */
+  assert.match(SANDBOX_RUNNER, /\.\.\.\(await readSubmitOutcome\(\)\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/,
+    'submitNetwork must be spread into submitOutcome after the real DOM receipt read from readSubmitOutcome()');
 });
