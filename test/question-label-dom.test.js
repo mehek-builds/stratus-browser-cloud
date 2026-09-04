@@ -51,6 +51,9 @@ const LABEL_SOURCE = [
   extractBraced('function renderedText(node) {'),
   extractBraced('function labelledByText(el) {'),
   extractBraced('function blockOf(el) {'),
+  extractBraced('function ownBlocksOf(el, peers) {'),
+  extractBraced('function holdsAnotherQuestion(block, el, peers) {'),
+  extractBraced('function isSubmitSection(fieldset) {'),
   extractBraced('function questionLabel(el) {'),
 ].join('\n');
 
