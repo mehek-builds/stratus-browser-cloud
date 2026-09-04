@@ -1138,10 +1138,12 @@ let terminalFailureInput = null;
       } : {})
     });
       // Injected, not referenced: the runner string carries its own copy of the verdict and the
-      // widget host list so the listener below has no free variable to resolve at event time. They sit ABOVE the
-      // socket route on purpose: test/sandbox-runner-compiles.test.js strips block comments with a
-      // regex that reads the '**/*' glob as a comment opener, and anything between that route and
-      // the next one is invisible to its export guard.
+      // widget host list so the listener below has no free variable to resolve at event time.
+      // They sit ABOVE the socket route on purpose: test/sandbox-runner-compiles.test.js strips
+      // block comments with a regex that reads the socket route's catch-all glob (two stars, a
+      // slash, a star) as a comment opener, so anything between that route and the next one is
+      // invisible to its export guard. The same goes for this comment, which is why the glob is
+      // spelled out rather than quoted.
       const MANAGED_CAPTCHA_WIDGET_HOSTS = ${JSON.stringify(CAPTCHA_WIDGET_FRAME_ORIGINS.map((entry) => entry.host))};
       const isCaptchaWidgetFrameOrigin = ${isCaptchaWidgetFrameOrigin.toString()};
       const managedTransportConsoleVerdict = ${managedTransportConsoleVerdict.toString()};

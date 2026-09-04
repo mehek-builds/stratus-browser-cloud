@@ -119,8 +119,10 @@ test('the shipped runner carries the same verdict, the widget host list, and an 
 
 test('the injected copy behaves identically to the exported one on the measured report', () => {
   const start = SANDBOX_RUNNER.indexOf('const isCaptchaWidgetFrameOrigin = (origin, widgetHosts) =>');
-  const end = SANDBOX_RUNNER.indexOf("await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {", start);
-  assert.ok(start > 0 && end > start);
+  const verdictStart = SANDBOX_RUNNER.indexOf('const managedTransportConsoleVerdict = (', start);
+  // The injected verdict ends at the first top-level closing of its arrow body.
+  const end = SANDBOX_RUNNER.indexOf('\n};', verdictStart) + 3;
+  assert.ok(start > 0 && verdictStart > start && end > verdictStart);
   const source = SANDBOX_RUNNER.slice(start, end);
   const injected = new Function(source + '\nreturn managedTransportConsoleVerdict;')();
   const measured = { text: TOKEN + ':Worker:https://www.recaptcha.net', token: TOKEN, initialNavigationActive: false, fromPrimaryPage: true, widgetHosts: HOSTS };
