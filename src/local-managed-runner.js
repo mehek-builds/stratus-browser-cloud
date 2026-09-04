@@ -144,16 +144,27 @@ export async function waitForLocalScreenshot(session, phase, waitMs, pollMs = SC
  * read before this wait began and is never delayed or changed by it. Unpressed results keep the
  * sandbox contract exactly. */
 export const PRESSED_SCREENSHOT_WAIT_MS = 20_000;
+/* The wait ends this many milliseconds before the caller's own deadline, so the answer, the
+ * continuation token and the concurrency slot leave in time even when the picture does not. In
+ * the buzzer shape (result published at the runner's action deadline, browser already closing,
+ * capture impossible) a flat wait would have answered ten seconds AFTER the caller hung up. */
+export const PRESSED_SCREENSHOT_RETURN_MARGIN_MS = 3_000;
 
-export function localScreenshotWaitMsForResult(screenshotWait, result) {
-  if (result?.submitOutcome?.pressed === true) return PRESSED_SCREENSHOT_WAIT_MS;
-  return screenshotWaitMsForResult(screenshotWait, result);
+export function localScreenshotWaitMsForResult(screenshotWait, result, { providerDeadlineAt, now = Date.now() } = {}) {
+  if (result?.submitOutcome?.pressed !== true) return screenshotWaitMsForResult(screenshotWait, result);
+  const deadlineMs = typeof providerDeadlineAt === 'string' ? Date.parse(providerDeadlineAt) : NaN;
+  if (!Number.isFinite(deadlineMs)) return PRESSED_SCREENSHOT_WAIT_MS;
+  return Math.max(0, Math.min(PRESSED_SCREENSHOT_WAIT_MS, deadlineMs - now - PRESSED_SCREENSHOT_RETURN_MARGIN_MS));
 }
 
-async function readResult(session, phase, screenshot, screenshotWait) {
+async function readResult(session, phase, screenshot, screenshotWait, providerDeadlineAt) {
   const result = JSON.parse(await fs.readFile(path.join(session.directory, `stratus-result-${phase}.json`), 'utf8'));
   if (screenshot) {
-    const bytes = await waitForLocalScreenshot(session, phase, localScreenshotWaitMsForResult(screenshotWait, result));
+    const bytes = await waitForLocalScreenshot(
+      session,
+      phase,
+      localScreenshotWaitMsForResult(screenshotWait, result, { providerDeadlineAt }),
+    );
     result.screenshot = bytes?.toString('base64') || null;
   }
   return result;
@@ -231,7 +242,7 @@ async function startRun(input) {
     await cleanup(session);
     throw error;
   }
-  const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
+  const result = await readResult(session, 0, context.screenshot, context.screenshotWait, context.providerDeadlineAt);
   if (token && continuationEligible(result, context.continuationCheckpoint)) {
     session.expiresAt = result.continuationExpiresAt || expiresAt;
     sessions.set(token, session);
@@ -271,7 +282,7 @@ async function continueRun(input) {
     await cleanup(session);
     throw error;
   }
-  const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait);
+  const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait, continuation.providerDeadlineAt);
   await cleanup(session);
   return result;
 }
