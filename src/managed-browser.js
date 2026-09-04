@@ -580,11 +580,45 @@ const SANDBOX_DEPENDENCIES = [
 ];
 
 /**
- * Resolve the page boundary that may receive applicant data. Apart from exact equality, the only
- * accepted transition is Workable's public /j/<token>/apply link resolving to its same-host
- * /<tenant>/j/<token>/apply page. Workable accepts and preserves either token case, so the token is
- * compared case-insensitively while the complete query string and every other URL component stay
- * bound.
+ * Resolve the page boundary that may receive applicant data. Apart from exact equality, exactly two
+ * transitions are accepted, and each one is a first-party redirect that provably lands on THE SAME
+ * JOB - same scheme, same job identity, same complete query string.
+ *
+ * 1. WORKABLE. Its public /j/<token>/apply link resolves to the same-host /<tenant>/j/<token>/apply
+ *    page. Workable accepts and preserves either token case, so the token is compared
+ *    case-insensitively while every other component stays bound.
+ *
+ * 2. GREENHOUSE'S LEGACY HOST. boards.greenhouse.io answers a 301 to job-boards.greenhouse.io with
+ *    the path and query carried across byte-for-byte. Measured 2026-09-04 from the shell:
+ *
+ *      GET https://boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004
+ *        -> 301 location: https://job-boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004
+ *        -> 200
+ *      GET https://boards.greenhouse.io/sage49/jobs/6131185004
+ *        -> 301 location: https://job-boards.greenhouse.io/sage49/jobs/6131185004
+ *        -> 200
+ *
+ *    THE HOSTNAME IS THE ONLY COMPONENT THAT MOVES. It is a whole-host migration rather than a
+ *    per-route rewrite - both shapes above take the same 301 - so this branch demands an IDENTICAL
+ *    pathname rather than pattern-matching one, and the job identity (?for=<board>&token=<jobId>)
+ *    rides in the query string, which is already held byte-identical by the shared floor below.
+ *
+ *    WHY IT MATTERS: volley-backend synthesizes EVERY Greenhouse application URL on the legacy host
+ *    (portalSubmission.greenhouseEmbedApplicationUrl, which passes GREENHOUSE_LEGACY_EMBED_HOST to
+ *    buildGreenhouseEmbedUrl for both the boards.greenhouse.io and the job-boards.greenhouse.io
+ *    posting shapes). So without this branch the expected URL is on the legacy host, the landed URL
+ *    is on the current host, and EVERY Greenhouse managed submit aborts here having filled nothing.
+ *    Measured live on Sage application aae653a3-2d5a-4f3e-ba3b-afea4219df37: two consecutive runs,
+ *    both "failed" seconds after starting with filled_fields [] and submission_attempted_at null.
+ *
+ *    ONLY THE MEASURED US PAIR IS ACCEPTED. boards.eu.greenhouse.io is deliberately absent: the EU
+ *    builder (greenhouseEmbedHostForHostname) already targets the current job-boards.eu host, so no
+ *    caller can present an EU legacy host as its expected URL, and accepting one would widen this
+ *    boundary to a transition that has never been measured or requested.
+ *
+ * THE DIRECTION IS ONE-WAY. Greenhouse redirects legacy -> current, so only that ordering resolves;
+ * a run that asked for the current host and landed on the legacy one has not made this redirect and
+ * still fails.
  */
 export function resolvedManagedExactPageUrl(expectedValue, observedValue) {
   let expected;
@@ -598,12 +632,26 @@ export function resolvedManagedExactPageUrl(expectedValue, observedValue) {
   expected.hash = '';
   observed.hash = '';
   if (expected.href === observed.href) return observed.href;
+  /* The floor every accepted redirect has to clear before its family rule is even consulted: https
+   * on the default port, no embedded credentials on either side, and a query string preserved
+   * exactly. Greenhouse keeps the job identity in the query and Workable keeps it in the path, so
+   * binding the query here covers one family outright and costs the other nothing. */
   if (expected.protocol !== 'https:' || observed.protocol !== 'https:'
-    || expected.hostname.toLowerCase() !== 'apply.workable.com'
-    || observed.hostname.toLowerCase() !== 'apply.workable.com'
     || expected.username || expected.password || observed.username || observed.password
     || (expected.port && expected.port !== '443') || (observed.port && observed.port !== '443')
-    || expected.origin !== observed.origin || expected.search !== observed.search) return null;
+    || expected.search !== observed.search) return null;
+  const expectedHost = expected.hostname.toLowerCase();
+  const observedHost = observed.hostname.toLowerCase();
+  if (expectedHost === 'boards.greenhouse.io' && observedHost === 'job-boards.greenhouse.io') {
+    // A host migration carries the path across untouched, so any path movement is a real one.
+    if (expected.pathname !== observed.pathname) return null;
+    /* An embed route with no token names no job, so there would be no identity to hold bound and
+     * nothing for the equal query strings above to have proved. Refuse rather than resolve. */
+    if (expected.pathname === '/embed/job_app' && !observed.searchParams.get('token')) return null;
+    return observed.href;
+  }
+  if (expectedHost !== 'apply.workable.com' || observedHost !== 'apply.workable.com'
+    || expected.origin !== observed.origin) return null;
   const from = expected.pathname.match(/^\/j\/([A-Fa-f0-9]{10})\/apply\/?$/);
   const to = observed.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-Fa-f0-9]{10})\/apply\/?$/);
   return from && to && from[1].toUpperCase() === to[2].toUpperCase() ? observed.href : null;
@@ -4058,7 +4106,7 @@ let terminalFailureInput = null;
       /* Playwright's route handler currently sees the initial request but not an HTTP redirect
        * target after route.fallback(). Validate the browser's own immutable redirectedFrom chain
        * before unlocking any applicant action: either the page never redirected, or it made the one
-       * measured Workable short-link transition and nothing else. */
+       * measured one-hop redirect resolvedManagedExactPageUrl accepts, and nothing else. */
       const navigationChain = [];
       let navigationRequest = navigationResponse?.request() || null;
       while (navigationRequest && navigationChain.length < 4) {
@@ -4076,11 +4124,11 @@ let terminalFailureInput = null;
       const exactNavigation = navigationChain.length === 1
         && navigationChain[0].url === expectedNavigationUrl
         && committedNavigationUrl === expectedNavigationUrl;
-      const workableNavigation = navigationChain.length === 2
+      const resolvedRedirectNavigation = navigationChain.length === 2
         && navigationChain[0].url === expectedNavigationUrl
         && navigationChain[1].url === committedNavigationUrl
         && resolvedManagedExactPageUrl(expectedNavigationUrl, committedNavigationUrl) === committedNavigationUrl;
-      if (navigationRequest || !readOnlyNavigation || (!exactNavigation && !workableNavigation)) {
+      if (navigationRequest || !readOnlyNavigation || (!exactNavigation && !resolvedRedirectNavigation)) {
         throw new Error('Atomic submit v4 initial navigation left its approved page boundary');
       }
       v4InitialNavigationBoundary = committedNavigationUrl;

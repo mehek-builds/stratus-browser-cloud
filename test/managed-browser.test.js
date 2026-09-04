@@ -109,6 +109,57 @@ test('exact URL proof allows only Workable short-link canonicalization', () => {
   );
 });
 
+/* Greenhouse's legacy host answers a 301 to the current one with the path and query carried across
+ * byte-for-byte, measured 2026-09-04:
+ *   GET https://boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004
+ *     -> 301 https://job-boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004
+ * volley-backend builds every Greenhouse application URL on the legacy host, so before this was
+ * accepted EVERY Greenhouse managed submit aborted with "Employer page URL changed before the
+ * first application action" having filled nothing - measured on Sage application
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37, which failed that way twice in a row. */
+test('exact URL proof accepts Greenhouse legacy-host 301 but nothing that changes the job', () => {
+  const expected = 'https://boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004';
+  const resolved = 'https://job-boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004';
+  assert.equal(resolvedManagedExactPageUrl(expected, resolved), resolved);
+  // The same whole-host 301 is served for the hosted posting route, so it resolves too.
+  assert.equal(
+    resolvedManagedExactPageUrl(
+      'https://boards.greenhouse.io/sage49/jobs/6131185004',
+      'https://job-boards.greenhouse.io/sage49/jobs/6131185004',
+    ),
+    'https://job-boards.greenhouse.io/sage49/jobs/6131185004',
+  );
+  for (const rejected of [
+    // A different board, or a different job, is a different application.
+    'https://job-boards.greenhouse.io/embed/job_app?for=notsage&token=6131185004',
+    'https://job-boards.greenhouse.io/embed/job_app?for=sage49&token=9999999999',
+    'https://job-boards.greenhouse.io/embed/job_app?for=sage49',
+    // The host migration carries the path across untouched, so a moved path is a real move.
+    'https://job-boards.greenhouse.io/embed/job_app/extra?for=sage49&token=6131185004',
+    'https://job-boards.greenhouse.io/sage49/jobs/6131185004?for=sage49&token=6131185004',
+    // Neither a lookalike host nor an unrelated one is Greenhouse's own redirect target.
+    'https://job-boards.greenhouse.io.evil.example/embed/job_app?for=sage49&token=6131185004',
+    'https://job-boards.eu.greenhouse.io/embed/job_app?for=sage49&token=6131185004',
+    'https://boards.greenhouse.io.evil.example/embed/job_app?for=sage49&token=6131185004',
+    // The transport floor still applies to the accepted pair.
+    'http://job-boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004',
+    'https://user:pass@job-boards.greenhouse.io/embed/job_app?for=sage49&token=6131185004',
+    'https://job-boards.greenhouse.io:444/embed/job_app?for=sage49&token=6131185004',
+  ]) {
+    assert.equal(resolvedManagedExactPageUrl(expected, rejected), null, rejected);
+  }
+  // Greenhouse redirects legacy -> current only, so the reverse ordering is not this redirect.
+  assert.equal(resolvedManagedExactPageUrl(resolved, expected), null);
+  // An embed route naming no job has no identity for the equal query strings to have bound.
+  assert.equal(
+    resolvedManagedExactPageUrl(
+      'https://boards.greenhouse.io/embed/job_app',
+      'https://job-boards.greenhouse.io/embed/job_app',
+    ),
+    null,
+  );
+});
+
 function extractFunctionSource(name) {
   const start = SANDBOX_RUNNER.indexOf(`function ${name}`);
   assert.notEqual(start, -1, `${name} must exist in the sandbox runner`);
