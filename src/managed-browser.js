@@ -13159,9 +13159,8 @@ let terminalFailureInput = null;
         const multiValue = before.multiValue === true
           || await menu.getAttribute('aria-multiselectable').catch(() => null) === 'true';
         if (multiValue) {
-          // Clicking any selected row in a multi-select removes that value. Opening, closing and
-          // blurring is enough to replay the field lifecycle, but only if every displayed chip and
-          // every selected menu row survived the open unchanged.
+          // Opening the control is itself the first read, and NO READ, NO NUDGE: it has to land on
+          // the exact recorded chips before anything below is trustworthy enough to click.
           const afterOpen = await readChoiceState(target);
           const afterValues = (Array.isArray(afterOpen.values) ? afterOpen.values : [afterOpen.value])
             .map((value) => clean(value));
@@ -13169,9 +13168,96 @@ let terminalFailureInput = null;
             && afterOpen.multiValue === true
             && afterValues.length === beforeValues.length
             && afterValues.every((value, index) => value === beforeValues[index]);
-          if (!stableChips) return { answerPreserved: false, multiValue: true, arrival: before };
+          if (!stableChips || beforeValues.length === 0) {
+            return { answerPreserved: false, multiValue: true, arrival: before };
+          }
+          /* MEHEK'S OWN FIX, verbatim: "deselect the option, then go back and make sure you
+           * reselect the exact same one". react-select's selectOption REMOVES an already-selected
+           * option under isMulti - that removal is the intended first half of this cycle, not the
+           * hazard it would be as a bare click. What makes it safe is everything after it: the
+           * control's full rendered selection is re-read after every click and required
+           * byte-identical (all values, in order) to what was recorded above, never a first-node
+           * read and never a substring match - the exact two ways PR #154 shipped corruption
+           * (committing "4.0" for a stored "3.76 - 4.0", and reporting "South Asian|East Asian"
+           * filled for a stored "South Asian"). One deselect, one reselect, one bounded restore
+           * attempt if the reselect misses, then stop - never a loop, and never a second guess at a
+           * different row. */
           if (selectedCount === beforeValues.length) {
-            return { answerPreserved: true, multiValue: true, arrival: before };
+            // Cycling the LAST recorded chip, not any other, keeps chip order stable across the
+            // round trip: react-select appends a freshly (re)selected value to the end of a
+            // controlled multi-value, which is exactly where the last chip already sits, so a clean
+            // deselect/reselect lands the array back where it started rather than reordering it.
+            const targetValue = beforeValues[beforeValues.length - 1];
+            const exactTargetRow = () => menu.getByRole('option', { name: targetValue, exact: true });
+            const targetRowSafe = await (async () => {
+              const rows = exactTargetRow();
+              if (await rows.count().catch(() => 0) !== 1) return false;
+              return rows.first().evaluate((element) => {
+                const submitSelector = 'button, input[type="submit"], input[type="button"],'
+                  + ' input[type="image"], [role="button"]';
+                return element.getAttribute('aria-selected') === 'true'
+                  && !(element.closest(submitSelector) || element.querySelector(submitSelector));
+              }).catch(() => false);
+            })();
+            if (!targetRowSafe) return { answerPreserved: false, multiValue: true, arrival: before };
+            const readFullSelection = async () => {
+              const state = await readChoiceState(target);
+              if (state.kind === 'chosen' && state.multiValue === true) {
+                return {
+                  stable: true,
+                  values: (Array.isArray(state.values) ? state.values : [state.value]).map(
+                    (value) => clean(value)
+                  )
+                };
+              }
+              // Deselecting a control's ONLY chip renders no chosen node at all - not a corrupt
+              // read, just zero values, and 'kind: empty' (the placeholder state) is the one other
+              // reading trusted to mean exactly that. Anything else, 'unknown' included, still
+              // means this read cannot be trusted, matched-length or not.
+              return { stable: state.kind === 'empty', values: [] };
+            };
+            const sameAsBefore = (values) => values.length === beforeValues.length
+              && values.every((value, index) => value === beforeValues[index]);
+            const clickExactTargetRowOnce = async () => {
+              const rows = exactTargetRow();
+              if (await rows.count().catch(() => 0) !== 1) return null;
+              const clicked = await rows.first().click({ timeout: 2000 }).then(() => true).catch(() => false);
+              return clicked ? readFullSelection() : null;
+            };
+            // DESELECT. Confirmed to be exactly the recorded set minus the one target value - not
+            // just "something changed" - before this call ever considers a reselect click.
+            const afterDeselect = await clickExactTargetRowOnce();
+            const deselected = Boolean(afterDeselect?.stable)
+              && afterDeselect.values.length === beforeValues.length - 1
+              && afterDeselect.values.every((value, index) => value === beforeValues[index]);
+            const attemptRestore = async () => {
+              // The ONE bounded restore attempt: reselect the exact recorded value one more time.
+              // Never a loop, and this is the only place besides the reselect step itself that
+              // clicks the target row.
+              const afterRestore = await clickExactTargetRowOnce();
+              return Boolean(afterRestore?.stable) && sameAsBefore(afterRestore.values);
+            };
+            if (!deselected) {
+              // The deselect did not land the expected single-chip removal. This call no longer
+              // knows what is selected well enough to risk a blind second click choosing wrong, so
+              // it goes straight to the bounded restore rather than guessing at a second deselect.
+              const restored = await attemptRestore();
+              return {
+                answerPreserved: restored, multiValue: true, arrival: before, corrupted: !restored
+              };
+            }
+            // RESELECT the exact same option, matched byte-for-byte against what was recorded
+            // before either click, never by index and never by a nearest match.
+            const afterReselect = await clickExactTargetRowOnce();
+            if (Boolean(afterReselect?.stable) && sameAsBefore(afterReselect.values)) {
+              return { answerPreserved: true, multiValue: true, arrival: before };
+            }
+            // The reselect missed, or landed a coerced neighbour - PR #154's own failure shape.
+            // One bounded restore attempt, then report honestly rather than claim filled.
+            const restored = await attemptRestore();
+            return {
+              answerPreserved: restored, multiValue: true, arrival: before, corrupted: !restored
+            };
           }
           /* Greenhouse multi-selects can publish no aria-selected state at all. In that one shape,
            * preserve without clicking only when every distinct stable chip names exactly one visible
@@ -13308,6 +13394,70 @@ let terminalFailureInput = null;
         }
         return false;
       };
+      /* THE TEXT-BOX HALF OF THE SAME FIX, Mehek's own words: "tap that text box to select it, and
+       * then add a little space to showcase that there's some movement happening in the text box.
+       * Then I register the answer." A synthetic input/change pair with no value change (the
+       * generic arm below, used for every other left-over fieldType) does not convince every
+       * validator; a real keystroke that changes the DOM value and is then undone does. The point
+       * is the movement, not the space: this always ends holding EXACTLY the bytes it started
+       * with, never a trailing space left over on a legal or free-text answer.
+       *
+       * SAFE BY CONSTRUCTION rather than by luck: Backspace is pressed only once this call has
+       * confirmed the space it just typed is the ONLY thing that changed, so a control at
+       * maxlength, or one that silently swallows whitespace, never has a real trailing character
+       * taken from it. Whatever the keystrokes did or did not do, the final value is required
+       * byte-identical to the one this call started with, or a single forced restore (the native
+       * value setter, the same input/change events, blurred again) puts it back - and if even that
+       * does not land exactly, the control is marked the same way an unreadable choice already is
+       * (data-litos-unverified-choice) and reported not filled rather than claimed. */
+      const nudgeTextControl = async (target) => {
+        // A retry on THIS SAME control after an earlier attempt already gave up on it must never
+        // get a second chance to "restore" against its own already-corrupted value and call that
+        // confirmed - the exact way a bounded, per-attempt restore could otherwise launder a
+        // corruption on retry. The mark is permanent for this control for the rest of the run.
+        const alreadyMarked = await target.evaluate((element) => (
+          element.hasAttribute('data-litos-unverified-choice')
+        )).catch(() => false);
+        if (alreadyMarked) return { preserved: false, corrupted: true };
+        const readValue = () => target.evaluate((element) => (
+          'value' in element ? String(element.value) : null
+        )).catch(() => null);
+        const before = await readValue();
+        if (before === null || before === '') return { preserved: false };
+        const tapped = await target.click({ timeout: 2000 }).then(() => true).catch(() => false);
+        if (!tapped) return { preserved: false };
+        await target.press('End', { timeout: 2000 }).catch(() => undefined);
+        const spaced = await target.press(' ', { timeout: 2000 }).then(() => true).catch(() => false);
+        const afterSpace = spaced ? await readValue() : before;
+        // Only ever remove a character THIS call just confirmed it added. A control that silently
+        // refused the space (maxlength, a masking library, an unsupported input type) must never
+        // have a real trailing character taken from it instead.
+        if (spaced && afterSpace === before + ' ') {
+          await target.press('Backspace', { timeout: 2000 }).catch(() => undefined);
+        }
+        await target.evaluate((element) => element.blur()).catch(() => undefined);
+        const after = await readValue();
+        if (after === before) return { preserved: true };
+        const restoredValue = await target.evaluate((element, desired) => {
+          const proto = element instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(element, desired); else element.value = desired;
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+          element.blur();
+          return 'value' in element ? String(element.value) : null;
+        }, before).catch(() => null);
+        if (restoredValue === before) return { preserved: true };
+        // Could not be put back exactly. Marked and reported honestly rather than left silent - the
+        // same contract an unreadable choice already carries, so the independent readiness pass
+        // blocks this regardless of what any later retry on this same control believes.
+        await target.evaluate((element) => {
+          element.setAttribute('data-litos-unverified-choice', 'litos-nudge-changed-the-answer');
+        }).catch(() => undefined);
+        return { preserved: false, corrupted: true };
+      };
       for (const candidate of runnerChoiceFailures.length > 0 ? [] : candidates) {
         const target = requiredTargetHandles[candidate.directIndex] || null;
         const proofSelector = candidate.selector || '';
@@ -13358,8 +13508,13 @@ let terminalFailureInput = null;
         const maxAttempts = 1 + action.maxRetries;
         let attemptNumber = 0;
         let reactArrivalValues = null;
+        // Set only by a nudge that changed a control's answer and then could not restore it
+        // exactly. Reset every attempt, so a stale reason from an earlier attempt on this same
+        // candidate never survives to describe a later, unrelated one.
+        let attemptFailureReason = '';
         for (; attemptNumber < maxAttempts; attemptNumber += 1) {
           let answerPreserved = true;
+          attemptFailureReason = '';
           if (fieldType === 'radio') {
             await target.evaluate((element) => {
               const selected = element.checked ? element : (element.form || document).querySelector('input[name="' + CSS.escape(element.name) + '"]:checked');
@@ -13389,8 +13544,29 @@ let terminalFailureInput = null;
             choiceScope = directChoiceScopeHandle;
             choiceScopeCount = directChoiceScopeHandle ? 1 : 0;
             if (choiceScopeCount === 1) {
-              const replayed = await replayExactReactSelection(target);
+              // A retry after an earlier attempt already gave up on THIS control must never get a
+              // second chance to click its way back to its own already-corrupted chip set and call
+              // that byte-identical - the exact way a bounded, per-attempt restore could otherwise
+              // launder a corruption on retry. The mark is permanent for this control for the rest
+              // of the run.
+              const alreadyMarkedCorrupted = await choiceScope.evaluate((element) => (
+                element.hasAttribute('data-litos-unverified-choice')
+              )).catch(() => false);
+              const replayed = alreadyMarkedCorrupted
+                ? { answerPreserved: false, corrupted: true }
+                : await replayExactReactSelection(target);
               answerPreserved = replayed.answerPreserved;
+              if (replayed.corrupted) {
+                // The deselect/reselect cycle left this control off its recorded answer and the
+                // one bounded restore attempt could not put it back exactly - PR #154's own
+                // failure shape. Marked the same way an unreadable choice already is, so the
+                // independent readiness pass blocks this regardless of what a later retry believes.
+                attemptFailureReason = 'a stale-validation nudge changed this control\'s selection and'
+                  + ' it could not be restored to the exact recorded answer; left for you to confirm';
+                await choiceScope.evaluate((element) => {
+                  element.setAttribute('data-litos-unverified-choice', 'litos-nudge-changed-the-answer');
+                }).catch(() => undefined);
+              }
               if (replayed.multiValue) {
                 const arrivalValues = (Array.isArray(replayed.arrival?.values)
                   ? replayed.arrival.values : [replayed.arrival?.value]
@@ -13456,6 +13632,13 @@ let terminalFailureInput = null;
               selected.blur();
               return remainsSelected();
             }).catch(() => false);
+          } else if (fieldType === 'text') {
+            const nudged = await nudgeTextControl(target);
+            answerPreserved = nudged.preserved;
+            if (nudged.corrupted) {
+              attemptFailureReason = 'a stale-validation nudge changed this control\'s text and it'
+                + ' could not be restored to the exact recorded answer; left for you to confirm';
+            }
           } else if (fieldType === 'file') {
             answerPreserved = await target.evaluate((element) => {
               const input = element.matches?.('input[type="file"]') ? element : element.querySelector?.('input[type="file"]');
@@ -13527,7 +13710,14 @@ let terminalFailureInput = null;
         if (outcome === 'confirmed') {
           attempts.push({ selector: proofSelector, label: candidate.label, fieldType, outcome: 'confirmed', attemptCount: attemptNumber + 1 });
         } else {
-          attempts.push({ selector: proofSelector, label: candidate.label, fieldType, outcome: 'failed', attemptCount: maxAttempts, reason: 'This requires an answer' });
+          attempts.push({
+            selector: proofSelector,
+            label: candidate.label,
+            fieldType,
+            outcome: 'failed',
+            attemptCount: maxAttempts,
+            reason: attemptFailureReason || 'This requires an answer'
+          });
           unresolved.push(candidate.label || proofSelector);
         }
       }
