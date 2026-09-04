@@ -189,10 +189,16 @@ test('the read list and the write list stay separate, and neither answers for th
 
 test('the containment consults the write allowance in the fill phase, and nowhere else', () => {
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
-  // Exactly one call site: the locked-mode data-fetch branch, where a typed value lands.
+  // Call site one: the locked-mode data-fetch branch, where a typed value lands.
   assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{/);
-  assert.equal(source.split('ashbyFormValueWrite(request)').length - 1, 1,
-    'the field-value write allowance is called from the locked-mode branch and nowhere else');
+  /* Call site two, added 2026-09-04: the submit transport floor, which watches an ordinary fill
+   * run's employer-bound writes. It has to consult the SAME predicate, because an Ashby form
+   * cannot be filled at all without admitting this one operation, and the floor is installed on
+   * exactly the runs that do the filling. It is pinned to a route that FALLS BACK, never one that
+   * counts: an admitted field write must not read as an attempted filing. */
+  assert.match(source, /if \(ashbyFormValueWrite\(request\)\) return route\.fallback\(\);/);
+  assert.equal(source.split('ashbyFormValueWrite(request)').length - 1, 2,
+    'the field-value write allowance is called from those two branches and nowhere else');
   // NOT on the initial-navigation branch, which still admits reads only. A page that writes a form
   // value before the run has a reviewed action to write is moving on its own, and stays fatal.
   assert.match(source, /return readOnlyMethod \|\| ashbyPublicBoardRead\(request\)\s*\n\s*\? route\.fallback\(\)/);

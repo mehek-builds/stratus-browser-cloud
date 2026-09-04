@@ -93,7 +93,18 @@ export const PUBLIC_EGRESS_NETWORK_POLICY = Object.freeze({
  * spared the fatality and simultaneously locked out of the upload window, silently breaking that
  * board's resume attachment - the exact failure #129 exists to fix. So add a host only with a
  * measured capture proving it is a collector AND that no upload for that board targets it. */
-export const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = Object.freeze(['spl.greenhouse.io']);
+/* careers-analytics.recruitee.com joins it on the same measured terms (2026-09-04, live Recruitee
+ * board thecareersteam.recruitee.com): "POST https://careers-analytics.recruitee.com/api/event"
+ * fires during page load, before any control is touched, and never again after the Submit control
+ * is pressed. It shares the board's registrable site, so without this entry it reads as an
+ * employer-bound write on every Recruitee run. The upload half of the admission rule is satisfied
+ * too: the board's own bundles carry its attachment endpoints as
+ * https://api.cloudinary.com/v1_1/recruitee/image/upload and an /upload/ path on the board origin,
+ * neither of which is this host, so sparing it cannot lock a resume out of the upload window. */
+export const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = Object.freeze([
+  'spl.greenhouse.io',
+  'careers-analytics.recruitee.com'
+]);
 
 export const isEmployerDomainTelemetryHost = (hostname) => {
   const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
@@ -906,6 +917,21 @@ let terminalFailureInput = null;
   const exactMutationAuthority = input.exactMutationAuthority === true
     && Boolean(input.submissionAttempt);
   const managedMutationContainmentRequired = exactMutationAuthority && !retainedAtomicV4Run;
+  /* THE FLOOR UNDER EVERY OTHER NON-SUBMIT RUN.
+   *
+   * The two containments above are the ones that already existed, and between them they cover a
+   * run carrying exact mutation authority and a retained atomic v4 run. What was left uncovered is
+   * the ordinary fill run: allowSubmit is not true, so it must not be able to file anything, but
+   * with no submissionAttempt (compat mode) exactMutationAuthority is false and NOTHING watched its
+   * transport. Its only protection was the DOM submit guard below, and the 2026-09-04 measurement
+   * across the live boards is that the guard sees nothing on five of the seven that could be
+   * measured: only Recruitee and Rippling dispatch a submit event at all.
+   *
+   * So this is armed by the same literal the guard is armed by. A run that was not asked to submit
+   * gets a transport floor whether or not it also carries mutation authority. */
+  const submitTransportFloorRequired = input.allowSubmit !== true
+    && !managedMutationContainmentRequired
+    && !retainedAtomicV4Run;
   const v4ContainmentToken = retainedAtomicV4Run ? crypto.randomBytes(24).toString('hex') : null;
   let v4OutOfBandTransportAttempted = false;
   let v4PageTransportLockUnavailable = false;
@@ -935,10 +961,12 @@ let terminalFailureInput = null;
   try {
     const browserContext = await browser.newContext({
       viewport: input.viewport || { width: 1440, height: 900 },
-      ...(retainedAtomicV4Run || managedMutationContainmentRequired ? {
+      ...(retainedAtomicV4Run || managedMutationContainmentRequired || submitTransportFloorRequired ? {
       // A service worker can originate a request outside Playwright routing. Mutation containment
       // depends on every candidate transport passing through browserContext.route, so an exact
-      // mutation run must not inherit or install that bypass.
+      // mutation run must not inherit or install that bypass. The submit floor rests on the same
+      // routing invariant and needs the same closure; all seven boards measured on 2026-09-04
+      // rendered and validated their forms normally with service workers blocked.
       serviceWorkers: 'block'
       } : {})
     });
@@ -1853,6 +1881,92 @@ let terminalFailureInput = null;
           : null;
       }, { method, args: v4UtilityValue(args) });
     };
+    /* THE TRANSPORT CLASSIFIERS ARE SHARED BY BOTH CONTAINMENTS BELOW, so they are declared here
+     * rather than inside either one. The managed mutation containment and the submit transport
+     * floor have to agree, request by request, on what counts as employer-bound, what counts as a
+     * proved Ashby read, and what counts as a field value rather than a filing. Two copies of that
+     * judgement would be two things to keep in step, and the floor exists precisely to be the
+     * weaker, always-on statement of the same rule.
+     *
+     * THE NEXT DEFINITIONS ARE MODULE SOURCE INJECTED BY INTERPOLATION, the same way
+     * RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE ships a module function into this string. This
+     * runner is one String.raw template evaluated in the sandbox, so a bare module identifier
+     * here is a ReferenceError at run time. That is exactly what shipped in production
+     * 2026-09-01: "transportRegistrableSuffix is not defined" on every managed run, from a plain
+     * assignment that parsed, passed node -c, and matched every source-contract regex. Inside
+     * this template, interpolate the source; never reference the module by name. */
+    const GRAPHQL_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION)};
+    const isGraphqlReadDocument = ${isGraphqlReadDocument.toString()};
+    const ASHBY_PUBLIC_BOARD_SITE = ${JSON.stringify(ASHBY_PUBLIC_BOARD_SITE)};
+    const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = ${JSON.stringify(ASHBY_PUBLIC_BOARD_GRAPHQL_PATH)};
+    const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
+    const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
+    const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
+    const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
+    const GRAPHQL_NAMED_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_NAMED_OPERATION_DEFINITION)};
+    const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
+    const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
+    const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
+    const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
+    const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
+    const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
+    const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
+    const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
+    const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
+    /* The board's own resume store, admitted only inside the armed upload window below. See
+     * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
+    const boardResumeStorageUpload = (request) => {
+      try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
+    };
+    const registrableSuffix = transportRegistrableSuffix;
+    /* The last two host labels of the page this run is authorized to fill. Everything the
+     * employer's board can reach through its own app - a Breezy field save on breezy.hr, a
+     * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
+     * this suffix with the application page. On multi-label public suffixes (co.uk) this
+     * over-matches toward FATAL for the managed containment, and toward COUNTED for the submit
+     * floor. Both directions are the safe one: neither can spare an employer-bound write. */
+    const applicationTransportSite = (() => {
+      try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
+    })();
+    /* Whether a blocked transport could have been the employer's own. An unparseable or
+     * schemeless target counts as employer-bound, fail-closed. */
+    const employerBoundTransport = (request) => {
+      if (!applicationTransportSite) return true;
+      try {
+        const { hostname } = new URL(request.url());
+        // A collector on the employer's own registrable domain is still only a collector. See
+        // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
+        // which is aborted exactly as before and reaches nobody.
+        // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
+        // contract: the request is still aborted; only the run is spared.
+        if (isEmployerTelemetryPath(request.url())) return false;
+        if (isEmployerDomainTelemetryHost(hostname)) return false;
+        return registrableSuffix(hostname) === applicationTransportSite;
+      } catch { return true; }
+    };
+    /* The one same-site write-shaped transport that is a read, decided from the request body.
+     * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
+    const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
+      applicationSite: applicationTransportSite,
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      postData: request.postData()
+    });
+    /* The one same-site write-shaped transport that is a FIELD VALUE rather than a filing. See
+     * isAshbyFormValueWrite: Ashby saves each value to its own API as it is typed, so without
+     * this an Ashby form renders (3c4ea81) and then cannot be filled at all. Deliberately a
+     * second predicate with a second gate: this one is consulted only in the locked fill phase
+     * below, never during initial navigation, and it pins one exact operation name whose document
+     * has to prove it is that operation and nothing else. */
+    const ashbyFormValueWrite = (request) => isAshbyFormValueWrite({
+      applicationSite: applicationTransportSite,
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      postData: request.postData()
+    });
+
     let managedMutationTransportContainment = null;
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
@@ -1867,83 +1981,6 @@ let terminalFailureInput = null;
         uploadActionArmed: false,
         handler: null
       };
-      /* The last two host labels of the page this run is authorized to fill. Everything the
-       * employer's board can reach through its own app - a Breezy field save on breezy.hr, a
-       * Greenhouse board POSTing to boards-api.greenhouse.io from job-boards.greenhouse.io - shares
-       * this suffix with the application page. On multi-label public suffixes (co.uk) this
-       * over-matches toward FATAL, never away from it. */
-      /* THE NEXT DEFINITIONS ARE MODULE SOURCE INJECTED BY INTERPOLATION, the same way
-       * RESOLVED_MANAGED_EXACT_PAGE_URL_SOURCE ships a module function into this string. This
-       * runner is one String.raw template evaluated in the sandbox, so a bare module identifier
-       * here is a ReferenceError at run time. That is exactly what shipped in production
-       * 2026-09-01: "transportRegistrableSuffix is not defined" on every managed run, from a plain
-       * assignment that parsed, passed node -c, and matched every source-contract regex. Inside
-       * this template, interpolate the source; never reference the module by name. */
-      const GRAPHQL_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_OPERATION_DEFINITION)};
-      const isGraphqlReadDocument = ${isGraphqlReadDocument.toString()};
-      const ASHBY_PUBLIC_BOARD_SITE = ${JSON.stringify(ASHBY_PUBLIC_BOARD_SITE)};
-      const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = ${JSON.stringify(ASHBY_PUBLIC_BOARD_GRAPHQL_PATH)};
-      const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = ${JSON.stringify(ASHBY_PUBLIC_BOARD_READ_OPERATIONS)};
-      const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
-      const isAshbyPublicBoardRead = ${isAshbyPublicBoardRead.toString()};
-      const ashbyPublicBoardOperationName = ${ashbyPublicBoardOperationName.toString()};
-      const GRAPHQL_NAMED_OPERATION_DEFINITION = ${JSON.stringify(GRAPHQL_NAMED_OPERATION_DEFINITION)};
-      const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
-      const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
-      const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
-      const EMPLOYER_DOMAIN_TELEMETRY_HOSTS = ${JSON.stringify(EMPLOYER_DOMAIN_TELEMETRY_HOSTS)};
-      const isEmployerDomainTelemetryHost = ${isEmployerDomainTelemetryHost.toString()};
-      const EMPLOYER_TELEMETRY_PATH_SEGMENTS = ${JSON.stringify(EMPLOYER_TELEMETRY_PATH_SEGMENTS)};
-      const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
-      const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
-      const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
-      /* The board's own resume store, admitted only inside the armed upload window below. See
-       * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
-      const boardResumeStorageUpload = (request) => {
-        try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
-      };
-      const registrableSuffix = transportRegistrableSuffix;
-      const applicationTransportSite = (() => {
-        try { return registrableSuffix(new URL(input.url).hostname); } catch { return null; }
-      })();
-      /* Whether a blocked transport could have been the employer's own. An unparseable or
-       * schemeless target counts as employer-bound, fail-closed. */
-      const employerBoundTransport = (request) => {
-        if (!applicationTransportSite) return true;
-        try {
-          const { hostname } = new URL(request.url());
-          // A collector on the employer's own registrable domain is still only a collector. See
-          // isEmployerDomainTelemetryHost: this spares the RUN, it does not spare the request,
-          // which is aborted exactly as before and reaches nobody.
-          // And a collector PATH on the employer's own host, the Teamtailor page-view beacon. Same
-          // contract: the request is still aborted; only the run is spared.
-          if (isEmployerTelemetryPath(request.url())) return false;
-          if (isEmployerDomainTelemetryHost(hostname)) return false;
-          return registrableSuffix(hostname) === applicationTransportSite;
-        } catch { return true; }
-      };
-      /* The one same-site write-shaped transport that is a read, decided from the request body.
-       * See isAshbyPublicBoardRead: without it an Ashby board cannot render its own form. */
-      const ashbyPublicBoardRead = (request) => isAshbyPublicBoardRead({
-        applicationSite: applicationTransportSite,
-        method: request.method(),
-        resourceType: request.resourceType(),
-        url: request.url(),
-        postData: request.postData()
-      });
-      /* The one same-site write-shaped transport that is a FIELD VALUE rather than a filing. See
-       * isAshbyFormValueWrite: Ashby saves each value to its own API as it is typed, so without
-       * this an Ashby form renders (3c4ea81) and then cannot be filled at all. Deliberately a
-       * second predicate with a second gate: this one is consulted only in the locked fill phase
-       * below, never during initial navigation, and it pins one exact operation name whose document
-       * has to prove it is that operation and nothing else. */
-      const ashbyFormValueWrite = (request) => isAshbyFormValueWrite({
-        applicationSite: applicationTransportSite,
-        method: request.method(),
-        resourceType: request.resourceType(),
-        url: request.url(),
-        postData: request.postData()
-      });
       /* Every blocked request is aborted either way - nothing ever reaches anyone. What differs is
        * whether the run must DIE for it. It must when the blocked transport was bound for the
        * employer's own site, because then the page's fill semantics may depend on it and a later
@@ -2096,6 +2133,112 @@ let terminalFailureInput = null;
       await browserContext.route('**/*', containment.handler);
       v4PreSubmitTransportContainment = containment;
     }
+    /* THE SUBMIT TRANSPORT FLOOR.
+     *
+     * WHY A SECOND LAYER EXISTS AT ALL. The DOM guard below reads one signal: the submit event. On
+     * 2026-09-04 that signal was measured on the live application form of every board this runner
+     * has an adapter for, with the guard installed verbatim, a non-GET abort net in front of it,
+     * and no field ever filled. Pressing the board's own Submit control produced:
+     *
+     *   Greenhouse   job-boards.greenhouse.io/embed/job_app   no submit event   blockedSubmits 0
+     *   Ashby        jobs.ashbyhq.com/.../application         no submit event   blockedSubmits 0
+     *   Lever        jobs.lever.co/.../apply                  no submit event   blockedSubmits 0
+     *   Workable     apply.workable.com/.../apply             no submit event   blockedSubmits 0
+     *   Breezy       <tenant>.breezy.hr/p/.../apply           no submit event   blockedSubmits 0
+     *   Recruitee    <tenant>.recruitee.com/o/.../c/new       submit event      blockedSubmits 1
+     *   Rippling     ats.rippling.com/.../apply               submit event      blockedSubmits 1
+     *
+     * SmartRecruiters could not be measured: its apply route (jobs.smartrecruiters.com/oneclick-ui)
+     * answers 403 from a bot-detection challenge, and this project does not defeat those.
+     *
+     * Five of the seven are structurally invisible to an event listener, for four different
+     * reasons. Greenhouse and Workable carry a button[type=submit] inside a form and still dispatch
+     * nothing, because React cancels the click before implicit submission. Lever's #btn-submit and
+     * Breezy's control are type="button", which has no activation behaviour to intercept. Ashby has
+     * no form element on the page at all, so there is no node a submit event could be dispatched
+     * at. On Ashby the press went straight to "POST /api/non-user-graphql?op=
+     * ApiSubmitMultipleFormsAction" - the employer's real filing operation - on an EMPTY form, with
+     * no client-side validation in front of it. Nothing in the DOM guard saw any of it.
+     *
+     * WHAT THIS FLOOR IS. The one thing all five have in common is not an event, it is a request:
+     * pressing Submit means write-shaped transport bound for the employer. That is observable at
+     * the router, so that is where the floor sits. On a run that was not asked to submit, an
+     * employer-bound write is aborted and COUNTED, and the count is what blockedSubmits reports.
+     *
+     * WHY IT IS NOT A BLANKET NON-GET BLOCK. It cannot be. Greenhouse's resume uploader POSTs the
+     * file the instant it is attached, and Ashby holds every field value on its own server as it is
+     * typed; blocking either makes the board unfillable, which is the failure #129 and the
+     * 2026-09-03 Ashby regression already paid for. So the floor admits exactly what those two
+     * incidents established and nothing else: the armed upload window, a proved Ashby field-value
+     * write, and a proved Ashby board read. Every one of those decisions is the SAME predicate the
+     * managed mutation containment uses, hoisted above so the two cannot drift apart.
+     *
+     * WHY IT DOES NOT KILL THE RUN. The managed containment treats an employer-bound block as
+     * fatal, and three production outages (2026-09-01 twice, 2026-09-03) came from that fatality
+     * meeting a request nobody had classified yet. This floor makes no such claim. It aborts the
+     * request, counts it, and lets the run continue to its result carrying the report. A run that
+     * was not asked to submit still cannot submit; an unclassified request costs a defect report
+     * instead of an outage.
+     *
+     * WHY IT IS NARROWER THAN THE MANAGED CONTAINMENT. That one also blocks third-party transport
+     * and every navigation after load, and needs prepareManagedReadOnlyClick to reopen a read-only
+     * navigation one target at a time. A plain fill run has no such helper, so a floor built from
+     * the same handler would abort ordinary read-only navigations and report them as submits. This
+     * one touches nothing but an employer-bound write, so GET stays GET and a third-party beacon is
+     * left exactly as it is today. */
+    let submitTransportFloor = null;
+    if (submitTransportFloorRequired) {
+      const floor = {
+        mode: 'initial_navigation',
+        blockedAttemptCount: 0,
+        blockedReason: null,
+        uploadActionArmed: false,
+        handler: null
+      };
+      floor.handler = async (route) => {
+        const request = route.request();
+        const method = request.method().toUpperCase();
+        if (method === 'GET' || method === 'HEAD') return route.fallback();
+        // The board's own form read. Proved from the document, not from the host.
+        if (ashbyPublicBoardRead(request)) return route.fallback();
+        // Not the employer's own site: a collector, a captcha vendor, a video widget. It cannot
+        // file an application, and a fill run does not block it today. Counting it would turn
+        // blockedSubmits into noise on Lever, Breezy and Rippling, all of which POST to third
+        // parties while the form merely sits there.
+        if (!employerBoundTransport(request)) return route.fallback();
+        // Ashby's per-keystroke field write. One pinned operation whose document must prove it is
+        // a sole named mutation by that name; a submit cannot be admitted by omission or rename.
+        if (ashbyFormValueWrite(request)) return route.fallback();
+        /* The reviewed packet's own upload, armed around the upload action exactly as the managed
+         * containment arms it. Attaching a document is not filing an application. */
+        if (floor.uploadActionArmed
+          && (method === 'POST' || method === 'PUT')
+          && (request.resourceType() === 'xhr' || request.resourceType() === 'fetch')
+          && (employerBoundTransport(request) || boardResumeStorageUpload(request))) {
+          return route.fallback();
+        }
+        if (floor.mode !== 'initial_navigation') {
+          floor.blockedAttemptCount += 1;
+          let target = '';
+          try {
+            const parsed = new URL(request.url());
+            target = ' ' + (parsed.origin + parsed.pathname).slice(0, 200);
+          } catch {}
+          const operationName = ashbyPublicBoardOperationName({
+            url: request.url(),
+            postData: request.postData()
+          });
+          floor.blockedReason = 'employer-bound ' + request.resourceType() + ' transport on a run '
+            + 'that was not asked to submit: ' + method + target
+            + (operationName ? ' op=' + operationName : '');
+        }
+        return route.abort('blockedbyclient');
+      };
+      /* Routed on the context, not the page: a board that opens the form in a second page or an
+       * iframe would otherwise submit from a document this floor never saw. */
+      await browserContext.route('**/*', floor.handler);
+      submitTransportFloor = floor;
+    }
     // A RUN THAT WAS NOT ASKED TO SUBMIT MUST BE STRUCTURALLY UNABLE TO SUBMIT.
     //
     // Measured on 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) reached
@@ -2116,10 +2259,16 @@ let terminalFailureInput = null;
     // dies at the first navigation, and a form post navigates. This one is reinstalled by the
     // browser into every document the run ever loads.
     //
-    // WHAT IT DOES NOT COVER, said out loud: a page that posts with fetch/XHR from its own click
-    // handler never dispatches a submit event and never calls form.submit(), so nothing here sees
-    // it. This is a floor, not a proof. 'blockedSubmits' in the result is the measurement that says
-    // whether the floor was ever reached.
+    // WHAT THIS LAYER DOES NOT COVER, said out loud: a page that posts with fetch/XHR from its own
+    // click handler never dispatches a submit event and never calls form.submit(), so nothing here
+    // sees it. That was measured on 2026-09-04 to be the MAJORITY case, not an edge: five of the
+    // seven live boards that could be measured dispatch no submit event when their own Submit
+    // control is pressed, and on Ashby the press reached the employer's real filing operation with
+    // this counter still reading 0. The submit transport floor installed above is what covers them,
+    // by watching the request instead of the event. This layer is still worth having and is still
+    // installed first: it stops a native form post inside the page, before any transport is
+    // attempted, and it is the only one of the two that sees a same-document form.submit().
+    // 'blockedSubmits' in the result is the sum of what every layer stopped.
     if (input.allowSubmit !== true) {
       await page.addInitScript(() => {
         const apply = Reflect.apply;
@@ -4054,6 +4203,10 @@ let terminalFailureInput = null;
       managedMutationTransportContainment.allowedNavigationUrl = null;
       managedInitialNavigationActive = false;
     }
+    /* The floor locks at the same instant and for the same reason. Before this line the page is
+     * still loading and an employer-bound write is the board bootstrapping itself, which no action
+     * of ours caused; after it, every write is downstream of something the packet did. */
+    if (submitTransportFloor) submitTransportFloor.mode = 'locked';
     if (retainedAtomicV4Run) {
       /* Playwright's route handler currently sees the initial request but not an HTTP redirect
        * target after route.fallback(). Validate the browser's own immutable redirectedFrom chain
@@ -14314,14 +14467,17 @@ let terminalFailureInput = null;
        }
      });
      assertManagedMutationTransportClean();
-     if (managedMutationTransportContainment) {
+     for (const armed of [managedMutationTransportContainment, submitTransportFloor]) {
+       if (!armed) continue;
        /* The upload allowance is scoped to the upload action itself plus any read-only actions
         * after it, because the page's own upload XHR starts on the change event and can still be
-        * in flight while proofs are read. The next MUTATION action closes it. */
+        * in flight while proofs are read. The next MUTATION action closes it. One rule, applied to
+        * whichever containment this run installed: a floor whose upload window never opened would
+        * abort the resume bytes and then report the board's own uploader as an attempted filing. */
        if (action.type === 'upload') {
-         managedMutationTransportContainment.uploadActionArmed = true;
+         armed.uploadActionArmed = true;
        } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
-         managedMutationTransportContainment.uploadActionArmed = false;
+         armed.uploadActionArmed = false;
        }
      }
      let successfulMutation = false;
@@ -16946,13 +17102,31 @@ let terminalFailureInput = null;
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
-    // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
-    // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
-    // action list tried to send a real application without authorization, and this is the only
-    // place that can ever say so.
+    /* How many submissions were stopped. Zero on a run that was allowed to submit, because nothing
+     * is installed there. Non-zero on a fill run is a DEFECT REPORT: something in the action list
+     * tried to send a real application without authorization, and this is the only place that can
+     * ever say so.
+     *
+     * IT IS A SUM, AND THAT IS THE FIX. It used to read one number, the DOM guard's, and the
+     * 2026-09-04 board sweep is that the DOM guard sees nothing on five of the seven boards
+     * measured - including Ashby, where the press reached the employer's real filing operation and
+     * this field still said 0. A field documented as the defect report could not report the defect
+     * it exists for. Every layer that can stop a submit now contributes:
+     *
+     *   the DOM submit guard         a dispatched submit event, or a form.submit() call
+     *   the submit transport floor   an employer-bound write on an ordinary fill run
+     *   the managed containment      the same, on a run carrying exact mutation authority
+     *   the v4 pre-submit lock       any write-shaped transport before the atomic chooser released
+     *
+     * At most one of the three transport layers is installed on any given run, so these do not
+     * double-count each other. The v4 lock records a boolean rather than a tally, so it can only
+     * ever move this from 0 to at least 1, which is the whole question this field answers. */
     const blockedSubmits = input.allowSubmit === true
       ? 0
-      : await page.evaluate(() => window.__litosBlockedSubmits || 0).catch(() => 0);
+      : (await page.evaluate(() => window.__litosBlockedSubmits || 0).catch(() => 0))
+        + (submitTransportFloor?.blockedAttemptCount || 0)
+        + (managedMutationTransportContainment?.blockedAttemptCount || 0)
+        + (v4PreSubmitTransportContainment?.blockedTransportObserved ? 1 : 0);
     const title = await observeForResult(() => page.title(), '');
     const url = page.url();
     const text = await observeForResult(

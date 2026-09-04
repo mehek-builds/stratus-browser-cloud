@@ -19,8 +19,9 @@ jobs:
     name: npm run verify
     runs-on: ubuntu-latest
     # 35, and the reason is the suite's own size rather than any one change in it: a unit suite of
-    # 257 plus five replay harnesses that each drive a real browser against a fixture server, plus
-    # an e2e pass.
+    # 257 plus six replay harnesses that each drive a real browser against a fixture server, plus
+    # an e2e pass. The submit floor replay is the sixth, added 2026-09-04; it measures under a
+    # minute, so it does not move the number below.
     #
     # The chronology matters, because one of the cancellations below is at 30 minutes and would
     # otherwise read as evidence that 35 is also too small:
@@ -118,6 +119,13 @@ jobs:
 
       - name: Required confirmation replay
         run: npm run test:required-confirmation
+
+      # Drives the shipped runner against the four Submit mechanisms measured across the live
+      # boards on 2026-09-04, and against mutants of itself. Three of the four dispatch no submit
+      # event at all, so this is the only suite that can tell whether blockedSubmits still reports
+      # a filing the DOM guard cannot see.
+      - name: Submit floor replay
+        run: npm run test:submit-floor
 
       # The producer half of the cross-repo captcha contract. It has to run HERE rather than only
       # locally: the file it pins is committed byte-identical in student-outreach-backend, and a

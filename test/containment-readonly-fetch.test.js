@@ -29,15 +29,23 @@ test('everything else in the contained set stays blocked', () => {
 test('the upload allowance is scoped to the armed window, employer-bound POST/PUT xhr/fetch only', () => {
   // Armed exactly by an upload action, disarmed by the next mutation action; read-only actions
   // after the upload keep it open because the page's upload XHR starts on the change event.
-  assert.match(source, /if \(action\.type === 'upload'\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = true;/);
-  assert.match(source, /\} else if \(!\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{\s*\n\s*managedMutationTransportContainment\.uploadActionArmed = false;/);
+  /* One arming rule, applied to whichever containment the run installed. The submit transport
+   * floor (2026-09-04) has an upload window for the same reason the managed containment does:
+   * without it the floor aborts the board's own eager resume POST and then reports it as an
+   * attempted filing. The loop is pinned by its subjects, so dropping either one is visible. */
+  assert.match(source, /for \(const armed of \[managedMutationTransportContainment, submitTransportFloor\]\) \{/);
+  assert.match(source, /if \(action\.type === 'upload'\) \{\s*\n\s*armed\.uploadActionArmed = true;/);
+  assert.match(source, /\} else if \(!\['waitForSelector', 'extract', 'requireCapability', 'discover'\]\.includes\(action\.type\)\) \{\s*\n\s*armed\.uploadActionArmed = false;/);
   // The allowance itself: employer-bound POST/PUT xhr/fetch, plus the board's own resume store
   // (Greenhouse's eager S3 upload - see isBoardResumeStorageUploadHost), and nothing wider.
   assert.match(source, /if \(containment\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{\s*\n\s*return route\.fallback\(\);/);
-  // The store helper is gated inside that armed branch only: it appears in the template exactly
-  // once outside its own definition, so it cannot silently widen any other admission.
+  // And the floor's own armed window, which carries the identical four conditions.
+  assert.match(source, /if \(floor\.uploadActionArmed\s*\n\s*&& \(method === 'POST' \|\| method === 'PUT'\)\s*\n\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\)\s*\n\s*&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{\s*\n\s*return route\.fallback\(\);/);
+  /* The store helper is gated inside those two armed branches and nowhere else: it appears in the
+   * template exactly twice outside its own definition, once per containment, so it cannot silently
+   * widen any other admission. */
   const uses = source.match(/boardResumeStorageUpload\(request\)/g) || [];
-  assert.equal(uses.length, 1, 'the store admission is called from the armed upload branch and nowhere else');
+  assert.equal(uses.length, 2, 'the store admission is called from those two armed upload branches and nowhere else');
 });
 
 test('only employer-bound blocked transport is run-fatal; third-party blocks are aborted quietly', () => {
