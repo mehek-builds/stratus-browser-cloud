@@ -171,12 +171,13 @@ async function startRun(input) {
   const runTimeoutMs = runTimeoutMsFor(context.providerDeadlineAt);
   await terminalResults.reservePending(retainedAttempt, Date.now() + runTimeoutMs);
   let session = null;
+  let directory = null;
   /* Everything after the reservation runs under one catch, so no throw can leave a live runner
    * acting on the employer's page with its slot held, and a run that never spawned is retained
    * as failed rather than left pending. A throw that reaches the catch after the spawn without a
    * retained answer retains indeterminate: the host lost track of what the runner did. */
   try {
-    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stratus-managed-'));
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stratus-managed-'));
     const token = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
     const expiresAt = context.requestContinuation
       ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
@@ -252,6 +253,8 @@ async function startRun(input) {
     return result;
   } catch (error) {
     if (session && (!childExited(session.child) || active.has(session.id))) await cleanup(session).catch(() => {});
+    // A directory made before the session existed is nobody's to clean but ours.
+    if (!session && directory) await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
     if (retainedAttempt && !(error && error.code === 'SUBMISSION_EXECUTION_CONFLICT')) {
       await terminalResults.retain(retainedAttempt, session
         ? { state: 'indeterminate', error: { code: 'HOST_LOST_RUN', message: String(error?.message || 'The host lost the managed run').slice(0, 500) } }
@@ -269,7 +272,6 @@ async function continueRun(input) {
     if (session) await cleanup(session);
     throw managedError('Continuation is expired, already used, or does not belong to this service', 409, 'CONTINUATION_REJECTED');
   }
-  session.used = true;
   /* THE PARENT TRAVELS WITH THE CONTINUATION. The runner refuses a continuation whose parent
    * attempt it cannot verify ("Submission attempt correlation changed during continuation",
    * managed-browser.js, since 2026-08-31); the sandbox host injects the parent server-side and
@@ -277,7 +279,9 @@ async function continueRun(input) {
    * observation) failed closed. The continuation is retained under ITS OWN tuple, which volley
    * mints with a fresh executionId; the first phase's record stays as it was. */
   const continuationAttempt = continuation.submissionAttempt ?? null;
+  // Reserved before the single-use token is spent, so a refused reservation leaves the session usable.
   await terminalResults.reservePending(continuationAttempt, Date.now() + CONTINUATION_TIMEOUT_MS + 5_000);
+  session.used = true;
   await fs.writeFile(
     path.join(session.directory, 'stratus-continuation-input.json'),
     JSON.stringify({ ...continuation, parentSubmissionAttempt: session.submissionAttempt }),
@@ -289,7 +293,8 @@ async function continueRun(input) {
     session.child,
   );
   if (!produced) {
-    const runProgress = await readProgress(session.directory, session.submissionAttempt);
+    // Progress on this phase is bound to the continuation's own tuple.
+    const runProgress = await readProgress(session.directory, continuationAttempt ?? session.submissionAttempt);
     await cleanup(session);
     const error = Object.assign(
       managedError('Managed browser continuation timed out', 410, 'CONTINUATION_EXPIRED'),
@@ -299,7 +304,7 @@ async function continueRun(input) {
     throw error;
   }
   if (produced === 'stratus-error.json') {
-    const error = await runnerError(session.directory, session.stderr, session.submissionAttempt);
+    const error = await runnerError(session.directory, session.stderr, continuationAttempt ?? session.submissionAttempt);
     await cleanup(session);
     await terminalResults.retain(continuationAttempt, { state: 'failed', error, runProgress: error.runProgress });
     throw error;
