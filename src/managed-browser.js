@@ -507,6 +507,42 @@ export const isAshbyFormValueWrite = ({
  * root-field pin - see that function's comment for why a document proof alone, the way
  * isAshbyFormValueWrite already has it, is not enough for a second admitted operation). */
 
+/* TEAMTAILOR'S COOKIE PREFERENCE IS A WRITE TO THE EMPLOYER'S ORIGIN, AND IT IS NOT A FILING.
+ *
+ * MEASURED 2026-09-04 22:12Z, Covenant House International "Intern, Finance" (packet c24e48a2) on
+ * covenanthouseinternational.na.teamtailor.com. The backend's Teamtailor cookie preflight (volley
+ * portalSubmission.ts, TEAMTAILOR_COOKIE_DECLINE_SELECTOR, its own 2026-09-04 fix) clicks the
+ * dialog's "disable all" button so the modal stops covering the form; Teamtailor's client answers
+ * that click with `POST https://<tenant>.na.teamtailor.com/cookie-policy/accept` recording the
+ * choice. That POST is write-shaped, same-site with the application page, and issued during the
+ * locked fill, so the gate below blocked it and the run died with "A non-submit action attempted
+ * employer transport without exact final authority (fetch transport: POST …/cookie-policy/accept)"
+ * - the decline that was added so the fill could proceed became the thing that ended it.
+ *
+ * What is admitted: exactly one path, `/cookie-policy/accept`, on a Teamtailor tenant host
+ * (`<tenant>.teamtailor.com` or the regional `<tenant>.<region>.teamtailor.com`) that is the
+ * application page's own site, as a POST xhr/fetch. It records a cookie preference on the
+ * candidate's own browser session and files nothing: Teamtailor's application submit is a
+ * different route (`/jobs/<id>/applications`) and stays blocked exactly as before, as does every
+ * other write to the tenant. No body inspection is needed because the path alone names the
+ * preference endpoint, and a different path is a different request. */
+export const TEAMTAILOR_COOKIE_CONSENT_PATH = '/cookie-policy/accept';
+export const isTeamtailorCookieConsentWrite = ({ applicationSite, method, resourceType, url } = {}) => {
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'fetch' && resourceType !== 'xhr') return false;
+  let parsed;
+  try {
+    parsed = new URL(String(url || ''));
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  if (!/^[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/.test(host)) return false;
+  if (!applicationSite || transportRegistrableSuffix(host) !== applicationSite) return false;
+  return parsed.pathname === TEAMTAILOR_COOKIE_CONSENT_PATH;
+};
+
 /* Blanks every string body (`"..."` and `"""...\"\"\"` block strings) and every `#` line comment to
  * spaces of the SAME length, so a brace, paren or fragment keyword sitting inside quoted text or a
  * comment cannot desynchronize a brace count taken over the result. Returns null on an unterminated
@@ -2488,6 +2524,8 @@ let terminalFailureInput = null;
       const isGraphqlSoleNamedMutation = ${isGraphqlSoleNamedMutation.toString()};
       const ASHBY_FORM_VALUE_WRITE_OPERATIONS = ${JSON.stringify(ASHBY_FORM_VALUE_WRITE_OPERATIONS)};
       const isAshbyFormValueWrite = ${isAshbyFormValueWrite.toString()};
+      const TEAMTAILOR_COOKIE_CONSENT_PATH = ${JSON.stringify(TEAMTAILOR_COOKIE_CONSENT_PATH)};
+      const isTeamtailorCookieConsentWrite = ${isTeamtailorCookieConsentWrite.toString()};
       /* The 2026-09-04 resume-upload fix: Ashby stores a file in three calls, and only the first
        * (ApiCreateFileUploadHandle) and third (the field-value write above) were ever employer-bound
        * candidates for this containment. The second - the actual bytes, POSTed to a presigned target
@@ -2556,6 +2594,15 @@ let terminalFailureInput = null;
         resourceType: request.resourceType(),
         url: request.url(),
         postData: request.postData()
+      });
+      /* Teamtailor's cookie-preference POST, the one write the cookie preflight's own click issues.
+       * See isTeamtailorCookieConsentWrite: one exact path on the application page's own tenant,
+       * and nothing else on that tenant is widened by it. */
+      const teamtailorCookieConsentWrite = (request) => isTeamtailorCookieConsentWrite({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url()
       });
       /* Call 3 of the resume-upload fix: the mutation that binds an already-stored file handle to
        * the draft. See isAshbyFileBindWrite for why this needed its own gate and its own root-field
@@ -2737,7 +2784,8 @@ let terminalFailureInput = null;
             containment.ashbyFileBindWriteAdmitted = true;
             return route.fallback();
           }
-          if (!readOnlyDataFetch && !ashbyPublicBoardRead(request) && !ashbyFormValueWrite(request)) {
+          if (!readOnlyDataFetch && !ashbyPublicBoardRead(request) && !ashbyFormValueWrite(request)
+            && !teamtailorCookieConsentWrite(request)) {
             return block(route, request.resourceType() + ' transport');
           }
           return route.fallback();

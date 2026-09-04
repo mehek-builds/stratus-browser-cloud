@@ -190,7 +190,9 @@ test('the read list and the write list stay separate, and neither answers for th
 test('the containment consults the write allowance in the fill phase, and nowhere else', () => {
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
   // Exactly one call site: the locked-mode data-fetch branch, where a typed value lands.
-  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{/);
+  // Since 2026-09-04 the same gate also consults Teamtailor's cookie-preference allowance (see
+  // teamtailor-cookie-consent-write.test.js); the Ashby allowance keeps its one call site here.
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\s*&& !teamtailorCookieConsentWrite\(request\)\) \{/);
   assert.equal(source.split('ashbyFormValueWrite(request)').length - 1, 1,
     'the field-value write allowance is called from the locked-mode branch and nowhere else');
   // NOT on the initial-navigation branch, which still admits reads only. A page that writes a form
