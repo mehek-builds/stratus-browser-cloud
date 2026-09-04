@@ -55,11 +55,21 @@ test('the run reports the same required fields the pre-submit gate would withhol
   // The weaker readers are gone rather than left beside the better one, so the two cannot drift.
   assert.doesNotMatch(section, /page\.locator\('input\[required\], textarea\[required\], select\[required\]'\)/);
   assert.doesNotMatch(section, /requiredFileGroups/);
-  // stale and unmatched stay OUT. Both are about validation MESSAGES rather than empty controls,
-  // and a stale message over a filled field must never block a complete application - the mistake
-  // an earlier gate made when it matched the form's own "* indicates a required field" legend.
-  assert.doesNotMatch(section, /readiness\.stale/);
+  /* stale and unmatched stay OUT OF 'blockers'. Both are about validation MESSAGES rather than
+     empty controls, and a stale message over a filled field must never block a complete
+     application, which is the mistake an earlier gate made when it matched the form's own
+     "* indicates a required field" legend.
+
+     PINNED ON WHERE THE COUNT GOES, not on whether the word appears anywhere. The earlier spelling
+     forbade the identifier 'readiness.stale' throughout this section, so it also forbade REPORTING
+     the number, and the number is the only thing in the whole run that tells an applicant why the
+     screenshot she is being asked to approve is covered in red over fields she can see are filled.
+     Forbidding the word was never the property. Not refusing an application over a message is. */
+  assert.doesNotMatch(section, /blockers\.push\([^)]*readiness\.stale/);
   assert.doesNotMatch(section, /readiness\.unmatched/);
+  // And it is not dropped either. It reaches the caller through 'skipped', which is the channel the
+  // pre-submit gate already uses for this exact sentence.
+  assert.match(section, /skipped\.push\('form_rendering: the form is still showing ' \+ readiness\.stale\.length/);
 });
 
 test('the required scan reads a per-control marker and never page text', () => {

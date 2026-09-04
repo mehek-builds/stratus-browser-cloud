@@ -548,9 +548,26 @@ async function replay(actions, options = {}) {
 
 const valueOf = (result, selector) => result.extracted.find((entry) => entry.selector === selector)?.value;
 
-// 1. A FILL RUN CANNOT SUBMIT. The action list is the shape of a real prepare run: fills, then an
-//    Enter aimed at a field, and no submit click anywhere. Before the guard, that Enter reached the
-//    form and sent an application no one had authorized.
+/* 1. A FILL RUN CANNOT SUBMIT. The action list is the shape of a real prepare run: fills, then an
+ *    Enter aimed at a field, and no submit click anywhere. Before the guard, that Enter reached the
+ *    form and sent an application no one had authorized.
+ *
+ *    THE KEYSTROKE NOW STOPS ONE LAYER EARLIER, and this case was rewritten to say so rather than
+ *    left asserting a number that had become the wrong evidence. It used to require
+ *    blockedSubmits === 1: the Enter reached the form, the form dispatched a submit event, and the
+ *    guard caught it. On a run that was not asked to submit, that Enter is now withheld before it
+ *    reaches anything, so the guard has nothing to catch and the count is 0.
+ *
+ *    That is a strictly stronger position, and the reason is not the submission. It is that
+ *    delivering the keystroke ran the EMPLOYER'S validator over a form that was still half filled,
+ *    and this form never takes those messages back. Measured on the live Hudson River Trading
+ *    Greenhouse form, 2026-09-04: one Enter in a plain text input rendered "This field is required."
+ *    under seven required controls, and every one of them was still red after being filled
+ *    correctly a moment later. That is the picture the applicant is handed and asked to approve.
+ *
+ *    NOT SILENTLY SWALLOWED, which is what the old assertion was really protecting. The withholding
+ *    is reported in 'skipped' with the control it was aimed at and the reason, which is more than
+ *    the counter ever said, and it is asserted below. */
 {
   const result = await replay([
     { type: 'fill', selector: '#first_name', value: 'Mehek', label: 'first_name' },
@@ -560,8 +577,12 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   ]);
   assert.equal(valueOf(result, '#submitted'), 'no',
     'a run that was not allowed to submit must not have submitted');
-  assert.equal(result.blockedSubmits, 1,
-    'the blocked submission must be counted and reported, not silently swallowed');
+  const withheld = result.skipped.filter((line) => /Enter withheld/.test(line));
+  assert.equal(withheld.length, 1,
+    'the withheld keystroke must be reported, not silently swallowed: ' + JSON.stringify(result.skipped));
+  assert.match(withheld[0], /email_confirm: Enter withheld, #email is inside the application form/);
+  assert.equal(result.blockedSubmits, 0,
+    'nothing reached the submit guard, because nothing reached the form');
   assert.equal(result.humanVerification, null, 'no submission means no challenge');
   // The fills still happened. A guard that works by breaking the run is not a fix.
   assert.deepEqual(result.filledFields, ['first_name', 'email']);
@@ -578,6 +599,10 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
   ], { allowSubmit: true });
   assert.equal(valueOf(result, '#submitted'), '1', 'an authorized run must still be able to submit');
   assert.equal(result.blockedSubmits, 0, 'nothing is blocked on a run that was allowed to submit');
+  // And nothing is withheld either. The keystroke rule case 1 relies on is keyed on the SAME
+  // declaration of intent that installs the guard, so an authorized run keeps every press it had.
+  assert.equal(result.skipped.filter((line) => /Enter withheld/.test(line)).length, 0,
+    'an authorized run keeps its keystrokes: ' + JSON.stringify(result.skipped));
 }
 
 // 3. THE CHALLENGE IS SEEN, AND IT IS READ OFF THE CONTROL. A submit with no code supplied leaves

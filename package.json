@@ -14,7 +14,8 @@
     "test:required-confirmation": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/required-confirmation-replay.mjs",
     "test:e2e": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/e2e.mjs",
     "test:captcha-visibility": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/captcha-visibility-replay.mjs",
-    "verify": "npm test && npm run test:runner && npm run test:choice-parity && npm run test:security-code && npm run test:required-confirmation && npm run test:captcha-visibility && npm run test:e2e",
+    "test:enter-validation": "LITOS_POST_SUBMIT_SETTLE_MS=1500 NODE_ENV=test node test/enter-validation-replay.mjs",
+    "verify": "npm test && npm run test:runner && npm run test:choice-parity && npm run test:security-code && npm run test:required-confirmation && npm run test:captcha-visibility && npm run test:enter-validation && npm run test:e2e",
     "dev:vercel": "vercel dev"
   },
   "dependencies": {
