@@ -13121,6 +13121,23 @@ let terminalFailureInput = null;
             && cleanText(selected[0].label || selected[0].textContent) === proof.semantic;
         }, before).catch(() => false);
       };
+      /* THE ONE SETTLE LOOP for a React choice control, shared by every reader below. A click on a
+       * react-select row does not change the DOM: it dispatches a state update that React renders
+       * on a later task, so a read taken immediately after the click reports the selection the
+       * control held BEFORE it. Both the single-select arrival wait and the multi-select
+       * deselect/reselect cycle poll through here so their cadence and budget cannot drift apart.
+       *
+       * It is a WAIT, never a retry: it re-reads and never re-clicks, so a caller that clicked once
+       * still judges exactly one click. When the state never arrives it simply stops, leaving the
+       * caller holding the same final reading an immediate read would have produced - so every
+       * verdict below still fails closed on a control React never published. */
+      const pollReactSettle = async (hasLanded) => {
+        for (let elapsed = 0; elapsed <= 3000; elapsed += 50) {
+          if (await hasLanded()) return true;
+          if (elapsed < 3000) await page.waitForTimeout(50).catch(() => undefined);
+        }
+        return false;
+      };
       // A required React Select can still carry an invalid marker after its answer is visible. The
       // visual node is not necessarily the semantic option, though: country controls commonly show
       // "+971" after choosing "United Arab Emirates +971". Replaying that abbreviation searches
@@ -13130,8 +13147,10 @@ let terminalFailureInput = null;
       // answer. It must name the popup itself, exactly one option must declare itself selected, and
       // that option's text must resolve through Playwright's exact accessible-name query exactly once.
       // Anything else is left invalid for the final readiness check to block. In particular, two
-      // selected rows means multi-select, where confirmation remains click/Escape/blur only and never
-      // clicks an already-selected row.
+      // selected rows means multi-select, where the ONLY click aimed at an already-selected row is
+      // the deliberate deselect step of the bounded cycle below: the reselect runs only once the
+      // full rendered selection has confirmed that value came off, and the one restore attempt
+      // re-reads aria-selected before it clicks.
       const replayExactReactSelection = async (target) => {
         const before = await readChoiceState(target);
         if (before.kind !== 'chosen') return { answerPreserved: false };
@@ -13218,24 +13237,60 @@ let terminalFailureInput = null;
             };
             const sameAsBefore = (values) => values.length === beforeValues.length
               && values.every((value, index) => value === beforeValues[index]);
-            const clickExactTargetRowOnce = async () => {
+            // The two states a click in this cycle can be aiming at, named once so the wait below
+            // and the verdict that follows it are the same byte-exact test and cannot diverge.
+            const isRecordedSetMinusTarget = (reading) => Boolean(reading?.stable)
+              && reading.values.length === beforeValues.length - 1
+              && reading.values.every((value, index) => value === beforeValues[index]);
+            const isRecordedSet = (reading) => Boolean(reading?.stable)
+              && sameAsBefore(reading.values);
+            /* Read the control until React publishes the state this click was meant to produce.
+             * Nothing is clicked in here - the shared settle loop only re-reads - so the verdict
+             * still judges exactly one click, and a click React never lands returns the same final
+             * reading an immediate read would have taken, failing closed exactly as before. */
+            const settledSelection = async (hasLanded) => {
+              let reading = null;
+              await pollReactSettle(async () => {
+                reading = await readFullSelection();
+                return hasLanded(reading);
+              });
+              return reading;
+            };
+            const clickExactTargetRowOnce = async (hasLanded) => {
               const rows = exactTargetRow();
               if (await rows.count().catch(() => 0) !== 1) return null;
               const clicked = await rows.first().click({ timeout: 2000 }).then(() => true).catch(() => false);
-              return clicked ? readFullSelection() : null;
+              return clicked ? settledSelection(hasLanded) : null;
             };
             // DESELECT. Confirmed to be exactly the recorded set minus the one target value - not
             // just "something changed" - before this call ever considers a reselect click.
-            const afterDeselect = await clickExactTargetRowOnce();
-            const deselected = Boolean(afterDeselect?.stable)
-              && afterDeselect.values.length === beforeValues.length - 1
-              && afterDeselect.values.every((value, index) => value === beforeValues[index]);
+            const afterDeselect = await clickExactTargetRowOnce(isRecordedSetMinusTarget);
+            const deselected = isRecordedSetMinusTarget(afterDeselect);
             const attemptRestore = async () => {
-              // The ONE bounded restore attempt: reselect the exact recorded value one more time.
-              // Never a loop, and this is the only place besides the reselect step itself that
-              // clicks the target row.
-              const afterRestore = await clickExactTargetRowOnce();
-              return Boolean(afterRestore?.stable) && sameAsBefore(afterRestore.values);
+              /* The ONE bounded restore attempt: put the exact recorded value back, once. This is
+               * the only click in the cycle whose direction is not already established, so it is
+               * the only one that has to ask. react-select's isMulti TOGGLES a row, and the paths
+               * that reach here include ones where the target value never actually came off the
+               * control - a dropped deselect click, or a reselect that landed but read back
+               * unstably. Clicking blind there would remove the recorded answer a second time
+               * instead of restoring it, so aria-selected is re-read first and only a row that
+               * reads back deselected is clicked. */
+              const rows = exactTargetRow();
+              const readableRow = (await rows.count().catch(() => 0)) === 1;
+              const stillSelected = readableRow
+                ? await rows.first()
+                    .evaluate((element) => element.getAttribute('aria-selected') === 'true')
+                    .catch(() => null)
+                : null;
+              // Unreadable is not "not selected". Refuse rather than guess at the click direction.
+              if (stillSelected === null) return false;
+              if (stillSelected) {
+                // The value is still on the control, so there is nothing to put back and a click
+                // would take it off. Judge what is rendered by the same byte-exact rule instead,
+                // after the same settle budget the clicking arms get.
+                return isRecordedSet(await settledSelection(isRecordedSet));
+              }
+              return isRecordedSet(await clickExactTargetRowOnce(isRecordedSet));
             };
             if (!deselected) {
               // The deselect did not land the expected single-chip removal. This call no longer
@@ -13248,8 +13303,8 @@ let terminalFailureInput = null;
             }
             // RESELECT the exact same option, matched byte-for-byte against what was recorded
             // before either click, never by index and never by a nearest match.
-            const afterReselect = await clickExactTargetRowOnce();
-            if (Boolean(afterReselect?.stable) && sameAsBefore(afterReselect.values)) {
+            const afterReselect = await clickExactTargetRowOnce(isRecordedSet);
+            if (isRecordedSet(afterReselect)) {
               return { answerPreserved: true, multiValue: true, arrival: before };
             }
             // The reselect missed, or landed a coerced neighbour - PR #154's own failure shape.
@@ -13380,19 +13435,17 @@ let terminalFailureInput = null;
       const waitForReactArrival = async (target, arrival, semanticAnswer) => {
         const arrivalValues = (Array.isArray(arrival?.values) ? arrival.values : [arrival?.value])
           .map((value) => clean(value));
-        for (let elapsed = 0; elapsed <= 3000; elapsed += 50) {
+        return pollReactSettle(async () => {
           const current = await readChoiceState(target);
           const currentValues = (Array.isArray(current.values) ? current.values : [current.value])
             .map((value) => clean(value));
           const sameDisplay = current.kind === 'chosen'
             && currentValues.length === arrivalValues.length
             && currentValues.every((value, index) => value === arrivalValues[index]);
-          if (sameDisplay || (semanticAnswer && await verifyChoiceInContainer(
+          return Boolean(sameDisplay || (semanticAnswer && await verifyChoiceInContainer(
             target, semanticAnswer, semanticAnswer, semanticAnswer
-          ))) return true;
-          if (elapsed < 3000) await page.waitForTimeout(50).catch(() => undefined);
-        }
-        return false;
+          )));
+        });
       };
       /* THE TEXT-BOX HALF OF THE SAME FIX, Mehek's own words: "tap that text box to select it, and
        * then add a little space to showcase that there's some movement happening in the text box.
