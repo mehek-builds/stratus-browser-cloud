@@ -2651,7 +2651,13 @@ test('discover scans choice controls as well as text-shaped ones', () => {
     SANDBOX_RUNNER,
     /input\[type="text"\], input\[type="email"\], input\[type="tel"\], input\[type="url"\], input\[type="number"\],/,
   );
-  assert.match(SANDBOX_RUNNER, /input\[type="date"\], input\[type="radio"\], input\[type="checkbox"\], input:not\(\[type\]\), textarea, select/);
+  /* input[type="file"] joined the list on 2026-09-03, for the same reason the choice controls
+   * joined it: a control discovery never sees can neither be answered nor asked, and a document
+   * control was the last kind still invisible. The backend's measuredRequiredDocuments has been
+   * filtering discovered questions on portal_input_type === 'file' with nothing to find, which is
+   * how the DSI Innovations form's required "CV or resume" produced required_documents: []. The
+   * behaviour is in discover-document-control-dom.test.js, against the shipped runner. */
+  assert.match(SANDBOX_RUNNER, /input\[type="date"\], input\[type="radio"\], input\[type="checkbox"\], input\[type="file"\], input:not\(\[type\]\), textarea, select/);
   assert.match(SANDBOX_RUNNER, /const discovered = \[\];/);
   assert.match(SANDBOX_RUNNER, /const runnerCapabilities = \[/);
   assert.match(SANDBOX_RUNNER, /inputType: el\.tagName === 'TEXTAREA'/);
