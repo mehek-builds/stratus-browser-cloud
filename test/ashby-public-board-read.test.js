@@ -122,8 +122,12 @@ test('the containment consults the allowance in both modes, and nowhere else', (
   assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{/);
   // The violation assert is untouched: an employer-bound block that is not this read is still fatal.
   assert.match(source, /A non-submit action attempted employer transport without exact final authority/);
-  // "and nowhere else" has to be measured, or a third call site could widen this silently.
-  assert.equal(source.split('ashbyPublicBoardRead(request)').length - 1, 2);
+  /* And the submit transport floor, added 2026-09-04, which is installed on an ordinary fill run
+   * and would otherwise abort the very read that renders the form it is about to fill. Pinned to a
+   * fallback, so admitting the read can never be confused with counting a submit. */
+  assert.match(source, /if \(ashbyPublicBoardRead\(request\)\) return route\.fallback\(\);/);
+  // "and nowhere else" has to be measured, or a fourth call site could widen this silently.
+  assert.equal(source.split('ashbyPublicBoardRead(request)').length - 1, 3);
 });
 
 test('a blocked Ashby operation names itself in the violation sentence', () => {

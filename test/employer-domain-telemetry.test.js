@@ -50,10 +50,29 @@ test('no other board is touched', () => {
   assert.equal(isEmployerDomainTelemetryHost('jobs.lever.co'), false);
 });
 
+/* The Recruitee collector joined the list on 2026-09-04 on the same measured terms: a live board
+ * POSTs to careers-analytics.recruitee.com/api/event during page load and never again after the
+ * Submit control is pressed, and the board's own attachment endpoints are elsewhere (Cloudinary
+ * and an /upload/ path on the board origin), so sparing it cannot lock a resume out of the upload
+ * window. It shares the board's registrable site, so without the entry every Recruitee run reports
+ * an analytics beacon as an employer-bound write. */
+test('the measured Recruitee collector is spared, and its board is not', () => {
+  assert.equal(isEmployerDomainTelemetryHost('careers-analytics.recruitee.com'), true);
+  assert.equal(isEmployerDomainTelemetryHost('CAREERS-ANALYTICS.Recruitee.com.'), true);
+  // The tenant board and the bare registrable domain stay fully employer-bound.
+  assert.equal(isEmployerDomainTelemetryHost('thecareersteam.recruitee.com'), false);
+  assert.equal(isEmployerDomainTelemetryHost('recruitee.com'), false);
+  assert.equal(isEmployerDomainTelemetryHost('careers-analytics.recruitee.com.evil.example'), false);
+  assert.equal(isEmployerDomainTelemetryHost('notcareers-analytics.recruitee.com'), false);
+});
+
 test('the list stays a deliberate, reviewed set', () => {
   // Every entry here is a measured capture proving the host is a collector. Growth should be
   // visible in review rather than incidental, so the exact contents are pinned.
-  assert.deepEqual([...EMPLOYER_DOMAIN_TELEMETRY_HOSTS], ['spl.greenhouse.io']);
+  assert.deepEqual([...EMPLOYER_DOMAIN_TELEMETRY_HOSTS], [
+    'spl.greenhouse.io',
+    'careers-analytics.recruitee.com'
+  ]);
   assert.equal(Object.isFrozen(EMPLOYER_DOMAIN_TELEMETRY_HOSTS), true);
 });
 
