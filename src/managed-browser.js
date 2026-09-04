@@ -253,6 +253,67 @@ export const isCaptchaWidgetFrameRequest = ({ method, resourceType, url, mainFra
   return target.pathname.startsWith(origin.pathPrefix);
 };
 
+/* A BLOCKED ATTEMPT INSIDE THE WIDGET FRAME IS NOT EMPLOYER TRANSPORT.
+ *
+ * Measured on the live Hudson River Trading form 2026-09-04, first fill after the widget frame was
+ * admitted: Google's own recaptcha__en.js, running inside the admitted anchor frame
+ * (location.origin https://www.recaptcha.net, 545ms into that frame's life, readyState loading),
+ * calls new Worker. The managed hook blocks it, exactly as before, and reports it, exactly as
+ * before. The report then reached the context console listener after the employer page's initial
+ * navigation had closed, so it was counted as the employer page attempting covert transport, and
+ * the run died at the next assertion with "A non-submit action attempted employer transport
+ * without exact final authority", before the evidence screenshot. Behind a dead anchor frame that
+ * script never ran, which is why the sentence only appeared once the widget could load.
+ *
+ * The hook now names the frame that reported (its own location.origin, captured by the init
+ * script before any page code runs; the token itself is random per run and never readable by the
+ * page, so a page cannot forge a report from another origin). A report from an origin in
+ * CAPTCHA_WIDGET_FRAME_ORIGINS is still a blocked action, but it is Google's widget failing to
+ * spin its Worker, not the employer's page reaching out, so it does not end the run. Every other
+ * origin, a report with no origin at all (an older hook), and the employer page itself keep the
+ * exact treatment they had. Nothing here admits any transport; it only stops mis-attributing one.
+ */
+export const isCaptchaWidgetFrameOrigin = (origin, widgetHosts) => {
+  let parsed;
+  try { parsed = new URL(String(origin || '')); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password || (parsed.port && parsed.port !== '443')) return false;
+  if (parsed.pathname !== '/' || parsed.search || parsed.hash) return false;
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  return Array.isArray(widgetHosts) && widgetHosts.includes(host);
+};
+
+export const managedTransportConsoleVerdict = ({
+  text,
+  token,
+  initialNavigationActive,
+  fromPrimaryPage,
+  widgetHosts
+} = {}) => {
+  const silent = { attempted: false, kind: null, origin: null, exemptedWidgetFrame: false, detail: null };
+  if (typeof text !== 'string' || typeof token !== 'string' || !token) return silent;
+  if (!text.startsWith(token + ':')) return silent;
+  const rest = text.slice(token.length + 1);
+  const separator = rest.indexOf(':');
+  const kind = separator === -1 ? rest : rest.slice(0, separator);
+  const origin = separator === -1 ? null : rest.slice(separator + 1);
+  // The employer page's own load is trusted exactly as before: parser hints and inline attempts
+  // during the initial navigation of the primary page were never counted.
+  if (initialNavigationActive && fromPrimaryPage) {
+    return { attempted: false, kind, origin, exemptedWidgetFrame: false, detail: null };
+  }
+  if (origin && isCaptchaWidgetFrameOrigin(origin, widgetHosts)) {
+    return { attempted: false, kind, origin, exemptedWidgetFrame: true, detail: null };
+  }
+  return {
+    attempted: true,
+    kind,
+    origin,
+    exemptedWidgetFrame: false,
+    detail: 'page hook: ' + kind + ' from ' + (origin || 'an unidentified frame')
+  };
+};
+
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
@@ -1045,6 +1106,7 @@ let terminalFailureInput = null;
   let v4PrimaryPage = null;
   let v4InitialNavigationActive = retainedAtomicV4Run;
   let managedOutOfBandTransportAttempted = false;
+  let managedOutOfBandTransportDetail = null;
   let managedInitialNavigationActive = managedMutationContainmentRequired;
   let managedPrimaryPage = null;
   fs.writeFileSync('stratus-runner-capabilities.json', JSON.stringify({
@@ -1077,7 +1139,10 @@ let terminalFailureInput = null;
     });
     if (managedMutationContainmentRequired) {
       await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {
-        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        if (!managedInitialNavigationActive) {
+          managedOutOfBandTransportAttempted = true;
+          if (!managedOutOfBandTransportDetail) managedOutOfBandTransportDetail = 'WebSocket ' + String(webSocketRoute.url()).slice(0, 160);
+        }
         await webSocketRoute.close({
           code: 1008,
           reason: 'Managed non-submit mutation blocks WebSocket transport'
@@ -1085,13 +1150,22 @@ let terminalFailureInput = null;
       });
       var managedTransportConsoleToken = '__litosManagedTransport_'
         + crypto.randomBytes(18).toString('hex');
+      // Injected, not referenced: the runner string carries its own copy of the verdict and the
+      // widget host list so the listener below has no free variable to resolve at event time.
+      const MANAGED_CAPTCHA_WIDGET_HOSTS = ${JSON.stringify(CAPTCHA_WIDGET_FRAME_ORIGINS.map((entry) => entry.host))};
+      const isCaptchaWidgetFrameOrigin = ${isCaptchaWidgetFrameOrigin.toString()};
+      const managedTransportConsoleVerdict = ${managedTransportConsoleVerdict.toString()};
       await browserContext.addInitScript(({ consoleToken }) => {
         const nativeConsole = console;
         const consoleError = console.error;
         const apply = Reflect.apply;
         const defineProperty = Object.defineProperty;
+        // The reporting frame names itself once, before any page code runs. See
+        // managedTransportConsoleVerdict for why the origin travels with the report.
+        let frameOrigin = '';
+        try { frameOrigin = String(location.origin || ''); } catch {}
         const notify = (kind) => {
-          try { apply(consoleError, nativeConsole, [consoleToken + ':' + kind]); } catch {}
+          try { apply(consoleError, nativeConsole, [consoleToken + ':' + kind + ':' + frameOrigin]); } catch {}
         };
         const blockedConstructor = (name) => function litosBlockedTransport() {
           notify(name);
@@ -1948,15 +2022,24 @@ let terminalFailureInput = null;
       // popup raises before browserContext.on('page') can close it, which is the same escape the
       // v4 guard binds at context level.
       browserContext.on('console', (message) => {
-        const text = message.text();
-        if (text.startsWith(managedTransportConsoleToken + ':')
-          && !(managedInitialNavigationActive && message.page() === managedPrimaryPage)) {
+        const verdict = managedTransportConsoleVerdict({
+          text: message.text(),
+          token: managedTransportConsoleToken,
+          initialNavigationActive: managedInitialNavigationActive,
+          fromPrimaryPage: message.page() === managedPrimaryPage,
+          widgetHosts: MANAGED_CAPTCHA_WIDGET_HOSTS
+        });
+        if (verdict.attempted) {
           managedOutOfBandTransportAttempted = true;
+          if (!managedOutOfBandTransportDetail) managedOutOfBandTransportDetail = verdict.detail;
         }
       });
       browserContext.on('page', (candidate) => {
         if (candidate === managedPrimaryPage) return;
-        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        if (!managedInitialNavigationActive) {
+          managedOutOfBandTransportAttempted = true;
+          if (!managedOutOfBandTransportDetail) managedOutOfBandTransportDetail = 'popup page ' + String(candidate.url() || '').slice(0, 160);
+        }
         void candidate.close().catch(() => undefined);
       });
     }
@@ -4418,8 +4501,9 @@ let terminalFailureInput = null;
       if (managedMutationTransportContainment.blockedAttemptCount > 0
         || managedOutOfBandTransportAttempted) {
         // The named transport travels with the sentence so the next operator reading a 502 knows
-        // WHICH request tripped the containment instead of re-deriving it from a live probe.
-        const detail = managedMutationTransportContainment.blockedReason;
+        // WHICH request tripped the containment instead of re-deriving it from a live probe. An
+        // out-of-band report names its hook kind and the frame that raised it for the same reason.
+        const detail = managedMutationTransportContainment.blockedReason || managedOutOfBandTransportDetail;
         throw managedTransportViolation(
           'A non-submit action attempted employer transport without exact final authority'
           + (detail ? ' (' + detail + ')' : '')
