@@ -204,6 +204,36 @@ test('Teamtailor receipt prose over any remaining application field stays unknow
   assert.equal(outcome.state, 'unknown');
 });
 
+/* THE SAME REGIONAL-HOST GAP PR #954 CLOSED ON THE PLAN-BUILDER SIDE, mirrored here.
+ *
+ * covenanthouseinternational.na.teamtailor.com puts a region label between the tenant and
+ * teamtailor.com. Before this fix, the single-label host regex above meant a genuine Teamtailor
+ * receipt on a regional tenant fell through to the generic form-still-present fallback instead of
+ * being trusted the same way the exact same markup is trusted on a bare tenant host. */
+test('the measured Teamtailor receipt shape is trusted on a regional tenant host too', async () => {
+  const outcome = await readAt(
+    'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance/applications/new',
+    TEAMTAILOR_RECEIPT,
+  );
+  assert.equal(outcome.formStillPresent, false);
+  assert.equal(outcome.state, 'confirmed');
+  assert.equal(outcome.source, 'page_text');
+  assert.match(outcome.message, /We have received your application/);
+});
+
+test('a regional-looking Teamtailor host still needs the region to be a plausible label', async () => {
+  // api.na.teamtailor.com: "api" is a reserved word in the tenant position on volley's own
+  // HOSTS.teamtailor map, but this reader has no reserved-word list - it only narrows an ALREADY
+  // fatal counter-witness (a live form, or a missing receipt phrase) toward 'unknown', so a
+  // permissive match here costs nothing beyond what the other four ANDed conditions already guard.
+  // This test exists to make that trade explicit rather than silent.
+  const outcome = await readAt(
+    'https://api.na.teamtailor.com/jobs/686133-intern-finance/applications/new',
+    TEAMTAILOR_RECEIPT,
+  );
+  assert.equal(outcome.state, 'confirmed');
+});
+
 const WORKABLE_RECEIPT = `
   <main data-ui="successful-submit">
     <h1>Thank you!</h1>
