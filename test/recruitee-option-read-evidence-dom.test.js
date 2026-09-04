@@ -31,7 +31,11 @@ const SUPPORT_NAMES = [
   'publishChoiceOffers', 'choiceOffersClause', 'unmatchedReason',
   'verifyChoiceInContainer', 'settleVerified',
   'CHOICE_SHELL_CLASSES', 'markChoice', 'unmarkChoice', 'clearChoiceControl',
-  'withdrawRefusedChoice', 'blurDrivenChoiceControl', 'choiceLanded',
+  'withdrawRefusedChoice', 'blurDrivenChoiceControl',
+  // choiceLanded's form confirmation and the sentence it speaks. Both are reached from
+  // choiceLanded itself, so a harness that omits them executes a different function.
+  'formRefusedChoiceReason', 'formStillRequiresChoice',
+  'choiceLanded',
   'CLEAR_CONTROL_RE', 'CHOICE_CONTROLS', 'CLEAR_CONTROLS',
   'fillCustomChoice',
 ];
@@ -58,6 +62,7 @@ function build() {
     let lastChoiceRefusal = '';
     let choiceRefusals = 0;
     let lastChoiceUnreadable = false;
+    let lastChoiceRejectedByForm = false;
     let lastChoiceOffersEvidence = null;
     const tracksChoiceFailures = false;
     ${SRC}

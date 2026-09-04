@@ -6698,6 +6698,19 @@ let terminalFailureInput = null;
     // "confirm this", not "this did not take". See verifyChoiceInContainer.
     const unreadableChoiceReason = 'the answer was entered but this control does not report what it'
       + ' is holding, so Litos could not read it back: please confirm it';
+    /* WHAT A CHOICE THE EMPLOYER'S FORM ITSELF REFUSED IS TOLD, as opposed to one the widget lost.
+     *
+     * The control is SHOWING the answer and the form is still calling the field empty. That is not
+     * a read Litos failed to make and it is not a value that vanished, so neither of the two
+     * sentences above fits: what the applicant has to do is finish this one control by hand,
+     * because a form that still wants it will refuse the submission over it. See
+     * formStillRequiresChoice for what "the form still wants it" is read from. */
+    const formRefusedChoiceReason = 'the answer is showing on this control but the employer\'s form'
+      + ' still reports the field as required and empty, so it was not accepted: please set it yourself';
+    /* Set by choiceLanded when the confirmation below fails, read by the sentence at every call
+     * site so no branch can report a form-refused choice as an ordinary lost value. Cleared at the
+     * top of every choiceLanded call, so it can never travel from one control to the next. */
+    let lastChoiceRejectedByForm = false;
     /* WHAT THE OPTION READ ACTUALLY SAW, carried on the bare refusal so the next failure arrives
      * with its own diagnosis instead of a theory.
      *
@@ -7407,6 +7420,71 @@ let terminalFailureInput = null;
         if (active && element.contains(active)) active.blur();
       }).catch(() => undefined);
     };
+    /* WHAT THE EMPLOYER'S FORM ITSELF SAYS ABOUT THIS FIELD, which is the only party whose opinion
+     * decides whether an application can be sent.
+     *
+     * Every rule above this one reads what the WIDGET is rendering. That is the right thing to read
+     * and it is not sufficient, because a widget's display and the value its form holds are two
+     * separate pieces of state and they can disagree. Measured on the live Hudson River Trading
+     * Greenhouse form (job-boards.greenhouse.io/embed/job_app?for=wehrtyou): six required controls
+     * rendered the applicant's answer inside the control while the form's own validation printed
+     * "This field is required." under five of them. Two of those five - gender and race - are the
+     * SAME required multi select, so the difference is not the approach the runner takes to chips.
+     *
+     * WHAT IS READ, and it is one thing: CONSTRAINT VALIDATION. react-select renders '<input
+     * required tabindex="-1" aria-hidden="true" class="...requiredInput">' inside its shell for
+     * exactly as long as it holds no value, so that the browser refuses the submission. Read live
+     * on that form on 2026-09-03: present on all 14 required controls before any fill, absent on
+     * both optional ones, and gone on all 16 after a committed fill. willValidate plus
+     * validity.valueMissing is the browser's own answer to "will this form submit", asked of the
+     * exact node the widget put there to be asked. It is a fact, not a reading.
+     *
+     * WHAT ELSE CAN ANSWER IT, precisely, because the honesty of this function rests on what
+     * constraint validation can and cannot see. A CSS-hidden or visually-hidden '<select required>'
+     * or text input is a validation candidate and answers exactly as react-select's sentinel does.
+     * An '<input type="hidden">' is NOT: the spec bars hidden inputs from constraint validation
+     * outright, so willValidate is false for one however it is marked, and a widget backed only by
+     * a hidden input is a widget this function has no opinion about. That is the correct outcome
+     * and not a gap to paper over: silence here means no opinion, never "fine".
+     *
+     * WHAT IS DELIBERATELY NOT READ: aria-invalid plus the sentence in the node aria-errormessage
+     * names. That is where the photograph's "This field is required." lives, and it looked like the
+     * obvious second source. It was written, and an adversarial review killed it with a case this
+     * file has no answer to: a Greenhouse office-preference control that had committed cleanly -
+     * "London" rendered, no RequiredInput anywhere - whose form renders "Please choose an office we
+     * are hiring in." under aria-invalid="true". The answer was dropped from filled_fields and the
+     * applicant was told the form still reported it empty, which the form had never said. Every
+     * content rule, every format rule and every stale error left standing from an earlier submit
+     * press lands in that arm the same way, and separating "you left this empty" from "this is the
+     * wrong value" means guessing at a sentence in a language this runner does not read. A false
+     * refusal costs a real application. So this reads the one signal that cannot be misread, and
+     * a form that expresses "required" only in prose gets no opinion here at all.
+     *
+     * BOUNDED TO ONE WIDGET, always, and silent when it cannot be. The shell is resolved the way
+     * clearChoiceControl resolves it - nearest shell below the container, else the nearest above -
+     * and this refuses to speak at all when the container holds more than one shell or the shell
+     * holds more than one opener, because two openers are two questions and a required control that
+     * cannot be attributed proves nothing about this one. Silence means "no opinion", never "fine".
+     */
+    const formStillRequiresChoice = async (container) => await container.evaluate((element) => {
+      const SHELL = '[class*="select__container"], [class*="select-shell"]';
+      const OPENER = '[role="combobox"], [aria-haspopup="listbox"]';
+      const below = element.querySelectorAll ? [...element.querySelectorAll(SHELL)] : [];
+      // Outer and inner shells of ONE widget nest; two shells that do not nest are two questions.
+      const distinct = below.filter((shell) => !below.some((other) => other !== shell && shell.contains(other)));
+      if (distinct.length > 1) return false;
+      const shell = distinct[0] || element.closest?.(SHELL) || null;
+      if (!shell) return false;
+      const openers = [...shell.querySelectorAll(OPENER)];
+      if (openers.length !== 1) return false;
+      const opener = openers[0];
+      for (const control of shell.querySelectorAll('input, select, textarea')) {
+        if (control === opener) continue;
+        if (!control.willValidate) continue;
+        if (control.validity && control.validity.valueMissing) return true;
+      }
+      return false;
+    }).catch(() => false);
     /* THE VERDICT AND WHAT IT COSTS THE FORM, IN ONE CALL, so that no branch of the action loop can
      * take the first without the second. Every fillCustomChoice call site in this file goes through
      * this and none of them calls the verifier directly: the defect that made this necessary is
@@ -7414,6 +7492,10 @@ let terminalFailureInput = null;
      * matter of time. verifyChoiceInContainer stays a pure reading of the control, which is what
      * lets it be unit-tested against a container that is nothing but a state. */
     const choiceLanded = async (container, expected, directControl = null) => {
+      /* Cleared here and nowhere else, so a refusal can never travel from one control to the next.
+       * The per-action reset a few thousand lines below clears lastChoiceRefusal and
+       * lastChoiceOffersEvidence; this flag is choiceLanded's own and is reset by its own entry. */
+      lastChoiceRejectedByForm = false;
       // React-controlled choices can publish their selected value on a later render. Give that
       // exact value a bounded window before withdrawing anything the option click may have set.
       for (let elapsed = 0; elapsed <= 500; elapsed += 50) {
@@ -7464,8 +7546,27 @@ let terminalFailureInput = null;
             lastChooserTierAnswer,
             directControl,
           ))) {
-            await unmarkChoice(container);
-            return true;
+            /* AND THE FORM ITSELF HAS TO AGREE, or this run has no business calling the field
+             * filled. Everything above has established that the WIDGET is holding the answer; this
+             * asks the one party whose refusal actually stops an application.
+             *
+             * It gets the same bounded window every other read here gets, because a form's own
+             * validation can land a render behind the commit that satisfied it. What it will not do
+             * is wait out a commit that never happened.
+             *
+             * A refusal here leaves the control exactly as it is. There is nothing to withdraw and
+             * clearing it would replace a field she can finish in one click with an empty one she
+             * has to find. It is marked instead, so the pre-submit gate holds the run, and the
+             * sentence below tells her which control and who refused it. */
+            if (await settleVerified(async () => !(await formStillRequiresChoice(container)))) {
+              await unmarkChoice(container);
+              return true;
+            }
+            lastChoiceRejectedByForm = true;
+            lastChoiceUnreadable = false;
+            lastChoiceRefusal = formRefusedChoiceReason;
+            await markChoice(container, 'unaccepted');
+            return false;
           }
           break;
         }
@@ -10824,7 +10925,14 @@ let terminalFailureInput = null;
           message: element.getAttribute('data-litos-unverified-choice') === 'unreadable'
             ? subject + ' was answered by Litos and this control does not report what it is holding,'
               + ' so what it is now carrying could not be confirmed'
-            : subject + ' was answered by Litos and is now showing something that is not that answer'
+            /* A THIRD THING THAT CAN BE WRONG WITH A MARKED CHOICE, and it is neither of the other
+             * two. The control is showing her answer and reads back correctly; the form it belongs
+             * to is the party that refused it. Saying "showing something that is not that answer"
+             * here would be a plain falsehood about a control she is looking at. */
+            : element.getAttribute('data-litos-unverified-choice') === 'unaccepted'
+              ? subject + ' was answered by Litos and the employer\'s form still reports it as'
+                + ' required and empty, so the answer was not accepted'
+              : subject + ' was answered by Litos and is now showing something that is not that answer'
         });
       }
       return {
@@ -12675,6 +12783,31 @@ let terminalFailureInput = null;
           const nativeMissing = Boolean(element.validity && element.validity.valueMissing);
           return nativeMissing || element.getAttribute?.('aria-invalid') === 'true';
         };
+        /* GREENHOUSE NEVER TAKES ITS ERROR BACK, and both readings above are made of what it
+         * leaves behind. Measured live on the Hudson River Trading form (2026-09-04) in three
+         * reads of the same page: pristine, after one validation pass on an empty form, and after
+         * answering each control correctly by clicking its own option row.
+         *
+         *   control          shown           RequiredInput   aria-invalid   error text
+         *   gender           "Woman"         GONE            "true"         "This field is required."
+         *   veteran          "No"            GONE            "true"         "This field is required."
+         *   race/ethnicity   "South Asian"   GONE            "true"         "This field is required."
+         *   GPA              "3.76 - 4.0"    GONE            "true"         "This field is required."
+         *
+         * The answers are on the form and the browser will submit them: react-select unmounts its
+         * RequiredInput the moment it holds a value. What never clears is aria-invalid and the
+         * sentence under the control. So a correctly answered Greenhouse control comes back
+         * affected:true and takes the re-drive path rather than already_committed.
+         *
+         * LEFT ALONE ON PURPOSE, and the measurement is why. The re-drive was run against this
+         * exact state through the shipped runner, single and multi value, and it preserved the
+         * answer and confirmed every time ('confirmed', both chips intact, submit pressed). A
+         * short-circuit here would save that work and nothing else, and it would do so by teaching
+         * this gate to ignore an employer's own words on the strength of one board's habit. The
+         * cost of being wrong in that direction is a sent application with an empty required field.
+         * See test/greenhouse-required-backing-commit-dom.test.js for the pin that this state must
+         * not block a send.
+         */
         const belongsToRoot = (element) => {
           if (!element) return false;
           if (!(root instanceof HTMLFormElement)) return root.contains(element);
@@ -12972,7 +13105,9 @@ let terminalFailureInput = null;
       for (const kind of new Set(runnerChoiceFailures)) {
         unresolved.push(kind === 'unreadable'
           ? 'A choice this run could not verify remains unresolved in the bound application scope'
-          : 'A choice this run could not preserve remains unresolved in the bound application scope');
+          : kind === 'unaccepted'
+            ? 'A choice the employer\'s form did not accept remains unresolved in the bound application scope'
+            : 'A choice this run could not preserve remains unresolved in the bound application scope');
       }
       if (chooserVersion === 4 && binding.formShape.submittedControlsWithinBound === false) {
         unresolved.push('The bound application form has too many or oversized submitted controls to fingerprint safely');
@@ -16292,7 +16427,9 @@ let terminalFailureInput = null;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
-                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fill'));
+                + (lastChoiceRejectedByForm
+                  ? formRefusedChoiceReason
+                  : (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fill')));
             }
             continue;
           }
@@ -16507,7 +16644,9 @@ let terminalFailureInput = null;
           if (action.label && landed) filledFields.push(action.label);
           else if (action.label) {
             skipped.push(action.label + ': '
-              + (lastChoiceUnreadable
+              + (lastChoiceRejectedByForm
+                ? formRefusedChoiceReason
+                : lastChoiceUnreadable
                 ? unreadableChoiceReason
                 : (questionMenuProbe === 'ambiguous'
                   ? 'more than one question-scoped option menu opened, left for you to choose'
@@ -16639,7 +16778,9 @@ let terminalFailureInput = null;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
-                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText'));
+                + (lastChoiceRejectedByForm
+                  ? formRefusedChoiceReason
+                  : (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText')));
             }
             continue;
           }
@@ -16771,7 +16912,9 @@ let terminalFailureInput = null;
             if (action.label && landed) filledFields.push(action.label);
             else if (action.label) {
               skipped.push(action.label + ': '
-                + (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText'));
+                + (lastChoiceRejectedByForm
+                  ? formRefusedChoiceReason
+                  : (lastChoiceUnreadable ? unreadableChoiceReason : 'choice value did not persist after fillByLabelText')));
             }
             continue;
           }
