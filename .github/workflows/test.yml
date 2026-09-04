@@ -132,6 +132,9 @@ jobs:
       - name: Enter validation replay
         run: npm run test:enter-validation
 
+      - name: Transport containment replay
+        run: npm run test:transport-containment
+
       - name: Browser end to end
         run: npm run test:e2e
 
