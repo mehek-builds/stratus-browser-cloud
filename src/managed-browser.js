@@ -10104,7 +10104,28 @@ let terminalFailureInput = null;
        * your application", and the only remaining submit control was the talent-network action
        * "Connect". The generic counter-witness correctly distrusts every unrecognized submit form,
        * so this exception is bound to that ATS host and route, both receipt phrases, exactly one
-       * isolated Connect submit, and the absence of every measured Teamtailor application field. */
+       * isolated Connect submit, and the absence of every measured Teamtailor application field.
+       *
+       * THE HOST CHECK ADMITS A REGIONAL TENANT TOO, the same shape volley-backend's HOSTS.teamtailor
+       * learned to recognize in PR #954 after covenanthouseinternational.na.teamtailor.com built a
+       * packet the family detector could not see at all. This copy of the host pattern lives on the
+       * OTHER side of that same boundary - it decides whether a genuine post-submit receipt on a
+       * regional tenant is trusted over the generic form-still-present fallback, or wrongly
+       * distrusted for a host shape the single-label regex never accounted for. A one-label-only
+       * pattern here would not misfire the way a missed family detection does (this exception only
+       * NARROWS when a receipt is trusted, so the failure mode is a false "still present" on an
+       * otherwise-confirmed regional submission, not a fill that writes nothing), but it is the same
+       * class of drift PR #954 closed on the plan-builder side, and it is closed here for the same
+       * reason: a region label between the tenant and teamtailor.com is still a Teamtailor tenant.
+       *
+       * DELIBERATELY MISSING: volley's own reserved-tenant-word exclusion (www/app/api/partner/docs/
+       * support/careers as the label immediately before the region-or-base suffix). That list guards
+       * a detector deciding whether to attempt a fill at all, where a reserved word in the tenant
+       * position is a real host, not a customer tenant, and treating it as one would misfire onto
+       * traffic that was never a job application. This check only ever NARROWS an already-fatal
+       * counter-witness (a live form, a missing receipt phrase, or a submit control that is not the
+       * lone Connect button) toward distrust, so admitting a reserved word here costs nothing beyond
+       * what those other four ANDed conditions already guard - see the pinned test for this trade. */
       const pageText = clean(document.body ? document.body.innerText : '');
       const teamtailorApplicationField = visibleOne([
         'input[type=file]', 'input[type=email]', 'input[type=tel]', 'textarea', 'select',
@@ -10112,7 +10133,7 @@ let terminalFailureInput = null;
       ].join(', '));
       const onlyIsolatedConnectSubmit = formSubmitControls.length === 1
         && /^connect$/i.test(clean(formSubmitControls[0].innerText || formSubmitControls[0].value || ''));
-      const teamtailorReceipt = /^[a-z0-9-]+\.teamtailor\.com$/i.test(location.hostname)
+      const teamtailorReceipt = /^[a-z0-9-]+(?:\.[a-z]{2,4})?\.teamtailor\.com$/i.test(location.hostname)
         && /\/jobs\/[^/]+\/applications\/new\/?$/i.test(location.pathname)
         && /thanks for applying/i.test(pageText)
         && /we have received your application/i.test(pageText)
