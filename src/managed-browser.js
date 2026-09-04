@@ -870,6 +870,24 @@ export const findAshbyFileUploadHandleUrl = (value, depth = 0) => {
  * or any key outside the closed list - at the top level or nested inside cookie_policy - still fails
  * the shape proof and is refused exactly as before.
  *
+ * ROUND 3, MEASURED LIVE 2026-09-04 23:32Z AND 23:37Z: with round 1 deployed, the same Covenant
+ * House fill stopped on the identical sentence twice more (runs 32cd900c and 01cc54be). Run offline
+ * against the shipped predicate, the minimal body {"cookie_policy":{"categories":""}} was admitted
+ * and {"cookie_policy":{"referrer":null,"categories":""}} was refused - and the second is what the
+ * page actually sends. The careersite controller (same chunk 6950, handleReferrerCookie) executes
+ * window.referrer || (window.referrer = this.referrerValue()) on connect, where referrerValue() is
+ * this.utmSource() || this.documentReferrer(): utmSource() is
+ * new URL(location.href).searchParams.get("utm_source"), and documentReferrer() returns null for an
+ * empty or same-host document.referrer, else document.referrer.substr(0, 1000). A fresh managed
+ * browser opening the tenant's apply URL has neither, so the global is assigned NULL, and
+ * JSON.stringify keeps a null where it would have dropped an undefined. Round 1 read "referrer (if
+ * present)" as "referrer (if a string)" and refused the null. Both window-global fields now read
+ * null as the absence it is, and referrer additionally admits the bare utm_source label that same
+ * function returns when the apply URL carries one (a short attribution word in a closed character
+ * class - no "@", "=", "?", "&" or "/" - so still nothing a candidate field could be spelt in).
+ * The URL form, its 512-character cap, the UUID shape, the categories and same_site proofs, the
+ * closed key list, the single top-level key and the envelope checks are all unchanged.
+ *
  * WHERE THIS IS CONSULTED: its own early-return in the containment handler, structured exactly like
  * ashbyFileBindWrite's - never folded into the readOnlyDataFetch/ashbyPublicBoardRead/
  * ashbyFormValueWrite compound condition next to it - so it cannot widen what that gate already
@@ -897,6 +915,9 @@ export const isTeamtailorCookieChoiceWrite = ({
   // be the exact "not defined" ReferenceError b816a61 shipped in production 2026-09-01.
   const VISITOR_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const MAX_REFERRER_LENGTH = 512;
+  // A utm_source value after URLSearchParams decoding: letters, digits, space, dot, underscore,
+  // hyphen, at most 100 characters, starting with a letter or digit. See the referrer branch below.
+  const UTM_SOURCE_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$/;
   if (applicationSite !== TEAMTAILOR_SITE) return false;
   if (String(method || '').toUpperCase() !== 'POST') return false;
   if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
@@ -931,18 +952,32 @@ export const isTeamtailorCookieChoiceWrite = ({
   if (Object.prototype.hasOwnProperty.call(policy, 'same_site') && policy.same_site !== 'None') {
     return false;
   }
-  if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid')) {
+  // A NULL IS AN ABSENCE, NOT A VALUE, for the two fields the page fills from window globals.
+  // JSON.stringify drops an undefined global's key but keeps a null one, and the careersite
+  // controller assigns null (see the referrer branch below), so "absent" arrives as both shapes.
+  if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid') && policy.visitor_uuid !== null) {
     if (typeof policy.visitor_uuid !== 'string'
       || policy.visitor_uuid.length > TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH) return false;
     // Round 1: length alone let ~4 KB of arbitrary text through. The analytics token Teamtailor's
     // own page assigns itself is UUID-shaped; anything else, or absent (empty), and nothing more.
     if (policy.visitor_uuid !== '' && !VISITOR_UUID_PATTERN.test(policy.visitor_uuid)) return false;
   }
-  if (Object.prototype.hasOwnProperty.call(policy, 'referrer')) {
+  if (Object.prototype.hasOwnProperty.call(policy, 'referrer') && policy.referrer !== null) {
+    // ROUND 3, MEASURED LIVE 2026-09-04 23:32Z AND 23:37Z (Covenant House runs 32cd900c and
+    // 01cc54be, both on the round-1 build): the real decline-all body was refused HERE. The
+    // careersite controller runs window.referrer || (window.referrer = this.referrerValue()) on
+    // connect, and referrerValue() is this.utmSource() || this.documentReferrer(): utm_source from
+    // the page's own query string, else document.referrer only when it is cross-host (truncated by
+    // Teamtailor at 1000 characters), else null. A fresh managed browser has neither, so the global
+    // is assigned null and the body reads {"cookie_policy":{"referrer":null,"categories":""}}.
+    // Round 1 required a string, refused the null, and the cookie choice fell back to a violation.
+    // null is admitted above as the absence it is. The two values the same function can still
+    // produce are the URL form round 1 already proved, and a bare utm_source label - a short
+    // attribution word such as "linkedin", admitted only inside a closed character class with no
+    // "@", "=", "?", "&" or "/" in it, so it cannot spell an email, a query string, a URL or a
+    // resume line. Anything else is refused exactly as before.
     if (typeof policy.referrer !== 'string' || policy.referrer.length > MAX_REFERRER_LENGTH) return false;
-    // Round 1: same length-only gap. document.referrer is always either empty or a real URL, so
-    // require it parse as one - http(s), with a hostname - rather than merely counting characters.
-    if (policy.referrer !== '') {
+    if (policy.referrer !== '' && !UTM_SOURCE_LABEL_PATTERN.test(policy.referrer)) {
       let referrerUrl;
       try { referrerUrl = new URL(policy.referrer); } catch { return false; }
       if (referrerUrl.protocol !== 'https:' && referrerUrl.protocol !== 'http:') return false;

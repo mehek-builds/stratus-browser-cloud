@@ -398,7 +398,7 @@ test('(b) a fragment on the cookie-choice URL is refused, even carrying an other
   })), false);
 });
 
-test('(c) referrer must be empty or an actual URL - free text is refused, the measured job-page referrer and empty are admitted', () => {
+test('(c) referrer must be empty, null, a utm_source label or an actual URL - free text is refused, the measured job-page referrer and empty are admitted', () => {
   // Free text under both the old 2000-char cap and the new 512-char cap: only the shape check added
   // in round 1 catches this. Must fail on the pre-round-1 code, where length was the only gate.
   assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
@@ -441,6 +441,85 @@ test('(e) the measured decline body - empty categories, a UUID visitor_uuid, the
       categories: ''
     })
   })), true);
+});
+
+/* ROUND 3, MEASURED LIVE 2026-09-04 23:32Z AND 23:37Z (runs 32cd900c and 01cc54be, both on the
+ * round-1 build): the same Covenant House fill stopped on the identical violation sentence twice
+ * after round 1 deployed. Run offline against the shipped predicate, the minimal body was admitted
+ * and {"cookie_policy":{"referrer":null,"categories":""}} was refused - and the second is what the
+ * page sends. Teamtailor's careersite controller (chunk 6950, handleReferrerCookie) executes
+ * window.referrer || (window.referrer = this.referrerValue()) on connect, and referrerValue() is
+ * this.utmSource() || this.documentReferrer(), which is null in a fresh managed browser: no
+ * utm_source on the apply URL, no cross-host document.referrer. JSON.stringify keeps that null
+ * where it drops an undefined, and round 1's typeof-string check refused it. These tests pin the
+ * measured body, the null-as-absent reading for both window-global fields, and the one other value
+ * referrerValue() can produce - a bare utm_source label - while proving null is not a wildcard and
+ * the label class cannot carry an email, a query string, a path or free text. */
+
+const MEASURED_FRESH_BROWSER_DECLINE_BODY = JSON.stringify({ cookie_policy: { referrer: null, categories: '' } });
+
+test('(f) the decline-all body a fresh managed browser actually sends - referrer null - is admitted, through the shipped gate', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({ postData: MEASURED_FRESH_BROWSER_DECLINE_BODY })), true);
+  const calls = runCookieChoiceGate(fakeRequest({
+    method: 'POST', resourceType: 'fetch', url: COOKIE_URL, postData: MEASURED_FRESH_BROWSER_DECLINE_BODY
+  }));
+  assert.deepEqual(calls, ['fallback'],
+    'the measured body must be admitted via route.fallback(); this is the exact request runs 32cd900c and 01cc54be died on');
+});
+
+test('(f) visitor_uuid null reads as absent too, alone and beside a null referrer', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: declineAllBody({ visitor_uuid: null })
+  })), true);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { visitor_uuid: null, referrer: null, categories: '' } })
+  })), true);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { visitor_uuid: null, referrer: null, categories: 'analytics,marketing,preferences' } })
+  })), true);
+});
+
+test('(g) null is an absence, never a wildcard: null categories, same_site, or cookie_policy are still refused', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { categories: null } })
+  })), false);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { categories: '', same_site: null } })
+  })), false);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: null })
+  })), false);
+  // A null referrer buys nothing for a smuggled sibling key.
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { referrer: null, categories: '', candidate_email: 'mehek@usc.edu' } })
+  })), false);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { referrer: null, categories: '' }, candidate: { first_name: 'Mehek' } })
+  })), false);
+});
+
+test('(h) a bare utm_source label is admitted; an email, a query string, a path, free text, and an over-long label are not', () => {
+  for (const label of ['linkedin', 'Indeed', 'google_jobs_apply', 'LinkedIn Limited Listings', 'jobs2careers', 'x'.repeat(100)]) {
+    assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+      postData: declineAllBody({ referrer: label })
+    })), true, label);
+  }
+  for (const notALabel of [
+    'mehek@usc.edu',
+    'candidate_email=mehek@usc.edu',
+    'a=b&c=d',
+    'linkedin?utm_medium=x',
+    '/jobs/686133-intern-finance',
+    'resume: not a url at all',
+    ' leading-space',
+    'name;drop',
+    'x'.repeat(101),
+    'https://' + COVENANT_HOUSE_TENANT + '/jobs/686133-intern-finance?q=' + 'x'.repeat(600)
+  ]) {
+    assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+      postData: declineAllBody({ referrer: notALabel })
+    })), false, notALabel.slice(0, 40));
+  }
 });
 
 test('the runner carries no backtick template literals or stray interpolation markers', () => {
