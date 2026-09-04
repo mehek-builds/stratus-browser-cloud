@@ -204,13 +204,22 @@ function fakeRoute(request) {
   };
 }
 
-/* Every collaborator the handler closes over. The four board-specific allowances answer false so
+/* Every collaborator the handler closes over. The board-specific allowances answer false so
  * nothing but the widget rule can produce an admission, and `block` records instead of throwing so
- * a refusal is a value rather than a stack. */
+ * a refusal is a value rather than a stack. The four resume-upload-fix additions
+ * (ashbyFileBindWrite, ashbyFileUploadHandleRequest, captureAshbyOneShotUploadTarget,
+ * ashbyOneShotUploadTargetMatches) answer false / no-op the same way: none of this file's fixtures
+ * ever arm uploadActionArmed, so none of them are reachable here, but the extracted handler source
+ * still names them and a ReferenceError at call time is exactly the drift this extraction exists to
+ * catch - so they get real, inert stand-ins rather than being left undefined. */
 const MUTATION_DEPENDENCIES = {
   transportTypes: new Set(['fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker']),
   ashbyPublicBoardRead: () => false,
   ashbyFormValueWrite: () => false,
+  ashbyFileBindWrite: () => false,
+  ashbyFileUploadHandleRequest: () => false,
+  captureAshbyOneShotUploadTarget: async (route) => route.fallback(),
+  ashbyOneShotUploadTargetMatches: () => false,
   boardResumeStorageUpload: () => false,
   employerBoundTransport: () => false,
   canonicalPageUrl: (value) => String(value),
@@ -225,14 +234,17 @@ function runMutationHandler(request, containmentOverrides = {}) {
     blockedReason: null,
     blockedThirdPartyCount: 0,
     uploadActionArmed: false,
+    ashbyOneShotUpload: null,
+    ashbyFileBindWriteAdmitted: false,
     ...containmentOverrides
   };
   const blocked = [];
   const source = extractHandler('const transportTypes = new Set([');
   const names = [
     'containment', 'transportTypes', 'block', 'ashbyPublicBoardRead', 'ashbyFormValueWrite',
-    'boardResumeStorageUpload', 'employerBoundTransport', 'canonicalPageUrl', 'page',
-    'captchaWidgetFrame'
+    'ashbyFileBindWrite', 'ashbyFileUploadHandleRequest', 'captureAshbyOneShotUploadTarget',
+    'ashbyOneShotUploadTargetMatches', 'boardResumeStorageUpload', 'employerBoundTransport',
+    'canonicalPageUrl', 'page', 'captchaWidgetFrame'
   ];
   const handler = new Function(...names, `return ${source};`)(
     containment,
@@ -240,6 +252,10 @@ function runMutationHandler(request, containmentOverrides = {}) {
     async (route, reason) => { blocked.push(reason); return route.abort('blockedbyclient'); },
     MUTATION_DEPENDENCIES.ashbyPublicBoardRead,
     MUTATION_DEPENDENCIES.ashbyFormValueWrite,
+    MUTATION_DEPENDENCIES.ashbyFileBindWrite,
+    MUTATION_DEPENDENCIES.ashbyFileUploadHandleRequest,
+    MUTATION_DEPENDENCIES.captureAshbyOneShotUploadTarget,
+    MUTATION_DEPENDENCIES.ashbyOneShotUploadTargetMatches,
     MUTATION_DEPENDENCIES.boardResumeStorageUpload,
     MUTATION_DEPENDENCIES.employerBoundTransport,
     MUTATION_DEPENDENCIES.canonicalPageUrl,
