@@ -1277,3 +1277,49 @@ test('a labelled group wins over its name: a same-name input outside it is forei
   const backend = await optionInventoryFor(html, '#be input');
   assert.deepEqual(backend.values, ['Node', 'Go']);
 });
+
+/* CRELATE'S CUSTOM QUESTIONS. The portal renders each one as div.cr-form-item -> <strong>Name</strong>
+ * -> a red '*' when required -> span.cr-help-text -> a control with GUID id and name, no <label for>,
+ * no aria, and the help text as its placeholder. Measured on Prediktive (packet da59781b) and
+ * Blueprint Hires (e3a22025), 2026-09-02: the stored questions were the placeholder welded to the
+ * type-prefixed handle ("maximum 400 characters short-"), and one control had no text at all. */
+const crelateForm = `
+  <form id="submitForm">
+    <div class="cr-form-item ShortText"><strong>Why are you interested in this role?</strong><span style="color:red"> *</span> <span class="cr-help-text">Maximum 400 characters</span>
+      <input id="e49c4230-526b-4288-842e-a95a0030e2d6" name="short-e49c4230-526b-4288-842e-a95a0030e2d6" type="text" placeholder="Maximum 400 characters" /></div>
+    <div class="cr-form-item Number"><strong>Years of Java experience</strong> <span class="cr-help-text">Enter a number</span>
+      <input id="b4fc3b16-d4ed-4c1a-9b7e-1234567890ab" name="number-b4fc3b16-d4ed-4c1a-9b7e-1234567890ab" type="number" placeholder="Enter a number" /></div>
+    <div class="cr-form-item yesno-answer"><strong>Are you authorized to work in the US?</strong>
+      <span class="k-multiselect k-input"><input id="c1d2e3f4-0000-4000-8000-abcdefabcdef" name="yesno-c1d2e3f4-0000-4000-8000-abcdefabcdef" multiple required style="display:none" />
+        <input class="k-input-inner" role="combobox" aria-expanded="false" /></span></div>
+    <div class="cr-form-item rating-answer"><strong>What is your English language level?</strong> <span class="cr-help-text">1=None … 5=Advanced</span>
+      <div class="cr-star-rating-container"><div class="cr-star-rating">
+        <input type="radio" name="rating-d4e5f6a7-0000-4000-8000-abcdefabcdef" value="1" /><input type="radio" name="rating-d4e5f6a7-0000-4000-8000-abcdefabcdef" value="2" /><input type="radio" name="rating-d4e5f6a7-0000-4000-8000-abcdefabcdef" value="3" /></div></div></div>
+  </form>`;
+
+test('a crelate custom question is named by the bold name that leads its field wrapper', async () => {
+  const labels = await labelsFor(crelateForm, 'input[type="text"]:not(.k-input-inner), input[type="number"], input[name^="yesno-"], input[type="radio"]');
+  assert.deepEqual(labels, [
+    'why are you interested in this role?',
+    'years of java experience',
+    'are you authorized to work in the us?',
+    'what is your english language level?',
+    'what is your english language level?',
+    'what is your english language level?',
+  ]);
+});
+
+test('a bold word that does not lead the wrapper, a two-question wrapper, a named control, or a marker word names nothing new', async () => {
+  const [inParagraph, twoControls, named, required, note] = await labelsFor(`
+    <div><p>Please <strong>describe</strong> your setup.</p><input id="p1" name="short-11111111-1111-4111-8111-111111111111" type="text" placeholder="Maximum 400 characters" /></div>
+    <div><strong>Contact</strong><input id="t1" name="short-22222222-2222-4222-8222-222222222222" type="text" /><input id="t2" name="short-33333333-3333-4333-8333-333333333333" type="text" /></div>
+    <div><strong>Personal details</strong><input id="n1" name="fullName" type="text" placeholder="Full name" /></div>
+    <div><strong>Required</strong><input id="r1" name="short-44444444-4444-4444-8444-444444444444" type="text" placeholder="Email address" /></div>
+    <div><b>Note:</b> all fields are mandatory <input id="o1" name="short-55555555-5555-4555-8555-555555555555" type="text" placeholder="Phone" /></div>
+  `, '#p1, #t1, #n1, #r1, #o1');
+  assert.doesNotMatch(inParagraph, /describe/);
+  assert.notEqual(twoControls, 'contact');
+  assert.notEqual(named, 'personal details');
+  assert.notEqual(required, 'required');
+  assert.notEqual(note, 'note:');
+});
