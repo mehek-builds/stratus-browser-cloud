@@ -1137,6 +1137,14 @@ let terminalFailureInput = null;
       serviceWorkers: 'block'
       } : {})
     });
+      // Injected, not referenced: the runner string carries its own copy of the verdict and the
+      // widget host list so the listener below has no free variable to resolve at event time. They sit ABOVE the
+      // socket route on purpose: test/sandbox-runner-compiles.test.js strips block comments with a
+      // regex that reads the '**/*' glob as a comment opener, and anything between that route and
+      // the next one is invisible to its export guard.
+      const MANAGED_CAPTCHA_WIDGET_HOSTS = ${JSON.stringify(CAPTCHA_WIDGET_FRAME_ORIGINS.map((entry) => entry.host))};
+      const isCaptchaWidgetFrameOrigin = ${isCaptchaWidgetFrameOrigin.toString()};
+      const managedTransportConsoleVerdict = ${managedTransportConsoleVerdict.toString()};
     if (managedMutationContainmentRequired) {
       await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {
         if (!managedInitialNavigationActive) {
@@ -1150,11 +1158,6 @@ let terminalFailureInput = null;
       });
       var managedTransportConsoleToken = '__litosManagedTransport_'
         + crypto.randomBytes(18).toString('hex');
-      // Injected, not referenced: the runner string carries its own copy of the verdict and the
-      // widget host list so the listener below has no free variable to resolve at event time.
-      const MANAGED_CAPTCHA_WIDGET_HOSTS = ${JSON.stringify(CAPTCHA_WIDGET_FRAME_ORIGINS.map((entry) => entry.host))};
-      const isCaptchaWidgetFrameOrigin = ${isCaptchaWidgetFrameOrigin.toString()};
-      const managedTransportConsoleVerdict = ${managedTransportConsoleVerdict.toString()};
       await browserContext.addInitScript(({ consoleToken }) => {
         const nativeConsole = console;
         const consoleError = console.error;

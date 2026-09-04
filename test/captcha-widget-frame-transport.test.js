@@ -119,7 +119,7 @@ test('the shipped runner carries the same verdict, the widget host list, and an 
 
 test('the injected copy behaves identically to the exported one on the measured report', () => {
   const start = SANDBOX_RUNNER.indexOf('const isCaptchaWidgetFrameOrigin = (origin, widgetHosts) =>');
-  const end = SANDBOX_RUNNER.indexOf('await browserContext.addInitScript(({ consoleToken }) => {', start);
+  const end = SANDBOX_RUNNER.indexOf("await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {", start);
   assert.ok(start > 0 && end > start);
   const source = SANDBOX_RUNNER.slice(start, end);
   const injected = new Function(source + '\nreturn managedTransportConsoleVerdict;')();
