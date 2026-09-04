@@ -58,7 +58,8 @@ function loadExcerptHelpers() {
   const source = excerptHelpersSource();
   // eslint-disable-next-line no-new-func
   const factory = new Function(source
-    + '\nreturn { buildSubmitResponseBodyExcerpt, readLiveSubmitResponseBodyExcerpt };');
+    + '\nreturn { buildSubmitResponseBodyExcerpt, readLiveSubmitResponseBodyExcerpt,'
+    + ' recordSubmitResponseBodyInfo, submitResponseBodyInfo };');
   return factory();
 }
 
@@ -129,6 +130,29 @@ test('(c) an email address and a long token are redacted from the excerpt', () =
   // A short, ordinary identifier is not a bearer-length token and must survive untouched.
   assert.ok(buildSubmitResponseBodyExcerpt('application/json',
     Buffer.from(JSON.stringify({ code: 'captcha-retry' }), 'utf8')).body_excerpt.includes('captcha-retry'));
+});
+
+test('Finding 4: a phone number (US and international shapes) is redacted from the excerpt', () => {
+  const { buildSubmitResponseBodyExcerpt } = loadExcerptHelpers();
+  const body = Buffer.from(JSON.stringify({
+    message: 'A confirmation call will be placed to +1 (415) 555-0132',
+    alt: 'or reach the recruiter at 415-555-0199',
+    intl: 'or call +44 20 7946 0958'
+  }), 'utf8');
+  const info = buildSubmitResponseBodyExcerpt('application/json', body);
+  assert.ok(!info.body_excerpt.includes('415'), 'digits from the US phone numbers must not survive redaction');
+  assert.ok(!info.body_excerpt.includes('7946'), 'digits from the international phone number must not survive redaction');
+  assert.ok(info.body_excerpt.includes('[redacted-phone]'), 'a redaction placeholder must replace each phone number');
+  // Fewer than 7 digits is not phone-shaped, and a thousands-grouped amount (comma, never a phone
+  // separator) must not be mistaken for one either - both must survive untouched.
+  const survivors = buildSubmitResponseBodyExcerpt('application/json', Buffer.from(JSON.stringify({
+    code: 'captcha-retry',
+    zip: '94107',
+    amountDue: '$1,234,567.89'
+  }), 'utf8'));
+  assert.ok(survivors.body_excerpt.includes('captcha-retry'));
+  assert.ok(survivors.body_excerpt.includes('94107'), 'a 5-digit value must not be mistaken for a phone number');
+  assert.ok(survivors.body_excerpt.includes('1,234,567.89'), 'a comma-grouped amount must not be mistaken for a phone number');
 });
 
 test('(d) a binary content type records body_excerpt null with a reason', () => {
@@ -208,6 +232,27 @@ test('(e) a normal response still resolves through the live reader', async () =>
   assert.equal(info.body_unavailable_reason, null);
 });
 
+test('Finding 3: recordSubmitResponseBodyInfo records an explicit failure, not no entry, when the excerpt builder throws', () => {
+  const { recordSubmitResponseBodyInfo, submitResponseBodyInfo } = loadExcerptHelpers();
+  // A content-type value whose own toString() throws - buildSubmitResponseBodyExcerpt normalizes it
+  // via String(contentType || ''), which invokes exactly that toString.
+  const hostileContentType = { toString() { throw new Error('hostile content-type'); } };
+  const targetRequest = {}; // any object identity works; the WeakMap only cares that it is one
+  assert.doesNotThrow(
+    () => recordSubmitResponseBodyInfo(targetRequest, hostileContentType, Buffer.from('irrelevant')),
+    'a throw inside the excerpt builder must never escape recordSubmitResponseBodyInfo'
+  );
+  const info = submitResponseBodyInfo.get(targetRequest);
+  assert.ok(
+    info,
+    'a swallowed throw must still leave an explicit entry in the WeakMap - the response listener '
+      + 'only falls back to a live re-read when NOTHING was recorded, so no entry at all is worse '
+      + 'than an explicit failure'
+  );
+  assert.equal(info.body_excerpt, null);
+  assert.equal(info.body_unavailable_reason, 'excerpt_failed');
+});
+
 /* WIRING. Both transport paths the runner has for the press must feed the same witness: the
  * native-replay path (settleHeldRoute, which already holds the body as a Buffer the moment it
  * decides what to fulfil the route with) records synchronously before every route.fulfill, and the
@@ -264,4 +309,126 @@ test('this change never touches reCAPTCHA handling or the containment admit/bloc
   const fullSource = SANDBOX_RUNNER;
   assert.match(fullSource, /if \(containment\.mode === 'activation'\) return route\.fallback\(\);/);
   assert.match(fullSource, /return captchaWidgetFrame\(request\)\s*\n\s*\? route\.fallback\(\)\s*\n\s*: block\(route, 'navigation transport'\);/);
+});
+
+/* FINDING 1 (review round 1): the activation-mode body read is a race, not a guarantee.
+ *
+ * armSubmitNetworkWatch's page.on('response') listener starts readLiveSubmitResponseBodyExcerpt and
+ * never awaits it there - nothing awaits a listener callback's return value. Before the fix, that
+ * promise had nowhere to be collected, so a fast-finishing run could reach the point where the
+ * terminal result is serialized before the live read (or its own submitResponseBodyReadTimeoutMs)
+ * had ever settled, silently dropping body_excerpt/content_type/body_unavailable_reason even though
+ * the read itself is bounded. The fix collects every such promise into pendingSubmitBodyReads and
+ * drains it with Promise.allSettled right after submitOutcome is built, before the result is
+ * serialized, gated on finalSubmitPressed (the same condition that gates the network watch).
+ *
+ * These tests extract the shipped armSubmitNetworkWatch listener and the submitOutcome assembly
+ * plus its drain step, verbatim, and run them together against a fake page and a fake Playwright
+ * response - exactly the activation-mode passthrough shape (no native replay, no settleHeldRoute
+ * involved). On the pre-fix runner this extraction itself fails: pendingSubmitBodyReads, and the
+ * drain statement that awaits it, do not exist anywhere in the runner, because nothing captured the
+ * listener's promise anywhere an outer await could ever reach it - which is exactly the bug. */
+
+function extractArmSubmitNetworkWatchForRace() {
+  const start = uniqueMarkerIndex("const armSubmitNetworkWatch = () => {");
+  const end = SANDBOX_RUNNER.indexOf('const managedTransportViolation = (message) =>', start);
+  assert.ok(end > start, 'armSubmitNetworkWatch must still precede managedTransportViolation');
+  return SANDBOX_RUNNER.slice(start, end);
+}
+
+function extractSubmitOutcomeAndDrain() {
+  const startMarker = 'const submitOutcome = finalSubmitPressed';
+  const endMarker = 'pendingSubmitBodyReads.length = 0;';
+  const start = SANDBOX_RUNNER.indexOf(startMarker);
+  assert.notEqual(start, -1, 'the runner must still assemble submitOutcome from finalSubmitPressed');
+  const end = SANDBOX_RUNNER.indexOf(endMarker, start);
+  assert.notEqual(
+    end,
+    -1,
+    'the runner must drain pendingSubmitBodyReads after submitOutcome is built (Finding 1 fix) - '
+      + 'this is missing on the pre-fix runner, which is the bug this test proves'
+  );
+  return SANDBOX_RUNNER.slice(start, end + endMarker.length);
+}
+
+// Combines three shipped slices, in the same order they run in the real runner, never
+// reimplemented by hand: the excerpt/witness machinery, the response listener that starts a live
+// read per activation-mode response, and the submitOutcome assembly plus its drain.
+async function runActivationModeSubmitRace({ body, headers }) {
+  const source = excerptHelpersSource() + '\n'
+    + extractArmSubmitNetworkWatchForRace() + '\n'
+    + 'armSubmitNetworkWatch();\n'
+    + extractSubmitOutcomeAndDrain() + '\nreturn submitOutcome;';
+  const listeners = {};
+  const fakePage = { on: (event, handler) => { listeners[event] = handler; } };
+  const fakeRequest = { method: () => 'POST', resourceType: () => 'fetch' };
+  const fakeResponse = {
+    request: () => fakeRequest,
+    url: () => 'https://boards.greenhouse.io/embed/board/jobs/12345',
+    status: () => 428,
+    headers: () => headers,
+    body
+  };
+  const fakeReadSubmitOutcome = async () => (
+    { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }
+  );
+  // eslint-disable-next-line no-new-func
+  const run = new Function(
+    'page',
+    'finalSubmitPressed',
+    'readSubmitOutcome',
+    'submitNetwork',
+    'submitTransportDisposition',
+    'return (async () => {\n' + source + '\n})();'
+  );
+  // An async function body runs synchronously up to its first await, so armSubmitNetworkWatch has
+  // already registered listeners.response by the time this call returns - the first await inside
+  // the extracted source is `await readSubmitOutcome()`, further down.
+  const resultPromise = run(fakePage, true, fakeReadSubmitOutcome, null, null);
+  assert.ok(typeof listeners.response === 'function', 'armSubmitNetworkWatch must register a response listener');
+  listeners.response(fakeResponse);
+  return resultPromise;
+}
+
+test('Finding 1: the drained submitOutcome carries the excerpt for an activation-mode response whose body resolves after 200ms', async () => {
+  const startedAt = Date.now();
+  const submitOutcome = await runActivationModeSubmitRace({
+    headers: { 'content-type': 'application/json' },
+    body: () => new Promise((resolve) => {
+      setTimeout(() => resolve(Buffer.from(JSON.stringify({ code: 'captcha-retry' }), 'utf8')), 200);
+    })
+  });
+  const elapsedMs = Date.now() - startedAt;
+  // The drain must actually wait for the 200ms read rather than racing past it.
+  assert.ok(elapsedMs >= 190, 'the drain finished before the 200ms body read could plausibly have settled: ' + elapsedMs + 'ms');
+  const serialized = JSON.parse(JSON.stringify(submitOutcome));
+  assert.equal(serialized.pressed, true);
+  assert.ok(Array.isArray(serialized.network) && serialized.network.length === 1);
+  assert.equal(serialized.network[0].content_type, 'application/json');
+  assert.equal(serialized.network[0].body_unavailable_reason, null);
+  assert.ok(
+    serialized.network[0].body_excerpt && serialized.network[0].body_excerpt.includes('captcha-retry'),
+    'the serialized terminal result must carry the excerpt once the drain has run: got '
+      + JSON.stringify(serialized.network[0])
+  );
+});
+
+test('Finding 1: a body that never resolves does not delay the drain past its own timeout', async () => {
+  const startedAt = Date.now();
+  const submitOutcome = await runActivationModeSubmitRace({
+    headers: { 'content-type': 'application/json' },
+    body: () => new Promise(() => {}) // never settles
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(
+    elapsedMs < 5000,
+    'a hanging body read must not delay the drain past its own ~750ms timeout, took ' + elapsedMs + 'ms'
+  );
+  const serialized = JSON.parse(JSON.stringify(submitOutcome));
+  assert.ok(Array.isArray(serialized.network) && serialized.network.length === 1);
+  assert.equal(serialized.network[0].body_excerpt, null);
+  assert.ok(
+    serialized.network[0].body_unavailable_reason,
+    'a body that never resolves must still explain why there is no excerpt, even after the drain'
+  );
 });

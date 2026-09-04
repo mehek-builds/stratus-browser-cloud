@@ -4951,8 +4951,14 @@ let terminalFailureInput = null;
     const submitResponseBodyExcerptCapBytes = 2048;
     const submitResponseTokenRedactionPattern = /[A-Za-z0-9_-]{24,}/g;
     const submitResponseEmailRedactionPattern = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+    // International and US shapes: an optional leading +, then at least 7 digits with any mix of
+    // space/parenthesis/hyphen/dot separators between them (never a comma, so a thousands-grouped
+    // amount like 1,234,567 is left alone). The 7-digit floor is structural - six digit-led
+    // repetitions plus one trailing digit - not a separate count check.
+    const submitResponsePhoneRedactionPattern = /\+?(?:\d[\s().-]*){6,}\d/g;
     const redactSubmitResponseExcerpt = (text) => String(text)
       .replace(submitResponseEmailRedactionPattern, '[redacted-email]')
+      .replace(submitResponsePhoneRedactionPattern, '[redacted-phone]')
       .replace(submitResponseTokenRedactionPattern, '[redacted-token]');
     const stripSubmitResponseControlCharacters = (text) => String(text).replace(/[\x00-\x1F\x7F]/g, '');
     const stripSubmitResponseHtmlTags = (html) => String(html)
@@ -5025,13 +5031,34 @@ let terminalFailureInput = null;
         const info = buildSubmitResponseBodyExcerpt(contentType, bodyValue);
         if (submitTransportResponseUnavailable()) info.transport_disposition = submitTransportDisposition;
         submitResponseBodyInfo.set(targetRequest, info);
-      } catch (error) { /* a witness must never break the run */ }
+      } catch (error) {
+        // A throw here (a hostile content-type header, an exotic body encoding) must never leave NO
+        // entry: the response listener below only falls back to a live re-read when nothing was
+        // recorded for this request, and a live re-read of a response already fulfilled from a
+        // Buffer is not guaranteed to work at all. Recording the explicit failure keeps the same
+        // shape every reader of submitResponseBodyInfo already expects, and says why rather than
+        // leaving a silent gap.
+        try {
+          submitResponseBodyInfo.set(targetRequest, {
+            content_type: null,
+            body_excerpt: null,
+            body_unavailable_reason: 'excerpt_failed'
+          });
+        } catch (setError) { /* a witness must never break the run */ }
+      }
     };
     // Chromium performed this request itself (activation-mode passthrough, no native replay), so
     // there is no Buffer already in hand - only Playwright's own response.body() reaches it, which
     // can be slow or refuse outright (already consumed, streaming, a containment stub response).
     // Bounded to a small timeout and fully guarded so a witness read can never delay or fail the run.
     const submitResponseBodyReadTimeoutMs = 750;
+    // The response listener below (armSubmitNetworkWatch) starts this read from a page.on('response')
+    // callback and cannot await it there - nothing awaits a listener's return value. Every read is
+    // collected here as it starts so the run can drain the whole batch once, after submitOutcome is
+    // built and before the result is serialized: without that drain, a fast-finishing run can reach
+    // JSON.stringify before a read's own .then() has run, silently dropping body_excerpt from the
+    // persisted result even though the read itself is already bounded by the timeout above.
+    const pendingSubmitBodyReads = [];
     const readLiveSubmitResponseBodyExcerpt = async (response) => {
       let contentType = null;
       try { contentType = response.headers()['content-type'] || null; } catch (error) {}
@@ -5081,10 +5108,14 @@ let terminalFailureInput = null;
             return;
           }
           // Otherwise Chromium made this request itself (activation-mode passthrough): read the
-          // body live, bounded and guarded, and merge it in whenever it lands.
-          readLiveSubmitResponseBodyExcerpt(response)
-            .then((info) => { Object.assign(entry, info); })
-            .catch(() => {});
+          // body live, bounded and guarded, and merge it in whenever it lands. Collected into
+          // pendingSubmitBodyReads so the run can wait for the batch once, later, instead of
+          // leaving this listener's own promise to resolve on nobody's schedule.
+          pendingSubmitBodyReads.push(
+            readLiveSubmitResponseBodyExcerpt(response)
+              .then((info) => { Object.assign(entry, info); })
+              .catch(() => {})
+          );
         } catch (error) { /* a witness must never break the run */ }
       });
       page.on('requestfailed', (request) => {
@@ -18327,6 +18358,19 @@ let terminalFailureInput = null;
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
+    // The response listener (armSubmitNetworkWatch, above) starts readLiveSubmitResponseBodyExcerpt
+    // from a page.on('response') callback and never awaits it there - collected into
+    // pendingSubmitBodyReads as each one starts. This is the first safe point to wait for the batch:
+    // after submitOutcome (and the submitNetwork array embedded in it, above) already exists, and
+    // before the result below is serialized. Each read already races its own
+    // submitResponseBodyReadTimeoutMs internally, so this can never itself delay the run past that
+    // bound, and allSettled never throws regardless of how any one read finished. Only reached on a
+    // run that pressed, because armSubmitNetworkWatch only ever runs before finalSubmitPressed is
+    // set - an unpressed run leaves the array empty anyway.
+    if (finalSubmitPressed) {
+      await Promise.allSettled(pendingSubmitBodyReads);
+    }
+    pendingSubmitBodyReads.length = 0;
     // How many submissions the guard stopped. Zero on a run that was allowed to submit, because the
     // guard is not installed there. Non-zero on a fill run is a DEFECT REPORT: something in the
     // action list tried to send a real application without authorization, and this is the only
