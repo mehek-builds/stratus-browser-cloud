@@ -4934,6 +4934,126 @@ let terminalFailureInput = null;
       postSubmitObservationDisposition = postSubmitObservationDisposition
         || 'post_submit_observation_failed';
     };
+    // EMPLOYER-REFUSAL-BODY-EXCERPT:BEGIN
+    /* THE NETWORK WITNESS ABOVE RECORDED THAT A WRITE-SHAPED REQUEST HAPPENED AND WHAT STATUS IT
+     * CAME BACK WITH, NEVER WHAT THE EMPLOYER'S RESPONSE ACTUALLY SAID. Measured 2026-09-04: two
+     * live Greenhouse sends both ended POST https://boards.greenhouse.io/embed/board/jobs/id -> 428,
+     * one page rendering "There was an error processing your application. Please try again.", and
+     * nothing recorded which of Greenhouse's own refusal codes (captcha-failed, captcha-retry,
+     * invalid-attributes, an expired or exceeded security code) the JSON body actually carried - so
+     * the applicant was asked a generic "I found it there / It is not there" instead of being told
+     * the employer's own reason.
+     *
+     * This only records more evidence. It never changes what a request is admitted, blocked,
+     * replayed or fulfilled as: every route.fulfill below still ships the exact status, headers and
+     * body it always did. A bounded, redacted excerpt of that SAME body is additionally captured -
+     * never a request body, never an applicant answer, never page content. */
+    const submitResponseBodyExcerptCapBytes = 2048;
+    const submitResponseTokenRedactionPattern = /[A-Za-z0-9_-]{24,}/g;
+    const submitResponseEmailRedactionPattern = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+    const redactSubmitResponseExcerpt = (text) => String(text)
+      .replace(submitResponseEmailRedactionPattern, '[redacted-email]')
+      .replace(submitResponseTokenRedactionPattern, '[redacted-token]');
+    const stripSubmitResponseControlCharacters = (text) => String(text).replace(/[\x00-\x1F\x7F]/g, '');
+    const stripSubmitResponseHtmlTags = (html) => String(html)
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const classifySubmitResponseContentType = (contentType) => {
+      const normalized = String(contentType || '').toLowerCase().split(';')[0].trim();
+      if (normalized === 'text/html' || normalized === 'application/xhtml+xml') return 'html';
+      if (normalized === 'application/json' || normalized.endsWith('+json')) return 'text';
+      if (normalized.startsWith('text/')) return 'text';
+      return 'binary';
+    };
+    const submitResponseBodyBuffer = (bodyValue) => {
+      if (bodyValue == null) return Buffer.alloc(0);
+      return Buffer.isBuffer(bodyValue) ? bodyValue : Buffer.from(String(bodyValue), 'utf8');
+    };
+    /* JSON or text: the first submitResponseBodyExcerptCapBytes bytes, UTF-8 decoded, control
+     * characters stripped, then anything that looks like an email address or a bearer-length token
+     * redacted. HTML: the same, but only its stripped-tag visible text, and only when the whole
+     * document already fits inside the cap - Stratus's own containment pages are small HTML, a real
+     * employer receipt page usually is not. Anything else (images, PDFs, an oversized HTML document)
+     * is skipped, never guessed at. */
+    const buildSubmitResponseBodyExcerpt = (contentType, bodyValue) => {
+      const kind = classifySubmitResponseContentType(contentType);
+      const normalizedContentType = contentType || null;
+      if (kind === 'binary') {
+        return {
+          content_type: normalizedContentType,
+          body_excerpt: null,
+          body_unavailable_reason: 'unsupported_content_type'
+        };
+      }
+      const buffer = submitResponseBodyBuffer(bodyValue);
+      if (kind === 'html') {
+        if (buffer.length > submitResponseBodyExcerptCapBytes) {
+          return {
+            content_type: normalizedContentType,
+            body_excerpt: null,
+            body_unavailable_reason: 'html_body_too_large'
+          };
+        }
+        const visibleText = stripSubmitResponseHtmlTags(buffer.toString('utf8'));
+        const bounded = stripSubmitResponseControlCharacters(visibleText)
+          .slice(0, submitResponseBodyExcerptCapBytes);
+        return {
+          content_type: normalizedContentType,
+          body_excerpt: redactSubmitResponseExcerpt(bounded),
+          body_unavailable_reason: null
+        };
+      }
+      const bounded = stripSubmitResponseControlCharacters(
+        buffer.subarray(0, submitResponseBodyExcerptCapBytes).toString('utf8')
+      );
+      return {
+        content_type: normalizedContentType,
+        body_excerpt: redactSubmitResponseExcerpt(bounded),
+        body_unavailable_reason: null
+      };
+    };
+    // Correlates a Playwright Request to the excerpt already computed for it, so the same request
+    // never pays to read its body twice: the native-replay path (settleHeldRoute, below) has the
+    // bytes in hand as a Buffer the moment it decides what to fulfil the route with, and stores the
+    // excerpt here; the passthrough path just below reads it live only when this is empty.
+    const submitResponseBodyInfo = new WeakMap();
+    const recordSubmitResponseBodyInfo = (targetRequest, contentType, bodyValue) => {
+      try {
+        const info = buildSubmitResponseBodyExcerpt(contentType, bodyValue);
+        if (submitTransportResponseUnavailable()) info.transport_disposition = submitTransportDisposition;
+        submitResponseBodyInfo.set(targetRequest, info);
+      } catch (error) { /* a witness must never break the run */ }
+    };
+    // Chromium performed this request itself (activation-mode passthrough, no native replay), so
+    // there is no Buffer already in hand - only Playwright's own response.body() reaches it, which
+    // can be slow or refuse outright (already consumed, streaming, a containment stub response).
+    // Bounded to a small timeout and fully guarded so a witness read can never delay or fail the run.
+    const submitResponseBodyReadTimeoutMs = 750;
+    const readLiveSubmitResponseBodyExcerpt = async (response) => {
+      let contentType = null;
+      try { contentType = response.headers()['content-type'] || null; } catch (error) {}
+      try {
+        const bodyBuffer = await Promise.race([
+          response.body(),
+          new Promise((_resolve, reject) => {
+            setTimeout(() => reject(new Error('body read timed out')), submitResponseBodyReadTimeoutMs);
+          })
+        ]);
+        return buildSubmitResponseBodyExcerpt(contentType, bodyBuffer);
+      } catch (error) {
+        return {
+          content_type: contentType,
+          body_excerpt: null,
+          body_unavailable_reason: error && /timed out/.test(String(error.message))
+            ? 'body_read_timed_out'
+            : 'body_read_failed'
+        };
+      }
+    };
+    // EMPLOYER-REFUSAL-BODY-EXCERPT:END
     const armSubmitNetworkWatch = () => {
       if (submitNetwork) return;
       submitNetwork = [];
@@ -4950,7 +5070,21 @@ let terminalFailureInput = null;
           const method = writeShaped(response.request());
           if (!method) return;
           const parsed = new URL(response.url());
-          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: response.status() });
+          const entry = { method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: response.status() };
+          record(entry);
+          // The native-replay path (settleHeldRoute) already read this exact response's body as
+          // part of deciding what to fulfil the route with, and left the excerpt here keyed by the
+          // same Request Playwright hands back on this event. Reuse it instead of reading again.
+          const precomputed = submitResponseBodyInfo.get(response.request());
+          if (precomputed) {
+            Object.assign(entry, precomputed);
+            return;
+          }
+          // Otherwise Chromium made this request itself (activation-mode passthrough): read the
+          // body live, bounded and guarded, and merge it in whenever it lands.
+          readLiveSubmitResponseBodyExcerpt(response)
+            .then((info) => { Object.assign(entry, info); })
+            .catch(() => {});
         } catch (error) { /* a witness must never break the run */ }
       });
       page.on('requestfailed', (request) => {
@@ -5462,11 +5596,13 @@ let terminalFailureInput = null;
           if (!['GET', 'HEAD', 'OPTIONS'].includes(method)
             && (response.status === 307 || response.status === 308)) {
             submitTransportDisposition = 'write_redirect_blocked';
+            const writeRedirectBlockedBody = '<!doctype html><meta charset="utf-8"><title>Submission redirect blocked</title>'
+              + '<p>Stratus blocked a write-preserving submit redirect.</p>';
+            recordSubmitResponseBodyInfo(record.request, 'text/html; charset=utf-8', writeRedirectBlockedBody);
             await record.route.fulfill({
               status: 409,
               contentType: 'text/html; charset=utf-8',
-              body: '<!doctype html><meta charset="utf-8"><title>Submission redirect blocked</title>'
-                + '<p>Stratus blocked a write-preserving submit redirect.</p>'
+              body: writeRedirectBlockedBody
             });
           } else {
             if (response.status >= 300 && response.status < 400) {
@@ -5483,11 +5619,13 @@ let terminalFailureInput = null;
               } catch {}
               if (!redirectAllowed) {
                 submitTransportDisposition = 'receipt_redirect_blocked';
+                const unboundReceiptRedirectBlockedBody = '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
+                  + '<p>Stratus blocked an unbound receipt redirect.</p>';
+                recordSubmitResponseBodyInfo(record.request, 'text/html; charset=utf-8', unboundReceiptRedirectBlockedBody);
                 await record.route.fulfill({
                   status: 409,
                   contentType: 'text/html; charset=utf-8',
-                  body: '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
-                    + '<p>Stratus blocked an unbound receipt redirect.</p>'
+                  body: unboundReceiptRedirectBlockedBody
                 });
                 return { released: true };
               }
@@ -5503,6 +5641,7 @@ let terminalFailureInput = null;
                 completed: false
               };
             }
+            recordSubmitResponseBodyInfo(record.request, response.headers['content-type'], response.body);
             await record.route.fulfill({
               status: response.status,
               headers: response.headers,
@@ -5523,13 +5662,16 @@ let terminalFailureInput = null;
           });
           if (response.status >= 300 && response.status < 400) {
             submitTransportDisposition = 'receipt_redirect_blocked';
+            const additionalReceiptRedirectBlockedBody = '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
+              + '<p>Stratus blocked an additional receipt redirect.</p>';
+            recordSubmitResponseBodyInfo(record.request, 'text/html; charset=utf-8', additionalReceiptRedirectBlockedBody);
             await record.route.fulfill({
               status: 409,
               contentType: 'text/html; charset=utf-8',
-              body: '<!doctype html><meta charset="utf-8"><title>Receipt redirect blocked</title>'
-                + '<p>Stratus blocked an additional receipt redirect.</p>'
+              body: additionalReceiptRedirectBlockedBody
             });
           } else {
+            recordSubmitResponseBodyInfo(record.request, response.headers['content-type'], response.body);
             await record.route.fulfill({
               status: response.status,
               headers: response.headers,
@@ -5549,11 +5691,13 @@ let terminalFailureInput = null;
         if ((decision === 'release' && (replayDispatched || error?.replayDispatched))
           || decision === 'receipt') {
           submitTransportDisposition = 'transport_replay_observation_failed';
+          const transportReplayObservationFailedBody = '<!doctype html><meta charset="utf-8"><title>Submission response unavailable</title>'
+            + '<p>The application transport was dispatched, but its response could not be observed.</p>';
+          recordSubmitResponseBodyInfo(record.request, 'text/html; charset=utf-8', transportReplayObservationFailedBody);
           await record.route.fulfill({
             status: 502,
             contentType: 'text/html; charset=utf-8',
-            body: '<!doctype html><meta charset="utf-8"><title>Submission response unavailable</title>'
-              + '<p>The application transport was dispatched, but its response could not be observed.</p>'
+            body: transportReplayObservationFailedBody
           }).catch(() => undefined);
           return { released: true };
         }
