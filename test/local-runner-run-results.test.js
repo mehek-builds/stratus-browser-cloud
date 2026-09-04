@@ -98,7 +98,9 @@ test('a runner that failed or was lost is retained as failed or indeterminate wi
   const lost = await other.lookup(OTHER);
   assert.equal(lost.body.state, 'indeterminate');
   assert.equal(lost.body.error.code, 'RUN_TIMED_OUT');
-  await assert.rejects(() => other.retain(OTHER, { state: 'nonsense' }), (e) => e.code === 'TERMINAL_RESULT_STORE_UNAVAILABLE');
+  const unknownState = { ...ATTEMPT, executionId: '55555555-5555-4555-8555-555555555555' };
+  await other.reservePending(unknownState, Date.now() + 1000);
+  await assert.rejects(() => other.retain(unknownState, { state: 'nonsense' }), (e) => e.code === 'TERMINAL_RESULT_STORE_UNAVAILABLE');
 });
 
 test('acknowledging a pending or unknown attempt, or with a malformed id, is refused with the exact code', async () => {
@@ -108,9 +110,13 @@ test('acknowledging a pending or unknown attempt, or with a malformed id, is ref
   await assert.rejects(() => store.acknowledge(ATTEMPT, 'b'.repeat(64)), (e) => e.code === 'TERMINAL_RESULT_PENDING' && e.status === 409);
   await assert.rejects(() => store.acknowledge(ATTEMPT, 'B'.repeat(64)), (e) => e.code === 'INVALID_RUN_RESULT_ACKNOWLEDGEMENT' && e.status === 400);
   await assert.rejects(() => store.lookup({ runId: 'x' }), (e) => e.code === 'INVALID_RUN_RESULT_REQUEST' && e.status === 400);
+  // A second reservation while the first is executing is refused as in progress, never a second runner.
+  await assert.rejects(() => store.reservePending(ATTEMPT, Date.now() + 1000), (e) => e.code === 'SUBMISSION_EXECUTION_IN_PROGRESS' && e.status === 409);
   // A second reservation for a tuple that already has a result is a conflict, never an overwrite.
   await store.retain(ATTEMPT, { state: 'completed', run: RUN });
   await assert.rejects(() => store.reservePending(ATTEMPT, Date.now() + 1000), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT' && e.status === 409);
+  // And a settled record is never rewritten by a later retain.
+  await assert.rejects(() => store.retain(ATTEMPT, { state: 'failed', error: { message: 'late' } }), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
   // A tuple this host never started is a 404, not somebody else's result.
   assert.equal((await store.lookup(OTHER)).status, 404);
 });
@@ -133,13 +139,67 @@ test('records survive a restart of the process through their files, and expire o
     assert.equal((await second.lookup(ATTEMPT)).status, 404);
     assert.ok(!fs.existsSync(path.join(directory, `${ATTEMPT.runId}_${ATTEMPT.claimId}_${ATTEMPT.executionId}.json`)));
 
-    // A pending reservation whose deadline passed is kept for the retention window, so a late
-    // lookup learns the run was started here rather than reading a false 404.
+    // A pending reservation is swept at its own deadline: by then this host has retained its own
+    // indeterminate answer, and 202 past that point would make the caller wait on nobody.
     await second.reservePending(OTHER, time.now() + 5_000);
-    time.advance(30_000);
+    time.advance(4_000);
     assert.equal((await second.lookup(OTHER)).status, 202);
-    time.advance(60_000);
+    time.advance(2_000);
     assert.equal((await second.lookup(OTHER)).status, 404);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a reservation reloaded after a restart is answered as indeterminate, because the runner that owned it is gone', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-terminal-restart-'));
+  try {
+    const first = new LocalTerminalResultStore({ directory });
+    await first.reservePending(ATTEMPT, Date.now() + 300_000);
+    assert.equal((await first.lookup(ATTEMPT)).status, 202);
+    // The process restarts: the volume still holds the pending file, the child does not exist.
+    const second = new LocalTerminalResultStore({ directory });
+    const answer = await second.lookup(ATTEMPT);
+    assert.equal(answer.status, 200);
+    assert.equal(answer.body.state, 'indeterminate');
+    assert.equal(answer.body.error.code, 'RUN_LOST_ON_RESTART');
+    assert.match(answer.body.resultId, HEX64);
+    // And the same tuple cannot be started again here.
+    await assert.rejects(() => second.reservePending(ATTEMPT, Date.now() + 1000), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a continuation supersedes the first phase for the same tuple, and nothing else may', async () => {
+  const store = new LocalTerminalResultStore();
+  await store.reservePending(ATTEMPT, Date.now() + 1000);
+  const phase0 = await store.retain(ATTEMPT, { state: 'completed', run: { ...RUN, submitPressed: false, continuationOffered: true, continuationToken: 'tok' } });
+  await assert.rejects(() => store.retain(ATTEMPT, { state: 'completed', run: RUN }), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
+  const phase1 = await store.retain(ATTEMPT, { state: 'completed', run: { ...RUN, submitPressed: true }, continuation: true });
+  assert.notEqual(phase1.resultId, phase0.resultId);
+  const answer = await store.lookup(ATTEMPT);
+  assert.equal(answer.body.resultId, phase1.resultId);
+  assert.equal(answer.body.run.submitPressed, true);
+  // Once the continuation has answered, the tuple is settled.
+  await assert.rejects(() => store.retain(ATTEMPT, { state: 'completed', run: RUN, continuation: true }), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
+});
+
+test('the timer sweep bounds the files without anyone looking anything up', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stratus-terminal-sweep-'));
+  try {
+    const time = clock(Date.parse('2026-09-04T16:00:00.000Z'));
+    const store = new LocalTerminalResultStore({ directory, now: time.now, retentionMs: 1_000 });
+    await store.reservePending(ATTEMPT, time.now() + 500);
+    await store.retain(ATTEMPT, { state: 'completed', run: RUN });
+    assert.equal(fs.readdirSync(directory).length, 1);
+    time.advance(2_000);
+    const timer = store.startSweeping(20);
+    assert.equal(store.startSweeping(20), timer, 'one timer');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    clearInterval(timer);
+    assert.equal(fs.readdirSync(directory).length, 0);
+    assert.equal(store.records.size, 0);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -168,6 +228,8 @@ test('the Railway server answers /api/run-results and /api/run-results/acknowled
     const malformed = await fetch(`${base}/api/run-results?runId=${ATTEMPT.runId}`, { headers });
     assert.equal(malformed.status, 400);
     assert.equal((await malformed.json()).error.code, 'INVALID_RUN_RESULT_REQUEST');
+    const repeated = await fetch(`${base}/api/run-results?${query}&runId=${OTHER.runId}`, { headers });
+    assert.equal(repeated.status, 400, 'a repeated key is refused, never collapsed to the last value');
 
     const wrongMethod = await fetch(`${base}/api/run-results?${query}`, { method: 'POST', headers, body: '{}' });
     assert.equal(wrongMethod.status, 405);

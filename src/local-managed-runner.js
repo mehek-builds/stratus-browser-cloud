@@ -41,6 +41,7 @@ const active = new Set();
 export const terminalResults = new LocalTerminalResultStore({
   directory: path.join(config.dataDir, 'terminal-results'),
 });
+terminalResults.startSweeping();
 
 function managedError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
@@ -160,6 +161,10 @@ async function startRun(input) {
     throw managedError('Managed browser capacity is busy. Try again shortly.', 429, 'MANAGED_CAPACITY');
   }
   const context = await normalizeManagedRun(input, { urlValidator: assertPublicUrl });
+  /* Reserved BEFORE anything is created, so a tuple already executing or already answered is
+   * refused with nothing to clean up: no directory, no child, no capacity slot. */
+  const runTimeoutMs = runTimeoutMsFor(context.providerDeadlineAt);
+  await terminalResults.reservePending(context.submissionAttempt ?? null, Date.now() + runTimeoutMs);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stratus-managed-'));
   const token = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
   const expiresAt = context.requestContinuation
@@ -194,42 +199,59 @@ async function startRun(input) {
     session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
   });
 
-  const runTimeoutMs = runTimeoutMsFor(context.providerDeadlineAt);
-  await terminalResults.reservePending(session.submissionAttempt, Date.now() + runTimeoutMs);
-  const produced = await waitForFile(
-    directory,
-    ['stratus-result-0.json', 'stratus-error.json'],
-    runTimeoutMs,
-    child,
-  );
-  if (!produced) {
-    const runProgress = await readProgress(directory, session.submissionAttempt);
-    await cleanup(session);
-    const error = Object.assign(
-      managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
-      runProgress ? { runProgress } : {},
+  /* Everything after the spawn runs under one catch, so no throw can leave a live runner acting
+   * on the employer's page with its slot held. A throw that reaches the catch without having
+   * retained an answer retains indeterminate: the host lost track of what the runner did. */
+  try {
+    const produced = await waitForFile(
+      directory,
+      ['stratus-result-0.json', 'stratus-error.json'],
+      runTimeoutMs,
+      child,
     );
-    // The runner was lost before it said what it did: the outcome is unknown, not failed.
-    await terminalResults.retain(session.submissionAttempt, { state: 'indeterminate', error, runProgress });
-    throw error;
-  }
-  if (produced === 'stratus-error.json') {
-    const error = await runnerError(directory, session.stderr, session.submissionAttempt);
+    if (!produced) {
+      const runProgress = await readProgress(directory, session.submissionAttempt);
+      await cleanup(session);
+      const error = Object.assign(
+        managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
+        runProgress ? { runProgress } : {},
+      );
+      // The runner was lost before it said what it did: the outcome is unknown, not failed.
+      await terminalResults.retain(session.submissionAttempt, { state: 'indeterminate', error, runProgress });
+      throw error;
+    }
+    if (produced === 'stratus-error.json') {
+      const error = await runnerError(directory, session.stderr, session.submissionAttempt);
+      await cleanup(session);
+      await terminalResults.retain(session.submissionAttempt, { state: 'failed', error, runProgress: error.runProgress });
+      throw error;
+    }
+    const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
+    const continuation = Boolean(token && continuationEligible(result, context.continuationCheckpoint));
+    if (continuation) {
+      session.expiresAt = result.continuationExpiresAt || expiresAt;
+      sessions.set(token, session);
+      result.continuationToken = token;
+      result.continuationExpiresAt = session.expiresAt;
+    }
+    /* Retained with the continuation facts attached, and the answer carries the retained id:
+     * litos-api requires terminalResult.resultId on every submit-correlated response, and until
+     * now this host never supplied one, so even a good synchronous answer was thrown away. */
+    const retained = await terminalResults.retain(session.submissionAttempt, { state: 'completed', run: result });
+    if (retained) result.terminalResult = { resultId: retained.resultId };
+    if (continuation) return result;
     await cleanup(session);
-    await terminalResults.retain(session.submissionAttempt, { state: 'failed', error, runProgress: error.runProgress });
+    return result;
+  } catch (error) {
+    if (!childExited(session.child) || active.has(session.id)) await cleanup(session).catch(() => {});
+    if (session.submissionAttempt && !(error && error.code === 'SUBMISSION_EXECUTION_CONFLICT')) {
+      await terminalResults.retain(session.submissionAttempt, {
+        state: 'indeterminate',
+        error: { code: 'HOST_LOST_RUN', message: String(error?.message || 'The host lost the managed run').slice(0, 500) },
+      }).catch(() => {});
+    }
     throw error;
   }
-  const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
-  await terminalResults.retain(session.submissionAttempt, { state: 'completed', run: result });
-  if (token && continuationEligible(result, context.continuationCheckpoint)) {
-    session.expiresAt = result.continuationExpiresAt || expiresAt;
-    sessions.set(token, session);
-    result.continuationToken = token;
-    result.continuationExpiresAt = session.expiresAt;
-    return result;
-  }
-  await cleanup(session);
-  return result;
 }
 
 async function continueRun(input) {
@@ -262,6 +284,10 @@ async function continueRun(input) {
   }
   const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait);
   await cleanup(session);
+  // The second phase's answer supersedes the first for the same durable tuple.
+  const retained = await terminalResults.retain(session.submissionAttempt, { state: 'completed', run: result, continuation: true })
+    .catch(() => null);
+  if (retained) result.terminalResult = { resultId: retained.resultId };
   return result;
 }
 

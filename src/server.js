@@ -86,7 +86,12 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
               res.setHeader('allow', 'GET');
               return json(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'Use GET' } });
             }
-            const attempt = submissionAttemptFromRunResultQuery(Object.fromEntries(url.searchParams));
+            const query = {};
+            for (const [key, value] of url.searchParams) {
+              // A repeated key is refused as the sandbox handler refuses an array, never collapsed.
+              query[key] = key in query ? [query[key], value].flat() : value;
+            }
+            const attempt = submissionAttemptFromRunResultQuery(query);
             const answer = await terminalResults.lookup(attempt);
             return json(res, answer.status, answer.body);
           }
@@ -98,6 +103,7 @@ export function createApp({ database = path.join(config.dataDir, 'stratus.db') }
           return json(res, 200, await terminalResults.acknowledge(submissionAttempt, resultId));
         } catch (error) {
           const status = Number(error?.status) || 500;
+          if (status >= 500) console.error(JSON.stringify({ requestId, route, event: 'terminal_result_request_failed', code: error?.code || 'INTERNAL_ERROR', status, message: String(error?.message || '').slice(0, 300) }));
           return json(res, status, { error: { code: error?.code || 'INTERNAL_ERROR', message: String(error?.message || 'Terminal result request failed').slice(0, 500) } });
         }
       }

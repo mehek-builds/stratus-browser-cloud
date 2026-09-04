@@ -25,9 +25,12 @@
  *   (acknowledged) 410  litos-api folded the result and acknowledged it; it is gone
  *
  * The retained run drops its screenshot bytes: the evidence PNG is published separately and a
- * recovery reads the outcome, not the picture. Files are ephemeral across a redeploy (this
- * service mounts no volume), which is stated rather than hidden: a redeploy mid-run loses the run
- * exactly as it did before, and nothing else. */
+ * recovery reads the outcome, not the picture. The data directory is the service's Railway volume
+ * (/data, attached since #121), so files survive a restart or an auto-deploy. A reservation that
+ * is reloaded after a restart is rewritten as indeterminate on load: the process that owned that
+ * run is gone, its browser with it, and 202 would make litos-api wait on a run nobody is running.
+ * A reservation whose deadline passed while the process lived is swept at that deadline for the
+ * same reason; by then this host has already retained indeterminate itself. */
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -57,9 +60,12 @@ function attemptKey(attempt) {
   return `${attempt.runId}_${attempt.claimId}_${attempt.executionId}`;
 }
 
+/* Unique per retention, not per tuple: a continuation's answer supersedes the first phase's within
+ * the same millisecond in tests and within the same second in production, and an acknowledgement
+ * must name exactly the answer it folded. */
 function resultIdFor(attempt, completedAt, state) {
   return crypto.createHash('sha256')
-    .update(`${attemptKey(attempt)}|${completedAt}|${state}`)
+    .update(`${attemptKey(attempt)}|${completedAt}|${state}|${crypto.randomBytes(8).toString('hex')}`)
     .digest('hex');
 }
 
@@ -87,8 +93,18 @@ export class LocalTerminalResultStore {
         try {
           const record = JSON.parse(await fs.readFile(path.join(this.directory, name), 'utf8'));
           const attempt = normalizeLocalSubmissionAttempt(record?.submissionAttempt);
-          if (attempt && typeof record.state === 'string') this.records.set(attemptKey(attempt), record);
-        } catch { /* a corrupt file is dropped; the sweep below removes it */ }
+          if (!attempt || typeof record.state !== 'string') continue;
+          if (record.state === 'pending') {
+            // The process that reserved this is gone, and so is its runner: the outcome is unknown.
+            const orphaned = this.terminalRecord(attempt, 'indeterminate', {
+              error: { code: 'RUN_LOST_ON_RESTART', message: 'The host restarted while this managed run was executing; its outcome is unknown' },
+            });
+            this.records.set(attemptKey(attempt), orphaned);
+            await this.persist(orphaned);
+            continue;
+          }
+          this.records.set(attemptKey(attempt), record);
+        } catch { /* a corrupt file is unreadable and is left for the operator; nothing is served from it */ }
       }
     } catch { /* no directory: memory only */ }
   }
@@ -116,7 +132,10 @@ export class LocalTerminalResultStore {
     if (!attempt) return null;
     await this.loaded;
     const existing = this.records.get(attemptKey(attempt));
-    if (existing && existing.state !== 'pending') {
+    if (existing && existing.state === 'pending') {
+      throw terminalError('This submission attempt is already executing here', 409, 'SUBMISSION_EXECUTION_IN_PROGRESS');
+    }
+    if (existing) {
       throw terminalError('This submission attempt already has a retained terminal result', 409, 'SUBMISSION_EXECUTION_CONFLICT');
     }
     const record = {
@@ -130,35 +149,45 @@ export class LocalTerminalResultStore {
     return record;
   }
 
-  /** Called when the runner produced a result, an error, or nothing before the host gave up. */
-  async retain(submissionAttempt, outcome) {
-    const attempt = normalizeLocalSubmissionAttempt(submissionAttempt);
-    if (!attempt) return null;
-    await this.loaded;
+  terminalRecord(attempt, state, outcome) {
     const completedAt = new Date(this.now()).toISOString();
     const base = {
       submissionAttempt: attempt,
-      resultId: resultIdFor(attempt, completedAt, outcome.state),
+      resultId: resultIdFor(attempt, completedAt, state),
       completedAt,
       expiresAt: new Date(this.now() + this.retentionMs).toISOString(),
     };
-    let record;
-    if (outcome.state === 'completed') {
-      record = { ...base, state: 'completed', run: withoutScreenshot(outcome.run) };
-    } else if (outcome.state === 'failed' || outcome.state === 'indeterminate') {
+    if (state === 'completed') {
+      return { ...base, state: 'completed', run: withoutScreenshot(outcome.run) };
+    }
+    if (state === 'failed' || state === 'indeterminate') {
       const error = outcome.error || {};
-      record = {
+      return {
         ...base,
-        state: outcome.state,
+        state,
         error: {
           code: typeof error.code === 'string' ? error.code : 'SANDBOX_RUN_FAILED',
           message: typeof error.message === 'string' ? error.message.slice(0, 2000) : 'Managed browser run failed',
         },
         ...(outcome.runProgress ? { runProgress: outcome.runProgress } : {}),
       };
-    } else {
-      throw terminalError(`Unknown terminal state ${String(outcome.state)}`, 500, 'TERMINAL_RESULT_STORE_UNAVAILABLE');
     }
+    throw terminalError(`Unknown terminal state ${String(state)}`, 500, 'TERMINAL_RESULT_STORE_UNAVAILABLE');
+  }
+
+  /** Called when the runner produced a result, an error, or nothing before the host gave up.
+   *  Only a pending reservation, or a completed phase that offered a continuation (the second
+   *  phase's answer supersedes the first), may be written; a settled record is never rewritten. */
+  async retain(submissionAttempt, outcome) {
+    const attempt = normalizeLocalSubmissionAttempt(submissionAttempt);
+    if (!attempt) return null;
+    await this.loaded;
+    const existing = this.records.get(attemptKey(attempt));
+    if (existing && existing.state !== 'pending'
+      && !(existing.state === 'completed' && existing.run?.continuationOffered === true && outcome.continuation === true)) {
+      throw terminalError('This submission attempt already has a retained terminal result', 409, 'SUBMISSION_EXECUTION_CONFLICT');
+    }
+    const record = this.terminalRecord(attempt, outcome.state, outcome);
     this.records.set(attemptKey(attempt), record);
     await this.persist(record);
     return record;
@@ -215,13 +244,18 @@ export class LocalTerminalResultStore {
     const nowMs = this.now();
     for (const [key, record] of this.records) {
       const expiresMs = Date.parse(record.expiresAt);
-      // A pending reservation outlives its own deadline by the retention window, so a lookup that
-      // arrives late still learns the run was started here rather than reading a false 404.
-      const limit = record.state === 'pending' ? expiresMs + this.retentionMs : expiresMs;
-      if (Number.isFinite(limit) && nowMs > limit) {
+      if (Number.isFinite(expiresMs) && nowMs > expiresMs) {
         this.records.delete(key);
         await this.remove(record.submissionAttempt);
       }
     }
+  }
+
+  /** A host that only prepares never looks anything up; the timer keeps the files bounded. */
+  startSweeping(intervalMs = 60_000) {
+    if (this.sweeper) return this.sweeper;
+    this.sweeper = setInterval(() => { this.sweep().catch(() => {}); }, intervalMs);
+    this.sweeper.unref();
+    return this.sweeper;
   }
 }
