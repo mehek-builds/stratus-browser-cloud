@@ -16676,15 +16676,25 @@ let terminalFailureInput = null;
             try {
               if (verification.pass.submissionOutcome === 'clicked') {
                 await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-                if (submitTransportResponseUnavailable()) {
-                  markPostSubmitObservationFailed();
-                  codeOutcome = 'unknown';
-                } else {
-                  await waitForPostSubmitApplicationState({ securityCodeSettles: false });
-                  const receipt = await readSubmitOutcome();
-                  const still = await readSecurityCodeChallenge();
-                  codeOutcome = securityCodeVerdict(receipt, still);
-                }
+                /* The same blocked-write-replay flag gates this arm too, and it needs the same fix
+                 * as the sibling application-submit arm below. A blocked write-replay is transport
+                 * safety refusing to relay a redirect or response Chromium did not vouch for; it is
+                 * not a statement that the DOM in front of the run became unreadable.
+                 * waitForPostSubmitApplicationState, readSubmitOutcome and readSecurityCodeChallenge
+                 * only ever evaluate the DOM and send nothing of their own, so they stay safe to run
+                 * even once the transport is flagged. Hardcoding codeOutcome to unknown here threw
+                 * away a genuinely accepted code resubmission the exact way the application arm did
+                 * before it was fixed - litos-api's submissionRunner.ts treats
+                 * securityCodeAttempt.outcome === 'accepted' as one of two ways a submission counts
+                 * as confirmed, so this folded an accepted Greenhouse-style resubmission into an
+                 * unverified one. The disposition itself must still be recorded, so
+                 * markPostSubmitObservationFailed() still runs; only the DOM read and
+                 * securityCodeVerdict's judgement of it are no longer skipped for it. */
+                if (submitTransportResponseUnavailable()) markPostSubmitObservationFailed();
+                await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+                const receipt = await readSubmitOutcome();
+                const still = await readSecurityCodeChallenge();
+                codeOutcome = securityCodeVerdict(receipt, still);
               }
             } finally {
               await finishSubmitTransportGate();
