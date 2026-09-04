@@ -338,3 +338,22 @@ test('the v4 pre-submit containment still refuses everything else it always did'
   );
   assert.deepEqual(mainFrame.calls, ['abort:blockedbyclient']);
 });
+
+/* A second installer, armV4PreSubmitTransportContainment, used to live further down the runner.
+ * It was gated on the same retainedAtomicV4Run as the containment built above, so by the time its
+ * one caller ran, the containment above always already existed and its own early-return always
+ * fired - its body, an unconditional abort with no isCaptchaWidgetFrameRequest carve-out, was dead
+ * code that extractHandler's first-match anchor could never reach, so it shipped with zero
+ * coverage. Deleted in favour of a single install site, and asserted directly here: if a future
+ * change reintroduces a second place that hands v4PreSubmitTransportContainment a new containment
+ * object, this fails immediately instead of relying on an anchor string finding the right one by
+ * luck. */
+test('v4PreSubmitTransportContainment is installed in exactly one place', () => {
+  const installs = SANDBOX_RUNNER.match(/\bv4PreSubmitTransportContainment\s*=\s*containment\b/g) || [];
+  assert.equal(
+    installs.length,
+    1,
+    'expected exactly one assignment of a new containment object to v4PreSubmitTransportContainment, found: '
+      + JSON.stringify(installs)
+  );
+});

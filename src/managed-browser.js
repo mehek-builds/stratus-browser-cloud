@@ -4508,18 +4508,21 @@ let terminalFailureInput = null;
      * The binding and payload below never enter the result. They live only in this runner process,
      * for this click, and are discarded with the route. */
     let activeSubmitTransportGate = null;
-    const armV4PreSubmitTransportContainment = async () => {
-      if (v4PreSubmitTransportContainment) return v4PreSubmitTransportContainment;
-      const containment = { mode: 'locked', blockedTransportObserved: false, handler: null };
-      containment.handler = async (route) => {
-        if (containment.mode === 'activation') return route.fallback();
-        containment.blockedTransportObserved = true;
-        return route.abort('blockedbyclient');
-      };
-      await browserContext.route('**/*', containment.handler);
-      v4PreSubmitTransportContainment = containment;
-      return containment;
-    };
+    /* THERE IS DELIBERATELY NO SECOND INSTALLER HERE. v4PreSubmitTransportContainment is armed
+     * exactly once, by the initial-navigation gate that owns v4InitialNavigationBoundary and
+     * installs the widget-frame-admitting handler, before phase 0 of the while(true) loop below
+     * ever runs. An installer used to live here too, named armV4PreSubmitTransportContainment,
+     * gated on the very same retainedAtomicV4Run this whole atomic-v4 branch is gated on - so by
+     * the time its one caller ran, the early gate had always already run and its early-return
+     * guard (return the existing containment if one is already set) always fired. The body past
+     * that guard, an unconditional abort of every request with no isCaptchaWidgetFrameRequest
+     * carve-out, was therefore dead: unreachable in any execution, and covered by nothing.
+     * Keeping a duplicate, less-safe containment implementation on standby is exactly the kind of
+     * doorway this file closes rather than papers over (see the DOORWAY comment above) - a future
+     * refactor that decoupled the two retainedAtomicV4Run gates would have silently reintroduced
+     * the reCAPTCHA-killing bug PR #159 fixed, through a code path with zero test coverage. The
+     * one caller now asserts the invariant instead of re-implementing the installer; see the
+     * throw at its call site. */
     const authorizeV4SubmitTransport = () => {
       if (!v4PreSubmitTransportContainment) return false;
       v4PreSubmitTransportContainment.mode = 'activation';
@@ -14778,7 +14781,13 @@ let terminalFailureInput = null;
       if (!dnsPrefetchDisabled) {
         throw new Error('Atomic submit v4 could not disable speculative DNS for this phase');
       }
-      await armV4PreSubmitTransportContainment();
+      // The initial-navigation gate above installs v4PreSubmitTransportContainment before phase 0
+      // ever reaches here, and nothing nulls it until finishV4PreSubmitTransportContainment runs
+      // after this loop exits. This is a structural invariant, not a lazy install: see the DOORWAY
+      // comment by activeSubmitTransportGate for why there is no installer call here anymore.
+      if (!v4PreSubmitTransportContainment) {
+        throw new Error('Atomic submit v4 pre-submit transport containment was not installed');
+      }
       relockV4SubmitTransport();
     }
     const negotiatedSubmitVersions = (currentInput.actions || [])
