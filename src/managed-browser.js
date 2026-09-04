@@ -1192,13 +1192,15 @@ let terminalFailureInput = null;
          * prototype alone therefore never runs; the own instance property shadows it on every
          * lookup. globalThis in this realm IS that global object, so defining there is what
          * actually intercepts the call. The prototype definition is kept alongside it, harmless
-         * and redundant, rather than removed, in case anything ever reaches for it directly. */
+         * and redundant, rather than removed, in case anything ever reaches for it directly - both
+         * definitions share this one function so the two can never drift apart. */
+        const litosBlockedPopup = function litosBlockedPopup() {
+          notify('popup');
+          return null;
+        };
         try {
           defineProperty(globalThis, 'open', {
-            value: function litosBlockedPopup() {
-              notify('popup');
-              return null;
-            },
+            value: litosBlockedPopup,
             configurable: false,
             enumerable: false,
             writable: false
@@ -1206,10 +1208,7 @@ let terminalFailureInput = null;
         } catch { notify('unavailable'); }
         try {
           defineProperty(Window.prototype, 'open', {
-            value: function litosBlockedPopup() {
-              notify('popup');
-              return null;
-            },
+            value: litosBlockedPopup,
             configurable: false,
             enumerable: false,
             writable: false

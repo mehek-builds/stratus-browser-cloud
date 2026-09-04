@@ -31,7 +31,15 @@ import { SANDBOX_RUNNER } from '../src/managed-browser.js';
  * no backtick template literals - confirmed by scanning SANDBOX_RUNNER - so backtick handling is
  * not needed here.) String contents still pass through into the returned text unstripped, same as
  * before: a name mentioned only inside a string can still over-report as "referenced", which the
- * guard's own comment already accepts as the safe direction. */
+ * guard's own comment already accepts as the safe direction.
+ *
+ * SCOPED TO STRINGS, NOT EVERY TOKEN THAT CAN CONTAIN COMMENT-LOOKING CHARACTERS: this has no
+ * notion of a JS regex literal, so a future regex whose body contains an unescaped '/' next to a
+ * '*' (e.g. a character class like /[/*]/) would reopen the same class of blind spot the glob
+ * string above did, just from a different token type. Confirmed today's SANDBOX_RUNNER contains
+ * zero such regex bodies despite containing many ordinary ones (.replace(/.../g) and similar), so
+ * this is a known, currently-dormant gap rather than a live one - not a full parser, so still not
+ * a guarantee against every shape, only the one shape that has actually reached production twice. */
 function stripRunnerComments(source) {
   let out = '';
   let i = 0;
@@ -129,7 +137,16 @@ test('the export scan is not blinded by a string literal shaped like a comment o
    * file. That second span, not the gap between the two glob sites, is where a bare reference
    * would have vanished from the guard entirely. This test finds that real boundary the same way
    * the naive stripper would have (search for '/*', then the next '*\/'), so it tracks wherever
-   * the actual blind spot falls rather than assuming today's file offsets. */
+   * the actual blind spot falls rather than assuming today's file offsets.
+   *
+   * The planted reference itself is NOT dropped at an arbitrary offset inside that ~40KB span -
+   * anywhere in there is unreviewed, actively-edited territory (four prior PRs already touch this
+   * exact block: #128, #131, #167, #168), and a byte-midpoint could drift into one of that span's
+   * own string literals or its one real comment on a future, unrelated edit, failing this test for
+   * a reason that has nothing to do with the tokenizer. Instead it goes on the FIRST line right
+   * after the second glob call's own opening line - a small, fixed offset from a site this test
+   * already asserts is present, and unambiguously plain code (the top of routeWebSocket's own
+   * callback body), not inside any string or comment. */
   const secondGlob = SANDBOX_RUNNER.indexOf(
     "routeWebSocket('**/*'",
     SANDBOX_RUNNER.indexOf("routeWebSocket('**/*'") + 1
@@ -139,14 +156,16 @@ test('the export scan is not blinded by a string literal shaped like a comment o
   const fakeClose = SANDBOX_RUNNER.indexOf('*/', fakeOpen + 2);
   assert.ok(fakeOpen >= 0 && fakeClose > fakeOpen,
     'the glob string must still contain the /* -shaped content this defect turns on');
-  assert.ok(fakeClose - fakeOpen > 4000,
+  assert.ok(fakeClose - fakeOpen > 20_000,
     'this test assumes the historically large (40KB+) blind spot after the second glob site; ' +
     'if the surrounding source changed shape, re-locate the current blind spot before trusting it');
+  const insertionPoint = SANDBOX_RUNNER.indexOf('\n', secondGlob) + 1;
+  assert.ok(insertionPoint > fakeOpen && insertionPoint < fakeClose,
+    'the line right after the glob call must itself fall inside the measured blind span');
   const plantedName = '__stratusPlantedUndefinedExportProbe';
-  const midpoint = fakeOpen + Math.floor((fakeClose - fakeOpen) / 2);
-  const mutated = SANDBOX_RUNNER.slice(0, midpoint)
-    + ('\n  ' + plantedName + '();\n')
-    + SANDBOX_RUNNER.slice(midpoint);
+  const mutated = SANDBOX_RUNNER.slice(0, insertionPoint)
+    + ('        ' + plantedName + '();\n')
+    + SANDBOX_RUNNER.slice(insertionPoint);
 
   const code = stripRunnerComments(mutated);
   assert.match(
@@ -158,12 +177,5 @@ test('the export scan is not blinded by a string literal shaped like a comment o
   assert.ok(
     code.indexOf('const ' + plantedName + ' = ') < 0,
     'the planted name deliberately has no definition anywhere in the mutated text'
-  );
-  // This is the exact check 'every module export the runner references is defined inside the
-  // runner first' performs. Restated here directly so this test fails on its own if the scan
-  // ever regresses back to being fooled by the glob, independent of that other test's export list.
-  assert.ok(
-    new RegExp('\\b' + plantedName + '\\b').test(code) && code.indexOf('const ' + plantedName + ' = ') < 0,
-    'the guard must be able to see and flag a reference planted inside the second routeWebSocket site\'s blind spot'
   );
 });

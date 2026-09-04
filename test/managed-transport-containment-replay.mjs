@@ -127,7 +127,12 @@ async function run(fixtureName) {
 
 {
   const { status, stderr } = await run('worker');
-  assert.notEqual(status, 0, 'a Worker constructed on the employer page must fail the run');
+  assert.notEqual(
+    status,
+    0,
+    `a Worker constructed on the employer page must fail the run: exit ${status}: `
+    + stderr.split('\n').slice(0, 5).join(' ')
+  );
   assert.match(
     stderr,
     /A non-submit action attempted employer transport without exact final authority \(out-of-band transport: Worker from http:\/\/127\.0\.0\.1:\d+\)/,
@@ -138,7 +143,12 @@ async function run(fixtureName) {
 
 {
   const { status, stderr } = await run('popup');
-  assert.notEqual(status, 0, 'a popup opened on the employer page must fail the run');
+  assert.notEqual(
+    status,
+    0,
+    `a popup opened on the employer page must fail the run: exit ${status}: `
+    + stderr.split('\n').slice(0, 5).join(' ')
+  );
   assert.match(
     stderr,
     /A non-submit action attempted employer transport without exact final authority \(out-of-band transport: popup from http:\/\/127\.0\.0\.1:\d+\)/,
@@ -150,4 +160,5 @@ async function run(fixtureName) {
 }
 
 server.close();
+fs.rmSync(workDir, { recursive: true, force: true });
 console.log('managed-transport-containment-replay: ok');
