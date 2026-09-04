@@ -86,9 +86,12 @@ test('a telemetry host is refused admission to the #129 upload window', () => {
     source,
     /containment\.uploadActionArmed[\s\S]{0,240}?&& \(employerBoundTransport\(request\) \|\| boardResumeStorageUpload\(request\)\)\) \{/,
   );
-  // And the telemetry check sits inside employerBoundTransport, so both callers see it.
+  /* And the telemetry check sits inside employerBoundTransport, so every caller sees it. The
+   * definition moved out of the containment block on 2026-09-03 so that the upload settle could
+   * read the same relation instead of carrying a second copy of it, which is why this slice now
+   * closes on a four-space '};' rather than a six-space one. */
   const fn = source.slice(source.indexOf('const employerBoundTransport = (request) => {'));
-  const body = fn.slice(0, fn.indexOf('\n      };'));
+  const body = fn.slice(0, fn.indexOf('\n    };'));
   assert.ok(
     body.includes('isEmployerDomainTelemetryHost(hostname)'),
     'the telemetry check must live inside employerBoundTransport so the upload gate sees it too'
