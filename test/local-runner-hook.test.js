@@ -71,10 +71,14 @@ async function withHost(behaviour, run, { concurrency = 1 } = {}) {
   }
 }
 
+// A submit-capable run: only those, and continuations, are retained (parity with the sandbox host).
+// A submit-capable run must carry an absolute provider deadline, as every real caller does.
 const input = (attempt) => ({
   url: 'https://example.com/apply',
   actions: [],
   submissionAttempt: attempt,
+  allowSubmit: true,
+  providerDeadlineAt: new Date(Date.now() + 280_000).toISOString(),
 });
 
 test('a completed run is retained, its id rides on the synchronous answer, and the slot is released', async () => withHost('result', async ({ executeLocalManagedRun, terminalResults }) => {
@@ -120,11 +124,22 @@ test('a run the runner refused is retained as failed with its message, and the s
   await assert.rejects(() => executeLocalManagedRun(input(FRESH)), (e) => e.code === 'SANDBOX_RUN_FAILED');
 }));
 
-test('a run without a durable attempt is not retained at all', async () => withHost('result', async ({ executeLocalManagedRun, terminalResults }) => {
+test('a run without a durable attempt, or a scan that cannot submit, is not retained at all', async () => withHost('result', async ({ executeLocalManagedRun, terminalResults }) => {
   // config.dataDir is fixed at first import, so a later host may reload earlier files: compare, do not count.
   await terminalResults.loaded;
   const before = terminalResults.records.size;
-  const result = await executeLocalManagedRun({ url: 'https://example.com/apply', actions: [] });
-  assert.equal(result.terminalResult, undefined);
+  const anonymous = await executeLocalManagedRun({ url: 'https://example.com/apply', actions: [] });
+  assert.equal(anonymous.terminalResult, undefined);
+  const scan = await executeLocalManagedRun({ url: 'https://example.com/apply', actions: [], submissionAttempt: FRESH });
+  assert.equal(scan.terminalResult, undefined, 'a prepare or discovery run carries an ephemeral tuple nobody will ask for');
   assert.equal(terminalResults.records.size, before);
+  assert.equal((await terminalResults.lookup(FRESH)).status, 404);
 }));
+
+test('the continuation input names its parent, and a continuation is retained under its own tuple', () => {
+  const source = fs.readFileSync(new URL('../src/local-managed-runner.js', import.meta.url), 'utf8');
+  assert.match(source, /JSON\.stringify\(\{ \.\.\.continuation, parentSubmissionAttempt: session\.submissionAttempt \}\)/u);
+  assert.match(source, /const continuationAttempt = continuation\.submissionAttempt \?\? null;/u);
+  assert.match(source, /terminalResults\.retain\(continuationAttempt, \{ state: 'completed', run: result \}\)/u);
+  assert.ok(!/continuation: true/u.test(source), 'no supersession of the first phase');
+});

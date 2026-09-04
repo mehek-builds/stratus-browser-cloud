@@ -117,7 +117,11 @@ export class LocalTerminalResultStore {
       await fs.mkdir(this.directory, { recursive: true });
       await fs.writeFile(temporary, JSON.stringify(record));
       await fs.rename(temporary, file);
-    } catch { await fs.rm(temporary, { force: true }).catch(() => {}); }
+    } catch (error) {
+      // Memory keeps serving; the file is what a restart would have read.
+      console.error(JSON.stringify({ event: 'terminal_result_persist_failed', code: error?.code || 'EIO', message: String(error?.message || '').slice(0, 200) }));
+      await fs.rm(temporary, { force: true }).catch(() => {});
+    }
   }
 
   async remove(attempt) {
@@ -176,15 +180,14 @@ export class LocalTerminalResultStore {
   }
 
   /** Called when the runner produced a result, an error, or nothing before the host gave up.
-   *  Only a pending reservation, or a completed phase that offered a continuation (the second
-   *  phase's answer supersedes the first), may be written; a settled record is never rewritten. */
+   *  Only a pending reservation may be written; a settled record is never rewritten. A
+   *  continuation is its own tuple (volley mints a fresh executionId) and its own record. */
   async retain(submissionAttempt, outcome) {
     const attempt = normalizeLocalSubmissionAttempt(submissionAttempt);
     if (!attempt) return null;
     await this.loaded;
     const existing = this.records.get(attemptKey(attempt));
-    if (existing && existing.state !== 'pending'
-      && !(existing.state === 'completed' && existing.run?.continuationOffered === true && outcome.continuation === true)) {
+    if (existing && existing.state !== 'pending') {
       throw terminalError('This submission attempt already has a retained terminal result', 409, 'SUBMISSION_EXECUTION_CONFLICT');
     }
     const record = this.terminalRecord(attempt, outcome.state, outcome);

@@ -171,18 +171,17 @@ test('a reservation reloaded after a restart is answered as indeterminate, becau
   }
 });
 
-test('a continuation supersedes the first phase for the same tuple, and nothing else may', async () => {
+test('a continuation is its own record under its own tuple, and the first phase is never rewritten', async () => {
   const store = new LocalTerminalResultStore();
   await store.reservePending(ATTEMPT, Date.now() + 1000);
   const phase0 = await store.retain(ATTEMPT, { state: 'completed', run: { ...RUN, submitPressed: false, continuationOffered: true, continuationToken: 'tok' } });
   await assert.rejects(() => store.retain(ATTEMPT, { state: 'completed', run: RUN }), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
-  const phase1 = await store.retain(ATTEMPT, { state: 'completed', run: { ...RUN, submitPressed: true }, continuation: true });
+  await store.reservePending(OTHER, Date.now() + 1000);
+  const phase1 = await store.retain(OTHER, { state: 'completed', run: { ...RUN, submissionAttempt: OTHER, submitPressed: true } });
   assert.notEqual(phase1.resultId, phase0.resultId);
-  const answer = await store.lookup(ATTEMPT);
-  assert.equal(answer.body.resultId, phase1.resultId);
-  assert.equal(answer.body.run.submitPressed, true);
-  // Once the continuation has answered, the tuple is settled.
-  await assert.rejects(() => store.retain(ATTEMPT, { state: 'completed', run: RUN, continuation: true }), (e) => e.code === 'SUBMISSION_EXECUTION_CONFLICT');
+  assert.equal((await store.lookup(ATTEMPT)).body.resultId, phase0.resultId);
+  assert.equal((await store.lookup(OTHER)).body.resultId, phase1.resultId);
+  assert.deepEqual((await store.lookup(OTHER)).body.run.submissionAttempt, OTHER);
 });
 
 test('the timer sweep bounds the files without anyone looking anything up', async () => {
