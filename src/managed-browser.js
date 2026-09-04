@@ -6972,9 +6972,9 @@ let terminalFailureInput = null;
     const exactFillByBinding = async (action, context) => {
       const bindingReference = await page.evaluateHandle((input) => {
         const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-        const wanted = cleanText(input.wanted).replace(/[\s\u2733*]+$/, '');
+        const wanted = cleanText(input.wanted).replace(/[\s\u2731\u2732\u2733*]+$/, '');
         const exact = wanted
-          ? new RegExp('^\\s*' + wanted.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2733]?\\s*$', 'i')
+          ? new RegExp('^\\s*' + wanted.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2731\u2732\u2733]?\\s*$', 'i')
           : null;
         const nodes = [...document.querySelectorAll('body *')].filter((node) => (
           !['SCRIPT', 'STYLE', 'NOSCRIPT', 'OPTION'].includes(node.tagName)
@@ -17734,16 +17734,31 @@ let terminalFailureInput = null;
          * that is how a required field is marked. The old containment search is still the fallback,
          * so a board whose label carries extra words is no worse off than before.
          */
-        /* THE REQUIRED MARKER IS NOT PART OF THE QUESTION'S NAME. Lever welds a \u2733 to the
-         * heading with no space ("...United States?\u2733") while the stored question carries it
-         * with one ("...united states? \u2733"), so the whole-string match failed, the containment
-         * fallback failed on the same byte, and every reviewed radio on the live DGA form was
-         * silently skipped with her answers sitting in the packet (measured 2026-08-20). The
-         * marker is stripped from the WANTED side and allowed on the page side, exactly as the
-         * trailing asterisk already was. */
-        const wantedLabel = clean(action.text).replace(/[\s\u2733*]+$/, '');
+        /* THE REQUIRED MARKER IS NOT PART OF THE QUESTION'S NAME. Lever welds a required mark to
+         * the heading with no space ("...United States?\u2731") while the stored question carries
+         * it with one ("...united states? \u2731"), so the whole-string match failed, the
+         * containment fallback failed on the same byte, and every reviewed radio on the live DGA
+         * form was silently skipped with her answers sitting in the packet (measured 2026-08-20).
+         * The marker is stripped from the WANTED side and allowed on the page side, exactly as the
+         * trailing asterisk already was.
+         *
+         * THE MARK IS U+2731 (HEAVY ASTERISK, "\u2731"), NOT U+2733 (EIGHT SPOKED ASTERISK,
+         * "\u2733"), and this line stripped only the latter. Both look like a star in a proportional
+         * font and the two codepoints sit two apart, which is how the wrong one was transcribed
+         * into the 2026-08-20 fix and pinned by its test. Measured 2026-09-04 on Belvedere Trading's
+         * jobs.lever.co apply page (application c4413bff, run 8b0f1705): the heading is
+         * '<div class="text">Name of School<span class="required">\u2731</span></div>' (bytes
+         * e2 9c b1) and the stored question is "name of school \u2731". The wanted side kept its
+         * trailing " \u2731", so the whole-string regex could not match a heading with no space
+         * before the mark and the containment fallback searched for "name of school \u2731"
+         * against "Name of School\u2731" - "fillByLabelText: label not found", on a control whose
+         * exact answer sat 1,500 rows down its own list, on every run. Replayed against real
+         * Select2 4.0.0 in lever-select2-v4-card-confirm-dom.test.js, which is where the fix is
+         * proven; the class below names every asterisk a board has been seen to weld on, plus the
+         * plain one. */
+        const wantedLabel = clean(action.text).replace(/[\s\u2731\u2732\u2733*]+$/, '');
         const wholeLabel = wantedLabel
-          ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2733]?\\s*$', 'i')
+          ? new RegExp('^\\s*' + wantedLabel.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\s*[*:\u2731\u2732\u2733]?\\s*$', 'i')
           : null;
         const exactLabel = !exactActionContext && wholeLabel ? page.getByText(wholeLabel).first() : null;
         const label = exactActionContext
