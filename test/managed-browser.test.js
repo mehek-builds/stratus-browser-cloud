@@ -4414,22 +4414,49 @@ test('one provider deadline governs launch, continuation, and every physical sub
   assert.match(SANDBOX_RUNNER, /providerActionDeadlineMs = deadlineMs - providerResponseMarginMs/);
   assert.match(SANDBOX_RUNNER, /providerDeadlineExpired = true;\n\s*if \(browser\) void browser\.close/);
   assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
-  assert.match(
-    SANDBOX_RUNNER,
-    // finalPressBudgetShortfall (see its own definition, next to assertProviderActionWindow) is
-    // the exact-final-authority press's own gate: a critical section checked before deciding
-    // whether to press at all, rather than a bare assertProviderActionWindow floor checked only
-    // before a fixed 2-second wait. An exact-mutation transport authorization may still sit inside
-    // the same critical section between the window check and the network watch. The ordering is
-    // what this pins, not adjacency.
-    /finalPressBudgetShortfall\(\);\n[\s\S]*?\n\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+  // Positional indexOf checks, not a regex spanning tens of lines with a lazy or greedy quantifier:
+  // a pattern needing that much backtracking across a megabyte-plus string is exactly the shape
+  // that can hit a regex engine's own backtracking limit, which is version-dependent and not
+  // something a source-shape test should be sensitive to (this replaced an earlier version of
+  // this test that did exactly that and failed only in CI, on a newer Node than any dev machine
+  // had, for that reason alone).
+  //
+  // finalPressBudgetShortfall (see its own definition, next to assertProviderActionWindow) is the
+  // exact-final-authority press's own gate at site 1 (confirmAndSubmitPass): a critical section
+  // checked before deciding whether to press at all, rather than a bare assertProviderActionWindow
+  // floor checked only before a fixed 2-second wait. An exact-mutation transport authorization may
+  // still sit inside the same critical section between the window check and the network watch. The
+  // ordering is what this pins, not adjacency.
+  const site1Authorize = SANDBOX_RUNNER.indexOf(
+    'if (chooserVersion !== 4) authorizeManagedFinalTransport(currentInput, action);',
   );
-  assert.match(
-    SANDBOX_RUNNER,
-    // Same gate, same reason, at the Greenhouse code-resubmit click: checked before the click is
-    // even attempted, so an insufficient window withholds the resubmit instead of racing it.
-    /if \(action\.securityCode && isFinalSubmitAction\(action\)\)[\s\S]*finalPressBudgetShortfall\(\);\n\s*if \(finalPressShortfall\) \{[\s\S]*?\}\s*else\s*\{\n\s*await locator\.click/,
-  );
+  assert.ok(site1Authorize > 0, 'site 1 must authorize the final transport before its click');
+  const site1Shortfall = SANDBOX_RUNNER.lastIndexOf('finalPressBudgetShortfall();', site1Authorize);
+  assert.ok(site1Shortfall > 0 && site1Authorize - site1Shortfall < 1000,
+    'the budget gate must sit immediately before site 1 authorizes transport, not merely somewhere earlier');
+  const site1Watch = SANDBOX_RUNNER.indexOf('armSubmitNetworkWatch();', site1Authorize);
+  assert.ok(site1Watch > site1Authorize && site1Watch < site1Authorize + 100,
+    'the network watch must arm right after authorization');
+  const site1Progress = SANDBOX_RUNNER.indexOf('recordCrashProgress', site1Watch);
+  assert.ok(site1Progress > site1Watch && site1Progress < site1Watch + 100,
+    'crash progress must be recorded right after the watch arms');
+
+  // Same gate, same reason, at the Greenhouse code-resubmit click (site 3): checked before the
+  // click is even attempted, so an insufficient window withholds the resubmit instead of racing it.
+  const site3Anchor = SANDBOX_RUNNER.indexOf('if (action.securityCode && isFinalSubmitAction(action)) {');
+  assert.ok(site3Anchor > 0, 'the Greenhouse code-resubmit branch must exist');
+  const site3Shortfall = SANDBOX_RUNNER.indexOf('finalPressBudgetShortfall();', site3Anchor);
+  assert.ok(site3Shortfall > site3Anchor && site3Shortfall < site3Anchor + 3000,
+    'the resubmit must be gated by the same budget check');
+  const site3If = SANDBOX_RUNNER.indexOf('if (finalPressShortfall) {', site3Shortfall);
+  assert.ok(site3If > site3Shortfall && site3If < site3Shortfall + 100,
+    'the gate result must be checked right after it is computed');
+  const site3Else = SANDBOX_RUNNER.indexOf('} else {', site3If);
+  assert.ok(site3Else > site3If && site3Else < site3If + 2000,
+    'the withholding branch must have a matching else for the actual press');
+  const site3Click = SANDBOX_RUNNER.indexOf('await locator.click', site3Else);
+  assert.ok(site3Click > site3Else && site3Click < site3Else + 200,
+    'the resubmit click must sit in the else branch, immediately after it');
 });
 
 test('the runner decides whether a continuation is held open, not the caller\'s text sweep', async () => {
