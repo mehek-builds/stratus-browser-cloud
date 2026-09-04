@@ -7699,6 +7699,72 @@ let terminalFailureInput = null;
       if (!combobox) return false;
       return combobox.getAttribute('aria-expanded') !== 'true';
     }).catch(() => false);
+    /* AND AN ENTER THAT CANNOT DO A FIELD-LOCAL JOB REACHES THE EMPLOYER'S OWN VALIDATOR.
+     *
+     * choiceControlIsClosed above covers a shut menu. It leaves two shapes that were measured on the
+     * live Hudson River Trading Greenhouse form (job-boards.greenhouse.io/embed/job_app, read-only,
+     * 2026-09-04) doing exactly the damage it exists to prevent:
+     *
+     *   - AN OPEN MENU OFFERING NOTHING. Type a filter no option matches and the widget renders "No
+     *     options": aria-expanded is still "true", and the control's own listbox holds ZERO rows.
+     *     There is no highlighted option for Enter to take, so the keystroke falls straight through
+     *     to the form. Measured: one Enter in that state took the form from 0 rendered validation
+     *     messages to 13. This is the state the run reaches most often, because the caller queues
+     *     its Enter right after a fill attempt and a fill attempt that matched no row leaves the
+     *     menu open and empty. That packet's own record says so: its single skipped reason is
+     *     'no option matched "3.89" (the list offered: "No options")'.
+     *   - A PLAIN CONTROL INSIDE THE FORM. An Enter in '#first_name', after twenty fields had been
+     *     filled correctly and with no validation message anywhere on the page, took that form from
+     *     0 messages to 7 - one on every required control still empty at that instant - and nothing
+     *     retracts them when those controls are filled a moment later. That is the picture the
+     *     applicant is shown and asked to approve.
+     *
+     * THE SUBMIT GUARD AT THE TOP OF THIS FILE DOES NOT COVER EITHER, which is why this is a second
+     * lock and not a duplicate one. Measured with that guard installed verbatim: the messages
+     * rendered and window.__litosBlockedSubmits stayed 0. This form runs its validator from its own
+     * key handler and dispatches no submit event at all, which is precisely the gap the guard's own
+     * comment names.
+     *
+     * THE SIGNAL IS THE CONTROL'S OWN LISTBOX, not a class fragment: aria-controls names it,
+     * getElementById resolves it, and the number of rows in it is the offer. Measured on the same
+     * control: no listbox at all while the menu is shut, 3 rows with the menu freshly open, 3 after
+     * ArrowDown moves the highlight, 0 on "No options". (Corroborating, and deliberately NOT
+     * depended on: whenever the count is non-zero exactly one row carries a focused marker class.
+     * aria-activedescendant is useless here - it is the empty string in every one of those states.)
+     *
+     * ASKED ONLY ON A RUN THAT WAS NOT ASKED TO SUBMIT, which is where the harm is: that run is the
+     * one that captures the picture the applicant approves, and its caller has already declared it
+     * may not send. An authorized submit run keeps every keystroke it always had.
+     *
+     * WHAT IT GIVES UP, said out loud: a widget that genuinely needs Enter to commit and publishes
+     * no rows - a tag input, a search box that adds on Enter - keeps its keystroke and has its field
+     * reported unfilled instead. That is the direction this file already fails in. A field handed
+     * back costs a person a minute; a form validated early cannot be un-validated, and a form sent
+     * early cannot be un-sent.
+     */
+    const enterHasNothingToTake = async (target) => await target.evaluate((element) => {
+      if (!element || element.nodeType !== 1) return null;
+      const tag = String(element.tagName || '').toUpperCase();
+      /* A descendant search run from the page's own root would adopt the first combobox on the form
+       * as "the target", which is the wrong answer for an unaimed press whose focus is sitting on
+       * <body>. Only a caller-aimed element is treated as a container that may hold its control. */
+      const container = tag !== 'BODY' && tag !== 'HTML' && tag !== 'FORM';
+      const combobox = element.getAttribute('role') === 'combobox'
+        ? element
+        : (element.closest('[role="combobox"]')
+          || (container ? element.querySelector('[role="combobox"]') : null));
+      if (combobox) {
+        if (combobox.getAttribute('aria-expanded') !== 'true') return 'a choice control with no menu open';
+        const owned = combobox.getAttribute('aria-controls') || combobox.getAttribute('aria-owns');
+        const listbox = owned ? document.getElementById(owned) : null;
+        const offered = listbox ? listbox.querySelectorAll('[role="option"]').length : 0;
+        return offered > 0 ? null : 'a choice control whose open menu is offering nothing to take';
+      }
+      // Enter is a newline here, which is the field's own business and reaches nothing else.
+      if (tag === 'TEXTAREA' || element.isContentEditable) return null;
+      // Outside a form there is no validator for the keystroke to run and no form for it to send.
+      return element.closest('form') ? 'inside the application form' : null;
+    }).catch(() => null);
     // A control that already holds a matching answer is left alone, and a control that holds ANY
     // answer is never emptied on the way to looking for a better one.
     //
@@ -16946,15 +17012,44 @@ let terminalFailureInput = null;
         if (hasExactFinalActionAuthority(currentInput, action)) {
           authorizeManagedFinalTransport(currentInput, action);
         }
-        if (!locator) {
-          await page.keyboard.press(action.value);
-        } else if (/^enter$/i.test(String(action.value || '')) && await choiceControlIsClosed(locator)) {
+        const pressIsEnter = /^enter$/i.test(String(action.value || ''));
+        if (pressIsEnter && locator && await choiceControlIsClosed(locator)) {
           // Enter on a choice control means "take the highlighted option". With the menu shut there
           // is no highlighted option, so the keystroke cannot do the job it was queued for, and the
           // only thing left for it to do is trigger the form's implicit submission. Withheld, and
           // said out loud.
           skipped.push((action.label || 'press')
             + ': Enter withheld, ' + action.selector + ' is a choice control with no menu open, so the keystroke could only have submitted the form');
+        } else if (pressIsEnter && input.allowSubmit !== true) {
+          /* ON THE SAME DECLARATION OF INTENT THAT INSTALLS THE SUBMIT GUARD, and deliberately not
+           * on a wider one. A run that WAS asked to submit keeps every keystroke it always had:
+           * that path is the riskiest surface in the product, its authorized send goes through
+           * confirmAndSubmit rather than through a keystroke, and this change has no business
+           * touching it. A run that was NOT asked to submit is the one that captures the picture
+           * the applicant is asked to approve, and it is the only one this rule speaks for.
+           *
+           * AN UNAIMED PRESS STILL LANDS SOMEWHERE, so the rule is asked of wherever that is rather
+           * than of the selector that was not supplied. normalizeManagedActions keeps the selector
+           * optional on purpose - "send this key wherever focus is" is a legitimate thing for a
+           * caller to mean - and until now that arm ran no guard at all, so the one press shape
+           * nobody can aim was also the one shape nothing checked. */
+          const focused = locator
+            ? null
+            : await page.evaluateHandle(() => document.activeElement).catch(() => null);
+          const target = locator || focused;
+          const withholdBecause = target ? await enterHasNothingToTake(target) : null;
+          if (focused) await focused.dispose().catch(() => undefined);
+          if (withholdBecause) {
+            skipped.push((action.label || 'press')
+              + ': Enter withheld, ' + (action.selector || 'the focused control') + ' is ' + withholdBecause
+              + ', so the keystroke could only have run the employer validation over the fields not filled yet');
+          } else if (locator) {
+            await locator.press(action.value);
+          } else {
+            await page.keyboard.press(action.value);
+          }
+        } else if (!locator) {
+          await page.keyboard.press(action.value);
         } else {
           await locator.press(action.value);
         }
@@ -17163,6 +17258,23 @@ let terminalFailureInput = null;
           { blocking: [], stale: [], unmatched: [] }
         );
     blockers.push(...readiness.blocking);
+    /* A VALIDATION MESSAGE LEFT STANDING OVER A FIELD THAT IS NOW FILLED IS THE ONLY THING THE
+     * APPLICANT CAN SEE, and until now this run computed that number on every call and dropped it.
+     *
+     * It stays out of 'blockers' for the reason stated above - a message is not an empty control,
+     * and a complete application must never be refused over one - but silence is not the only other
+     * option. The screenshot she is asked to approve is a picture of the form, this form does not
+     * retract a message once it has rendered one, and a run that left the page in that state owes
+     * her the sentence that says so. Measured on the live Hudson River Trading form: six required
+     * controls each showing their correct value under a red "This field is required.", and nothing
+     * anywhere in the run's own record telling those apart from a fill that had failed. The gate
+     * knew. It just never said.
+     */
+    if (readiness.stale.length > 0) {
+      skipped.push('form_rendering: the form is still showing ' + readiness.stale.length
+        + ' validation message(s) left over from an earlier pass, over fields that are now filled,'
+        + ' so the screenshot shows those fields in red');
+    }
     // Read on EVERY run, at zero action cost, because the caller has no other way to find out. A
     // fill run that has somehow submitted looks exactly like a fill run that has not, right up
     // until the applicant is asked to approve sending an application that is already half sent.

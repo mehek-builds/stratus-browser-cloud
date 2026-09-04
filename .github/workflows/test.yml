@@ -126,6 +126,12 @@ jobs:
       - name: Captcha visibility contract
         run: npm run test:captcha-visibility
 
+      # The keystroke that used to hand the applicant a correctly filled form covered in red. It is
+      # a replay rather than a unit test because the defect lives in the press branch of the runner,
+      # not in the rule it calls, and a rule a test can reach is not a rule production calls.
+      - name: Enter validation replay
+        run: npm run test:enter-validation
+
       - name: Browser end to end
         run: npm run test:e2e
 
