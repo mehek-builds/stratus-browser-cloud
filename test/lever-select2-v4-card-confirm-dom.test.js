@@ -301,6 +301,44 @@ test('the Select2 4.0.0 university picker fills through its backing select and t
     'Select2 4.0.0 must have repainted the applicant-visible selection from the change event');
 });
 
+/* THE HEADING'S OWN MARK, when the question is addressed by its heading rather than by its name.
+ *
+ * Measured 2026-09-04 on Belvedere Trading's jobs.lever.co apply page (application c4413bff, run
+ * 8b0f1705): the backend attaches Lever's published option list to the university picker and so
+ * addresses it by label - a fillByLabelText carrying the stored heading "name of school ✱" -
+ * and the runner answered "fillByLabelText: label not found" while the exact answer sat 1,500 rows
+ * down the picker's own list. Lever's required mark is U+2731 (HEAVY ASTERISK); the runner's
+ * label matchers stripped and allowed only U+2733 (EIGHT SPOKED ASTERISK), a transcription of the
+ * same-looking star two codepoints away, so the wanted side kept its trailing " ✱" and matched
+ * nothing. The cardSelect/universityPicker fixtures above carry Lever's real byte, so this replay
+ * is the proof: the heading is found, the pick lands on the backing select, and Select2 4.0.0
+ * repaints. */
+test('a card question addressed by its heading is found under Lever\'s own ✱ mark, on the shipped runner', async () => {
+  const byHeading = (text, value, label) => ({ type: 'fillByLabelText', text, value, label, optional: true });
+  const result = await run([
+    fill('[name="name"]', 'Mehek Mandal', 'name'),
+    fill('[name="email"]', 'mehek@example.com', 'email'),
+    // The stored question keeps the mark with a space before it; the heading welds it on.
+    byHeading('which was the most recent university you attended? ✱', 'University of Southern California',
+      'question:which was the most recent university you attended? ✱'),
+    // A plain text card by heading, with the spoked mark the old code expected: still accepted.
+    byHeading('what degree did you complete at the above university? ✳', 'Bachelor of Science in Computer Science',
+      'question:what degree did you complete at the above university? ✳'),
+    { type: 'extract', selector: '#university-echo', optional: true },
+    { type: 'extract', selector: '.select2-selection__rendered', optional: true }
+  ]);
+  // The runner reads every text fill back before it reports it, so an empty skipped list is the
+  // degree card's proof as well as the picker's.
+  assert.deepEqual(result.skipped, [], 'a heading carrying Lever\'s own required mark must be found');
+  assert.ok(result.filledFields.includes('question:which was the most recent university you attended? ✱'),
+    'the picker addressed by its heading must report filled');
+  assert.ok(result.filledFields.includes('question:what degree did you complete at the above university? ✳'));
+  assert.equal(result.extracted.find((entry) => entry.selector === '#university-echo')?.value,
+    'University of Southern California', 'the pick must land on the backing native select');
+  assert.equal(result.extracted.find((entry) => entry.selector === '.select2-selection__rendered')?.value,
+    'University of Southern California', 'Select2 4.0.0 must repaint the applicant-visible selection');
+});
+
 test('a card question never answered at all blocks under its heading, not as an unlabelled field', async () => {
   const actions = cardFills('GPA 3.9+').filter((action) => !action.selector.includes('field5'));
   const result = await run([...actions, submitAction]);

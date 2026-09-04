@@ -4494,11 +4494,25 @@ test('discovery scans combobox openers that are not form tags', () => {
 });
 
 test('the required marker is stripped from the wanted label before matching', () => {
-  /* Lever welds \u2733 to the heading with no space while the stored question carries it with
-   * one; the whole-string and containment matches both failed on that byte and every reviewed
-   * radio on the live DGA form was silently skipped (measured 2026-08-20, proven in a live
-   * Chromium check: 0 matches unstripped, 1 stripped). */
-  assert.match(SANDBOX_RUNNER, /const wantedLabel = clean\(action\.text\)\.replace\(\/\[\\s\\u2733\*\]\+\$\/, ''\);/);
+  /* Lever welds its required mark to the heading with no space while the stored question carries
+   * it with one; the whole-string and containment matches both failed on that byte and every
+   * reviewed radio on the live DGA form was silently skipped (measured 2026-08-20, proven in a live
+   * Chromium check: 0 matches unstripped, 1 stripped).
+   *
+   * The mark Lever actually serves is U+2731 (HEAVY ASTERISK). The 2026-08-20 fix, and this pin
+   * with it, transcribed it as U+2733 (EIGHT SPOKED ASTERISK), so the strip never fired on a live
+   * Lever heading: measured 2026-09-04 on Belvedere Trading's "Name of School\u2731" heading
+   * (application c4413bff), "fillByLabelText: label not found" on every run. Both codepoints are
+   * now stripped, with U+2732 between them, on the wanted side and allowed on the page side at
+   * BOTH label matchers - fillByLabelText's and exactFillByBinding's - so the two cannot disagree
+   * about what a heading is called. The executed proof against real Select2 4.0.0 is in
+   * lever-select2-v4-card-confirm-dom.test.js. */
+  assert.match(SANDBOX_RUNNER, /const wantedLabel = clean\(action\.text\)\.replace\(\/\[\\s\\u2731\\u2732\\u2733\*\]\+\$\/, ''\);/);
+  assert.match(SANDBOX_RUNNER, /const wanted = cleanText\(input\.wanted\)\.replace\(\/\[\\s\\u2731\\u2732\\u2733\*\]\+\$\/, ''\);/);
+  // The page-side allowance is built from a string literal, so the runner text carries '\\s'.
+  assert.equal((SANDBOX_RUNNER.match(/\\\\s\*\[\*:\\u2731\\u2732\\u2733\]\?\\\\s\*\$/g) || []).length, 2,
+    'both whole-label regexes allow the same required marks on the page side');
+  assert.doesNotMatch(SANDBOX_RUNNER, /\[\\s\\u2733\*\]\+\$/, 'no matcher strips the spoked asterisk alone any more');
   assert.match(SANDBOX_RUNNER, /getByText\(wantedLabel \|\| action\.text, \{ exact: false \}\)/);
 });
 
