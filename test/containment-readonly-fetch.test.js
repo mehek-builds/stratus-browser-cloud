@@ -11,10 +11,11 @@ const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.
 
 test('locked-mode containment lets read-only data fetches through', () => {
   assert.match(source, /const readOnlyDataFetch = readOnlyMethod\s*\n?\s*&& \(request\.resourceType\(\) === 'xhr' \|\| request\.resourceType\(\) === 'fetch'\);/);
-  // Ashby's field-value write joined this branch on 2026-09-03, and joined nothing else. The pin
-  // reads all three arms so a fourth cannot be added without a test saying why: see
-  // ashby-form-value-write.test.js for the safety property across them.
-  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{\s*\n\s*return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
+  // Ashby's field-value write joined this branch on 2026-09-03, and Teamtailor's cookie-preference
+  // write on 2026-09-04 (see teamtailor-cookie-consent-write.test.js for why a cookie choice files
+  // nothing). The pin reads all four arms so a fifth cannot be added without a test saying why: see
+  // ashby-form-value-write.test.js for the safety property across the Ashby arms.
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\s*\n\s*&& !teamtailorCookieConsentWrite\(request\)\) \{\s*\n\s*return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
 });
 
 test('everything else in the contained set stays blocked', () => {
