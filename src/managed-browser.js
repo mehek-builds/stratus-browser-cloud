@@ -15652,10 +15652,10 @@ let terminalFailureInput = null;
                 passes: [{
                   submitKind: 'verification',
                   scope: {
-                    scopeKind: 'form',
+                    scopeKind: null,
                     formFingerprint: null,
                     submitFingerprint: null,
-                    formMatchCount: 1,
+                    formMatchCount: 0,
                     submitMatchCount: 0,
                     requiredControlCount: 0,
                     sameNode: false
