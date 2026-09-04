@@ -801,6 +801,157 @@ export const findAshbyFileUploadHandleUrl = (value, depth = 0) => {
   return null;
 };
 
+/* A COOKIE CHOICE IS NOT AN APPLICATION.
+ *
+ * Measured 2026-09-04 ~21:55Z on production, volley-backend #958 deployed: that release makes an
+ * optional click on dialog[data-controller="common--cookies--alert"]
+ * button[data-action*="common--cookies--alert#disableAll"] ("Decline all non-necessary cookies")
+ * the first plan action on every Teamtailor form. The run against
+ * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance (application
+ * c24e48a2-06b1-4a01-989f-b6c2c5719f18) then stopped with
+ *
+ *   A non-submit action attempted employer transport without exact final authority
+ *   (fetch transport: POST https://covenanthouseinternational.na.teamtailor.com/cookie-policy/accept)
+ *
+ * Workable's own decline control is client-side only (a cookie set, nothing sent anywhere), which
+ * is why its pattern never tripped this. Teamtailor's records the choice with a POST to the
+ * employer's own tenant host, so pressing it during the fill is employer transport by the
+ * containment's own correct definition, and it died the same way Ashby's field-value write did on
+ * 2026-09-03 before #153: a benign, non-filing write to the employer's own host, refused for being
+ * employer-bound at all rather than examined for what it actually carries.
+ *
+ * WHAT THE REQUEST ACTUALLY IS, read from Teamtailor's own public bundle rather than assumed - this
+ * project never opens an employer portal. The job page, and, confirmed identical on a non-regional
+ * tenant (career.teamtailor.com), loads cookies-a135f52d0a68c93f4012.js from
+ * assets-aws.teamtailor-cdn.com; the alert dialog's decline button is
+ * data-action="click->common--cookies--alert#disableAll" on both hosts. That controller method
+ * (chunk 6950-5359525766bfcce982fa.js, app/components/common/cookies/alert_controller.js) reads,
+ * beautified from its minified form:
+ *
+ *   disableAll() { setCookiePolicy([], this.insideIframeValue); this.close(); }
+ *
+ * "Accept all" calls the identical function with categories ["analytics", "marketing",
+ * "preferences"] instead of []. setCookiePolicy itself (app/javascript/utils/cookies.js) is the one
+ * function in the whole pack that ever sends anything, quoted here close to verbatim from the
+ * minified source (fetch("/cookie-policy/accept", { method: "POST", credentials: "include",
+ * headers: { "Content-Type": "application/json;charset=UTF-8" }, body: JSON.stringify({
+ * cookie_policy: { visitor_uuid: window.visitor_uuid, referrer: window.referrer, categories:
+ * categories.join(","), same_site: insideIframe ? "None" : void 0 } }) }).then(...)). The path is
+ * relative, so it resolves against the tenant's own origin exactly as the violation sentence shows.
+ * For "Decline all" categories is always the empty string; for "Accept all" it is
+ * "analytics,marketing,preferences" - either way the body carries only those four fields, never
+ * anything about a candidate, a job, or a file. visitor_uuid is an analytics token the same page
+ * assigns itself from an earlier same-origin XHR response; referrer is document.referrer or a
+ * utm_source query param. Neither is form data, and nothing here can become form data: Teamtailor's
+ * actual application POST is a separate, unrelated endpoint (.../jobs/<id>/applications), never
+ * named or reachable through this one.
+ *
+ * THE ADMISSION, isTeamtailorCookieChoiceWrite below: exact host family (registrable suffix
+ * teamtailor.com, checked on both the request and the run's own application site - the same double
+ * pin isAshbyFormValueWrite already uses for ashbyhq.com, so this cannot fire on a run that is not
+ * itself a Teamtailor application), exact path with no query string and no fragment, POST, xhr/fetch
+ * only, https only, and then the BODY is proved rather than merely the envelope: valid JSON under a
+ * small size cap, exactly one top-level key (cookie_policy), that value a plain object whose own
+ * keys are a subset of exactly {visitor_uuid, referrer, categories, same_site}, categories (if
+ * present) a comma-joined subset of {analytics, marketing, preferences}, same_site (if present) the
+ * literal string "None", visitor_uuid (if present) either empty or exactly UUID-shaped, and referrer
+ * (if present) either empty or a parseable http(s) URL with a hostname, capped at 512 characters.
+ *
+ * REVIEW ROUND 1, 2026-09-05: the path check alone left the query string and fragment unexamined, so
+ * a request to .../cookie-policy/accept?candidate_email=...&resume=<3000 chars>, carrying an
+ * otherwise-minimal valid body, was admitted - an unbounded smuggling channel to the employer host
+ * that sat entirely outside the submit gate. And visitor_uuid/referrer were only length-capped
+ * (2000), not shape-validated, which let roughly 4 KB of arbitrary free text ride through either
+ * field. Both are closed here: parsed.search and parsed.hash must both be empty, visitor_uuid must
+ * match the UUID shape Teamtailor's own analytics token actually takes (or be absent/empty), and
+ * referrer must parse as the http(s) URL with a hostname that document.referrer actually is (or be
+ * absent/empty), under a tighter 512-character cap. categories and same_site are unchanged. None of
+ * this widens the allowance: a body carrying a candidate field, a job_application field, a file part,
+ * or any key outside the closed list - at the top level or nested inside cookie_policy - still fails
+ * the shape proof and is refused exactly as before.
+ *
+ * WHERE THIS IS CONSULTED: its own early-return in the containment handler, structured exactly like
+ * ashbyFileBindWrite's - never folded into the readOnlyDataFetch/ashbyPublicBoardRead/
+ * ashbyFormValueWrite compound condition next to it - so it cannot widen what that gate already
+ * covers. It is reached only from the same locked-fill branch those admissions already use, never
+ * from the initial-navigation branch and never from the 'activation' branch the final submit runs
+ * under, which returns before either gate. The final-submit policy is completely untouched:
+ * authorizeManagedFinalTransport still demands literal allowSubmit plus exactFinalActionAuthority,
+ * and still asserts the containment clean, before anything is let through unconditionally. */
+export const TEAMTAILOR_SITE = 'teamtailor.com';
+export const TEAMTAILOR_COOKIE_CHOICE_PATH = '/cookie-policy/accept';
+export const TEAMTAILOR_COOKIE_CHOICE_CATEGORIES = Object.freeze(['analytics', 'marketing', 'preferences']);
+export const TEAMTAILOR_COOKIE_CHOICE_FIELDS = Object.freeze(['visitor_uuid', 'referrer', 'categories', 'same_site']);
+export const TEAMTAILOR_COOKIE_CHOICE_MAX_BODY_LENGTH = 4096;
+export const TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH = 2000;
+
+export const isTeamtailorCookieChoiceWrite = ({
+  applicationSite,
+  method,
+  resourceType,
+  url,
+  postData
+} = {}) => {
+  // Local to this function on purpose: its source travels into SANDBOX_RUNNER by
+  // isTeamtailorCookieChoiceWrite.toString() interpolation, so a module-level identifier here would
+  // be the exact "not defined" ReferenceError b816a61 shipped in production 2026-09-01.
+  const VISITOR_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const MAX_REFERRER_LENGTH = 512;
+  if (applicationSite !== TEAMTAILOR_SITE) return false;
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (transportRegistrableSuffix(parsed.hostname) !== TEAMTAILOR_SITE) return false;
+  if (parsed.pathname !== TEAMTAILOR_COOKIE_CHOICE_PATH) return false;
+  // Round 1: the path alone was checked; a query string or fragment rode through untouched. Both
+  // must now be empty, closing the smuggling channel a candidate_email/resume query string opened.
+  if (parsed.search !== '' || parsed.hash !== '') return false;
+  if (typeof postData !== 'string' || !postData) return false;
+  if (postData.length > TEAMTAILOR_COOKIE_CHOICE_MAX_BODY_LENGTH) return false;
+  let body;
+  try { body = JSON.parse(postData); } catch { return false; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const topKeys = Object.keys(body);
+  if (topKeys.length !== 1 || topKeys[0] !== 'cookie_policy') return false;
+  const policy = body.cookie_policy;
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return false;
+  for (const key of Object.keys(policy)) {
+    if (!TEAMTAILOR_COOKIE_CHOICE_FIELDS.includes(key)) return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(policy, 'categories')) {
+    if (typeof policy.categories !== 'string') return false;
+    if (policy.categories.length > 0) {
+      for (const token of policy.categories.split(',')) {
+        if (!TEAMTAILOR_COOKIE_CHOICE_CATEGORIES.includes(token)) return false;
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(policy, 'same_site') && policy.same_site !== 'None') {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid')) {
+    if (typeof policy.visitor_uuid !== 'string'
+      || policy.visitor_uuid.length > TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH) return false;
+    // Round 1: length alone let ~4 KB of arbitrary text through. The analytics token Teamtailor's
+    // own page assigns itself is UUID-shaped; anything else, or absent (empty), and nothing more.
+    if (policy.visitor_uuid !== '' && !VISITOR_UUID_PATTERN.test(policy.visitor_uuid)) return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(policy, 'referrer')) {
+    if (typeof policy.referrer !== 'string' || policy.referrer.length > MAX_REFERRER_LENGTH) return false;
+    // Round 1: same length-only gap. document.referrer is always either empty or a real URL, so
+    // require it parse as one - http(s), with a hostname - rather than merely counting characters.
+    if (policy.referrer !== '') {
+      let referrerUrl;
+      try { referrerUrl = new URL(policy.referrer); } catch { return false; }
+      if (referrerUrl.protocol !== 'https:' && referrerUrl.protocol !== 'http:') return false;
+      if (!referrerUrl.hostname) return false;
+    }
+  }
+  return true;
+};
+
 export const EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 export const EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 export const ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
@@ -2510,6 +2661,16 @@ let terminalFailureInput = null;
       const CLOUDFLARE_RESERVED_PATH_PREFIX = ${JSON.stringify(CLOUDFLARE_RESERVED_PATH_PREFIX)};
       const isEmployerTelemetryPath = ${isEmployerTelemetryPath.toString()};
       const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
+      /* The Teamtailor cookie-consent write: see the long mechanism comment above
+       * isTeamtailorCookieChoiceWrite in the module source for the 2026-09-04 measurement and the
+       * public-bundle evidence this proof is built from. */
+      const TEAMTAILOR_SITE = ${JSON.stringify(TEAMTAILOR_SITE)};
+      const TEAMTAILOR_COOKIE_CHOICE_PATH = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_PATH)};
+      const TEAMTAILOR_COOKIE_CHOICE_CATEGORIES = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_CATEGORIES)};
+      const TEAMTAILOR_COOKIE_CHOICE_FIELDS = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_FIELDS)};
+      const TEAMTAILOR_COOKIE_CHOICE_MAX_BODY_LENGTH = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_MAX_BODY_LENGTH)};
+      const TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH)};
+      const isTeamtailorCookieChoiceWrite = ${isTeamtailorCookieChoiceWrite.toString()};
       /* The board's own resume store, admitted only inside the armed upload window below. See
        * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
       const boardResumeStorageUpload = (request) => {
@@ -2571,6 +2732,16 @@ let terminalFailureInput = null;
        * presigned target call 2 needs to be admitted at all. See isAshbyFileUploadHandleRequest -
        * this only decides whether an already-admitted response gets read, never what gets admitted. */
       const ashbyFileUploadHandleRequest = (request) => isAshbyFileUploadHandleRequest({
+        applicationSite: applicationTransportSite,
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: request.url(),
+        postData: request.postData()
+      });
+      /* The Teamtailor cookie-consent write (isTeamtailorCookieChoiceWrite above): host, path,
+       * method and resource type exactly as the Ashby wrappers above, plus a proof of the body
+       * itself, so this can only ever admit a cookie-category preference and never a filing. */
+      const teamtailorCookieChoiceWrite = (request) => isTeamtailorCookieChoiceWrite({
         applicationSite: applicationTransportSite,
         method: request.method(),
         resourceType: request.resourceType(),
@@ -2735,6 +2906,16 @@ let terminalFailureInput = null;
            * for beyond the DOM. */
           if (ashbyFileBindWrite(request)) {
             containment.ashbyFileBindWriteAdmitted = true;
+            return route.fallback();
+          }
+          /* AND TEAMTAILOR'S COOKIE-CONSENT WRITE, on the same footing as the file bind just above:
+           * its own early-return, proved by teamtailorCookieChoiceWrite rather than folded into the
+           * compound condition below, so it cannot widen what that condition already refuses.
+           * Measured 2026-09-04 on the Covenant House posting - see the long mechanism comment
+           * above isTeamtailorCookieChoiceWrite in the module source. A cookie choice is not an
+           * application: the body proof pins this to a cookie-category preference and nothing a
+           * candidate or a job_application field could ever satisfy. */
+          if (teamtailorCookieChoiceWrite(request)) {
             return route.fallback();
           }
           if (!readOnlyDataFetch && !ashbyPublicBoardRead(request) && !ashbyFormValueWrite(request)) {
