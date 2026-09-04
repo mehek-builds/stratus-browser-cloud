@@ -16706,11 +16706,17 @@ let terminalFailureInput = null;
           try {
             if (application.pass.submissionOutcome === 'clicked') {
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-              if (submitTransportResponseUnavailable()) {
-                markPostSubmitObservationFailed();
-              } else {
-                await waitForPostSubmitApplicationState();
-              }
+              /* A blocked write-replay is transport safety refusing to relay a redirect or
+               * response Chromium did not vouch for; it says nothing about whether the page in
+               * front of the run can still be read. waitForPostSubmitApplicationState only ever
+               * evaluates the DOM (readSubmitOutcome / readSecurityCodeChallenge) and sends
+               * nothing of its own, so it stays safe to run even once the transport is flagged.
+               * Measured 2026-09-04, Exa (Ashby) packet 73768339-7fef-4493-aa75-1d47c61ae51f: the
+               * skip here left the success-or-failure container unread, and a run that pressed
+               * Submit came back with nothing but state unknown, forty seconds after the claim,
+               * for a page that may already have confirmed. */
+              if (submitTransportResponseUnavailable()) markPostSubmitObservationFailed();
+              await waitForPostSubmitApplicationState();
             }
           } finally {
             await finishSubmitTransportGate();
@@ -18154,13 +18160,25 @@ let terminalFailureInput = null;
      * Only on a run that actually pressed the button. On a fill run there is nothing to confirm, and
      * a confirmation-shaped sentence already on an unsubmitted page (an employer's "Thank you for
      * your interest") must not be able to manufacture one. */
+    /* THE RECEIPT READ MUST NOT ROUTE THROUGH observeForResult'S DISPOSITION GATE.
+     *
+     * Every other post-press read below (captcha, readiness, humanVerification, title, text,
+     * links) is optional context; this one is the fact the whole run exists to establish, and
+     * readSubmitOutcome already fails closed to state unknown on its own (see its trailing catch
+     * far above, where the page.evaluate is defined) without needing observeForResult's help.
+     * Routing it through that shared gate anyway meant a blocked write-replay - a network-safety
+     * refusal that says nothing about whether the DOM can still be read - silently overwrote a
+     * real page read with the same hardcoded unknown used for a page that could not be reached at
+     * all. Measured 2026-09-04, Exa (Ashby) packet 73768339-7fef-4493-aa75-1d47c61ae51f:
+     * containment tripped after the press, this call was skipped, and the run reported unknown
+     * with nothing observed on a page that may already have confirmed. transportDisposition and
+     * observationDisposition (below) still travel on the outcome either way, so nothing about the
+     * containment event stops being visible; only the receipt itself stops being thrown away for
+     * it. */
     const submitOutcome = finalSubmitPressed
       ? {
           pressed: true,
-          ...(await observeForResult(
-            () => readSubmitOutcome(),
-            { state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null }
-          )),
+          ...(await readSubmitOutcome()),
           ...(submitNetwork ? { network: submitNetwork } : {}),
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
