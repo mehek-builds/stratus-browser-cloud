@@ -234,6 +234,29 @@ test('a regional-looking Teamtailor host still needs the region to be a plausibl
   assert.equal(outcome.state, 'confirmed');
 });
 
+// The widened host check is still a full-string anchor (^...$ against location.hostname), so it
+// cannot be fooled by a look-alike that merely CONTAINS "teamtailor.com" rather than ending the
+// hostname in a genuine "<tenant>[.<region>].teamtailor.com" shape. Both of these read the exact
+// measured receipt markup - the same HTML the regional-tenant test above confirms - so a false
+// match here could only come from the host regex itself, not from anything else the exception
+// checks.
+for (const [name, host] of [
+  ['a hyphenated look-alike that is not a teamtailor.com subdomain at all', 'evil-teamtailor.com'],
+  ['teamtailor.com smuggled in as a stolen prefix on an unrelated domain', 'teamtailor.com.evil.net'],
+]) {
+  test(`the Teamtailor receipt exception does not trust ${name}`, async () => {
+    const outcome = await readAt(
+      `https://${host}/jobs/686133-intern-finance/applications/new`,
+      TEAMTAILOR_RECEIPT,
+    );
+    // teamtailorReceipt fails to match, so this falls through to the generic counter-witness: the
+    // lone Connect button still counts as a live submit control off this exception, exactly as it
+    // does for the same markup read off any other unmeasured host below.
+    assert.equal(outcome.formStillPresent, true);
+    assert.equal(outcome.state, 'unknown');
+  });
+}
+
 const WORKABLE_RECEIPT = `
   <main data-ui="successful-submit">
     <h1>Thank you!</h1>

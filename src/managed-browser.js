@@ -10116,7 +10116,16 @@ let terminalFailureInput = null;
        * NARROWS when a receipt is trusted, so the failure mode is a false "still present" on an
        * otherwise-confirmed regional submission, not a fill that writes nothing), but it is the same
        * class of drift PR #954 closed on the plan-builder side, and it is closed here for the same
-       * reason: a region label between the tenant and teamtailor.com is still a Teamtailor tenant. */
+       * reason: a region label between the tenant and teamtailor.com is still a Teamtailor tenant.
+       *
+       * DELIBERATELY MISSING: volley's own reserved-tenant-word exclusion (www/app/api/partner/docs/
+       * support/careers as the label immediately before the region-or-base suffix). That list guards
+       * a detector deciding whether to attempt a fill at all, where a reserved word in the tenant
+       * position is a real host, not a customer tenant, and treating it as one would misfire onto
+       * traffic that was never a job application. This check only ever NARROWS an already-fatal
+       * counter-witness (a live form, a missing receipt phrase, or a submit control that is not the
+       * lone Connect button) toward distrust, so admitting a reserved word here costs nothing beyond
+       * what those other four ANDed conditions already guard - see the pinned test for this trade. */
       const pageText = clean(document.body ? document.body.innerText : '');
       const teamtailorApplicationField = visibleOne([
         'input[type=file]', 'input[type=email]', 'input[type=tel]', 'textarea', 'select',
