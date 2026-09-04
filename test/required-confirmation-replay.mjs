@@ -42,7 +42,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   <button id="application-submit" type="submit">Submit application</button>
 </form>
 <div id="submitted"></div>
-<div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div><div id="react-commits">0</div><div id="react-option-clicks">0</div><div id="react-multi-values"></div>
+<div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div><div id="react-commits">0</div><div id="react-option-clicks">0</div><div id="react-multi-values"></div><div id="text-space-events">0</div>
 <script>
   function clear(id) {
     if (location.search.includes('sticky-required-copy')) return;
@@ -85,6 +85,24 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     document.getElementById('question_123[]').closest('.field')
       .setAttribute('data-litos-unverified-choice', 'unreadable');
   }
+  // Proves the text nudge's own "movement", not merely that the value ends up unchanged - a
+  // no-op nudge would also leave the value unchanged, and that alone must not read as a pass.
+  // ?text-hostile-mask simulates a masking library that mangles the field once, on the space
+  // keystroke, so the nudge's bounded restore is what has to put "Mehek Mandal" back.
+  // ?text-hostile-mask-permanent mangles every input event forever, so no restore can land, and
+  // the control has to end up marked unverified and blocking rather than reported filled.
+  var textOriginalValue = document.getElementById('text').value;
+  document.getElementById('text').addEventListener('input', function () {
+    if (this.value === textOriginalValue + ' ') {
+      var counter = document.getElementById('text-space-events');
+      counter.textContent = String(Number(counter.textContent) + 1);
+    }
+    if (location.search.includes('text-hostile-mask-permanent')) {
+      if (!/!$/.test(this.value)) this.value += '!';
+    } else if (location.search.includes('text-hostile-mask') && this.value.endsWith(' ')) {
+      this.value = this.value.replace(/\s+$/, '') + '!';
+    }
+  });
   document.getElementById('newsletter-email').addEventListener('blur', function () { clear('newsletter-email'); });
   ['text', 'email-field', 'phone-field', 'essay', 'date'].forEach(function (id) {
     document.getElementById(id).addEventListener('blur', function () { clear(id); });
@@ -110,6 +128,11 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     if (reactMulti && !location.search.includes('react-multi-no-aria')) {
       listbox.setAttribute('aria-multiselectable', 'true');
     }
+    // Counts reselect clicks per option text, so ?react-multi-reselect-fails-once can drop
+    // exactly the FIRST click that would re-add a given chip (simulating the widget lag Mehek
+    // described) while a second click on the same row - the nudge's own bounded restore attempt -
+    // behaves normally.
+    var reselectAttempts = {};
     var addOption = function (text, selected) {
       var option = document.createElement(
         location.search.includes('react-submit-option') ? 'button' : 'div'
@@ -121,10 +144,43 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
         var optionClicks = document.getElementById('react-option-clicks');
         optionClicks.textContent = String(Number(optionClicks.textContent) + 1);
         if (reactMulti) {
-          option.setAttribute('aria-selected', String(option.getAttribute('aria-selected') !== 'true'));
+          // Real react-select isMulti semantics: clicking an already-selected row REMOVES its
+          // chip; clicking it again re-ADDS one at the end of the rendered list, which is what
+          // lets a deselect/reselect cycle be tested at all.
+          var nowSelected = option.getAttribute('aria-selected') !== 'true';
+          if (nowSelected && location.search.includes('react-multi-reselect-fails-once')) {
+            reselectAttempts[text] = (reselectAttempts[text] || 0) + 1;
+            if (reselectAttempts[text] === 1) return; // the widget drops the first reselect click
+          }
+          option.setAttribute('aria-selected', String(nowSelected));
           document.querySelectorAll('.select__multi-value__label').forEach(function (chip) {
             if (chip.textContent === text) chip.remove();
           });
+          var existingPlaceholder = document.querySelector('.select__container > .select__placeholder');
+          if (nowSelected) {
+            if (existingPlaceholder) existingPlaceholder.remove();
+            // ?react-multi-reselect-wrong simulates a widget bug that commits a near neighbour
+            // instead of the row that was actually clicked - PR #154's own failure shape.
+            var landedText = location.search.includes('react-multi-reselect-wrong') ? text + ' Near' : text;
+            var restoredChip = document.createElement('div');
+            restoredChip.className = 'select__multi-value__label';
+            restoredChip.textContent = landedText;
+            restoredChip.setAttribute('aria-label', landedText);
+            document.getElementById('react').parentElement.insertBefore(
+              restoredChip, document.getElementById('react')
+            );
+          } else if (!existingPlaceholder
+            && document.querySelectorAll('.select__multi-value__label').length === 0) {
+            // Real react-select renders its placeholder once the last chip is gone. Without this a
+            // deselected control with nothing else chosen reads back 'unknown' rather than 'empty',
+            // and a single-value multi-select could never prove its deselect step actually landed.
+            var placeholder = document.createElement('div');
+            placeholder.className = 'select__placeholder';
+            placeholder.textContent = 'Select...';
+            document.getElementById('react').parentElement.insertBefore(
+              placeholder, document.getElementById('react')
+            );
+          }
           return;
         }
       var commits = document.getElementById('react-commits');
@@ -535,6 +591,8 @@ const confirmedSubmitActions = [
   { type: 'confirmAndSubmit', selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]', chooserPolicy: ATOMIC_SUBMIT_POLICY, label: 'final_submit', optional: false, maxRetries: 1, contractVersion: 2, submitKind: 'application' },
   { type: 'extract', selector: '#submitted' },
   { type: 'extract', selector: '#text', attribute: 'value' },
+  { type: 'extract', selector: '#text', attribute: 'data-litos-unverified-choice', label: 'text-unverified-marker' },
+  { type: 'extract', selector: '#text-space-events' },
   { type: 'extract', selector: '.select__single-value' },
   { type: 'extract', selector: '#react-commits' },
   { type: 'extract', selector: '#react-option-clicks' },
@@ -628,6 +686,14 @@ async function replayFailure(suffix) {
 const result = await replay();
 assert.equal(result.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
 assert.equal(result.extracted.find((entry) => entry.selector === '#text')?.value, 'Mehek Mandal');
+// Proof of movement, not just an unchanged value: a no-op nudge would also leave "Mehek Mandal"
+// untouched, so the run has to show the transient "Mehek Mandal " it typed and then removed.
+assert.equal(result.extracted.find((entry) => entry.selector === '#text-space-events')?.value, '1');
+assert.equal(
+  result.extracted.find((entry) => entry.label === 'text-unverified-marker')?.value,
+  null,
+  'a clean text nudge must never mark its own control unverified'
+);
 assert.deepEqual(result.blockers, []);
 assert.equal(result.requiredFieldConfirmation.status, 'confirmed');
 assert.equal(result.requiredFieldConfirmation.version, 2);
@@ -660,6 +726,49 @@ assert.equal(result.extracted.find((entry) => entry.selector === '#checkbox-clic
 assert.equal(result.extracted.find((entry) => entry.selector === '#newsletter-error')?.value, 'This requires an answer');
 assert.equal(result.extracted.find((entry) => entry.selector === '#file-state')?.value, 'resume.pdf');
 assert.equal(applicationPass.attempts.find((attempt) => attempt.selector === '#resume')?.outcome, 'already_committed');
+const textAttempt = applicationPass.attempts.find((attempt) => attempt.selector === '#text');
+assert.equal(textAttempt?.fieldType, 'text');
+assert.equal(textAttempt?.outcome, 'confirmed');
+
+/* THE TEXT NUDGE'S OWN RESTORE PATH, pinned the same way the dropdown cycle's is: a masking
+ * library that mangles the field on the space keystroke must not survive as the applicant's
+ * answer, and a masking library that mangles EVERY write must block rather than let the mangled
+ * text through as if it were confirmed. */
+const textRestoreRecovers = await replay('?text-hostile-mask');
+assert.equal(
+  textRestoreRecovers.extracted.find((entry) => entry.selector === '#text')?.value,
+  'Mehek Mandal',
+  'the forced restore must land byte-identical to the original text after a one-time mangle'
+);
+assert.equal(
+  textRestoreRecovers.extracted.find((entry) => entry.label === 'text-unverified-marker')?.value,
+  null,
+  'a control the restore recovered must never be marked unverified'
+);
+assert.equal(textRestoreRecovers.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(textRestoreRecovers.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+
+const textCannotBeRestored = await replay('?text-hostile-mask-permanent');
+assert.equal(
+  textCannotBeRestored.extracted.find((entry) => entry.selector === '#submitted')?.value,
+  '',
+  'a control the nudge changed and could never restore must not be allowed to submit'
+);
+assert.equal(textCannotBeRestored.requiredFieldConfirmation.status, 'blocked');
+assert.notEqual(
+  textCannotBeRestored.extracted.find((entry) => entry.selector === '#text')?.value,
+  'Mehek Mandal',
+  'the corrupted text is left on the form for a human to see, not silently repaired or hidden'
+);
+assert.equal(
+  textCannotBeRestored.extracted.find((entry) => entry.label === 'text-unverified-marker')?.value,
+  'litos-nudge-changed-the-answer'
+);
+const unrestorableTextAttempt = textCannotBeRestored.requiredFieldConfirmation.passes[0].attempts.find(
+  (attempt) => attempt.selector === '#text'
+);
+assert.equal(unrestorableTextAttempt?.outcome, 'failed');
+assert.match(unrestorableTextAttempt?.reason || '', /could not be restored/);
 
 const stickyRequiredCopy = await replay('?sticky-required-copy');
 assert.equal(
@@ -760,7 +869,9 @@ const multiValueReact = await replay(
   confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value')
 );
 assert.equal(multiValueReact.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
-assert.equal(multiValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0');
+// Mehek's own fix: deselect the stale chip, then reselect the exact same one - one click each,
+// never a click count of zero any more. The chip set must still read back byte-identical.
+assert.equal(multiValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '2');
 assert.equal(multiValueReact.extracted.find((entry) => entry.selector === '#react-commits')?.value, '0');
 assert.equal(multiValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value, 'Alpha|Beta');
 assert.equal(multiValueReact.requiredFieldConfirmation.status, 'confirmed');
@@ -770,7 +881,7 @@ const oneValueReact = await replay(
   confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value')
 );
 assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
-assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0');
+assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '2');
 assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-commits')?.value, '0');
 assert.equal(oneValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value, 'Alpha');
 assert.equal(oneValueReact.requiredFieldConfirmation.status, 'confirmed');
@@ -814,6 +925,70 @@ for (const unsafeMultiValueCase of [
   assert.equal(rejected.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value, '0', unsafeMultiValueCase);
   assert.equal(rejected.requiredFieldConfirmation.status, 'blocked', unsafeMultiValueCase);
 }
+
+/* THE FAILURE MODE THE DESELECT/RESELECT CYCLE ITSELF INTRODUCES, pinned the way Mehek asked for
+ * it: "the deselect succeeds and the reselect FAILS. Assert the control ends holding her original
+ * value via the restore, or if restoration is impossible, that the run blocks and names the
+ * control rather than reporting it filled." A naive implementation that clicked once to deselect
+ * and trusted the reselect without ever reading back would leave "Beta" permanently missing (this
+ * first case) or silently ship a coerced neighbour as the applicant's answer (the second) - the
+ * exact two shapes PR #154 shipped. */
+const reactMultiActionsWithMarker = () => [
+  ...confirmedSubmitActions.filter((action) => action.selector !== '.select__single-value'),
+  { type: 'extract', selector: '.select__container', attribute: 'data-litos-unverified-choice', label: 'react-unverified-marker' }
+];
+
+const reselectDroppedOnce = await replay(
+  '?react-multi&react-multi-reselect-fails-once',
+  reactMultiActionsWithMarker()
+);
+assert.equal(
+  reselectDroppedOnce.extracted.find((entry) => entry.selector === '#react-multi-values')?.value,
+  'Alpha|Beta',
+  'a dropped first reselect click must be recovered by the one bounded restore attempt'
+);
+assert.equal(
+  reselectDroppedOnce.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value,
+  '3',
+  'deselect, a dropped reselect, and the one bounded restore click - never a loop beyond it'
+);
+assert.equal(
+  reselectDroppedOnce.extracted.find((entry) => entry.label === 'react-unverified-marker')?.value,
+  null,
+  'a control the restore recovered must never be marked unverified'
+);
+assert.equal(reselectDroppedOnce.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(reselectDroppedOnce.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+
+const reselectCoercedToNeighbour = await replay(
+  '?react-multi&react-multi-reselect-wrong',
+  reactMultiActionsWithMarker()
+);
+assert.equal(
+  reselectCoercedToNeighbour.extracted.find((entry) => entry.selector === '#submitted')?.value,
+  '',
+  'a reselect that lands a coerced neighbour must never be reported filled or allowed to submit'
+);
+assert.equal(reselectCoercedToNeighbour.requiredFieldConfirmation.status, 'blocked');
+assert.equal(
+  reselectCoercedToNeighbour.extracted.find((entry) => entry.selector === '#react-multi-values')?.value,
+  'Alpha|Beta Near',
+  'the corrupted chip set is left on the form for a human to see, not silently repaired or hidden'
+);
+assert.equal(
+  reselectCoercedToNeighbour.extracted.find((entry) => entry.label === 'react-unverified-marker')?.value,
+  'litos-nudge-changed-the-answer',
+  'a control the restore could not recover is marked unverified the same way an unreadable choice is'
+);
+const coercedAttempt = reselectCoercedToNeighbour.requiredFieldConfirmation.passes[0].attempts.find(
+  (attempt) => attempt.label === 'Privacy Statement *'
+);
+assert.equal(coercedAttempt?.outcome, 'failed');
+assert.match(coercedAttempt?.reason || '', /could not be restored/);
+assert.equal(
+  reselectCoercedToNeighbour.requiredFieldConfirmation.passes[0].unresolved.includes('Privacy Statement *'),
+  true
+);
 
 const hiddenInvalidOnly = await replay('?hidden-invalid-only');
 assert.equal(hiddenInvalidOnly.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
