@@ -216,6 +216,7 @@ const MUTATION_DEPENDENCIES = {
   transportTypes: new Set(['fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker']),
   ashbyPublicBoardRead: () => false,
   ashbyFormValueWrite: () => false,
+  teamtailorCookieConsentWrite: () => false,
   ashbyFileBindWrite: () => false,
   ashbyFileUploadHandleRequest: () => false,
   captureAshbyOneShotUploadTarget: async (route) => route.fallback(),
@@ -242,6 +243,7 @@ function runMutationHandler(request, containmentOverrides = {}) {
   const source = extractHandler('const transportTypes = new Set([');
   const names = [
     'containment', 'transportTypes', 'block', 'ashbyPublicBoardRead', 'ashbyFormValueWrite',
+    'teamtailorCookieConsentWrite',
     'ashbyFileBindWrite', 'ashbyFileUploadHandleRequest', 'captureAshbyOneShotUploadTarget',
     'ashbyOneShotUploadTargetMatches', 'boardResumeStorageUpload', 'employerBoundTransport',
     'canonicalPageUrl', 'page', 'captchaWidgetFrame'
@@ -252,6 +254,7 @@ function runMutationHandler(request, containmentOverrides = {}) {
     async (route, reason) => { blocked.push(reason); return route.abort('blockedbyclient'); },
     MUTATION_DEPENDENCIES.ashbyPublicBoardRead,
     MUTATION_DEPENDENCIES.ashbyFormValueWrite,
+    MUTATION_DEPENDENCIES.teamtailorCookieConsentWrite,
     MUTATION_DEPENDENCIES.ashbyFileBindWrite,
     MUTATION_DEPENDENCIES.ashbyFileUploadHandleRequest,
     MUTATION_DEPENDENCIES.captureAshbyOneShotUploadTarget,

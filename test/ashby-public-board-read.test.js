@@ -117,9 +117,10 @@ test('the containment consults the allowance in both modes, and nowhere else', (
   // The form has to render before discovery can enumerate anything, so initial_navigation counts.
   assert.match(source, /return readOnlyMethod \|\| ashbyPublicBoardRead\(request\)\s*\n\s*\? route\.fallback\(\)/);
   // And the locked-mode data-fetch branch, which is where a fill-time autocomplete lands. The
-  // field-value write allowance joined this same branch on 2026-09-03, and only this one: see
-  // ashby-form-value-write.test.js, which holds that predicate to its own single call site.
-  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{/);
+  // field-value write allowance joined this same branch on 2026-09-03, and Teamtailor's cookie
+  // preference write on 2026-09-04 - both only here: see ashby-form-value-write.test.js and
+  // teamtailor-cookie-consent-write.test.js, which hold each predicate to its own single call site.
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\s*\n\s*&& !teamtailorCookieConsentWrite\(request\)\) \{/);
   // The violation assert is untouched: an employer-bound block that is not this read is still fatal.
   assert.match(source, /A non-submit action attempted employer transport without exact final authority/);
   // "and nowhere else" has to be measured, or a third call site could widen this silently.

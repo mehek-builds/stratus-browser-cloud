@@ -389,9 +389,9 @@ test('MUTATION-CHECK: the one-shot upload target is consumed the instant it is a
 
 test('the file-bind write is admitted in the same locked-fill gate as ApiSetFormValue, without altering that gate', () => {
   const source = fs.readFileSync(new URL('../src/managed-browser.js', import.meta.url), 'utf8');
-  // The pre-existing ApiSetFormValue gate, byte-for-byte unchanged - same pin
-  // containment-readonly-fetch.test.js already holds it to.
-  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\) \{\s*\n\s*return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
+  // The pre-existing ApiSetFormValue gate, unchanged but for the Teamtailor cookie-preference arm
+  // that joined it on 2026-09-04 - same pin containment-readonly-fetch.test.js already holds it to.
+  assert.match(source, /if \(!readOnlyDataFetch && !ashbyPublicBoardRead\(request\) && !ashbyFormValueWrite\(request\)\s*\n\s*&& !teamtailorCookieConsentWrite\(request\)\) \{\s*\n\s*return block\(route, request\.resourceType\(\) \+ ' transport'\);/);
   assert.equal(source.split('ashbyFormValueWrite(request)').length - 1, 1,
     'the field-value write allowance is still called from exactly one place');
   // The new admission sits ahead of it, in the same transportTypes branch, gated on nothing but the
