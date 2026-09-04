@@ -133,10 +133,46 @@ export async function waitForLocalScreenshot(session, phase, waitMs, pollMs = SC
   }
 }
 
-async function readResult(session, phase, screenshot, screenshotWait) {
+/* A PRESSED RUN'S PICTURE IS THE RECEIPT, AND THIS HOST WAS THROWING IT AWAY.
+ *
+ * The sandbox contract (screenshotWaitMsForResult) waits for the preview only on an UNPRESSED
+ * result, so that a stalled optional picture can never delay a confirmed submission receipt. On
+ * this host that rule had the opposite effect: the runner publishes the result first and captures
+ * the screenshot seconds later, readResult read the PNG exactly once with no wait, and cleanup then
+ * killed the runner mid-capture and deleted its directory. So every pressed run left with
+ * screenshot null, and litos-api, which stores the run's screenshot as the picture of a pressed
+ * result that could not be confirmed (previewUrl on the unverified record), showed the applicant
+ * the pre-press preview instead of what the employer's page said after the press. Measured on the
+ * Hudson River Trading send of 2026-09-04: submitPressed true, submitState unknown, screenshot
+ * false, and the applicant told to "check the employer portal" with nothing to check against.
+ *
+ * A pressed result now waits for its picture, bounded: the runner's own capture timeout is 15s,
+ * and a full-page capture of a long board takes single seconds, so 20s covers it with margin
+ * while still ending on a runner that exits without publishing. The employer result itself was
+ * read before this wait began and is never delayed or changed by it. Unpressed results keep the
+ * sandbox contract exactly. */
+export const PRESSED_SCREENSHOT_WAIT_MS = 20_000;
+/* The wait ends this many milliseconds before the caller's own deadline, so the answer, the
+ * continuation token and the concurrency slot leave in time even when the picture does not. In
+ * the buzzer shape (result published at the runner's action deadline, browser already closing,
+ * capture impossible) a flat wait would have answered ten seconds AFTER the caller hung up. */
+export const PRESSED_SCREENSHOT_RETURN_MARGIN_MS = 3_000;
+
+export function localScreenshotWaitMsForResult(screenshotWait, result, { providerDeadlineAt, now = Date.now() } = {}) {
+  if (result?.submitOutcome?.pressed !== true) return screenshotWaitMsForResult(screenshotWait, result);
+  const deadlineMs = typeof providerDeadlineAt === 'string' ? Date.parse(providerDeadlineAt) : NaN;
+  if (!Number.isFinite(deadlineMs)) return PRESSED_SCREENSHOT_WAIT_MS;
+  return Math.max(0, Math.min(PRESSED_SCREENSHOT_WAIT_MS, deadlineMs - now - PRESSED_SCREENSHOT_RETURN_MARGIN_MS));
+}
+
+async function readResult(session, phase, screenshot, screenshotWait, providerDeadlineAt) {
   const result = JSON.parse(await fs.readFile(path.join(session.directory, `stratus-result-${phase}.json`), 'utf8'));
   if (screenshot) {
-    const bytes = await waitForLocalScreenshot(session, phase, screenshotWaitMsForResult(screenshotWait, result));
+    const bytes = await waitForLocalScreenshot(
+      session,
+      phase,
+      localScreenshotWaitMsForResult(screenshotWait, result, { providerDeadlineAt }),
+    );
     result.screenshot = bytes?.toString('base64') || null;
   }
   return result;
@@ -235,7 +271,7 @@ async function startRun(input) {
       await terminalResults.retain(retainedAttempt, { state: 'failed', error, runProgress: error.runProgress });
       throw error;
     }
-    const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
+    const result = await readResult(session, 0, context.screenshot, context.screenshotWait, context.providerDeadlineAt);
     const continuation = Boolean(token && continuationEligible(result, context.continuationCheckpoint));
     if (continuation) {
       session.expiresAt = result.continuationExpiresAt || expiresAt;
@@ -309,7 +345,7 @@ async function continueRun(input) {
     await terminalResults.retain(continuationAttempt, { state: 'failed', error, runProgress: error.runProgress });
     throw error;
   }
-  const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait);
+  const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait, continuation.providerDeadlineAt);
   await cleanup(session);
   const retained = await terminalResults.retain(continuationAttempt, { state: 'completed', run: result });
   if (retained) result.terminalResult = { resultId: retained.resultId };
