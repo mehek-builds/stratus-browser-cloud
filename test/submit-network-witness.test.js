@@ -102,5 +102,21 @@ test('the watch is armed at both press sites and travels in submitOutcome', () =
   const legacyClick = SANDBOX_RUNNER.indexOf('await locator.click();', armSites[1]);
   assert.ok(legacyClick > armSites[1],
     'the legacy watch is armed before the final locator is clicked');
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(await observeForResult\([\s\S]*?readSubmitOutcome\(\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/);
+  // Positional checks, not one lazy-backtracking regex spanning the two: a pattern with several
+  // candidate 'observeForResult('/'readSubmitOutcome()' starting points across a megabyte-plus
+  // string is exactly the shape that can hit a regex engine's own backtracking limit, which is
+  // version-dependent and not something a source-shape test should be sensitive to.
+  const submitOutcomeStart = SANDBOX_RUNNER.indexOf('const submitOutcome = finalSubmitPressed');
+  assert.ok(submitOutcomeStart > 0, 'the submitOutcome construction must exist');
+  const observeForResultCall = SANDBOX_RUNNER.indexOf('await observeForResult(', submitOutcomeStart);
+  assert.ok(observeForResultCall > submitOutcomeStart,
+    'submitOutcome must read the post-press state through observeForResult');
+  const readOutcomeCall = SANDBOX_RUNNER.indexOf('readSubmitOutcome()', observeForResultCall);
+  assert.ok(readOutcomeCall > observeForResultCall && readOutcomeCall < observeForResultCall + 200,
+    'observeForResult must call readSubmitOutcome directly, not some other reader');
+  const networkTernary = SANDBOX_RUNNER.indexOf(
+    'submitNetwork ? { network: submitNetwork } : {}', readOutcomeCall,
+  );
+  assert.ok(networkTernary > readOutcomeCall && networkTernary < readOutcomeCall + 500,
+    'the network witness must be spread onto submitOutcome right after the outcome read, not lost');
 });

@@ -1308,6 +1308,76 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'the gate must name the phone, and must not blame the answered country, got ' + JSON.stringify(phoneEmpty.blockers));
 }
 
+/* THE FINAL PRESS MUST NOT SPEND ITSELF ON A RECEIPT IT CANNOT STAY TO READ.
+ *
+ * Measured 2b521d32 (Hudson River Trading, Greenhouse embed, 120 actions, 47 fields, 2026-09-04):
+ * the press cleared the old 2-second pre-click floor with essentially nothing left, the provider
+ * deadline timer then force-closed the browser mid-poll before the post-press settle wait and
+ * confirmation read could finish, and the run could only report pressed=true, state="unknown".
+ *
+ * Two cases prove the fix from both sides, against the SAME complete form: a provider window too
+ * tight to fit the click plus the whole settle-and-confirm sequence must withhold the click and
+ * publish why, with the filled-field evidence intact so the caller can retry the send without
+ * redoing the fill; a window with room to spare must still press exactly as before.
+ */
+{
+  const fill = (selector, value) => ({ type: 'fill', selector, value, label: selector.slice(1) });
+  const submitAction = {
+    type: 'confirmAndSubmit',
+    selector: 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]',
+    chooserPolicy: ATOMIC_SUBMIT_POLICY,
+    label: 'final_submit',
+    optional: false,
+    maxRetries: 1,
+    contractVersion: 2,
+    submitKind: 'application'
+  };
+  const completeForm = [
+    fill('#req_name', 'Mehek Mandal'),
+    fill('#req_email', 'person@example.com'),
+    fill('#req_phone', '+971 50 123 4567')
+  ];
+  // 10s host-return margin plus 12s of runway: comfortably past the 2s floor every earlier gate in
+  // the run still checks on its own, comfortably short of the 42s (2000ms postSubmitSettleMs below
+  // plus the runner's fixed 40000ms CONFIRMATION_READ_BUDGET_MS) the final press itself now needs.
+  const tightDeadline = new Date(Date.now() + 10_000 + 12_000).toISOString();
+
+  const withheld = await replay([
+    ...completeForm,
+    submitAction,
+    { type: 'extract', selector: '#submitted' }
+  ], { allowSubmit: true, providerDeadlineAt: tightDeadline, postSubmitSettleMs: 2000 });
+  assert.equal(withheld.submitOutcome.pressed, false,
+    'a press that cannot be confirmed in the time left must not be pressed at all, got ' + JSON.stringify(withheld.submitOutcome));
+  assert.equal(withheld.submitOutcome.state, 'not_attempted');
+  assert.equal(valueOf(withheld, '#submitted'), '',
+    'the withheld click must never reach the page, got text ' + JSON.stringify(withheld.text));
+  assert.ok(withheld.submitRefusal, 'a withheld press must publish why it was withheld, got ' + JSON.stringify(withheld));
+  assert.equal(withheld.submitRefusal.code, 'BUDGET_EXHAUSTED_BEFORE_PRESS');
+  assert.equal(withheld.submitRefusal.requiredMs, 42_000,
+    '2000ms postSubmitSettleMs plus the fixed 40000ms confirmation-read budget');
+  assert.ok(withheld.submitRefusal.remainingMs < withheld.submitRefusal.requiredMs
+    && withheld.submitRefusal.remainingMs > 2_000,
+    'remainingMs must sit between the 2s floor every earlier gate cleared and the 42s this press needed, got '
+    + withheld.submitRefusal.remainingMs);
+  assert.deepEqual(withheld.filledFields.sort(), ['req_email', 'req_name', 'req_phone'],
+    'the filled-field evidence must survive a withheld press so the caller can retry without redoing the fill');
+  assert.ok(withheld.blockers.some((entry) => /provider deadline left/.test(entry)),
+    'the run must say the click was withheld for lack of provider budget, got ' + JSON.stringify(withheld.blockers));
+
+  // Same form, same fixture, a provider window with room to spare: the press must still happen.
+  const pressed = await replay([
+    ...completeForm,
+    submitAction,
+    { type: 'extract', selector: '#submitted' }
+  ], { allowSubmit: true, postSubmitSettleMs: 2000 });
+  assert.equal(pressed.submitOutcome.pressed, true,
+    'a provider window with room for the full settle-and-confirm sequence must still press, got ' + JSON.stringify(pressed.submitOutcome));
+  assert.equal(valueOf(pressed, '#submitted'), 'yes', 'the pressed click must actually reach the page');
+  assert.equal(pressed.submitRefusal, undefined,
+    'a press that went through must carry no refusal, got ' + JSON.stringify(pressed.submitRefusal));
+}
+
 // A choice control is answered from its OWN menu, and an answer already on the form survives every
 // later candidate.
 //

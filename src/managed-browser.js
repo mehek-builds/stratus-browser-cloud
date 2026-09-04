@@ -1289,6 +1289,74 @@ let terminalFailureInput = null;
       throw new Error('Managed provider deadline expired before employer submit');
     }
   };
+  /* THE FINAL PRESS NEEDS ROOM TO CONFIRM ITSELF, NOT MERELY ROOM TO HAPPEN.
+   *
+   * Measured 2b521d32 (Hudson River Trading, Greenhouse embed, 120 actions, 47 fields,
+   * 2026-09-04): the completion line read durationMs=157418 submitPressed=true
+   * submitState="unknown". assertProviderActionWindow(providerMinimumSubmitWindowMs) - a bare
+   * 2 seconds - was satisfied and the click landed with essentially nothing left. The provider
+   * deadline timer then force-closed the browser mid-poll, so the post-press settle wait
+   * (POST_SUBMIT_SETTLE_MS, below) and the confirmation read it runs never finished, and the run
+   * could only report the one fact recorded before the click fired: pressed, state unknown.
+   *
+   * A press that cannot be confirmed within the time left is worse than no press at all: it
+   * spends the one action that can duplicate an application at an employer, in exchange for a
+   * receipt this run will never get to read. So the exact-final-authority press - confirmAndSubmit,
+   * or a click labelled final_submit, including the Greenhouse code resubmit that finishes it - is
+   * gated on having enough of the window left for the WHOLE sequence that follows the click, not
+   * merely the click itself.
+   *
+   * CONFIRMATION_READ_BUDGET_MS is the fixed cost paid BETWEEN the click and the settle loop
+   * starting, not the settle loop's own budget, and it has two parts, not one - both existing
+   * timeouts already in this file, not new guesses.
+   *
+   * EVERY call site pays the first part: press, then page.waitForLoadState('networkidle',
+   * { timeout: 20000 }), and only then call waitForPostSubmitApplicationState.
+   *
+   * ATOMIC SUBMIT V4 PAYS A SECOND, EARLIER PART FIRST, and it is the one this constant used to
+   * miss. Inside confirmAndSubmitPass, a v4 click's activation is decided by
+   * decideSubmitTransportGate, which awaits native[0].completed - a promise driven by
+   * replayOneNativeHop, whose OWN hard deadline is 'Date.now() + 20_000' (DNS, connect, request
+   * and response, see its definition). That whole exchange runs and finishes BEFORE
+   * confirmAndSubmitPass even returns to the caller that starts the networkidle wait above, so a
+   * slow v4 native hop and a slow post-press page render are additive, not the same 20s counted
+   * twice. This constant is a v3-blind, uniform ceiling: it does not know which chooser version an
+   * upcoming press will use (two of its three call sites have no chooserVersion at all), so it
+   * budgets for the more expensive path everywhere rather than under-count the one that matters
+   * most - a Greenhouse security-code resubmit is exactly the v4 case this constant used to miss,
+   * and exactly the family the incident above was measured on. */
+  const CONFIRMATION_READ_BUDGET_MS = 40_000;
+  /* THE ONE PLACE THIS NUMBER IS COMPUTED, so the pre-press budget check and the settle wait it is
+   * guarding can never drift apart. See waitForPostSubmitApplicationState below for why the value
+   * is shaped the way it is; this function only holds the arithmetic. */
+  const resolvePostSubmitSettleMs = (candidateInput) => {
+    const clamp = (value) => Math.min(value, 30_000);
+    const requested = Number(candidateInput && candidateInput.postSubmitSettleMs);
+    if (Number.isFinite(requested) && requested > 0) return clamp(requested);
+    const fromEnv = Number(
+      typeof process !== 'undefined' && process.env && process.env.LITOS_POST_SUBMIT_SETTLE_MS
+    );
+    if (Number.isFinite(fromEnv) && fromEnv > 0) return clamp(fromEnv);
+    return 30_000;
+  };
+  /* Null means there is enough of the provider's window left to press AND to run the full
+   * post-press confirmation sequence, so the caller may proceed exactly as before. A non-null
+   * return means the press must be withheld: assertNoDurableTerminalAuthority has already run (and
+   * would already have thrown), so what is left to decide here is timing alone, and this never
+   * throws for timing - the run must still reach its own result-construction code and publish a
+   * gracefully unattempted outcome rather than dying with an unstructured error. */
+  const finalPressBudgetShortfall = () => {
+    assertNoDurableTerminalAuthority();
+    const requiredMs = resolvePostSubmitSettleMs(input) + CONFIRMATION_READ_BUDGET_MS;
+    const remainingMs = providerActionDeadlineMs - Date.now();
+    if (!providerDeadlineExpired && remainingMs >= requiredMs) return null;
+    return { code: 'BUDGET_EXHAUSTED_BEFORE_PRESS', remainingMs, requiredMs };
+  };
+  // One sentence, called at all three withholding sites, so a future wording change is one edit
+  // instead of three kept in sync by hand.
+  const finalPressShortfallReason = (shortfall) => 'the provider deadline left ' + shortfall.remainingMs
+    + 'ms before employer submit, short of the ' + shortfall.requiredMs
+    + 'ms needed to press and confirm the result';
   applyProviderDeadline(input.providerDeadlineAt);
   acquireDispatchLock();
   assertProviderActionWindow(providerMinimumSubmitWindowMs);
@@ -4900,6 +4968,15 @@ let terminalFailureInput = null;
      * 13bccb2d (Skydio, Ashby, 2026-08-09) is the case: the run was killed while this was the only
      * fact anybody needed, and it was not recorded anywhere. */
     let finalSubmitPressed = false;
+    /* WHY THE EXACT-FINAL-AUTHORITY PRESS WAS WITHHELD, when it was. Null on every ordinary run.
+     * Set from finalPressBudgetShortfall() when the provider's remaining window could not fit the
+     * click plus the full post-press confirmation sequence, so the run declined to press rather
+     * than spend the one irreversible action on a receipt it could not stay to read. Reported as
+     * its own top-level result field (see resultPayload) rather than folded into submitOutcome,
+     * so a caller that does not yet know this field can go on reading pressed/state exactly as
+     * before: this run still reports pressed: false, state: 'not_attempted', same as any other
+     * reason the run never clicked. */
+    let submitRefusal = null;
     /* WHAT THE SUBMIT REQUEST ITSELF CAME BACK WITH, because the page is allowed to say nothing.
      *
      * Measured on the live Easy Dynamics Rippling form, twice (2026-08-20, 15:15Z and 17:09Z):
@@ -10360,26 +10437,25 @@ let terminalFailureInput = null;
        *
        * Injectable so a test can choose its own window instead of depending on wall-clock coincidence
        * between a fixture timeout, this deadline and the 15s receipt-observation TTL. Clamped to 30s,
-       * because this decides how long a run holds a browser open. */
-      const POST_SUBMIT_SETTLE_MS = (() => {
-        const clamp = (value) => Math.min(value, 30_000);
-        // Per-run first: the delayed-receipt replay needs its own exact window and must outrank the
-        // suite-wide default below.
-        const requested = Number(input && input.postSubmitSettleMs);
-        if (Number.isFinite(requested) && requested > 0) return clamp(requested);
-        /* THEN THE SUITE-WIDE DEFAULT, and this exists for a measured reason.
-         *
-         * At 30s the verify suite exceeded a 20 MINUTE ci budget, then exceeded 30 minutes after the
-         * budget was raised - 30m15s, cancelled, no assertion failure. Every replay case that ends on
-         * a genuinely ambiguous submit spends the whole window before giving up, and there are many.
-         * Raising the budget again just moves the wall.
-         *
-         * So the suite sets this and production does not. A sandbox run has no such variable and gets
-         * the full 30s, which is the whole point of the change. */
-        const fromEnv = Number(typeof process !== 'undefined' && process.env && process.env.LITOS_POST_SUBMIT_SETTLE_MS);
-        if (Number.isFinite(fromEnv) && fromEnv > 0) return clamp(fromEnv);
-        return 30_000;
-      })();
+       * because this decides how long a run holds a browser open.
+       *
+       * Per-run first: the delayed-receipt replay needs its own exact window and must outrank the
+       * suite-wide default below.
+       *
+       * THEN THE SUITE-WIDE DEFAULT, and this exists for a measured reason.
+       *
+       * At 30s the verify suite exceeded a 20 MINUTE ci budget, then exceeded 30 minutes after the
+       * budget was raised - 30m15s, cancelled, no assertion failure. Every replay case that ends on
+       * a genuinely ambiguous submit spends the whole window before giving up, and there are many.
+       * Raising the budget again just moves the wall.
+       *
+       * So the suite sets this and production does not. A sandbox run has no such variable and gets
+       * the full 30s, which is the whole point of the change.
+       *
+       * Computed by resolvePostSubmitSettleMs, defined near the top of the runner next to the other
+       * provider-deadline machinery, so the pre-press budget gate can require exactly this many
+       * milliseconds before committing to a click rather than a separate guess at the same number. */
+      const POST_SUBMIT_SETTLE_MS = resolvePostSubmitSettleMs(input);
       const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
@@ -15158,7 +15234,22 @@ let terminalFailureInput = null;
           }
         }
         if (!blocked) {
-          assertProviderActionWindow(providerMinimumSubmitWindowMs);
+          // See finalPressBudgetShortfall: this both replaces assertProviderActionWindow's durable-
+          // authority check (still enforced, still throws) and its 2-second floor (now the much
+          // larger settle-plus-confirmation requirement) with a press that can be gracefully
+          // withheld instead of a run that dies mid-click with nothing published.
+          const finalPressShortfall = finalPressBudgetShortfall();
+          if (finalPressShortfall) {
+            submitRefusal = finalPressShortfall;
+            blockerReason = 'provider_budget_exhausted_before_press';
+            unresolved.push('Submit withheld: ' + finalPressShortfallReason(finalPressShortfall));
+            blocked = true;
+            // Same breadcrumb an activation-gate rejection leaves a few lines below: a crash between
+            // here and the run's own result write must not lose the one fact that decided this.
+            recordCrashProgress({ phase, stage: 'submit_blocked', submitPressed: false });
+          }
+        }
+        if (!blocked) {
           if (chooserVersion !== 4) authorizeManagedFinalTransport(currentInput, action);
           armSubmitNetworkWatch();
           recordCrashProgress({
@@ -15424,6 +15515,7 @@ let terminalFailureInput = null;
     submitGateBlockers.length = 0;
     requiredFieldConfirmation = null;
     finalSubmitChooser = null;
+    submitRefusal = null;
     successfulAddressIntegrityFailure = false;
     let exactPageUrlCheckedBeforeApplicantData = false;
     let submitDecisionTerminal = false;
@@ -16693,7 +16785,15 @@ let terminalFailureInput = null;
               supplied: true,
               entered: true,
               resubmitted: verification.pass.submissionOutcome === 'clicked',
-              outcome: codeOutcome
+              // codeOutcome's own default, 'not_entered', is right for the case that predates this
+              // press attempt entirely; it is wrong here, where the code WAS entered and this exact
+              // press was withheld by finalPressBudgetShortfall a moment ago (submitRefusal can only
+              // be set by the confirmAndSubmitPass call just above). Report no verdict rather than a
+              // contradictory 'entered: true, outcome: not_entered' - submitRefusal is where the
+              // reason lives.
+              outcome: submitRefusal && verification.pass.submissionOutcome !== 'clicked'
+                ? null
+                : codeOutcome
             };
           }
         } else {
@@ -16740,7 +16840,26 @@ let terminalFailureInput = null;
         // response worth recording is the one the click itself causes, and a watch attached after
         // the click races the request it exists to see.
         if (isFinalSubmitAction(action)) {
-          assertProviderActionWindow(providerMinimumSubmitWindowMs);
+          // See finalPressBudgetShortfall: replaces assertProviderActionWindow's 2-second floor
+          // (durable-authority is still checked, and still throws) with a press that can be
+          // gracefully withheld rather than a run that dies mid-click with nothing published.
+          const finalPressShortfall = finalPressBudgetShortfall();
+          if (finalPressShortfall) {
+            submitRefusal = finalPressShortfall;
+            skipped.push((action.label || 'final_submit') + ': submit withheld, '
+              + finalPressShortfallReason(finalPressShortfall));
+            // submitKind must travel with this patch, not wait for the activation call below: a
+            // 'submit_blocked'/'submit_activation_started' checkpoint with no submitKind yet set is
+            // itself an inconsistent shape (managedBrowserProgressStateIsConsistent's
+            // activationProgress branch requires one), which would discard this whole checkpoint.
+            recordCrashProgress({
+              phase,
+              stage: 'submit_blocked',
+              submitPressed: false,
+              submitKind: action.securityCode ? 'verification' : 'application'
+            });
+            continue;
+          }
           authorizeManagedFinalTransport(currentInput, action);
           armSubmitNetworkWatch();
           recordCrashProgress({
@@ -16826,22 +16945,52 @@ let terminalFailureInput = null;
             // Resubmitting is the whole point: Greenhouse's own email says "After you enter the
             // code, resubmit your application." A code typed into a form nobody sends changes
             // nothing.
-            assertProviderActionWindow(providerMinimumSubmitWindowMs);
-            await locator.click().catch(() => undefined);
-            await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
-            // The same verdict the atomic branch above makes, for the same measured reason: the
-            // control is still attached while a client-rendered view swaps, so a receipt outranks it.
-            // Two code paths reaching opposite conclusions about the same page is how one of them
-            // stays wrong without anyone noticing.
-            await waitForPostSubmitApplicationState({ securityCodeSettles: false });
-            const receipt = await readSubmitOutcome();
-            const still = await readSecurityCodeChallenge();
-            securityCodeAttempt = {
-              supplied: true,
-              entered: true,
-              resubmitted: true,
-              outcome: securityCodeVerdict(receipt, still)
-            };
+            //
+            // See finalPressBudgetShortfall: this is the exact-final-authority press for the code
+            // flow, so it is gated the same way the other two are. finalSubmitPressed is already
+            // true from the FIRST click above (the one that revealed this code control), so
+            // withholding only this second press still reports pressed: true - correctly, since a
+            // press did happen - and leaves submitOutcome.state for the fresh end-of-run page read
+            // to decide, exactly as the entry !== 'entered' branch above already does.
+            const finalPressShortfall = finalPressBudgetShortfall();
+            if (finalPressShortfall) {
+              submitRefusal = finalPressShortfall;
+              // outcome stays null rather than a new enum value: recordCrashProgress mirrors this
+              // into the durable progress file's securityCodeOutcome, whose validator only accepts
+              // 'accepted'/'rejected'/'no_control'/'not_entered', and separately requires any
+              // truthy value to agree with verificationPressed (already true from the first click)
+              // by being 'accepted' or 'rejected' - neither of which happened here. null clears
+              // that whole check rather than tripping it, and is the honest answer: no resubmit
+              // verdict exists to report. submitRefusal below is the one place that says why.
+              securityCodeAttempt = { supplied: true, entered: true, outcome: null, resubmitted: false };
+              skipped.push('security_code: resubmit withheld, ' + finalPressShortfallReason(finalPressShortfall));
+              /* NO recordCrashProgress HERE, unlike the other two sites - it would corrupt the very
+               * breadcrumb it exists to leave. The first click already recorded
+               * stage: 'submit_released' with verificationSubmitPressed: true, which
+               * managedBrowserProgressStateIsConsistent accepts. Re-stamping stage: 'submit_blocked'
+               * (an activationProgress stage) here would violate that validator's OWN rule that an
+               * activation/blocked checkpoint for the current kind must not already show that kind
+               * pressed - true here because a press for this exact kind already happened - and
+               * normalizeManagedBrowserProgress discards the ENTIRE progress object rather than
+               * partially trust it. Leaving the first click's own checkpoint standing is strictly
+               * safer: honest, and already valid. */
+            } else {
+              await locator.click().catch(() => undefined);
+              await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+              // The same verdict the atomic branch above makes, for the same measured reason: the
+              // control is still attached while a client-rendered view swaps, so a receipt outranks
+              // it. Two code paths reaching opposite conclusions about the same page is how one of
+              // them stays wrong without anyone noticing.
+              await waitForPostSubmitApplicationState({ securityCodeSettles: false });
+              const receipt = await readSubmitOutcome();
+              const still = await readSecurityCodeChallenge();
+              securityCodeAttempt = {
+                supplied: true,
+                entered: true,
+                resubmitted: true,
+                outcome: securityCodeVerdict(receipt, still)
+              };
+            }
           }
         }
       }
@@ -18343,6 +18492,12 @@ let terminalFailureInput = null;
       submitOutcome,
       requiredFieldConfirmation,
       ...(finalSubmitChooser ? { finalSubmitChooser } : {}),
+      // A caller that does not know this field still reads pressed: false, state: 'not_attempted'
+      // off submitOutcome above, same as any other reason this run never clicked. A caller that
+      // does know it can tell "the deadline ran out before we could safely press" apart from every
+      // other not_attempted reason, and retry the send under a fresh authorization instead of
+      // reporting an ordinary unsent packet. See finalPressBudgetShortfall.
+      ...(submitRefusal ? { submitRefusal } : {}),
       blockedSubmits,
       continuationOffered,
       ...(continuationExpiresAt ? { continuationExpiresAt } : {}),

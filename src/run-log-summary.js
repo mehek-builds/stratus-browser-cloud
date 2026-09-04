@@ -65,6 +65,11 @@ export function managedRunProgressLogSummary(progress) {
  * missing preview two seconds after they were requested, and this service had logged nothing at
  * all, because only failures were logged and the run had not failed. Hostname only, never the
  * page text or any extracted value. */
+// Bounded and allow-listed for the same reason every other enum field in this module is: the raw
+// value sits on a result an employer page can influence, and a log line is not the place to find
+// out what that page can make Litos say about it.
+const submitRefusalCodes = new Set(['BUDGET_EXHAUSTED_BEFORE_PRESS']);
+
 export function managedRunCompletionLogSummary(input, run, durationMs) {
   const url = (() => {
     try { return new URL(String(run?.url ?? input?.url ?? '')).hostname; } catch { return null; }
@@ -90,6 +95,11 @@ export function managedRunCompletionLogSummary(input, run, durationMs) {
     humanVerification: run?.humanVerification?.kind ?? null,
     submitPressed: run?.submitOutcome?.pressed === true,
     submitState: run?.submitOutcome?.state ?? null,
+    // Null on every ordinary run. See finalPressBudgetShortfall in src/managed-browser.js: this is
+    // what turns "submitPressed=false submitState=not_attempted" from an ordinary pre-submit-gate
+    // refusal into a deadline the caller can retry under a fresh authorization, without needing the
+    // full result to tell the two apart.
+    submitRefusalCode: submitRefusalCodes.has(run?.submitRefusal?.code) ? run.submitRefusal.code : null,
     requiredFieldConfirmation: run?.requiredFieldConfirmation?.status ?? null,
     terminalResult: Boolean(run?.terminalResult),
     actionOutcomes: outcomes

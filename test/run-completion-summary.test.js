@@ -45,4 +45,35 @@ test('a bare run and a bad url summarise without throwing', () => {
   assert.equal(summary.durationMs, null);
   assert.equal(summary.screenshot, false);
   assert.deepEqual(summary.actionOutcomes, {});
+  assert.equal(summary.submitRefusalCode, null,
+    'a run with no submitRefusal at all must summarise it as null, not throw reading .code off undefined');
+});
+
+test('a withheld press names its refusal code on the completion line, and only an allow-listed one', () => {
+  const budgetExhausted = managedRunCompletionLogSummary(
+    { url: 'https://acme.breezy.hr/p/1-role/apply' },
+    {
+      url: 'https://acme.breezy.hr/p/1-role/apply',
+      submitOutcome: { pressed: false, state: 'not_attempted' },
+      submitRefusal: { code: 'BUDGET_EXHAUSTED_BEFORE_PRESS', remainingMs: 4_000, requiredMs: 22_000 }
+    },
+    100
+  );
+  assert.equal(budgetExhausted.submitPressed, false);
+  assert.equal(budgetExhausted.submitState, 'not_attempted');
+  assert.equal(budgetExhausted.submitRefusalCode, 'BUDGET_EXHAUSTED_BEFORE_PRESS');
+
+  // An unrecognised code must not ride the log line unfiltered: submitRefusal sits on a result an
+  // employer page can influence, same reasoning as every other allow-listed field in this module.
+  const unrecognised = managedRunCompletionLogSummary(
+    { url: 'https://acme.breezy.hr/p/1-role/apply' },
+    {
+      url: 'https://acme.breezy.hr/p/1-role/apply',
+      submitOutcome: { pressed: false, state: 'not_attempted' },
+      submitRefusal: { code: 'SOMETHING_AN_OLDER_OR_NEWER_RUNNER_MADE_UP' }
+    },
+    100
+  );
+  assert.equal(unrecognised.submitRefusalCode, null,
+    'an unrecognised submitRefusal.code must summarise as null, got ' + JSON.stringify(unrecognised.submitRefusalCode));
 });

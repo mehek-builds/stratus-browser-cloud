@@ -4297,6 +4297,54 @@ test('consistent pre-submit and confirmation progress remains available', async 
         securityCodeOutcome: 'accepted',
       },
     },
+    /* The three finalPressBudgetShortfall withholding checkpoints, one per call site. Each is
+     * exactly what recordCrashProgress writes at that site today; a change to any of them that
+     * breaks this validator would discard the checkpoint silently rather than fail loudly, which
+     * is the class of bug this whole test exists to catch. */
+    {
+      name: 'application submit withheld for provider budget before any press',
+      progress: {
+        version: 1,
+        phase: 0,
+        stage: 'submit_blocked',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: null,
+      },
+    },
+    {
+      name: 'verification submit withheld for provider budget before any press',
+      progress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_blocked',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'verification',
+        policyVersion: null,
+      },
+    },
+    {
+      // The Greenhouse code-resubmit site deliberately calls recordCrashProgress nowhere in its
+      // withholding branch (see its comment): the first click already left this exact checkpoint,
+      // stage: 'submit_released' with verificationSubmitPressed: true, and it is left standing
+      // rather than re-stamped, because re-stamping stage: 'submit_blocked' for a kind already
+      // marked pressed is what this test's OWN validator refuses.
+      name: 'security code resubmit withheld after the first click already pressed',
+      progress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        policyVersion: null,
+      },
+    },
   ];
 
   for (const entry of cases) {
@@ -4322,6 +4370,34 @@ test('consistent pre-submit and confirmation progress remains available', async 
   }
 });
 
+test('a withheld final press leaves the runner-string checkpoint the cases above were pinned from', () => {
+  /* The 'consistent pre-submit and confirmation progress' cases just above prove three exact
+   * shapes are ACCEPTED by the validator. This test is what keeps them true of the actual runner
+   * rather than of three objects this file happens to also type by hand: it pins the literal
+   * recordCrashProgress call at each of the three finalPressBudgetShortfall withholding sites, so
+   * a future edit that drops a field (as submitKind was, once, from the plain-click site, during
+   * this very fix) fails here instead of only in a crash nobody can reproduce. */
+  // Site 1, confirmAndSubmitPass: submitKind travels via the pre-existing phase_started
+  // checkpoint (see 'one provider deadline governs...' above), so this patch does not repeat it.
+  assert.match(SANDBOX_RUNNER,
+    /blocked = true;\n[\s\S]{0,200}?recordCrashProgress\(\{ phase, stage: 'submit_blocked', submitPressed: false \}\);/);
+  // Site 2, the plain click final_submit handler: nothing has set submitKind yet at this point in
+  // THIS action, so it must travel in this same patch or the checkpoint is inconsistent.
+  assert.match(SANDBOX_RUNNER,
+    /recordCrashProgress\(\{\s*phase,\s*stage: 'submit_blocked',\s*submitPressed: false,\s*submitKind: action\.securityCode \? 'verification' : 'application'\s*\}\);\s*continue;/);
+  // Site 3, the Greenhouse code-resubmit: deliberately calls recordCrashProgress nowhere in its
+  // withholding branch, because the first click's own checkpoint is already valid and re-stamping
+  // it here for an already-pressed kind is exactly what the validator refuses.
+  const outcomeNullMarker = "outcome: null, resubmitted: false };";
+  const resubmitBranch = SANDBOX_RUNNER.slice(
+    SANDBOX_RUNNER.indexOf(outcomeNullMarker),
+    SANDBOX_RUNNER.indexOf('} else {', SANDBOX_RUNNER.indexOf(outcomeNullMarker)),
+  );
+  assert.ok(resubmitBranch.length > 0 && resubmitBranch.length < 2000, 'the withholding branch slice must be found and bounded');
+  // The call itself, not the explanatory comment naming it, is what must be absent.
+  assert.doesNotMatch(resubmitBranch, /recordCrashProgress\(/);
+});
+
 test('the runner checkpoints only bounded submit progress around activation and result writes', () => {
   assert.match(SANDBOX_RUNNER, /stage: 'launch',[\s\S]*submitPressed: false,[\s\S]*applicationSubmitPressed: false,[\s\S]*verificationSubmitPressed: false,[\s\S]*submitKind: null,[\s\S]*policyVersion: null/);
   assert.match(SANDBOX_RUNNER, /stage: 'submit_activation_started',[\s\S]*submitKind: action\.submitKind/);
@@ -4338,16 +4414,49 @@ test('one provider deadline governs launch, continuation, and every physical sub
   assert.match(SANDBOX_RUNNER, /providerActionDeadlineMs = deadlineMs - providerResponseMarginMs/);
   assert.match(SANDBOX_RUNNER, /providerDeadlineExpired = true;\n\s*if \(browser\) void browser\.close/);
   assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
-  assert.match(
-    SANDBOX_RUNNER,
-    // An exact-mutation transport authorization may sit inside the same critical section between
-    // the window check and the network watch. The ordering is what this pins, not adjacency.
-    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n(?:\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n)?\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+  // Positional indexOf checks, not a regex spanning tens of lines with a lazy or greedy quantifier:
+  // a pattern needing that much backtracking across a megabyte-plus string is exactly the shape
+  // that can hit a regex engine's own backtracking limit, which is version-dependent and not
+  // something a source-shape test should be sensitive to (this replaced an earlier version of
+  // this test that did exactly that and failed only in CI, on a newer Node than any dev machine
+  // had, for that reason alone).
+  //
+  // finalPressBudgetShortfall (see its own definition, next to assertProviderActionWindow) is the
+  // exact-final-authority press's own gate at site 1 (confirmAndSubmitPass): a critical section
+  // checked before deciding whether to press at all, rather than a bare assertProviderActionWindow
+  // floor checked only before a fixed 2-second wait. An exact-mutation transport authorization may
+  // still sit inside the same critical section between the window check and the network watch. The
+  // ordering is what this pins, not adjacency.
+  const site1Authorize = SANDBOX_RUNNER.indexOf(
+    'if (chooserVersion !== 4) authorizeManagedFinalTransport(currentInput, action);',
   );
-  assert.match(
-    SANDBOX_RUNNER,
-    /if \(action\.securityCode && isFinalSubmitAction\(action\)\)[\s\S]*assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*await locator\.click/,
-  );
+  assert.ok(site1Authorize > 0, 'site 1 must authorize the final transport before its click');
+  const site1Shortfall = SANDBOX_RUNNER.lastIndexOf('finalPressBudgetShortfall();', site1Authorize);
+  assert.ok(site1Shortfall > 0 && site1Authorize - site1Shortfall < 1000,
+    'the budget gate must sit immediately before site 1 authorizes transport, not merely somewhere earlier');
+  const site1Watch = SANDBOX_RUNNER.indexOf('armSubmitNetworkWatch();', site1Authorize);
+  assert.ok(site1Watch > site1Authorize && site1Watch < site1Authorize + 100,
+    'the network watch must arm right after authorization');
+  const site1Progress = SANDBOX_RUNNER.indexOf('recordCrashProgress', site1Watch);
+  assert.ok(site1Progress > site1Watch && site1Progress < site1Watch + 100,
+    'crash progress must be recorded right after the watch arms');
+
+  // Same gate, same reason, at the Greenhouse code-resubmit click (site 3): checked before the
+  // click is even attempted, so an insufficient window withholds the resubmit instead of racing it.
+  const site3Anchor = SANDBOX_RUNNER.indexOf('if (action.securityCode && isFinalSubmitAction(action)) {');
+  assert.ok(site3Anchor > 0, 'the Greenhouse code-resubmit branch must exist');
+  const site3Shortfall = SANDBOX_RUNNER.indexOf('finalPressBudgetShortfall();', site3Anchor);
+  assert.ok(site3Shortfall > site3Anchor && site3Shortfall < site3Anchor + 3000,
+    'the resubmit must be gated by the same budget check');
+  const site3If = SANDBOX_RUNNER.indexOf('if (finalPressShortfall) {', site3Shortfall);
+  assert.ok(site3If > site3Shortfall && site3If < site3Shortfall + 100,
+    'the gate result must be checked right after it is computed');
+  const site3Else = SANDBOX_RUNNER.indexOf('} else {', site3If);
+  assert.ok(site3Else > site3If && site3Else < site3If + 2000,
+    'the withholding branch must have a matching else for the actual press');
+  const site3Click = SANDBOX_RUNNER.indexOf('await locator.click', site3Else);
+  assert.ok(site3Click > site3Else && site3Click < site3Else + 200,
+    'the resubmit click must sit in the else branch, immediately after it');
 });
 
 test('the runner decides whether a continuation is held open, not the caller\'s text sweep', async () => {
