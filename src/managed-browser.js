@@ -1045,8 +1045,72 @@ let terminalFailureInput = null;
   let v4PrimaryPage = null;
   let v4InitialNavigationActive = retainedAtomicV4Run;
   let managedOutOfBandTransportAttempted = false;
+  let managedOutOfBandThirdPartyCount = 0;
+  let managedOutOfBandReason = null;
   let managedInitialNavigationActive = managedMutationContainmentRequired;
   let managedPrimaryPage = null;
+  /* A BLOCKED THIRD-PARTY CHANNEL IS NOT THE EMPLOYER'S TRANSPORT, AND IT WAS KILLING THE RUN.
+   *
+   * The route path below already draws this line and states why: a blocked request is aborted
+   * either way, and what decides whether the RUN must die is whether it was bound for the
+   * employer's own site, because only then can the page's fill semantics depend on it. A
+   * third-party beacon cannot file anything with the employer, so 9d8cbe9 stopped counting those
+   * on 2026-09-01 (blockedThirdPartyCount) after they killed every Breezy fill.
+   *
+   * The OUT-OF-BAND channels never got that line. Every one of them - the WebSocket route, the
+   * init script's Worker/SharedWorker/WebTransport/WebSocketStream/popup/service-worker locks, and
+   * a second page appearing in the context - sets one origin-blind boolean, so a Worker
+   * constructed by ANY frame on the page kills the run, and the sentence it produces names no
+   * channel, no origin and no URL. That is why the Greenhouse failure of 2026-09-04 arrived as the
+   * bare sentence with no parenthetical: blockedReason is assigned in the same branch that
+   * increments blockedAttemptCount, so a route block ALWAYS carries a suffix, and this disjunct
+   * never can.
+   *
+   * WHAT MADE IT REACHABLE. 647170c admitted the challenge widget's own anchor frame, so on a
+   * Greenhouse board reCAPTCHA enterprise now MOUNTS instead of being aborted, and its own frame
+   * loads "the widget's stylesheet, worker script, logo and font" (that commit's live enumeration
+   * of the Hudson River Trading board). A worker script is fetched because the widget calls the
+   * Worker constructor - which this containment has replaced with one that notifies and throws.
+   * That reproduction ran the ROUTE handler alone, with no init script, which is why the worker
+   * read there as an ordinary subresource and not as a violation.
+   *
+   * THE LINE. Nothing here is newly permitted to RUN: the Worker constructor still throws, the
+   * popup still returns null, the service worker still rejects, the socket is still closed 1008,
+   * and an extra page is still closed. Only FATALITY changes, and only for an origin that PROVES
+   * it is not the employer's, by the same registrable-suffix test the route path uses. An
+   * unparseable, opaque or absent origin counts as the employer's, so about:blank popups and
+   * data: frames stay fatal exactly as before. */
+  const managedTransportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
+  const managedApplicationTransportSite = (() => {
+    try { return managedTransportRegistrableSuffix(new URL(input.url).hostname); } catch { return null; }
+  })();
+  /* A HOST IS REQUIRED, not merely a parseable URL. about:blank, data:, blob: and javascript: all
+   * parse and all report an EMPTY hostname, whose registrable suffix is the empty string, which
+   * equals no application site and would therefore have read as third-party and spared the run.
+   * That is the one way this discriminator could fail open, so an absent host is employer-bound. */
+  const managedEmployerBoundOrigin = (value) => {
+    if (!managedApplicationTransportSite) return true;
+    try {
+      const { hostname } = new URL(String(value));
+      if (!hostname) return true;
+      return managedTransportRegistrableSuffix(hostname) === managedApplicationTransportSite;
+    } catch { return true; }
+  };
+  /* 'unavailable' is the lock failing to INSTALL, not a transport being attempted. It stays fatal
+   * whatever the origin, because it is this runner's own instrument reporting that it cannot
+   * prove containment held in that realm. */
+  const recordManagedOutOfBandTransport = (kind, origin) => {
+    const channel = String(kind || 'unknown').slice(0, 40);
+    if (channel !== 'unavailable' && !managedEmployerBoundOrigin(origin)) {
+      managedOutOfBandThirdPartyCount += 1;
+      return;
+    }
+    managedOutOfBandTransportAttempted = true;
+    if (managedOutOfBandReason) return;
+    const source = String(origin || '').slice(0, 200);
+    managedOutOfBandReason = 'out-of-band transport: ' + channel
+      + (source ? ' from ' + source : '');
+  };
   fs.writeFileSync('stratus-runner-capabilities.json', JSON.stringify({
     protocolVersion: 4,
     capabilities: [extractAssertionsCapability, exactPageUrlCapability, atomicSubmitV4Capability]
@@ -1077,7 +1141,12 @@ let terminalFailureInput = null;
     });
     if (managedMutationContainmentRequired) {
       await browserContext.routeWebSocket('**/*', async (webSocketRoute) => {
-        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        if (!managedInitialNavigationActive) {
+          // The socket's own target decides, exactly as the request URL decides on the route path.
+          let socketTarget = '';
+          try { socketTarget = String(webSocketRoute.url() || ''); } catch {}
+          recordManagedOutOfBandTransport('websocket', socketTarget);
+        }
         await webSocketRoute.close({
           code: 1008,
           reason: 'Managed non-submit mutation blocks WebSocket transport'
@@ -1090,8 +1159,16 @@ let terminalFailureInput = null;
         const consoleError = console.error;
         const apply = Reflect.apply;
         const defineProperty = Object.defineProperty;
+        /* Captured HERE, at install time, before any page script has run, so the origin that
+         * travels with a notify cannot be shadowed by the realm it accuses. An opaque origin
+         * (a data: or sandboxed frame) reports the literal string "null", which the Node side
+         * cannot parse and therefore treats as the employer's - fail closed. */
+        let frameOrigin = '';
+        try { frameOrigin = String(location.origin || ''); } catch {}
         const notify = (kind) => {
-          try { apply(consoleError, nativeConsole, [consoleToken + ':' + kind]); } catch {}
+          try {
+            apply(consoleError, nativeConsole, [consoleToken + ':' + kind + ':' + frameOrigin]);
+          } catch {}
         };
         const blockedConstructor = (name) => function litosBlockedTransport() {
           notify(name);
@@ -1949,14 +2026,28 @@ let terminalFailureInput = null;
       // v4 guard binds at context level.
       browserContext.on('console', (message) => {
         const text = message.text();
-        if (text.startsWith(managedTransportConsoleToken + ':')
-          && !(managedInitialNavigationActive && message.page() === managedPrimaryPage)) {
-          managedOutOfBandTransportAttempted = true;
-        }
+        const prefix = managedTransportConsoleToken + ':';
+        if (!text.startsWith(prefix)) return;
+        if (managedInitialNavigationActive && message.page() === managedPrimaryPage) return;
+        /* kind:origin, and the origin may itself contain a colon (https://host:8443), so split
+         * once on the FIRST separator and keep the remainder whole. A payload with no separator
+         * at all predates this shape and carries no origin, so it fails closed. */
+        const payload = text.slice(prefix.length);
+        const separator = payload.indexOf(':');
+        recordManagedOutOfBandTransport(
+          separator === -1 ? payload : payload.slice(0, separator),
+          separator === -1 ? '' : payload.slice(separator + 1)
+        );
       });
       browserContext.on('page', (candidate) => {
         if (candidate === managedPrimaryPage) return;
-        if (!managedInitialNavigationActive) managedOutOfBandTransportAttempted = true;
+        if (!managedInitialNavigationActive) {
+          // A popup is about:blank at this moment far more often than not, and an unparseable
+          // origin fails closed, so this stays fatal exactly as it was.
+          let candidateUrl = '';
+          try { candidateUrl = String(candidate.url() || ''); } catch {}
+          recordManagedOutOfBandTransport('page', candidateUrl);
+        }
         void candidate.close().catch(() => undefined);
       });
     }
@@ -4419,7 +4510,10 @@ let terminalFailureInput = null;
         || managedOutOfBandTransportAttempted) {
         // The named transport travels with the sentence so the next operator reading a 502 knows
         // WHICH request tripped the containment instead of re-deriving it from a live probe.
-        const detail = managedMutationTransportContainment.blockedReason;
+        // Both disjuncts name themselves now. Before 2026-09-04 only the route one did, so an
+        // out-of-band trip arrived as the bare sentence and the absence of a parenthetical was
+        // the ONLY evidence of which branch had fired.
+        const detail = managedMutationTransportContainment.blockedReason || managedOutOfBandReason;
         throw managedTransportViolation(
           'A non-submit action attempted employer transport without exact final authority'
           + (detail ? ' (' + detail + ')' : '')
