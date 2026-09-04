@@ -6019,6 +6019,170 @@ let terminalFailureInput = null;
     };
     const declineMatches = (candidate, wanted) =>
       DECLINE_TO_STATE.test(normalized(candidate)) && DECLINE_TO_STATE.test(normalized(wanted));
+    /* THE NOUN THE ROWS ARE ABOUT, AND WHETHER THE QUESTION ASKED ABOUT IT.
+     *
+     * Mapping a stored yes or no onto a negated statement is only sound when the statement negates
+     * THE QUESTION'S predicate, and nothing in the SHAPE of a list can say whether it does. Two
+     * rows reading "I require sponsorship to work in the United States" and "I do not require
+     * sponsorship to work in the United States" are a clean yes/no pair by construction; under the
+     * question "Are you legally authorized to work in the United States?" a stored "No" means NOT
+     * AUTHORISED, and the negated row states that no sponsorship is needed - the opposite claim,
+     * ticked under her name and never looked at again. Row polarity is not question polarity.
+     *
+     * So the tie is made on WORDS. The noun the two rows share - "veteran", "disability",
+     * "sponsorship", "authorized" - has to be a noun the question asked about, and the noise list
+     * is what makes that a test rather than a coincidence: a question and an unrelated pair of
+     * rows share plenty of words that are not the predicate, and on the pair above the shared
+     * words are "work", "united" and "states". Strike those and the question is about
+     * "authorized" while the rows are about "sponsorship", which is exactly the disagreement the
+     * tier must refuse; leave them in and it fires on it.
+     *
+     * Four letters minimum, for the same reason: "us", "the", "not" and "one" carry no predicate
+     * at all, and a two-letter overlap is what a coincidence is made of.
+     *
+     * The list is grammar, the words a form uses about ITSELF, and the words every employment
+     * question shares - where the work happens, who the employer is, when. It is deliberately not
+     * a stoplist of EEO vocabulary: "veteran", "disability", "sponsorship", "citizen",
+     * "authorized" and their like must survive it, because they are the whole test. */
+    const PREDICATE_NOISE = new Set([
+      'this', 'that', 'these', 'those', 'they', 'them', 'their', 'there', 'here', 'with',
+      'from', 'your', 'yours', 'have', 'having', 'been', 'being', 'will', 'would', 'shall',
+      'should', 'could', 'does', 'than', 'then', 'what', 'when', 'where', 'which', 'while',
+      'about', 'above', 'below', 'into', 'over', 'under', 'only', 'also', 'ever', 'never',
+      'same', 'such', 'more', 'most', 'other', 'others', 'some', 'none', 'both', 'each',
+      'very', 'just', 'like', 'made', 'take', 'well',
+      'work', 'working', 'employment', 'employer', 'employee', 'company', 'organization',
+      'organisation', 'position', 'role', 'roles', 'application', 'applicant', 'apply',
+      'form', 'question', 'answer', 'wish', 'prefer', 'decline', 'choose', 'select',
+      'following', 'option', 'options', 'please', 'check', 'boxes', 'listed',
+      'current', 'future', 'past', 'time', 'year', 'years', 'date',
+      'united', 'states', 'state', 'country', 'countries', 'america', 'national'
+    ]);
+    const predicateNouns = (text) => new Set(normalized(text).split(' ')
+      .filter((word) => word.length >= 4 && !PREDICATE_NOISE.has(word)));
+    /* A YES OR NO AGAINST TWO STATEMENTS, ONE OF WHICH SAYS "NOT".
+     *
+     * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: the stored answer is
+     * "No" and the rows are "I identify as one or more of the classifications of protected
+     * veteran listed above", "I am not a protected veteran" and "I don't wish to answer"; the
+     * disability group offers "Yes, I have a disability...", "No, I don't have a disability" and
+     * the same refusal. Neither exact tier can reach "No" there, the containment tier that once
+     * might have was removed on purpose (see the chooser's own note), so the answer sat in the
+     * packet and the run reported that no option matched.
+     *
+     * WHAT MAKES THIS SAFE WHERE CONTAINMENT WAS NOT. Containment took the one row that CONTAINED
+     * the answer, and on the sponsorship vocabulary that is the false row. This tier reads no
+     * containment at all: it fires only when the answer is exactly "yes" or "no", only when the
+     * list minus its refusals is exactly two statements, and only when exactly one of the two
+     * opens with a negation ("I am not", "I do not", "I don't", "No"). Two statements of which
+     * one negates are a yes/no pair by construction, so "no" is the negated one and "yes" is the
+     * other. Two negations, three statements, or a negation sitting mid-sentence all refuse, and
+     * a refusal costs her one click where a wrong tick would be a false declaration.
+     *
+     * AND THE LIST MUST CARRY AN OPT-OUT ROW, which is what keeps this from touching the case
+     * soleOptionIndex refuses on purpose. Optiver's "I am NOT currently in process for another
+     * Optiver role" / "I am currently in process..." is a two-statement pair with one negation,
+     * and the "Yes" stored against it is a consent-class affirmative, not her answer to "are you
+     * in process": choosing there would state something about her that nobody asked her. A pair
+     * that comes with "I don't wish to answer" is a self-identification question, the stored
+     * yes/no is her answer to that question (the held-declaration veto upstream never replays a
+     * consent into an EEO list), and the opt-out is the employer saying the pair is hers to
+     * answer or not. The refusal rows are set aside from the count rather than matched, because a
+     * refusal is not a claim about her; the decline tier after this one still carries a stored
+     * refusal onto them.
+     *
+     * The negation is anchored at the START of the normalised text, deliberately: "Yes, I have
+     * not yet graduated" is not a negated row, and reading "not" anywhere would make it one.
+     *
+     * AND THE ROW'S POLARITY IS NOT THE QUESTION'S POLARITY, which is the correction this tier
+     * needed and did not have. See PREDICATE_NOISE below: the tier is handed the question label
+     * and refuses unless the noun the two rows share is a noun the question asked about. */
+    const yesNoNegationIndex = (texts, wanted, question) => {
+      const want = normalized(wanted);
+      if (want !== 'no' && want !== 'yes') return -1;
+      /* NEVER OVER A LITERAL OR A NORMALISED-EXACT ROW, and the guard is repeated INSIDE the tier
+       * rather than left to the caller's ordering. chooseOptionIndex does run both exact tiers
+       * first, but a tier whose safety is a property of where it is called from is one call site
+       * away from not having it, and the unit suites execute this function on its own. */
+      for (const option of answerOptions(wanted)) {
+        const literal = clean(option).toLowerCase();
+        const exact = normalized(option);
+        if (texts.some((text) => (literal && clean(text).toLowerCase() === literal)
+          || (exact && normalized(text) === exact))) return -1;
+      }
+      const statements = [];
+      let optOuts = 0;
+      for (let index = 0; index < texts.length; index += 1) {
+        const text = normalized(texts[index]);
+        // An empty row cannot be read, and a list this tier cannot read in full is refused whole.
+        if (!text) return -1;
+        if (DECLINE_TO_STATE.test(text)) optOuts += 1;
+        else statements.push(index);
+      }
+      /* TWO REAL ROWS, NEVER THREE. A third statement is a third claim about her, and which of
+       * them a bare "yes" or "no" belongs to stops being a property of the list. */
+      if (statements.length !== 2 || optOuts === 0) return -1;
+      const opens = (index, pattern) => pattern.test(normalized(texts[index]));
+      const negated = statements.filter((index) => opens(index, /^(?:i am not|i do not|i don t|no)\b/));
+      if (negated.length !== 1) return -1;
+      const other = statements.find((index) => index !== negated[0]);
+      /* HOW THE ROWS SAY THEIR OWN POLARITY, and only these two readings are admitted.
+       *   - STATED: the negated row opens with a literal "no" token and its counterpart with a
+       *     literal "yes" token, so neither half of the mapping is inferred at all. Breezy's
+       *     disability group is this shape.
+       *   - IMPLIED: neither row opens with a literal yes or no, and exactly one opens with a
+       *     negation phrase, so the pair is a statement and its negation. Breezy's veteran group
+       *     is this shape, and it is the case this tier exists for.
+       * A list that MIXES them - a literal "No, ..." row against a bare affirmative statement - is
+       * refused: the affirmative half would be read by inference on a list that has just shown, on
+       * the other row, that it spells polarity out when it means it. */
+      const stated = opens(negated[0], /^no\b/) && opens(other, /^yes\b/);
+      const implied = !opens(negated[0], /^(?:yes|no)\b/) && !opens(other, /^(?:yes|no)\b/);
+      if (!stated && !implied) return -1;
+      /* THE NEGATED ROW MUST BE THE BARE NEGATION OF ITS COUNTERPART, and a residue test is how
+       * that is checked rather than assumed. "I do not require sponsorship now, but will in the
+       * future" opens with a negation and is NOT the negation of "I require sponsorship now": it
+       * adds a temporal claim of its own, and pressing it for a flat "No" files a declaration
+       * that she WILL require future sponsorship (executed in the round-2 review, on the exact
+       * vocabulary the containment post-mortem below quotes as live). So:
+       *   - strip the opening negation (and a stated "No," prefix) from the negated row;
+       *   - the residue may carry NO negation of its own ("I am not unable to..." is a double
+       *     negative, not a bare negation, and its polarity is not this tier's to read);
+       *   - every predicate word left in the residue must already be in the counterpart, with the
+       *     temporal qualifiers (now/will/future/current/past) made VISIBLE for this test, since
+       *     the general noise list hides exactly the words a compound row differs by. Extra words
+       *     in the COUNTERPART are fine - Breezy's affirmative veteran row carries list
+       *     boilerplate ("identify as one or more of the classifications... listed above") that a
+       *     bare negation legitimately drops.
+       * The counterpart must be negation-free too: a pair whose affirmative half says "without"
+       * is not a statement and its negation, whatever the openings say. */
+      const NEGATION_TOKEN = /(?:^|\s)(?:no|not|never|without|nor|unable|cannot)(?:\s|$)|\wn t(?:\s|$)/;
+      const TEMPORAL_QUALIFIERS = new Set(['will', 'current', 'currently', 'future', 'past', 'later', 'previously', 'longer']);
+      const residueNouns = (text) => new Set(text.split(' ')
+        .filter((word) => word && (TEMPORAL_QUALIFIERS.has(word)
+          || (word.length >= 4 && !PREDICATE_NOISE.has(word)))));
+      const strippedNegated = normalized(texts[negated[0]])
+        .replace(/^(?:no\s+)?(?:i am not|i do not|i don t|no)\b/, '').trim();
+      const counterpartText = normalized(texts[other]).replace(/^yes\b/, '').trim();
+      if (NEGATION_TOKEN.test(strippedNegated) || NEGATION_TOKEN.test(counterpartText)) return -1;
+      const counterpartResidue = residueNouns(counterpartText);
+      if ([...residueNouns(strippedNegated)].some((word) => !counterpartResidue.has(word))) return -1;
+      /* AND THE QUESTION HAS TO BE ASKING ABOUT WHAT THE ROWS ARE ABOUT - AFFIRMATIVELY. The
+       * mapping "no takes the negated row" is defined for an affirmatively phrased question and
+       * for nothing else: under "Are you authorized to work in the United States WITHOUT
+       * sponsorship?" or "Please confirm that you will NOT require sponsorship", the stored
+       * yes/no answers the question's own negation and the row mapping inverts (executed in the
+       * round-2 review). A question carrying any negation token is refused whole; one click of
+       * hers against a wrong tick filed under her name. No question label, no tier: every caller
+       * that cannot name the question it is filling gets the refusal. */
+      if (NEGATION_TOKEN.test(normalized(question))) return -1;
+      const asked = predicateNouns(question);
+      if (!asked.size) return -1;
+      const counterpart = predicateNouns(texts[other]);
+      const shared = [...predicateNouns(texts[negated[0]])].filter((word) => counterpart.has(word));
+      if (!shared.some((word) => asked.has(word))) return -1;
+      return want === 'no' ? negated[0] : other;
+    };
     /* THE FIRST OF SEVERAL IS NEVER AN ANSWER, and this is the one place that rule is written down.
      *
      * The exact tier is ranked by what the CALLER asked for rather than by where the employer put
@@ -6053,7 +6217,7 @@ let terminalFailureInput = null;
      * clicked here goes straight into filledFields and is never looked at again. Exact, an
      * unambiguous refusal, or nothing.
      */
-    const chooseOptionIndex = (texts, wanted) => {
+    const chooseOptionIndex = (texts, wanted, question) => {
       if (!clean(wanted)) return -1;
       /* THE LITERAL MATCH IS TAKEN BEFORE ANYTHING IS NORMALISED, and that ordering is the whole of
        * this tier's safety. normalized() keeps only [a-z0-9], which is what lets "Yes," reach a
@@ -6102,6 +6266,13 @@ let terminalFailureInput = null;
        * answered by the whole date, and only a list asking for one part reaches here. */
       const datePart = dateComponentIndex(texts, wanted);
       if (datePart !== -1) return datePart;
+      /* After every exact and widened tier, and before the refusal tier: a list that offers a
+       * literal "No" is answered by it above, and a stored refusal is still carried below. Only a
+       * bare yes/no against two statements reaches this, and yesNoNegationIndex says when - which
+       * now includes whether the question this list belongs to asked about what the rows state. A
+       * caller with no question label to hand gets a refusal from the tier, never a guess. */
+      const yesNo = yesNoNegationIndex(texts, wanted, question);
+      if (yesNo !== -1) return yesNo;
       const refusals = [];
       for (let index = 0; index < texts.length; index += 1) {
         if (declineMatches(texts[index], wanted)) refusals.push(index);
@@ -8400,7 +8571,7 @@ let terminalFailureInput = null;
      * to search - reuse this same read-every-label-then-tick-then-read-back discipline instead of
      * growing a second, unverified copy of it. Every existing call site passes a scope and is
      * unchanged. */
-    const pickRadioOption = async (scope, wanted, directChoices = null) => {
+    const pickRadioOption = async (scope, wanted, directChoices = null, question = '') => {
       if (!clean(wanted)) return 'no-answer';
       const choices = directChoices || scope.locator('input[type=checkbox], input[type=radio]');
       const total = await choices.count();
@@ -8412,7 +8583,7 @@ let terminalFailureInput = null;
       for (let index = 0; index < total; index += 1) {
         texts.push(await optionTextOf(choices.nth(index)));
       }
-      const chosen = chooseOptionIndex(texts, wanted);
+      const chosen = chooseOptionIndex(texts, wanted, question);
       if (chosen === -1) {
         const near = texts.filter((text) => text && optionMatches(text, wanted)).length;
         if (!near) return 'no-option';
@@ -8451,6 +8622,99 @@ let terminalFailureInput = null;
         + ' or contains(@class,"_fieldEntry_")) and .//input[@type="radio" or @type="checkbox"]][1]'
       ).first();
       if ((await block.count()) > 0) return block;
+      /* A BARE LIST OF SAME-NAME ROWS UNDER THE HEADING THAT NAMES IT.
+       *
+       * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: the veteran and
+       * disability groups are a <ul> of bare <li> rows under an <h3>, with no fieldset, group
+       * role, field path or provider class for the ancestor walk above to find. What the caller's
+       * container then resolves to depends entirely on the wrappers the theme happens to add:
+       * none at all (no div or fieldset ancestor holds a control, so the block is empty and the
+       * action ends in "field not found"), one div around the whole EEOC section (three names,
+       * refused as three questions), or one div per section (works, by luck of the theme). The
+       * rows themselves are unambiguous: the first control after the heading is a radio whose
+       * same-name peers share one smallest ancestor, and that ancestor holds no other choice
+       * name. That is the group wherever the wrappers sit, and it is stamped so the caller scopes
+       * every later read and tick to it.
+       *
+       * Bounded four ways. The first following element that is a control OR a heading or legend
+       * is taken, so a heading that belongs to the NEXT question ends the search before its rows
+       * are reached; the ancestor must hold exactly one radio or checkbox name, the same
+       * one-name-one-question rule radioGroupNames enforces on the caller; a control that is not a
+       * named radio or checkbox with peers falls straight back to the container the caller already
+       * resolved, so no other shape changes; and - the fourth, and the one the first three do not
+       * cover - THE GROUP HAS TO BE NAMED BY THIS ANCHOR.
+       *
+       * WHY THE FOURTH IS NOT OPTIONAL. Stopping at headings only bounds the search when the next
+       * question HAS a heading, and on this very page one does not: Breezy names its gender group
+       * with a bare <span>Gender</span>. So a heading whose own rows were removed - an employer
+       * that keeps the veteran preamble and drops the radios - walked past the span and stamped
+       * the NEXT question's group, and a stored "No" was then pressed on it and reported filled
+       * under the heading it did not belong to. A wrong question answered under her name is worse
+       * than a question left for her, which is the rule the whole file is built on.
+       *
+       * The naming walk is the one questionLabel's bare-list arm makes, in the same order and with
+       * the same bound: previous siblings of the group, then of its parent, and so on; a sibling
+       * holding a visible control is the PREVIOUS question and ends the walk; at the first level
+       * that says anything, a heading beats prose. Whatever that level names has to BE this
+       * anchor, or contain it - the caller's getByText can land on a <strong> inside the <h3> -
+       * and anything else means the group is somebody else's. */
+      const following = anchor.locator(
+        'xpath=following::*[(self::input and not(@type="hidden")) or self::select or self::textarea'
+        + ' or self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6 or self::legend][1]'
+      ).first();
+      const anchorHandle = (await following.count()) > 0
+        ? await anchor.elementHandle().catch(() => null)
+        : null;
+      const anchored = Boolean(anchorHandle) && await following.evaluate((element, anchorEl) => {
+        for (const stale of document.querySelectorAll('[data-litos-anchored-group]')) {
+          stale.removeAttribute('data-litos-anchored-group');
+        }
+        if (!anchorEl) return false;
+        if (!(element instanceof HTMLInputElement)) return false;
+        if (element.type !== 'radio' && element.type !== 'checkbox') return false;
+        if (!element.name) return false;
+        const peers = [...(element.form || document).querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+          .filter((input) => input.name === element.name && input.form === element.form);
+        if (peers.length < 2) return false;
+        let group = element.parentElement;
+        while (group && !peers.every((peer) => group.contains(peer))) group = group.parentElement;
+        if (!group || group === document.body || group === document.documentElement) return false;
+        const names = new Set([...group.querySelectorAll('input[type="radio"], input[type="checkbox"]')]
+          .map((input) => input.name || ''));
+        if (names.size !== 1) return false;
+        const CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], button';
+        const HEADINGS = 'h1, h2, h3, h4, h5, h6, legend';
+        const words = (node) => String((node && node.textContent) || '').replace(/\s+/g, ' ').trim();
+        const holdsControls = (node) => Boolean(node && node.matches
+          && (node.matches(CONTROLS) || node.querySelector(CONTROLS)));
+        let namedByAnchor = false;
+        let above = group;
+        for (let depth = 0; above && depth < 12 && above !== document.body; depth += 1, above = above.parentElement) {
+          let heading = null;
+          let nearest = null;
+          let bounded = false;
+          for (let beside = above.previousElementSibling; beside; beside = beside.previousElementSibling) {
+            if (holdsControls(beside)) {
+              bounded = true;
+              break;
+            }
+            const headingNode = beside.matches(HEADINGS) ? beside : beside.querySelector(HEADINGS);
+            if (!heading && headingNode && words(headingNode)) heading = headingNode;
+            if (!nearest && words(beside)) nearest = beside;
+          }
+          const naming = heading || nearest;
+          if (naming) {
+            namedByAnchor = naming === anchorEl || naming.contains(anchorEl);
+            break;
+          }
+          if (bounded) break;
+        }
+        if (!namedByAnchor) return false;
+        group.setAttribute('data-litos-anchored-group', '');
+        return true;
+      }, anchorHandle).catch(() => false);
+      if (anchorHandle) await anchorHandle.dispose().catch(() => undefined);
+      if (anchored) return page.locator('[data-litos-anchored-group]').first();
       return fallback;
     };
     /* Two named radio groups inside one block are TWO QUESTIONS. Radios in one question share a name
@@ -15847,6 +16111,74 @@ let terminalFailureInput = null;
               });
               const ownerText = clean(renderedText(ownerLabel)).toLowerCase();
               if (ownerText && !genericControlText(ownerText)) return ownerText;
+              /* A BARE LIST OF OPTIONS IS NAMED BY THE HEADING BEFORE IT, NOT BY ITS FIRST ROW.
+               *
+               * Measured on the live alertalarm.breezy.hr EEOC section, 2026-09-01: each veteran
+               * and disability radio sits in its own bare <li> under a <ul> with no fieldset,
+               * class or role, and its label[for] names that ONE option. So blockOf fell back to
+               * the option's own row, the owner search above found only a label that speaks for
+               * one option, and the join below welded the option text to the name and id: the
+               * stored question was "i identify as one or more of the classifications of
+               * protected veteran listed above eeoc.veteran_status vet_yes". No stored answer
+               * anchors to that, the fillByLabelText lookup cannot find those words on the page,
+               * and a saved "No" was never pressed.
+               *
+               * THREE GATES, each about the shape and none about the board:
+               *   - the block fell back to the option's own row (it holds this one choice input
+               *     and no other), so no fieldset, group or provider block has already spoken;
+               *   - the label element speaks for this input alone, so its text is the option's
+               *     and not the question's;
+               *   - the input has two or more same-name peers in its form, so there IS a group,
+               *     and the smallest ancestor holding every peer is where that group begins.
+               * The heading is then read the way the Rippling combobox arm reads its label: the
+               * preceding siblings of that group ancestor, then of its parent, and so on, where a
+               * sibling holding a visible control is the PREVIOUS question and ends the walk. At
+               * the first level that says anything, a heading (h1-h6 or legend) wins over prose,
+               * because Breezy puts two paragraphs of preamble between the heading and the rows;
+               * failing a heading, the nearest short text is the label, which is the "Gender"
+               * span on the same page. Levels are not pooled: pooling would let the section
+               * heading two levels above "Gender" outrank the span and name two groups alike. */
+              const optionRowOnly = Boolean(owner) && (owner === el.parentElement || owner === el)
+                && owner.querySelectorAll('input[type="radio"], input[type="checkbox"]').length === 1;
+              const labelSpeaksForThisOptionAlone = Boolean(labelEl)
+                && (labelEl.getAttribute('for') === el.id || labelEl.contains(el))
+                && labelEl.querySelectorAll('input:not([type="hidden"]), select, textarea').length
+                  <= (labelEl.contains(el) ? 1 : 0);
+              if (optionRowOnly && labelSpeaksForThisOptionAlone && sameNamePeers.length >= 2) {
+                let groupRoot = sameNamePeers[0].parentElement;
+                while (groupRoot && !sameNamePeers.every((peer) => groupRoot.contains(peer))) {
+                  groupRoot = groupRoot.parentElement;
+                }
+                const VISIBLE_CONTROLS = 'input:not([type="hidden"]), textarea, select, [role="combobox"], button';
+                const holdsControls = (node) => Boolean(node && node.matches
+                  && (node.matches(VISIBLE_CONTROLS) || node.querySelector(VISIBLE_CONTROLS)));
+                const HEADINGS = 'h1, h2, h3, h4, h5, h6, legend';
+                const shortText = (node) => {
+                  const text = clean(renderedText(node));
+                  return text && text.length <= 200 && !genericControlText(text) ? text.toLowerCase() : '';
+                };
+                let above = groupRoot;
+                for (let depth = 0; above && depth < 12 && above !== el.form && above !== document.body;
+                  depth += 1, above = above.parentElement) {
+                  let heading = '';
+                  let nearest = '';
+                  let bounded = false;
+                  for (let beside = above.previousElementSibling; beside; beside = beside.previousElementSibling) {
+                    if (holdsControls(beside)) {
+                      bounded = true;
+                      break;
+                    }
+                    const headingNode = beside.matches(HEADINGS) ? beside : beside.querySelector(HEADINGS);
+                    if (!heading && headingNode) heading = shortText(headingNode);
+                    if (!nearest) nearest = shortText(beside);
+                  }
+                  if (heading) return heading;
+                  if (nearest) return nearest;
+                  // The previous question sits right there: climbing past it would borrow a wider
+                  // heading that names both questions, and a wrong question is worse than a handle.
+                  if (bounded) break;
+                }
+              }
             }
             /* WHEN THE CONTROL CARRIES NO LABEL OF ITS OWN, the block's label beats the placeholder.
              *
@@ -16947,7 +17279,7 @@ let terminalFailureInput = null;
               intendedChoice || nativeChoiceGroup.inputs.first(),
               exactBinding?.rootBinding?.formHandle || exactActionRootBinding?.formHandle || null
             );
-            const outcome = await pickRadioOption(locator, wanted, nativeChoiceGroup.inputs);
+            const outcome = await pickRadioOption(locator, wanted, nativeChoiceGroup.inputs, action.label || '');
             if (outcome === 'checked') {
               successfulMutation = true;
               if (action.label) filledFields.push(action.label);
@@ -17754,7 +18086,7 @@ let terminalFailureInput = null;
             }
             continue;
           }
-          const outcome = await pickRadioOption(scope, wanted);
+          const outcome = await pickRadioOption(scope, wanted, null, action.text || action.label || '');
           if (outcome === 'checked') {
             successfulMutation = true;
             if (action.label) filledFields.push(action.label);

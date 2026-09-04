@@ -1227,6 +1227,74 @@ test('a named radio group in bare list rows reads every same-name peer, not the 
   assert.deepEqual(details.map((entry) => entry.options.length), [3, 3, 3]);
 });
 
+/* THE OTHER HALF OF THE SAME DEFECT: with the inventory fixed, every one of those nine radios was
+ * still NAMED by its own option, with the name and id welded on ("i identify as one or more of the
+ * classifications of protected veteran listed above eeoc.veteran_status vet_yes"). The stored
+ * question has to be words that are ON the page for the fillByLabelText lookup to find, and it has
+ * to be the same words for all three rows of a group or the group is three questions. The heading
+ * before the rows is both. Measured before the fix: the gender group read "male gender gender_male",
+ * so it is pinned to the "Gender" span that sits one level above its rows, and NOT to the section
+ * heading two levels up, which on the live page also names the race/ethnicity group. */
+test('a bare-list radio group is named by the heading before its rows, once for every row', async () => {
+  const labels = await labelsFor(BREEZY_EEOC, 'input[type="radio"]');
+  assert.deepEqual(labels, [
+    'gender', 'gender', 'gender',
+    'voluntary self-identification of veteran status',
+    'voluntary self-identification of veteran status',
+    'voluntary self-identification of veteran status',
+    'voluntary self-identification of disability',
+    'voluntary self-identification of disability',
+    'voluntary self-identification of disability',
+  ]);
+  // And the three groups are three questions carrying those three labels.
+  const details = await choiceDetailsFor(BREEZY_EEOC);
+  assert.deepEqual(details.map((entry) => entry.label), [
+    'gender',
+    'voluntary self-identification of veteran status',
+    'voluntary self-identification of disability',
+  ]);
+});
+
+test('the bare-list heading arm stops at the previous question and never borrows its heading', async () => {
+  // The walk from the second group's <ul> meets the first group's <ul> (a sibling holding
+  // controls) before any heading: it must stop there, not climb to the page heading.
+  const labels = await labelsFor(`
+    <form>
+      <h2>Application</h2>
+      <h3>Work authorization</h3>
+      <ul>
+        <li><input id="auth_yes" type="radio" name="auth" value="yes"><label for="auth_yes">I am authorized</label></li>
+        <li><input id="auth_no" type="radio" name="auth" value="no"><label for="auth_no">I am not authorized</label></li>
+      </ul>
+      <ul>
+        <li><input id="reloc_yes" type="radio" name="reloc" value="yes"><label for="reloc_yes">Willing to relocate</label></li>
+        <li><input id="reloc_no" type="radio" name="reloc" value="no"><label for="reloc_no">Not willing to relocate</label></li>
+      </ul>
+    </form>`, 'input[type="radio"]');
+  assert.deepEqual(labels.slice(0, 2), ['work authorization', 'work authorization']);
+  // The unheaded group keeps the fallthrough it always had: its own option and handles, which
+  // downstream reads as one question per row, exactly as before, rather than a borrowed heading.
+  assert.match(labels[2], /^willing to relocate reloc reloc_yes$/);
+  assert.match(labels[3], /^not willing to relocate reloc reloc_no$/);
+});
+
+test('the bare-list heading arm leaves a lone radio and a labelled group alone', async () => {
+  const labels = await labelsFor(`
+    <form>
+      <h3>Terms</h3>
+      <ul><li><input id="terms" type="checkbox" name="terms"><label for="terms">I agree to the terms</label></li></ul>
+      <fieldset><legend>Shift</legend>
+        <ul>
+          <li><input id="day" type="radio" name="shift" value="day"><label for="day">Day</label></li>
+          <li><input id="night" type="radio" name="shift" value="night"><label for="night">Night</label></li>
+        </ul>
+      </fieldset>
+    </form>`, 'input');
+  // One checkbox has no peers, so there is no group to name: its own label stays its label.
+  assert.match(labels[0], /^i agree to the terms terms terms$/);
+  assert.deepEqual(labels.slice(1), ['shift', 'shift']);
+});
+
 test('an unnamed choice group still reads its block, and same-name peers in another form are not its own', async () => {
   const twoForms = `
     <form id="a"><fieldset><legend>Remote?</legend>

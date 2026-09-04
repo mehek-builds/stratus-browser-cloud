@@ -28,12 +28,14 @@ export const CHOOSER_NAMES = [
   'AFFIRMATIVE_ANSWER', 'soleOptionIndex',
   'gradedValueWithScale', 'parseBand', 'gradedBandIndex',
   'MONTH_NAMES', 'monthIndexOf', 'datePartsOf', 'dateComponentIndex',
+  'PREDICATE_NOISE', 'predicateNouns', 'yesNoNegationIndex',
   'chooseOptionIndex',
 ];
 
 /** The chooser and every tier, executed out of the shipped runner source. */
 export function loadChooser() {
   const src = CHOOSER_NAMES.map((name) => constSource(name, 4)).join('\n');
-  const returns = CHOOSER_NAMES.filter((n) => n !== 'DECLINE_TO_STATE' && n !== 'MONTH_NAMES' && n !== 'AFFIRMATIVE_ANSWER');
+  const returns = CHOOSER_NAMES.filter((n) => n !== 'DECLINE_TO_STATE' && n !== 'MONTH_NAMES'
+    && n !== 'AFFIRMATIVE_ANSWER' && n !== 'PREDICATE_NOISE');
   return Function(`${src}\nreturn { ${returns.join(', ')} };`)();
 }
