@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { assertPublicUrl } from './security.js';
+import { config } from './config.js';
+import { LocalTerminalResultStore } from './local-terminal-results.js';
 import {
   normalizeManagedBrowserProgress,
   normalizeManagedContinuation,
@@ -34,6 +36,12 @@ export function runTimeoutMsFor(providerDeadlineAt, now = Date.now()) {
 const MAX_CONCURRENT_RUNS = Math.max(1, Number(process.env.MANAGED_CONCURRENCY || 2));
 const sessions = new Map();
 const active = new Set();
+/* See local-terminal-results.js for why this exists. Every run that carries a durable submission
+ * attempt is retained here from before its runner is spawned until litos-api acknowledges it. */
+export const terminalResults = new LocalTerminalResultStore({
+  directory: path.join(config.dataDir, 'terminal-results'),
+});
+terminalResults.startSweeping();
 
 function managedError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
@@ -153,69 +161,108 @@ async function startRun(input) {
     throw managedError('Managed browser capacity is busy. Try again shortly.', 429, 'MANAGED_CAPACITY');
   }
   const context = await normalizeManagedRun(input, { urlValidator: assertPublicUrl });
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stratus-managed-'));
-  const token = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
-  const expiresAt = context.requestContinuation
-    ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
+  /* Retained only for a run that may reach the employer or continue one that did, as the sandbox
+   * host does: a prepare fill or a discovery scan carries an ephemeral tuple nobody will ask for. */
+  const retainedAttempt = context.submissionAttempt && (context.allowSubmit === true || context.requestContinuation === true)
+    ? context.submissionAttempt
     : null;
-  if (expiresAt) context.continuationExpiresAt = expiresAt;
-  await Promise.all([
-    fs.writeFile(path.join(directory, 'stratus-runner.cjs'), SANDBOX_RUNNER),
-    fs.writeFile(path.join(directory, 'stratus-input.json'), JSON.stringify(context)),
-    ...(token ? [fs.writeFile(path.join(directory, 'stratus-continuation.json'), JSON.stringify({ expiresAt }))] : []),
-  ]);
-  const child = spawn(process.execPath, ['stratus-runner.cjs'], {
-    cwd: directory,
-    env: {
-      ...process.env,
-      NODE_PATH: [path.join(process.cwd(), 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  const session = {
-    id: crypto.randomUUID(),
-    token,
-    directory,
-    child,
-    expiresAt,
-    used: false,
-    stderr: '',
-    submissionAttempt: context.submissionAttempt ?? null,
-  };
-  active.add(session.id);
-  child.stderr.on('data', (chunk) => {
-    session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
-  });
+  /* Reserved BEFORE anything is created, so a tuple already executing or already answered is
+   * refused with nothing to clean up: no directory, no child, no capacity slot. */
+  const runTimeoutMs = runTimeoutMsFor(context.providerDeadlineAt);
+  await terminalResults.reservePending(retainedAttempt, Date.now() + runTimeoutMs);
+  let session = null;
+  let directory = null;
+  /* Everything after the reservation runs under one catch, so no throw can leave a live runner
+   * acting on the employer's page with its slot held, and a run that never spawned is retained
+   * as failed rather than left pending. A throw that reaches the catch after the spawn without a
+   * retained answer retains indeterminate: the host lost track of what the runner did. */
+  try {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'stratus-managed-'));
+    const token = context.requestContinuation ? crypto.randomBytes(32).toString('base64url') : null;
+    const expiresAt = context.requestContinuation
+      ? new Date(Date.now() + context.continuationTtlSeconds * 1000).toISOString()
+      : null;
+    if (expiresAt) context.continuationExpiresAt = expiresAt;
+    await Promise.all([
+      fs.writeFile(path.join(directory, 'stratus-runner.cjs'), SANDBOX_RUNNER),
+      fs.writeFile(path.join(directory, 'stratus-input.json'), JSON.stringify(context)),
+      ...(token ? [fs.writeFile(path.join(directory, 'stratus-continuation.json'), JSON.stringify({ expiresAt }))] : []),
+    ]);
+    const child = spawn(process.execPath, ['stratus-runner.cjs'], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        NODE_PATH: [path.join(process.cwd(), 'node_modules'), process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    session = {
+      id: crypto.randomUUID(),
+      token,
+      directory,
+      child,
+      expiresAt,
+      used: false,
+      stderr: '',
+      submissionAttempt: context.submissionAttempt ?? null,
+      retainedAttempt,
+    };
+    active.add(session.id);
+    child.stderr.on('data', (chunk) => {
+      session.stderr = `${session.stderr}${chunk.toString()}`.slice(-4000);
+    });
 
-  const produced = await waitForFile(
-    directory,
-    ['stratus-result-0.json', 'stratus-error.json'],
-    runTimeoutMsFor(context.providerDeadlineAt),
-    child,
-  );
-  if (!produced) {
-    const runProgress = await readProgress(directory, session.submissionAttempt);
-    await cleanup(session);
-    throw Object.assign(
-      managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
-      runProgress ? { runProgress } : {},
+    const produced = await waitForFile(
+      directory,
+      ['stratus-result-0.json', 'stratus-error.json'],
+      runTimeoutMs,
+      child,
     );
-  }
-  if (produced === 'stratus-error.json') {
-    const error = await runnerError(directory, session.stderr, session.submissionAttempt);
+    if (!produced) {
+      const runProgress = await readProgress(directory, session.submissionAttempt);
+      await cleanup(session);
+      const error = Object.assign(
+        managedError('Managed browser run timed out before it produced a result', 504, 'RUN_TIMED_OUT'),
+        runProgress ? { runProgress } : {},
+      );
+      // The runner was lost before it said what it did: the outcome is unknown, not failed.
+      await terminalResults.retain(retainedAttempt, { state: 'indeterminate', error, runProgress });
+      throw error;
+    }
+    if (produced === 'stratus-error.json') {
+      const error = await runnerError(directory, session.stderr, session.submissionAttempt);
+      await cleanup(session);
+      await terminalResults.retain(retainedAttempt, { state: 'failed', error, runProgress: error.runProgress });
+      throw error;
+    }
+    const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
+    const continuation = Boolean(token && continuationEligible(result, context.continuationCheckpoint));
+    if (continuation) {
+      session.expiresAt = result.continuationExpiresAt || expiresAt;
+      sessions.set(token, session);
+      result.continuationToken = token;
+      result.continuationExpiresAt = session.expiresAt;
+    }
+    /* Retained with the continuation facts attached, and the answer carries the retained id:
+     * litos-api requires terminalResult.resultId on every submit-correlated response, and until
+     * now this host never supplied one, so even a good synchronous answer was thrown away. */
+    const retained = await terminalResults.retain(retainedAttempt, { state: 'completed', run: result });
+    if (retained) result.terminalResult = { resultId: retained.resultId };
+    if (continuation) return result;
     await cleanup(session);
+    return result;
+  } catch (error) {
+    if (session && (!childExited(session.child) || active.has(session.id))) await cleanup(session).catch(() => {});
+    // A directory made before the session existed is nobody's to clean but ours.
+    if (!session && directory) await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    if (retainedAttempt && !(error && error.code === 'SUBMISSION_EXECUTION_CONFLICT')) {
+      await terminalResults.retain(retainedAttempt, session
+        ? { state: 'indeterminate', error: { code: 'HOST_LOST_RUN', message: String(error?.message || 'The host lost the managed run').slice(0, 500) } }
+        : { state: 'failed', error: { code: 'HOST_COULD_NOT_START', message: String(error?.message || 'The host could not start the managed run').slice(0, 500) } })
+        .catch(() => {});
+    }
     throw error;
   }
-  const result = await readResult(session, 0, context.screenshot, context.screenshotWait);
-  if (token && continuationEligible(result, context.continuationCheckpoint)) {
-    session.expiresAt = result.continuationExpiresAt || expiresAt;
-    sessions.set(token, session);
-    result.continuationToken = token;
-    result.continuationExpiresAt = session.expiresAt;
-    return result;
-  }
-  await cleanup(session);
-  return result;
 }
 
 async function continueRun(input) {
@@ -225,8 +272,20 @@ async function continueRun(input) {
     if (session) await cleanup(session);
     throw managedError('Continuation is expired, already used, or does not belong to this service', 409, 'CONTINUATION_REJECTED');
   }
+  /* THE PARENT TRAVELS WITH THE CONTINUATION. The runner refuses a continuation whose parent
+   * attempt it cannot verify ("Submission attempt correlation changed during continuation",
+   * managed-browser.js, since 2026-08-31); the sandbox host injects the parent server-side and
+   * this host never did, so every continuation here (the emailed security-code flow, the receipt
+   * observation) failed closed. The continuation is retained under ITS OWN tuple, which volley
+   * mints with a fresh executionId; the first phase's record stays as it was. */
+  const continuationAttempt = continuation.submissionAttempt ?? null;
+  // Reserved before the single-use token is spent, so a refused reservation leaves the session usable.
+  await terminalResults.reservePending(continuationAttempt, Date.now() + CONTINUATION_TIMEOUT_MS + 5_000);
   session.used = true;
-  await fs.writeFile(path.join(session.directory, 'stratus-continuation-input.json'), JSON.stringify(continuation));
+  await fs.writeFile(
+    path.join(session.directory, 'stratus-continuation-input.json'),
+    JSON.stringify({ ...continuation, parentSubmissionAttempt: session.submissionAttempt }),
+  );
   const produced = await waitForFile(
     session.directory,
     ['stratus-result-1.json', 'stratus-error.json'],
@@ -234,20 +293,26 @@ async function continueRun(input) {
     session.child,
   );
   if (!produced) {
-    const runProgress = await readProgress(session.directory, session.submissionAttempt);
+    // Progress on this phase is bound to the continuation's own tuple.
+    const runProgress = await readProgress(session.directory, continuationAttempt ?? session.submissionAttempt);
     await cleanup(session);
-    throw Object.assign(
+    const error = Object.assign(
       managedError('Managed browser continuation timed out', 410, 'CONTINUATION_EXPIRED'),
       runProgress ? { runProgress } : {},
     );
+    await terminalResults.retain(continuationAttempt, { state: 'indeterminate', error, runProgress });
+    throw error;
   }
   if (produced === 'stratus-error.json') {
-    const error = await runnerError(session.directory, session.stderr, session.submissionAttempt);
+    const error = await runnerError(session.directory, session.stderr, continuationAttempt ?? session.submissionAttempt);
     await cleanup(session);
+    await terminalResults.retain(continuationAttempt, { state: 'failed', error, runProgress: error.runProgress });
     throw error;
   }
   const result = await readResult(session, 1, continuation.screenshot, continuation.screenshotWait);
   await cleanup(session);
+  const retained = await terminalResults.retain(continuationAttempt, { state: 'completed', run: result });
+  if (retained) result.terminalResult = { resultId: retained.resultId };
   return result;
 }
 
