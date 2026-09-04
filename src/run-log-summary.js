@@ -1,3 +1,5 @@
+import { ALLOWED_ACTIONS } from './managed-browser.js';
+
 /* THE TWO PII-FREE LOG LINES A MANAGED RUN LEAVES BEHIND, in one module because there are two
  * request paths that must both write them: the Vercel Sandbox handler (api/run.js) and the Railway
  * server (src/server.js), whose /api/run branch runs the SANDBOX_RUNNER as a local child through
@@ -74,11 +76,47 @@ export function managedRunCompletionLogSummary(input, run, durationMs) {
     const key = typeof entry?.outcome === 'string' ? entry.outcome : 'unknown';
     outcomes[key] = (outcomes[key] || 0) + 1;
   }
+  /* WHAT THE CALLER ACTUALLY ASKED THIS RUN TO DO, counted by type, plus how many bytes of document
+   * came with it. Both are read off the RAW request, so they say what was sent rather than what the
+   * run made of it.
+   *
+   * This line already carried 'actions: N', which is a number that answers nothing. Measured
+   * 2026-09-03 on packet a34e5ce2 (DSI Innovations, Recruitee): the employer's "CV or resume *"
+   * dropzone came back empty, the result claimed 'resume' in filled_fields, and the application
+   * record on the other side showed resume_attached false with a resume artifact selected. The one
+   * question that separates "the board refused the file" from "the run was never given a file" is
+   * whether an upload action was queued at all, and NOTHING in any record could answer it: not this
+   * line, not the progress line, not the result. Hours went into inferring it.
+   *
+   * 'actionTypes' answers it in one field, forever, for every board. 'uploadBytes' answers the
+   * follow-up, whether what came was a real document or a stub, and it is the sum of the DECODED
+   * size of each upload's base64, so a plan that queued the action and attached three bytes reads
+   * differently from one that attached a resume.
+   *
+   * PII-free by construction and deliberately so: the type is admitted only if it is one of the
+   * eleven names in ALLOWED_ACTIONS and is otherwise counted as 'unknown', so a caller cannot push
+   * page text or an applicant value into this line through the type field, and the byte count is a
+   * number. No label, no selector, no value, no file name. */
+  const actionTypes = {};
+  let uploadBytes = 0;
+  for (const action of Array.isArray(input?.actions) ? input.actions : []) {
+    const type = typeof action?.type === 'string' && ALLOWED_ACTIONS.has(action.type)
+      ? action.type
+      : 'unknown';
+    actionTypes[type] = (actionTypes[type] || 0) + 1;
+    if (type === 'upload' && typeof action?.file?.base64 === 'string') {
+      const encoded = action.file.base64;
+      const padding = encoded.endsWith('==') ? 2 : (encoded.endsWith('=') ? 1 : 0);
+      uploadBytes += Math.max(0, Math.floor(encoded.length * 3 / 4) - padding);
+    }
+  }
   return {
     event: 'managed_browser_run_completed',
     durationMs: Number.isFinite(durationMs) ? Math.round(durationMs) : null,
     host: url,
     actions: Array.isArray(input?.actions) ? input.actions.length : null,
+    actionTypes,
+    uploadBytes,
     continuation: typeof input?.continuationToken === 'string',
     screenshotRequested: input?.screenshot !== false,
     screenshotWait: input?.screenshotWait === true,

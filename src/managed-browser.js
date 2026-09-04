@@ -476,7 +476,9 @@ if (submitReadinessGrammarHash !== SUBMIT_READINESS_POLICY.grammarHash) {
   throw new Error('Submit readiness gate grammar hash mismatch');
 }
 const ATOMIC_SUBMIT_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
-const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
+// Exported so the PII-free completion log can count a run's actions by type against the same closed
+// vocabulary this file enforces, rather than keeping a second copy of the list to drift from.
+export const ALLOWED_ACTIONS = new Set(['click', 'fill', 'fillByLabelText', 'upload', 'waitForSelector', 'press', 'select', 'extract', 'discover', 'requireCapability', 'confirmAndSubmit']);
 /* 'discover' belongs here and its absence broke a real product path (2026-09-01). The release
  * hardening enumerated this set narrowly on the sound principle that nothing becomes submit
  * capable by omission, and put 'discover' on the strict side. But discover is one page.evaluate
