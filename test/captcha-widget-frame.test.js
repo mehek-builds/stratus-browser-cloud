@@ -339,17 +339,19 @@ test('the v4 pre-submit containment still refuses everything else it always did'
   assert.deepEqual(mainFrame.calls, ['abort:blockedbyclient']);
 });
 
-/* A second installer, armV4PreSubmitTransportContainment, used to live further down the runner.
- * It was gated on the same retainedAtomicV4Run as the containment built above, so by the time its
- * one caller ran, the containment above always already existed and its own early-return always
- * fired - its body, an unconditional abort with no isCaptchaWidgetFrameRequest carve-out, was dead
- * code that extractHandler's first-match anchor could never reach, so it shipped with zero
- * coverage. Deleted in favour of a single install site, and asserted directly here: if a future
- * change reintroduces a second place that hands v4PreSubmitTransportContainment a new containment
- * object, this fails immediately instead of relying on an anchor string finding the right one by
- * luck. */
+/* See the "THERE IS DELIBERATELY NO SECOND INSTALLER HERE" comment beside
+ * activeSubmitTransportGate in src/managed-browser.js for the dead second installer this guards
+ * against: it is gated here rather than only narrated there so a reintroduction fails a test, not
+ * just a code review.
+ *
+ * The pattern below deliberately does not key on the surviving installer's local variable name
+ * (`containment`). It matches v4PreSubmitTransportContainment being assigned anything other than
+ * `null`, so a second installer written as a direct object literal, or through a differently
+ * named local, is still caught - only a plain reset to null (the teardown in
+ * finishV4PreSubmitTransportContainment) and every read (`if (v4PreSubmitTransportContainment)`,
+ * `?.blockedTransportObserved`, `.mode = 'locked'`) are excluded. */
 test('v4PreSubmitTransportContainment is installed in exactly one place', () => {
-  const installs = SANDBOX_RUNNER.match(/\bv4PreSubmitTransportContainment\s*=\s*containment\b/g) || [];
+  const installs = SANDBOX_RUNNER.match(/\bv4PreSubmitTransportContainment\s*=(?!=)\s*(?!null\b)\S/g) || [];
   assert.equal(
     installs.length,
     1,
