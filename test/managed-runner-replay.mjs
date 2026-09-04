@@ -1338,8 +1338,8 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     fill('#req_phone', '+971 50 123 4567')
   ];
   // 10s host-return margin plus 12s of runway: comfortably past the 2s floor every earlier gate in
-  // the run still checks on its own, comfortably short of the 22s (2000ms postSubmitSettleMs below
-  // plus the runner's fixed 20000ms CONFIRMATION_READ_BUDGET_MS) the final press itself now needs.
+  // the run still checks on its own, comfortably short of the 42s (2000ms postSubmitSettleMs below
+  // plus the runner's fixed 40000ms CONFIRMATION_READ_BUDGET_MS) the final press itself now needs.
   const tightDeadline = new Date(Date.now() + 10_000 + 12_000).toISOString();
 
   const withheld = await replay([
@@ -1354,11 +1354,11 @@ const valueOf = (result, selector) => result.extracted.find((entry) => entry.sel
     'the withheld click must never reach the page, got text ' + JSON.stringify(withheld.text));
   assert.ok(withheld.submitRefusal, 'a withheld press must publish why it was withheld, got ' + JSON.stringify(withheld));
   assert.equal(withheld.submitRefusal.code, 'BUDGET_EXHAUSTED_BEFORE_PRESS');
-  assert.equal(withheld.submitRefusal.requiredMs, 22_000,
-    '2000ms postSubmitSettleMs plus the fixed 20000ms confirmation-read budget');
+  assert.equal(withheld.submitRefusal.requiredMs, 42_000,
+    '2000ms postSubmitSettleMs plus the fixed 40000ms confirmation-read budget');
   assert.ok(withheld.submitRefusal.remainingMs < withheld.submitRefusal.requiredMs
     && withheld.submitRefusal.remainingMs > 2_000,
-    'remainingMs must sit between the 2s floor every earlier gate cleared and the 22s this press needed, got '
+    'remainingMs must sit between the 2s floor every earlier gate cleared and the 42s this press needed, got '
     + withheld.submitRefusal.remainingMs);
   assert.deepEqual(withheld.filledFields.sort(), ['req_email', 'req_name', 'req_phone'],
     'the filled-field evidence must survive a withheld press so the caller can retry without redoing the fill');

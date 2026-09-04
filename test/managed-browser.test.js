@@ -4297,6 +4297,54 @@ test('consistent pre-submit and confirmation progress remains available', async 
         securityCodeOutcome: 'accepted',
       },
     },
+    /* The three finalPressBudgetShortfall withholding checkpoints, one per call site. Each is
+     * exactly what recordCrashProgress writes at that site today; a change to any of them that
+     * breaks this validator would discard the checkpoint silently rather than fail loudly, which
+     * is the class of bug this whole test exists to catch. */
+    {
+      name: 'application submit withheld for provider budget before any press',
+      progress: {
+        version: 1,
+        phase: 0,
+        stage: 'submit_blocked',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: null,
+      },
+    },
+    {
+      name: 'verification submit withheld for provider budget before any press',
+      progress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_blocked',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'verification',
+        policyVersion: null,
+      },
+    },
+    {
+      // The Greenhouse code-resubmit site deliberately calls recordCrashProgress nowhere in its
+      // withholding branch (see its comment): the first click already left this exact checkpoint,
+      // stage: 'submit_released' with verificationSubmitPressed: true, and it is left standing
+      // rather than re-stamped, because re-stamping stage: 'submit_blocked' for a kind already
+      // marked pressed is what this test's OWN validator refuses.
+      name: 'security code resubmit withheld after the first click already pressed',
+      progress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        policyVersion: null,
+      },
+    },
   ];
 
   for (const entry of cases) {
@@ -4320,6 +4368,34 @@ test('consistent pre-submit and confirmation progress remains available', async 
       },
     );
   }
+});
+
+test('a withheld final press leaves the runner-string checkpoint the cases above were pinned from', () => {
+  /* The 'consistent pre-submit and confirmation progress' cases just above prove three exact
+   * shapes are ACCEPTED by the validator. This test is what keeps them true of the actual runner
+   * rather than of three objects this file happens to also type by hand: it pins the literal
+   * recordCrashProgress call at each of the three finalPressBudgetShortfall withholding sites, so
+   * a future edit that drops a field (as submitKind was, once, from the plain-click site, during
+   * this very fix) fails here instead of only in a crash nobody can reproduce. */
+  // Site 1, confirmAndSubmitPass: submitKind travels via the pre-existing phase_started
+  // checkpoint (see 'one provider deadline governs...' above), so this patch does not repeat it.
+  assert.match(SANDBOX_RUNNER,
+    /blocked = true;\n[\s\S]{0,200}?recordCrashProgress\(\{ phase, stage: 'submit_blocked', submitPressed: false \}\);/);
+  // Site 2, the plain click final_submit handler: nothing has set submitKind yet at this point in
+  // THIS action, so it must travel in this same patch or the checkpoint is inconsistent.
+  assert.match(SANDBOX_RUNNER,
+    /recordCrashProgress\(\{\s*phase,\s*stage: 'submit_blocked',\s*submitPressed: false,\s*submitKind: action\.securityCode \? 'verification' : 'application'\s*\}\);\s*continue;/);
+  // Site 3, the Greenhouse code-resubmit: deliberately calls recordCrashProgress nowhere in its
+  // withholding branch, because the first click's own checkpoint is already valid and re-stamping
+  // it here for an already-pressed kind is exactly what the validator refuses.
+  const outcomeNullMarker = "outcome: null, resubmitted: false };";
+  const resubmitBranch = SANDBOX_RUNNER.slice(
+    SANDBOX_RUNNER.indexOf(outcomeNullMarker),
+    SANDBOX_RUNNER.indexOf('} else {', SANDBOX_RUNNER.indexOf(outcomeNullMarker)),
+  );
+  assert.ok(resubmitBranch.length > 0 && resubmitBranch.length < 2000, 'the withholding branch slice must be found and bounded');
+  // The call itself, not the explanatory comment naming it, is what must be absent.
+  assert.doesNotMatch(resubmitBranch, /recordCrashProgress\(/);
 });
 
 test('the runner checkpoints only bounded submit progress around activation and result writes', () => {

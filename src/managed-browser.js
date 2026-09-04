@@ -973,12 +973,25 @@ let terminalFailureInput = null;
    * merely the click itself.
    *
    * CONFIRMATION_READ_BUDGET_MS is the fixed cost paid BETWEEN the click and the settle loop
-   * starting, not the settle loop's own budget: every call site presses, then runs
-   * page.waitForLoadState('networkidle', { timeout: 20000 }), and only then calls
-   * waitForPostSubmitApplicationState. 20000 is that existing timeout, used identically at every
-   * post-press call site today, not a new guess.
-   */
-  const CONFIRMATION_READ_BUDGET_MS = 20_000;
+   * starting, not the settle loop's own budget, and it has two parts, not one - both existing
+   * timeouts already in this file, not new guesses.
+   *
+   * EVERY call site pays the first part: press, then page.waitForLoadState('networkidle',
+   * { timeout: 20000 }), and only then call waitForPostSubmitApplicationState.
+   *
+   * ATOMIC SUBMIT V4 PAYS A SECOND, EARLIER PART FIRST, and it is the one this constant used to
+   * miss. Inside confirmAndSubmitPass, a v4 click's activation is decided by
+   * decideSubmitTransportGate, which awaits native[0].completed - a promise driven by
+   * replayOneNativeHop, whose OWN hard deadline is 'Date.now() + 20_000' (DNS, connect, request
+   * and response, see its definition). That whole exchange runs and finishes BEFORE
+   * confirmAndSubmitPass even returns to the caller that starts the networkidle wait above, so a
+   * slow v4 native hop and a slow post-press page render are additive, not the same 20s counted
+   * twice. This constant is a v3-blind, uniform ceiling: it does not know which chooser version an
+   * upcoming press will use (two of its three call sites have no chooserVersion at all), so it
+   * budgets for the more expensive path everywhere rather than under-count the one that matters
+   * most - a Greenhouse security-code resubmit is exactly the v4 case this constant used to miss,
+   * and exactly the family the incident above was measured on. */
+  const CONFIRMATION_READ_BUDGET_MS = 40_000;
   /* THE ONE PLACE THIS NUMBER IS COMPUTED, so the pre-press budget check and the settle wait it is
    * guarding can never drift apart. See waitForPostSubmitApplicationState below for why the value
    * is shaped the way it is; this function only holds the arithmetic. */
@@ -1005,6 +1018,11 @@ let terminalFailureInput = null;
     if (!providerDeadlineExpired && remainingMs >= requiredMs) return null;
     return { code: 'BUDGET_EXHAUSTED_BEFORE_PRESS', remainingMs, requiredMs };
   };
+  // One sentence, called at all three withholding sites, so a future wording change is one edit
+  // instead of three kept in sync by hand.
+  const finalPressShortfallReason = (shortfall) => 'the provider deadline left ' + shortfall.remainingMs
+    + 'ms before employer submit, short of the ' + shortfall.requiredMs
+    + 'ms needed to press and confirm the result';
   applyProviderDeadline(input.providerDeadlineAt);
   acquireDispatchLock();
   assertProviderActionWindow(providerMinimumSubmitWindowMs);
@@ -14750,12 +14768,11 @@ let terminalFailureInput = null;
           if (finalPressShortfall) {
             submitRefusal = finalPressShortfall;
             blockerReason = 'provider_budget_exhausted_before_press';
-            unresolved.push(
-              'The provider deadline left ' + finalPressShortfall.remainingMs
-              + 'ms before employer submit, short of the ' + finalPressShortfall.requiredMs
-              + 'ms needed to press and confirm the result'
-            );
+            unresolved.push('Submit withheld: ' + finalPressShortfallReason(finalPressShortfall));
             blocked = true;
+            // Same breadcrumb an activation-gate rejection leaves a few lines below: a crash between
+            // here and the run's own result write must not lose the one fact that decided this.
+            recordCrashProgress({ phase, stage: 'submit_blocked', submitPressed: false });
           }
         }
         if (!blocked) {
@@ -16288,7 +16305,15 @@ let terminalFailureInput = null;
               supplied: true,
               entered: true,
               resubmitted: verification.pass.submissionOutcome === 'clicked',
-              outcome: codeOutcome
+              // codeOutcome's own default, 'not_entered', is right for the case that predates this
+              // press attempt entirely; it is wrong here, where the code WAS entered and this exact
+              // press was withheld by finalPressBudgetShortfall a moment ago (submitRefusal can only
+              // be set by the confirmAndSubmitPass call just above). Report no verdict rather than a
+              // contradictory 'entered: true, outcome: not_entered' - submitRefusal is where the
+              // reason lives.
+              outcome: submitRefusal && verification.pass.submissionOutcome !== 'clicked'
+                ? null
+                : codeOutcome
             };
           }
         } else {
@@ -16335,11 +16360,18 @@ let terminalFailureInput = null;
           const finalPressShortfall = finalPressBudgetShortfall();
           if (finalPressShortfall) {
             submitRefusal = finalPressShortfall;
-            skipped.push(
-              (action.label || 'final_submit') + ': submit withheld, the provider deadline left '
-              + finalPressShortfall.remainingMs + 'ms before employer submit, short of the '
-              + finalPressShortfall.requiredMs + 'ms needed to press and confirm the result'
-            );
+            skipped.push((action.label || 'final_submit') + ': submit withheld, '
+              + finalPressShortfallReason(finalPressShortfall));
+            // submitKind must travel with this patch, not wait for the activation call below: a
+            // 'submit_blocked'/'submit_activation_started' checkpoint with no submitKind yet set is
+            // itself an inconsistent shape (managedBrowserProgressStateIsConsistent's
+            // activationProgress branch requires one), which would discard this whole checkpoint.
+            recordCrashProgress({
+              phase,
+              stage: 'submit_blocked',
+              submitPressed: false,
+              submitKind: action.securityCode ? 'verification' : 'application'
+            });
             continue;
           }
           authorizeManagedFinalTransport(currentInput, action);
@@ -16437,12 +16469,25 @@ let terminalFailureInput = null;
             const finalPressShortfall = finalPressBudgetShortfall();
             if (finalPressShortfall) {
               submitRefusal = finalPressShortfall;
-              securityCodeAttempt = { supplied: true, entered: true, outcome: 'not_attempted', resubmitted: false };
-              skipped.push(
-                'security_code: resubmit withheld, the provider deadline left ' + finalPressShortfall.remainingMs
-                + 'ms before employer submit, short of the ' + finalPressShortfall.requiredMs
-                + 'ms needed to press and confirm the result'
-              );
+              // outcome stays null rather than a new enum value: recordCrashProgress mirrors this
+              // into the durable progress file's securityCodeOutcome, whose validator only accepts
+              // 'accepted'/'rejected'/'no_control'/'not_entered', and separately requires any
+              // truthy value to agree with verificationPressed (already true from the first click)
+              // by being 'accepted' or 'rejected' - neither of which happened here. null clears
+              // that whole check rather than tripping it, and is the honest answer: no resubmit
+              // verdict exists to report. submitRefusal below is the one place that says why.
+              securityCodeAttempt = { supplied: true, entered: true, outcome: null, resubmitted: false };
+              skipped.push('security_code: resubmit withheld, ' + finalPressShortfallReason(finalPressShortfall));
+              /* NO recordCrashProgress HERE, unlike the other two sites - it would corrupt the very
+               * breadcrumb it exists to leave. The first click already recorded
+               * stage: 'submit_released' with verificationSubmitPressed: true, which
+               * managedBrowserProgressStateIsConsistent accepts. Re-stamping stage: 'submit_blocked'
+               * (an activationProgress stage) here would violate that validator's OWN rule that an
+               * activation/blocked checkpoint for the current kind must not already show that kind
+               * pressed - true here because a press for this exact kind already happened - and
+               * normalizeManagedBrowserProgress discards the ENTIRE progress object rather than
+               * partially trust it. Leaving the first click's own checkpoint standing is strictly
+               * safer: honest, and already valid. */
             } else {
               await locator.click().catch(() => undefined);
               await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
