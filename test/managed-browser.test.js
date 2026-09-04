@@ -4340,13 +4340,19 @@ test('one provider deadline governs launch, continuation, and every physical sub
   assert.match(SANDBOX_RUNNER, /applyProviderDeadline\(currentInput\.providerDeadlineAt\);\n\s*assertProviderActionWindow/);
   assert.match(
     SANDBOX_RUNNER,
-    // An exact-mutation transport authorization may sit inside the same critical section between
-    // the window check and the network watch. The ordering is what this pins, not adjacency.
-    /assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n(?:\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n)?\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
+    // finalPressBudgetShortfall (see its own definition, next to assertProviderActionWindow) is
+    // the exact-final-authority press's own gate: a critical section checked before deciding
+    // whether to press at all, rather than a bare assertProviderActionWindow floor checked only
+    // before a fixed 2-second wait. An exact-mutation transport authorization may still sit inside
+    // the same critical section between the window check and the network watch. The ordering is
+    // what this pins, not adjacency.
+    /finalPressBudgetShortfall\(\);\n[\s\S]*?\n\s*(?:if \(chooserVersion !== 4\) )?authorizeManagedFinalTransport\(currentInput, action\);\n\s*armSubmitNetworkWatch\(\);\n\s*recordCrashProgress/,
   );
   assert.match(
     SANDBOX_RUNNER,
-    /if \(action\.securityCode && isFinalSubmitAction\(action\)\)[\s\S]*assertProviderActionWindow\(providerMinimumSubmitWindowMs\);\n\s*await locator\.click/,
+    // Same gate, same reason, at the Greenhouse code-resubmit click: checked before the click is
+    // even attempted, so an insufficient window withholds the resubmit instead of racing it.
+    /if \(action\.securityCode && isFinalSubmitAction\(action\)\)[\s\S]*finalPressBudgetShortfall\(\);\n\s*if \(finalPressShortfall\) \{[\s\S]*?\}\s*else\s*\{\n\s*await locator\.click/,
   );
 });
 
