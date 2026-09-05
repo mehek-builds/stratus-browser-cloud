@@ -18,5 +18,5 @@ test('a short or absent deadline keeps the flat 150s the host always had', () =>
 });
 
 test('a malformed far-future deadline cannot hold a run slot for an hour', () => {
-  assert.equal(runTimeoutMsFor(new Date(NOW + 3_600_000).toISOString(), NOW), 330_000);
+  assert.equal(runTimeoutMsFor(new Date(NOW + 3_600_000).toISOString(), NOW), 480_000);
 });

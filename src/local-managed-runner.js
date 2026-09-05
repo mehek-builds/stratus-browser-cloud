@@ -26,7 +26,14 @@ const CONTINUATION_TIMEOUT_MS = 60_000;
  * the runner's own deadline has passed plus a return margin, so the runner's account of the run
  * always arrives first. Bounded above so a malformed deadline cannot hold a slot for an hour. */
 const HOST_WAIT_AFTER_DEADLINE_MS = 5_000;
-const MAX_RUN_TIMEOUT_MS = 330_000;
+/* 480 seconds, raised from 330 on a measurement. TWG Global (apply.workable.com, 6 employer
+ * questions, resume upload, phone dial-code picker) ran 2026-09-05 04:18:50 to 04:23:55 under
+ * litos-api's 280-second deadline and died in a page.waitForTimeout with five of six questions
+ * answered - the same shape as Mercari run 09814b03 a week earlier. The caller's deadline is what
+ * the runner actually stops at (ten seconds before it); this is only the ceiling the host will wait
+ * for, so a malformed far-future deadline still cannot hold a slot for an hour. 480 leaves the
+ * 420-second deadline litos-api now sends plus its return margin, with room for clock skew. */
+const MAX_RUN_TIMEOUT_MS = 480_000;
 
 export function runTimeoutMsFor(providerDeadlineAt, now = Date.now()) {
   const deadlineMs = typeof providerDeadlineAt === 'string' ? Date.parse(providerDeadlineAt) : NaN;

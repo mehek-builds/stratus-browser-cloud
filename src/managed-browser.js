@@ -1134,7 +1134,12 @@ const MANAGED_TERMINAL_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MANAGED_TERMINAL_STORE_TIMEOUT_MS = 10_000;
 export const MANAGED_PROVISIONING_LEASE_MS = 60_000;
 const PROVIDER_MINIMUM_SUBMIT_WINDOW_MS = 2_000;
-const MAX_PROVIDER_DEADLINE_MS = 5 * 60 * 1000;
+/* The most employer-action time a caller may ask for. Eight minutes, raised from five on the TWG
+ * Global measurement (see MAX_RUN_TIMEOUT_MS in local-managed-runner.js): the Railway-hosted local
+ * runner is the production path and waits up to 480 seconds; the Vercel entrypoint (api/run.js) is
+ * still bounded by its own maxDuration and MANAGED_RUN_TIMEOUT_MS below, which do not move. This is a
+ * validation ceiling on the deadline a caller sends, not a budget any run is granted by itself. */
+const MAX_PROVIDER_DEADLINE_MS = 8 * 60 * 1000;
 const OPTIONAL_ARTIFACT_TIMEOUT_MS = 1_000;
 /* How long a screenshotWait caller is willing to wait for the preview artifact to APPEAR. The
  * runner publishes the terminal result first (the authority moment must not wait on pixels) and
