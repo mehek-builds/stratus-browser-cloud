@@ -16960,7 +16960,7 @@ let terminalFailureInput = null;
                * particular. Only a <label> element counts here, never a heading, so a control that
                * carries a meaningful name under a section heading keeps its name exactly as before. */
               for (let block = el.parentElement, depth = 0; block && depth < 6; depth += 1, block = block.parentElement) {
-                if (!block.matches('div, section, li, fieldset')) continue;
+                if (!block.matches || !block.querySelectorAll || !block.matches('div, section, li, fieldset')) continue;
                 if (block.querySelectorAll(
                   'input:not([type="hidden"]), textarea, select, [role="combobox"], [aria-haspopup="listbox"]'
                 ).length > 1) break;
@@ -17434,7 +17434,11 @@ let terminalFailureInput = null;
               nativeChoice && el.name && (control.type === 'radio' || control.type === 'checkbox') && control.name === el.name
             ));
             const sharedBlock = foreignControls.length > 0;
-            const ownGroupChoices = nativeChoice && el.name
+            /* Narrowed to the same name only where the NAME is what makes the group (blockIsGroup:
+             * a fieldset or semantic group already holding two or more of this name). A semantic
+             * group of uniquely named checkboxes (Workable) is one question keyed on the group,
+             * and its inventory stays every checkbox in the block. */
+            const ownGroupChoices = blockIsGroup
               ? blockChoices.filter((input) => input.name === el.name)
               : blockChoices;
             const choiceInputs = sameNamePeers.length > 1
