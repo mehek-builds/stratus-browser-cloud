@@ -44,6 +44,14 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
 <div id="submitted"></div>
 <div id="checkbox-state"></div><div id="checkbox-clicks">0</div><div id="custom-state">selected</div><div id="react-commits">0</div><div id="react-option-clicks">0</div><div id="react-multi-values"></div><div id="text-space-events">0</div>
 <script>
+  // The rendered chip list, read out of the DOM. Written by the control's blur AND by every
+  // multi-select render, so a commit that lands after the blur (?react-multi-async) is reported as
+  // what the applicant is actually left holding rather than as its pre-render value.
+  function publishMultiValues() {
+    document.getElementById('react-multi-values').textContent = [...document.querySelectorAll(
+      '.select__multi-value__label'
+    )].map(function (chip) { return chip.textContent; }).join('|');
+  }
   function clear(id) {
     if (location.search.includes('sticky-required-copy')) return;
     var control = document.getElementById(id);
@@ -133,6 +141,11 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
     // described) while a second click on the same row - the nudge's own bounded restore attempt -
     // behaves normally.
     var reselectAttempts = {};
+    // The mirror of the above for the other direction: ?react-multi-deselect-fails-once drops
+    // exactly the FIRST click that would REMOVE a given chip, leaving the row still selected. It
+    // is the shape that makes the restore step's click direction matter, because the recorded
+    // value never came off the control at all.
+    var deselectAttempts = {};
     var addOption = function (text, selected) {
       var option = document.createElement(
         location.search.includes('react-submit-option') ? 'button' : 'div'
@@ -152,34 +165,52 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
             reselectAttempts[text] = (reselectAttempts[text] || 0) + 1;
             if (reselectAttempts[text] === 1) return; // the widget drops the first reselect click
           }
-          option.setAttribute('aria-selected', String(nowSelected));
-          document.querySelectorAll('.select__multi-value__label').forEach(function (chip) {
-            if (chip.textContent === text) chip.remove();
-          });
-          var existingPlaceholder = document.querySelector('.select__container > .select__placeholder');
-          if (nowSelected) {
-            if (existingPlaceholder) existingPlaceholder.remove();
-            // ?react-multi-reselect-wrong simulates a widget bug that commits a near neighbour
-            // instead of the row that was actually clicked - PR #154's own failure shape.
-            var landedText = location.search.includes('react-multi-reselect-wrong') ? text + ' Near' : text;
-            var restoredChip = document.createElement('div');
-            restoredChip.className = 'select__multi-value__label';
-            restoredChip.textContent = landedText;
-            restoredChip.setAttribute('aria-label', landedText);
-            document.getElementById('react').parentElement.insertBefore(
-              restoredChip, document.getElementById('react')
-            );
-          } else if (!existingPlaceholder
-            && document.querySelectorAll('.select__multi-value__label').length === 0) {
-            // Real react-select renders its placeholder once the last chip is gone. Without this a
-            // deselected control with nothing else chosen reads back 'unknown' rather than 'empty',
-            // and a single-value multi-select could never prove its deselect step actually landed.
-            var placeholder = document.createElement('div');
-            placeholder.className = 'select__placeholder';
-            placeholder.textContent = 'Select...';
-            document.getElementById('react').parentElement.insertBefore(
-              placeholder, document.getElementById('react')
-            );
+          if (!nowSelected && location.search.includes('react-multi-deselect-fails-once')) {
+            deselectAttempts[text] = (deselectAttempts[text] || 0) + 1;
+            if (deselectAttempts[text] === 1) return; // the widget drops the first deselect click
+          }
+          var renderMultiClick = function () {
+            option.setAttribute('aria-selected', String(nowSelected));
+            document.querySelectorAll('.select__multi-value__label').forEach(function (chip) {
+              if (chip.textContent === text) chip.remove();
+            });
+            var existingPlaceholder = document.querySelector('.select__container > .select__placeholder');
+            if (nowSelected) {
+              if (existingPlaceholder) existingPlaceholder.remove();
+              // ?react-multi-reselect-wrong simulates a widget bug that commits a near neighbour
+              // instead of the row that was actually clicked - PR #154's own failure shape.
+              var landedText = location.search.includes('react-multi-reselect-wrong') ? text + ' Near' : text;
+              var restoredChip = document.createElement('div');
+              restoredChip.className = 'select__multi-value__label';
+              restoredChip.textContent = landedText;
+              restoredChip.setAttribute('aria-label', landedText);
+              document.getElementById('react').parentElement.insertBefore(
+                restoredChip, document.getElementById('react')
+              );
+            } else if (!existingPlaceholder
+              && document.querySelectorAll('.select__multi-value__label').length === 0) {
+              // Real react-select renders its placeholder once the last chip is gone. Without this a
+              // deselected control with nothing else chosen reads back 'unknown' rather than 'empty',
+              // and a single-value multi-select could never prove its deselect step actually landed.
+              var placeholder = document.createElement('div');
+              placeholder.className = 'select__placeholder';
+              placeholder.textContent = 'Select...';
+              document.getElementById('react').parentElement.insertBefore(
+                placeholder, document.getElementById('react')
+              );
+            }
+            publishMultiValues();
+          };
+          /* ?react-multi-async commits the chip change on a LATER task instead of inside the click
+           * handler - what a real react-select does, since the click only dispatches a state update
+           * and React renders it afterwards. Every other multi-select case here renders
+           * synchronously, so the control has always already published its new selection by the
+           * time the very next read runs. That is the one thing a real async form does not
+           * guarantee, and it is what this flag exists to take away. */
+          if (location.search.includes('react-multi-async')) {
+            setTimeout(renderMultiClick, 300);
+          } else {
+            renderMultiClick();
           }
           return;
         }
@@ -231,9 +262,7 @@ const fixture = `<!doctype html><meta charset="utf-8"><title>Required confirmati
   });
   document.getElementById('react').addEventListener('blur', function () {
     if (reactMulti) {
-      document.getElementById('react-multi-values').textContent = [...document.querySelectorAll(
-        '.select__multi-value__label'
-      )].map(function (chip) { return chip.textContent; }).join('|');
+      publishMultiValues();
       clear('react');
     }
   });
@@ -989,6 +1018,93 @@ assert.equal(
   reselectCoercedToNeighbour.requiredFieldConfirmation.passes[0].unresolved.includes('Privacy Statement *'),
   true
 );
+
+/* THE ASYNC-RENDERING FORM, which is what a real react-select is. Every multi-select case above
+ * commits its chip change inside the click handler, so the control has already published the new
+ * selection by the time the very next read runs. ?react-multi-async takes that away: the click only
+ * schedules the commit, exactly as a React state update does. A cycle that re-read the control
+ * immediately after each click would judge the deselect against the chips the control still held
+ * from BEFORE it, conclude the removal never happened, and spend its one bounded restore attempt
+ * clicking a row that was already on its way off - ending with the applicant's answer short a chip
+ * on a form that was only slow. The chip set must read back byte-identical, on two clicks, with the
+ * control never marked unverified and the send never refused. */
+const asyncMultiValueReact = await replay(
+  '?react-multi&react-multi-async',
+  reactMultiActionsWithMarker()
+);
+assert.equal(
+  asyncMultiValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value,
+  'Alpha|Beta',
+  'an async-rendering multi-select must end holding the exact recorded chips, in order'
+);
+assert.equal(
+  asyncMultiValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value,
+  '2',
+  'waiting for React to publish a click is a wait, not a retry: still one deselect and one reselect'
+);
+assert.equal(
+  asyncMultiValueReact.extracted.find((entry) => entry.label === 'react-unverified-marker')?.value,
+  null,
+  'a control whose answer survived the cycle intact must never be marked unverified'
+);
+assert.equal(asyncMultiValueReact.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(
+  asyncMultiValueReact.extracted.find((entry) => entry.selector === '#submitted')?.value,
+  'yes',
+  'a form that renders on a later task must not have its send refused for being slow'
+);
+
+/* The same async form with a SINGLE recorded chip, where the deselect empties the control outright.
+ * The state the wait has to accept there is the placeholder, not a chosen value, so this pins that
+ * the settle step still recognises a landed deselect when the control renders no chosen node at
+ * all. */
+const asyncOneValueReact = await replay(
+  '?react-multi-one&react-multi-async',
+  reactMultiActionsWithMarker()
+);
+assert.equal(
+  asyncOneValueReact.extracted.find((entry) => entry.selector === '#react-multi-values')?.value,
+  'Alpha',
+  'an async single-chip multi-select must end holding its one recorded chip'
+);
+assert.equal(
+  asyncOneValueReact.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value,
+  '2'
+);
+assert.equal(
+  asyncOneValueReact.extracted.find((entry) => entry.label === 'react-unverified-marker')?.value,
+  null
+);
+assert.equal(asyncOneValueReact.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(asyncOneValueReact.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
+
+/* THE DESELECT THAT NEVER LANDED. react-select's isMulti toggles a row, so the restore attempt is
+ * the one click in the cycle whose direction is not already settled by what came before it: here
+ * the recorded value is still ON the control, and a blind restore click would remove it a second
+ * time - taking a correct answer off the form and then blocking the run over the damage it just
+ * did. Reading aria-selected first turns that into the honest outcome: nothing was disturbed, so
+ * nothing is clicked and nothing is claimed that is not on the page. */
+const deselectDropped = await replay(
+  '?react-multi&react-multi-deselect-fails-once',
+  reactMultiActionsWithMarker()
+);
+assert.equal(
+  deselectDropped.extracted.find((entry) => entry.selector === '#react-multi-values')?.value,
+  'Alpha|Beta',
+  'a deselect the widget swallowed must leave the recorded chips exactly as they were'
+);
+assert.equal(
+  deselectDropped.extracted.find((entry) => entry.selector === '#react-option-clicks')?.value,
+  '1',
+  'the restore must not click a row that still reads aria-selected: that click removes, it restores nothing'
+);
+assert.equal(
+  deselectDropped.extracted.find((entry) => entry.label === 'react-unverified-marker')?.value,
+  null,
+  'a control the cycle never actually changed must not be marked unverified'
+);
+assert.equal(deselectDropped.requiredFieldConfirmation.status, 'confirmed');
+assert.equal(deselectDropped.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
 
 const hiddenInvalidOnly = await replay('?hidden-invalid-only');
 assert.equal(hiddenInvalidOnly.extracted.find((entry) => entry.selector === '#submitted')?.value, 'yes');
