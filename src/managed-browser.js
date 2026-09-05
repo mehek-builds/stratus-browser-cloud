@@ -5292,6 +5292,19 @@ let terminalFailureInput = null;
      * matters is worse than no witness, so every read is wrapped and a failure to record is
      * silently a missing entry. */
     let submitNetwork = null;
+    // Whether the bound submit request was ever ISSUED at all while the watch was armed, as its
+    // own explicit fact rather than something a reader has to infer from an empty submitNetwork
+    // array. An empty array today means two different things - "we checked and nothing hit the
+    // wire" and "we never got the chance to check" - and a reader cannot tell them apart. Set the
+    // moment a write-shaped request is seen on page.on('request'), independent of whether it ever
+    // gets an answer; left null until armSubmitNetworkWatch runs at all, so a fill run (which never
+    // arms the watch) still reports nothing rather than a manufactured false.
+    let submitRequestSeen = null;
+    // Set by armSubmitNetworkWatch to close out any request that was issued but never answered by
+    // the time the run is ready to serialize its outcome (see SANDBOX_RUNNER's submitOutcome
+    // assembly, far below): it stamps a final waited_seconds onto every entry still open. A no-op
+    // until the watch is armed.
+    let finalizeSubmitNetworkWatch = () => {};
     let submitTransportDisposition = null;
     let postSubmitObservationDisposition = null;
     const submitTransportResponseUnavailable = () => [
@@ -5453,6 +5466,7 @@ let terminalFailureInput = null;
     const armSubmitNetworkWatch = () => {
       if (submitNetwork) return;
       submitNetwork = [];
+      submitRequestSeen = false;
       const record = (entry) => { if (submitNetwork.length < 20) submitNetwork.push(entry); };
       const writeShaped = (request) => {
         const method = request.method();
@@ -5461,13 +5475,53 @@ let terminalFailureInput = null;
         if (type !== 'xhr' && type !== 'fetch' && type !== 'document') return null;
         return method;
       };
+      /* THE MOMENT A WRITE-SHAPED REQUEST IS ISSUED, NOT ONLY THE MOMENT IT ANSWERS. Measured on
+       * the real incident this closes: Pony.ai on Workable, run a7876200, 2026-09-05 13:36Z. The
+       * submit button read "Submitting…" for the whole 30-second observation window, and the run's
+       * network record held ZERO entries, because the only two listeners here (response,
+       * requestfailed) fire on the way OUT of a request, and this one had gone out but had not come
+       * back. A response-only watch cannot tell "the press never touched the network" from "the
+       * press touched the network and the employer never answered" - both leave submitNetwork
+       * empty - and volley's unverifiedSubmissionReason had no way to say which had happened.
+       *
+       * Every entry is now created HERE, at issue time, keyed in openSubmitRequests by the same
+       * Playwright Request object the later response/requestfailed event hands back, so those
+       * listeners update the SAME object in place instead of racing to push a second, redundant
+       * entry. An entry that never gets a response keeps exactly what it was given at issue time -
+       * method, url, issued_at, outcome: 'unanswered' - all the way to finalizeSubmitNetworkWatch
+       * below, which is the one place that can honestly say how long it waited. */
+      const openSubmitRequests = new Map();
+      page.on('request', (request) => {
+        try {
+          const method = writeShaped(request);
+          if (!method) return;
+          submitRequestSeen = true;
+          const parsed = new URL(request.url());
+          const entry = {
+            method,
+            url: (parsed.origin + parsed.pathname).slice(0, 300),
+            status: null,
+            issued_at: new Date().toISOString(),
+            outcome: 'unanswered'
+          };
+          record(entry);
+          openSubmitRequests.set(request, { entry, issuedAtMs: Date.now() });
+        } catch (error) { /* a witness must never break the run */ }
+      });
       page.on('response', (response) => {
         try {
-          const method = writeShaped(response.request());
+          const request = response.request();
+          const method = writeShaped(request);
           if (!method) return;
+          const open = openSubmitRequests.get(request);
           const parsed = new URL(response.url());
-          const entry = { method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: response.status() };
-          record(entry);
+          // A request the 'request' listener above missed (an event ordering guarantee this file
+          // does not lean on) still gets an entry here, exactly as before that listener existed.
+          const entry = open ? open.entry : { method, url: (parsed.origin + parsed.pathname).slice(0, 300) };
+          entry.status = response.status();
+          delete entry.outcome;
+          if (!open) record(entry);
+          else openSubmitRequests.delete(request);
           // The native-replay path (settleHeldRoute) already read this exact response's body as
           // part of deciding what to fulfil the route with, and left the excerpt here keyed by the
           // same Request Playwright hands back on this event. Reuse it instead of reading again.
@@ -5491,11 +5545,33 @@ let terminalFailureInput = null;
         try {
           const method = writeShaped(request);
           if (!method) return;
-          const parsed = new URL(request.url());
+          const open = openSubmitRequests.get(request);
           const failure = request.failure();
-          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: null, failure: String(failure && failure.errorText || 'failed').slice(0, 120) });
+          const failureText = String(failure && failure.errorText || 'failed').slice(0, 120);
+          if (open) {
+            open.entry.status = null;
+            open.entry.outcome = 'unanswered';
+            open.entry.failure = failureText;
+            open.entry.waited_seconds = Math.max(0, Math.round((Date.now() - open.issuedAtMs) / 1000));
+            openSubmitRequests.delete(request);
+            return;
+          }
+          const parsed = new URL(request.url());
+          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: null, failure: failureText });
         } catch (error) { /* a witness must never break the run */ }
       });
+      // The run's own end, or navigation, can leave a request open forever with no requestfailed
+      // ever firing for it (Chromium does not always emit one, e.g. on a page torn down mid-flight).
+      // Called once, right before submitOutcome is assembled, so every entry submitOutcome.network
+      // actually ships either resolved a status or carries an honest 'unanswered' plus how long this
+      // run waited for it - never a silently stale issued_at with no way to tell it apart from one
+      // that just started.
+      finalizeSubmitNetworkWatch = () => {
+        for (const open of openSubmitRequests.values()) {
+          open.entry.waited_seconds = Math.max(0, Math.round((Date.now() - open.issuedAtMs) / 1000));
+        }
+        openSubmitRequests.clear();
+      };
     };
     const managedTransportViolation = (message) => Object.assign(
       new Error(message),
@@ -11074,11 +11150,101 @@ let terminalFailureInput = null;
         return 30_000;
       })();
       const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
+      let lastOutcome = null;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
-        const outcome = await readSubmitOutcome();
-        if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
+        lastOutcome = await readSubmitOutcome();
+        if (lastOutcome.state === 'confirmed' || lastOutcome.state === 'rejected') return;
         await page.waitForTimeout(50).catch(() => undefined);
+      }
+      /* THE 30-SECOND WINDOW ENDING ON A RECOGNISED "STILL WORKING" STATE IS NOT A DEAD END.
+       *
+       * Measured on the real incident this closes: Pony.ai on Workable, run a7876200, 2026-09-05
+       * 13:36Z. The whole 30-second window above elapsed with the submit button still disabled and
+       * reading "Submitting…" - readSubmitOutcome's workablePendingButton arm, which sets
+       * pending: true - and the run gave up right there even though MANAGED_RUN_TIMEOUT_MS (270s,
+       * managed-browser.js:20217 as of this change - see the constant's own comment for why 270 and
+       * not more) still had slack left. Giving up the moment a RECOGNISED in-flight state is still
+       * standing throws away exactly the case this file exists to resolve: the employer's server is
+       * demonstrably still answering, not silent.
+       *
+       * ONLY EXTENDS ON A NAMED SIGNAL, never on a bare 'unknown'. Two independent readers can each
+       * say "a bound submit request is still open": readSubmitOutcome's own pending: true (the DOM
+       * still shows Workable's disabled "Submitting…" button) and armSubmitNetworkWatch's network
+       * record carrying an entry with outcome: 'unanswered' (the submit XHR/fetch itself has not
+       * come back yet - see armSubmitNetworkWatch, above). Either is real, machine-read evidence
+       * that a request is in flight; a plain 'unknown' with neither signal is the same "nothing
+       * recognised this page" case every other ATS family already gets 30 seconds for, and extending
+       * it further would only spend browser time on a page that may never say anything at all.
+       *
+       * THE CEILING, worked out from every relevant clock rather than picked:
+       *
+       *   1. THIS RUN'S OWN REMAINING BUDGET. providerActionDeadlineMs (set above, from
+       *      input.providerDeadlineAt) is this sandbox's own hard stop: the deadline timer at that
+       *      constant's own definition force-closes the browser the instant it passes, so nothing
+       *      requested past it can ever be honoured anyway. providerActionDeadlineMs - Date.now(),
+       *      taken right here, is the true remaining budget, already net of whatever this run has
+       *      spent filling the form and pressing submit - no separate elapsed-time bookkeeping is
+       *      needed because this deadline already bakes it in.
+       *   2. VOLLEY'S PROVIDER-CALL LOCK. volley-backend src/lib/submissionAttemptLedger.ts:644,
+       *      PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000 (4 minutes). volley holds an advisory lock on
+       *      the applicant's account for the duration of this managed call; a browser-side wait that
+       *      outlives that lock is racing a caller that has already moved on. Approximated here from
+       *      this run's own elapsed time (Date.now() - startedAt), since the lock is acquired at
+       *      essentially the same moment this sandbox's own clock (startedAt) starts.
+       *   3. THE SEND'S BOUNDARY AUTHORIZATION. volley-backend src/lib/submissionAttemptLedger.ts:287,
+       *      SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 7 * 60 * 1000 = 420_000 (7 minutes) - the
+       *      window volley signs over to one managed send attempt (raised from 5 minutes together
+       *      with the prepare-fill deadline; see that constant's own comment for the TWG Global
+       *      measurement behind the raise). A wait past this is a wait past the authorization that
+       *      let this run touch the employer's form at all.
+       *
+       * The tightest of the three, minus a 60-second safety margin, bounds how much MORE time this
+       * function may spend beyond the 30 seconds already elapsed above. That extension is also
+       * capped at 90 seconds on its own terms, so a run with an unusually generous budget still
+       * targets a total post-press observation window of roughly 90-120 seconds (30 already spent
+       * plus up to 90 more) rather than camping on the page for the full remaining budget. Whichever
+       * is smaller wins, and either can legitimately drive the number down to zero on a run that
+       * pressed submit late. */
+      if (!lastOutcome) return;
+      const submitAwaitingEmployerAnswer = lastOutcome.pending === true
+        || (Array.isArray(submitNetwork) && submitNetwork.some((entry) => entry && entry.outcome === 'unanswered'));
+      if (!submitAwaitingEmployerAnswer) return;
+      const EXTENDED_WAIT_SAFETY_MARGIN_MS = 60_000;
+      const EXTENDED_WAIT_TARGET_EXTRA_MS = 90_000;
+      const EXTENDED_WAIT_POLL_SLICE_MS = 3_000;
+      // volley-backend src/lib/submissionAttemptLedger.ts:644 - kept as a local literal because the
+      // sandbox script runs as its own process and cannot import a sibling repo's constant.
+      const VOLLEY_PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
+      // volley-backend src/lib/submissionAttemptLedger.ts:287 - same reason.
+      const VOLLEY_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 420_000;
+      const elapsedSoFarMs = Date.now() - startedAt;
+      const remainingRunBudgetMs = providerActionDeadlineMs - Date.now();
+      const remainingProviderLockMs = VOLLEY_PROVIDER_CALL_LOCK_TIMEOUT_MS - elapsedSoFarMs;
+      const remainingBoundaryAuthorizationMs = VOLLEY_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS - elapsedSoFarMs;
+      const tightestRemainingMs = Math.min(
+        remainingRunBudgetMs,
+        remainingProviderLockMs,
+        remainingBoundaryAuthorizationMs
+      );
+      const extraBudgetMs = Math.max(
+        0,
+        Math.min(EXTENDED_WAIT_TARGET_EXTRA_MS, tightestRemainingMs - EXTENDED_WAIT_SAFETY_MARGIN_MS)
+      );
+      if (extraBudgetMs <= 0) return;
+      const extendedDeadline = Date.now() + extraBudgetMs;
+      while (Date.now() < extendedDeadline) {
+        await page.waitForTimeout(
+          Math.max(0, Math.min(EXTENDED_WAIT_POLL_SLICE_MS, extendedDeadline - Date.now()))
+        ).catch(() => undefined);
+        if (securityCodeSettles && await readSecurityCodeChallenge()) return;
+        lastOutcome = await readSubmitOutcome();
+        if (lastOutcome.state === 'confirmed' || lastOutcome.state === 'rejected') return;
+        const stillAwaitingEmployerAnswer = lastOutcome.pending === true
+          || (Array.isArray(submitNetwork) && submitNetwork.some((entry) => entry && entry.outcome === 'unanswered'));
+        // The pending marker clearing without a terminal state means the one signal that justified
+        // extending the wait is gone; keep waiting only while it still stands.
+        if (!stillAwaitingEmployerAnswer) return;
       }
     };
 
@@ -18924,11 +19090,21 @@ let terminalFailureInput = null;
      * observationDisposition (below) still travel on the outcome either way, so nothing about the
      * containment event stops being visible; only the receipt itself stops being thrown away for
      * it. */
+    // Closes out any submit request still open (issued, never answered) before the outcome is
+    // read, so submitOutcome.network never carries a stale issued_at with no honest waited_seconds
+    // beside it. A no-op when the watch was never armed (finalSubmitPressed false) or every
+    // request it saw already resolved.
+    finalizeSubmitNetworkWatch();
     const submitOutcome = finalSubmitPressed
       ? {
           pressed: true,
           ...(await readSubmitOutcome()),
-          ...(submitNetwork ? { network: submitNetwork } : {}),
+          // submit_request_seen is the explicit, distinct fact an empty (or absent) network array
+          // could never carry on its own: null when the watch was never armed, true the moment any
+          // write-shaped request was issued while it was, false when it was armed and watched the
+          // whole window without one ever hitting the wire - the "pressed, but nothing reached the
+          // network" case that used to be indistinguishable from "we didn't check".
+          ...(submitNetwork ? { network: submitNetwork, submit_request_seen: submitRequestSeen === true } : {}),
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
