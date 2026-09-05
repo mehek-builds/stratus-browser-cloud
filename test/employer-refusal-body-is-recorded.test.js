@@ -329,6 +329,17 @@ test('this change never touches reCAPTCHA handling or the containment admit/bloc
  * drain statement that awaits it, do not exist anywhere in the runner, because nothing captured the
  * listener's promise anywhere an outer await could ever reach it - which is exactly the bug. */
 
+// Round 3 of the Workable post-press PR made armSubmitNetworkWatch resolve the run's submit-endpoint
+// binding at arm time (resolveSubmitEndpointBinding, declared in the runner's own marked block just
+// ahead of the watch), so the extracted watch needs that block in scope too - lifted whole, never
+// copied.
+function extractSubmitEndpointBindingBlock() {
+  const start = uniqueMarkerIndex('// SUBMIT-ENDPOINT-BINDING:BEGIN');
+  const end = uniqueMarkerIndex('// SUBMIT-ENDPOINT-BINDING:END');
+  assert.ok(end > start, 'the binding block end marker must follow its begin marker');
+  return SANDBOX_RUNNER.slice(start, end);
+}
+
 function extractArmSubmitNetworkWatchForRace() {
   const start = uniqueMarkerIndex("const armSubmitNetworkWatch = () => {");
   const end = SANDBOX_RUNNER.indexOf('const managedTransportViolation = (message) =>', start);
@@ -356,11 +367,17 @@ function extractSubmitOutcomeAndDrain() {
 // read per activation-mode response, and the submitOutcome assembly plus its drain.
 async function runActivationModeSubmitRace({ body, headers }) {
   const source = excerptHelpersSource() + '\n'
+    + extractSubmitEndpointBindingBlock() + '\n'
     + extractArmSubmitNetworkWatchForRace() + '\n'
     + 'armSubmitNetworkWatch();\n'
     + extractSubmitOutcomeAndDrain() + '\nreturn submitOutcome;';
   const listeners = {};
-  const fakePage = { on: (event, handler) => { listeners[event] = handler; } };
+  // A Greenhouse embed page: an ATS the binding table leaves unbound, so the watch keeps the generic
+  // write-shaped behaviour this race test has always exercised.
+  const fakePage = {
+    on: (event, handler) => { listeners[event] = handler; },
+    url: () => 'https://boards.greenhouse.io/embed/board/jobs/12345',
+  };
   const fakeRequest = { method: () => 'POST', resourceType: () => 'fetch' };
   const fakeResponse = {
     request: () => fakeRequest,

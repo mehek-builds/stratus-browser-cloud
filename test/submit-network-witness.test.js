@@ -112,6 +112,175 @@ test('the watch is armed at both press sites and travels in submitOutcome', () =
    * pins - submitNetwork ends up merged into submitOutcome downstream of the real DOM receipt
    * read - still holds in the new shape; only the obsolete observeForResult wrapping is gone, so
    * the pattern below asserts the direct, unwrapped call instead of re-pinning the wrapper. */
-  assert.match(SANDBOX_RUNNER, /\.\.\.\(await readSubmitOutcome\(\)\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork \} : \{\}\)/,
-    'submitNetwork must be spread into submitOutcome after the real DOM receipt read from readSubmitOutcome()');
+  // ROUND 3: submit_request_seen is now tri-state (true/false/null) and passed through exactly as
+  // computed - no "=== true" coercion, which used to collapse the "no binding for this ATS" null
+  // case into a plain false. See the long comment above submitRequestSeen's declaration.
+  assert.match(
+    SANDBOX_RUNNER,
+    /\.\.\.\(await readSubmitOutcome\(\)\)[\s\S]*?\.\.\.\(submitNetwork \? \{ network: submitNetwork, submit_request_seen: submitRequestSeen \} : \{\}\)/,
+    'submitNetwork must be spread into submitOutcome, alongside submit_request_seen, after the real DOM receipt read from readSubmitOutcome()'
+  );
+});
+
+/* SUBMIT_REQUEST_SEEN IS THE FACT AN EMPTY ARRAY COULD NEVER CARRY: whether the bound submit
+ * request was issued at all while the watch was armed, distinct from whether it ever answered.
+ * Measured on the real incident this closes (Pony.ai on Workable, run a7876200, 2026-09-05): the
+ * network record held zero entries for a press that DID reach the wire, indistinguishable from a
+ * press that never left the browser at all.
+ *
+ * board.test carries no submit-endpoint binding (only apply.workable.com does - see
+ * resolveSubmitEndpointBinding), so ROUND 3 changes what this generic write-shaped request means
+ * for submitRequestSeen: it still gets RECORDED into network as evidence, but it no longer flips
+ * submitRequestSeen true, because a write-shaped request on an ATS this file cannot bind by
+ * endpoint proves nothing about whether the EMPLOYER'S OWN apply call ever fired. */
+test('an unbound write-shaped request is recorded immediately with an unanswered outcome, but never flips submitRequestSeen', async () => {
+  // Never fulfilled and never aborted: the request is issued and then simply never resolves for
+  // the life of this test, which is exactly the shape a run whose observation window ends before
+  // the employer answers sees.
+  await page.route('**/hang-forever', () => {});
+  await standOn('<p>form</p>');
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nreturn () => ({ network: submitNetwork, seen: submitRequestSeen });');
+  const read = reader(page);
+  await page.evaluate(() => { fetch('/hang-forever', { method: 'POST', body: '{}' }).catch(() => {}); });
+  await page.waitForTimeout(300);
+  const { network, seen } = read();
+  assert.equal(seen, null, 'no binding exists for board.test, so submitRequestSeen must stay null, never true or false');
+  assert.equal(network.length, 1, 'the request must still be recorded at issue time, before any response');
+  assert.equal(network[0].status, null);
+  assert.equal(network[0].outcome, 'unanswered');
+  assert.equal(network[0].bound, undefined, 'an unbound entry must not carry bound: true');
+  assert.ok(typeof network[0].issued_at === 'string' && network[0].issued_at.length > 0);
+  await page.unroute('**/hang-forever');
+});
+
+/* ROUND 3: THE SUBMIT-ENDPOINT BINDING TABLE. Workable's apply call is a fixed, public shape -
+ * POST apply.workable.com/api/v1/jobs/<jobId>/apply - and the job id is read straight off the
+ * page's own URL (apply.workable.com/<account>/j/<JOBID>/apply) at arm time. These cases stand a
+ * real page on that route and arm the real watch against it, so the binding is proven end to end
+ * rather than against a mock. */
+async function standOnWorkable(markup, { jobId = 'ABCDEF1234', account = 'acmeco' } = {}) {
+  const pageUrl = 'https://apply.workable.com/' + account + '/j/' + jobId + '/apply';
+  await page.route(pageUrl, (route) => route.fulfill({
+    status: 200, contentType: 'text/html', body: '<!doctype html><html><body>' + markup + '</body></html>',
+  }));
+  await page.goto(pageUrl);
+  return { pageUrl, jobId, account };
+}
+
+test('a request matching the Workable submit-endpoint binding flips submitRequestSeen true and is marked bound', async () => {
+  const { jobId } = await standOnWorkable('<button id="go">Apply</button>');
+  await page.route('**/api/v1/jobs/' + jobId + '/apply', (route) => route.fulfill({ status: 200, body: '{}' }));
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nreturn () => ({ network: submitNetwork, seen: submitRequestSeen });');
+  const read = reader(page);
+  await page.evaluate((id) => {
+    fetch('/api/v1/jobs/' + id + '/apply', { method: 'POST', body: '{}' });
+  }, jobId);
+  await page.waitForTimeout(500);
+  const { network, seen } = read();
+  assert.equal(seen, true, 'a request matching the binding must flip submitRequestSeen true');
+  assert.equal(network.length, 1);
+  assert.equal(network[0].bound, true, 'a bound match must carry bound: true');
+  await page.unroute('**/api/v1/jobs/' + jobId + '/apply');
+});
+
+test('an unrelated POST on a bound ATS leaves submitRequestSeen false, not true', async () => {
+  const { jobId } = await standOnWorkable('<p>form</p>');
+  await page.route('**/api/v1/track', (route) => route.fulfill({ status: 200, body: '{}' }));
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nfinalizeSubmitNetworkWatch();'
+    + '\nreturn () => ({ network: submitNetwork, seen: submitRequestSeen });');
+  const read = reader(page);
+  await page.evaluate(() => { fetch('/api/v1/track', { method: 'POST', body: '{}' }); });
+  await page.waitForTimeout(500);
+  const { network, seen } = read();
+  assert.equal(seen, false,
+    'a binding exists for Workable, and an unrelated write-shaped request must not satisfy it');
+  assert.equal(network.length, 1, 'the unrelated request is still recorded as evidence');
+  assert.equal(network[0].bound, undefined, 'an unrelated request must not be marked bound');
+  void jobId;
+  await page.unroute('**/api/v1/track');
+});
+
+test('a mismatched job id in the submit path is not bound', async () => {
+  const { jobId } = await standOnWorkable('<p>form</p>');
+  const otherJobId = jobId === 'ZZZZZZZZZZ' ? 'YYYYYYYYYY' : 'ZZZZZZZZZZ';
+  await page.route('**/api/v1/jobs/' + otherJobId + '/apply', (route) => route.fulfill({ status: 200, body: '{}' }));
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nfinalizeSubmitNetworkWatch();'
+    + '\nreturn () => ({ network: submitNetwork, seen: submitRequestSeen });');
+  const read = reader(page);
+  await page.evaluate((id) => {
+    fetch('/api/v1/jobs/' + id + '/apply', { method: 'POST', body: '{}' });
+  }, otherJobId);
+  await page.waitForTimeout(500);
+  const { network, seen } = read();
+  assert.equal(seen, false, 'a job id belonging to a different posting must not satisfy this run\'s binding');
+  assert.equal(network[0].bound, undefined);
+  await page.unroute('**/api/v1/jobs/' + otherJobId + '/apply');
+});
+
+test('a beacon-shaped request matching the binding is seen and marked bound', async () => {
+  const { jobId } = await standOnWorkable('<p>form</p>');
+  await page.route('**/api/v1/jobs/' + jobId + '/apply', (route) => route.fulfill({ status: 200, body: '' }));
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nreturn () => ({ network: submitNetwork, seen: submitRequestSeen });');
+  const read = reader(page);
+  await page.evaluate((id) => {
+    navigator.sendBeacon('/api/v1/jobs/' + id + '/apply', new Blob(['{}'], { type: 'application/json' }));
+  }, jobId);
+  await page.waitForTimeout(500);
+  const { network, seen } = read();
+  assert.equal(seen, true, 'a beacon matching the binding must still flip submitRequestSeen true');
+  assert.ok(network.some((entry) => entry && entry.bound === true),
+    'the beacon-shaped match must be recorded and marked bound: ' + JSON.stringify(network));
+  await page.unroute('**/api/v1/jobs/' + jobId + '/apply');
+});
+
+test('a request that later answers is resolved in place, not duplicated, and loses its unanswered outcome', async () => {
+  let resolveRoute;
+  const held = new Promise((resolve) => { resolveRoute = resolve; });
+  await page.route('**/slow', async (route) => {
+    await held;
+    await route.fulfill({ status: 201, body: '{}' });
+  });
+  await standOn('<p>form</p>');
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nreturn () => submitNetwork;');
+  const read = reader(page);
+  await page.evaluate(() => { window.__p = fetch('/slow', { method: 'POST', body: '{}' }); });
+  await page.waitForTimeout(200);
+  // Still open: recorded once, unanswered, no status yet.
+  assert.equal(read().length, 1);
+  assert.equal(read()[0].status, null);
+  assert.equal(read()[0].outcome, 'unanswered');
+  resolveRoute();
+  await page.waitForTimeout(300);
+  const entries = read();
+  assert.equal(entries.length, 1, 'the same request must not be recorded twice');
+  assert.equal(entries[0].status, 201);
+  assert.equal(entries[0].outcome, undefined, 'a resolved request must no longer carry an unanswered outcome');
+  await page.unroute('**/slow');
+});
+
+test('finalizeSubmitNetworkWatch stamps waited_seconds onto whatever is still open when the run ends', async () => {
+  await page.route('**/hang-forever-2', () => {});
+  await standOn('<p>form</p>');
+  const reader = new Function('page', watchSource()
+    + '\narmSubmitNetworkWatch();\nreturn () => { finalizeSubmitNetworkWatch(); return submitNetwork; };');
+  const read = reader(page);
+  await page.evaluate(() => { fetch('/hang-forever-2', { method: 'POST', body: '{}' }).catch(() => {}); });
+  await page.waitForTimeout(300);
+  const entries = read();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].outcome, 'unanswered');
+  assert.equal(typeof entries[0].waited_seconds, 'number');
+  assert.ok(entries[0].waited_seconds >= 0);
+  await page.unroute('**/hang-forever-2');
+});
+
+test('a fill run that never arms the watch reports submitRequestSeen as null, not false', () => {
+  const reader = new Function('page', watchSource() + '\nreturn () => submitRequestSeen;');
+  assert.equal(reader(page)(), null);
 });

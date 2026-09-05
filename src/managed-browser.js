@@ -5292,6 +5292,41 @@ let terminalFailureInput = null;
      * matters is worse than no witness, so every read is wrapped and a failure to record is
      * silently a missing entry. */
     let submitNetwork = null;
+    /* ROUND 3: TRI-STATE, AND BOUND TO THE EMPLOYER'S OWN SUBMIT ENDPOINT, NOT "ANY WRITE-SHAPED
+     * REQUEST." Before this, submitRequestSeen flipped true the moment ANY POST/PUT/PATCH
+     * xhr/fetch/document request was seen during the armed window - an analytics beacon, a
+     * telemetry ping, a field autosave - with no host or path binding to the employer's actual
+     * apply call. That made TWO different false readings possible, and volley's
+     * unverifiedSubmissionReason prints "the request never left the browser" only on submit_request
+     * _seen === false, so a false false was the unacceptable one:
+     *   (a) a stray write-shaped request during the window could make it TRUE even when the real
+     *       apply call never fired;
+     *   (b) for every ATS this file has no submit-endpoint binding for, it still emitted a bare
+     *       FALSE rather than admitting "the runner does not know what to look for here" - handing
+     *       the applicant a confident "it never left the browser" that the runner never actually
+     *       verified.
+     * Now:
+     *   - null:  no binding exists for this run's ATS (submitEndpointBinding, below, is null).
+     *            Generic write-shaped entries may still be recorded into submitNetwork as evidence,
+     *            but they never drive this flag.
+     *   - false: a binding exists, the watch was armed before the click (always true structurally -
+     *            armSubmitNetworkWatch runs immediately before every submit click), and by the end
+     *            of observation no request matching that binding was ever seen.
+     *   - true:  a request matching the binding for this run's ATS was seen (see boundSubmitMatch).
+     * KNOWN REMAINING PATHS TO A FALSE "false" even with a binding, none of them closed by this
+     * change: (1) a sendBeacon/'ping'/'other'-shaped request that does not reach Playwright's
+     * page.on('request') at all on some Chromium builds (this file now matches ping/other/beacon
+     * resourceTypes against the binding when they DO arrive - see below - but cannot make one
+     * arrive that never does); (2) the apply call firing from a POPUP Page (window.open / target
+     * _blank) rather than this page, which this watch is never attached to; (3) the deadline-timer
+     * race - the observation window ending in the interval between the click and the request being
+     * issued, though 30-90+ seconds of post-press wait makes this narrow in practice. */
+    let submitRequestSeen = null;
+    // Set by armSubmitNetworkWatch to close out any request that was issued but never answered by
+    // the time the run is ready to serialize its outcome (see SANDBOX_RUNNER's submitOutcome
+    // assembly, far below): it stamps a final waited_seconds onto every entry still open. A no-op
+    // until the watch is armed.
+    let finalizeSubmitNetworkWatch = () => {};
     let submitTransportDisposition = null;
     let postSubmitObservationDisposition = null;
     const submitTransportResponseUnavailable = () => [
@@ -5450,9 +5485,65 @@ let terminalFailureInput = null;
       }
     };
     // EMPLOYER-REFUSAL-BODY-EXCERPT:END
+    // SUBMIT-ENDPOINT-BINDING:BEGIN
+    /* WHICH WRITE-SHAPED REQUEST, IF ANY, IS THIS RUN'S OWN APPLY CALL - not merely write-shaped in
+     * general. A per-ATS table of (host, path, job-identity) predicates, each one built from a
+     * publicly-documented or previously-measured endpoint shape, never a guess. Only Workable is
+     * bound today: its apply endpoint is a fixed, public shape - POST
+     * apply.workable.com/api/v1/jobs/<jobId>/apply - and the job id the run is applying to is
+     * already sitting in the page URL it is on (apply.workable.com/<account>/j/<JOBID>/apply), so
+     * the two can be bound together and checked by an exact, case-insensitive match instead of "a
+     * write-shaped request happened somewhere."
+     *
+     * GREENHOUSE IS DELIBERATELY LEFT UNBOUND. Nothing else in this file yet proves which of
+     * Greenhouse's endpoints IS its submit call the way resolvedManagedExactPageUrl (module source,
+     * far above) proves its PAGE redirect - the boards-api.greenhouse.io mention near
+     * applicationTransportSite above is a registrable-suffix transport-containment check, not a
+     * submit-endpoint predicate, and duplicating a guess here would trade one false reading for
+     * another. submit_request_seen stays null for Greenhouse until a real binding is measured. */
+    const WORKABLE_SUBMIT_HOST = 'apply.workable.com';
+    const workableJobIdFromApplyPageUrl = (url) => {
+      try {
+        const parsed = new URL(url);
+        if (parsed.hostname.toLowerCase() !== WORKABLE_SUBMIT_HOST) return null;
+        const match = parsed.pathname.match(/^\/[A-Za-z0-9][A-Za-z0-9-]{0,99}\/j\/([A-Za-z0-9]+)\/apply\/?$/i);
+        return match ? match[1].toLowerCase() : null;
+      } catch { return null; }
+    };
+    const resolveSubmitEndpointBinding = (pageUrl) => {
+      const jobId = workableJobIdFromApplyPageUrl(pageUrl);
+      if (!jobId) return null;
+      return {
+        ats: 'workable',
+        matchesUrl: (rawUrl) => {
+          try {
+            const parsed = new URL(rawUrl);
+            if (parsed.hostname.toLowerCase() !== WORKABLE_SUBMIT_HOST) return false;
+            const match = parsed.pathname.match(/^\/api\/v1\/jobs\/([A-Za-z0-9]+)\/apply\/?$/i);
+            return Boolean(match && match[1].toLowerCase() === jobId);
+          } catch { return false; }
+        }
+      };
+    };
+    // SUBMIT-ENDPOINT-BINDING:END
     const armSubmitNetworkWatch = () => {
       if (submitNetwork) return;
       submitNetwork = [];
+      // Resolved ONCE, at arm time (immediately before the click - see both call sites), from the
+      // page this run is actually on. Never re-derived per request: the binding names one job,
+      // fixed for the life of this armed window.
+      const submitEndpointBinding = resolveSubmitEndpointBinding(page.url());
+      // Read by the extended-wait trigger below (outcome === 'unanswered') to tell "no binding
+      // exists for this ATS, fall back to the generic heuristic" from "a binding exists, only
+      // count entries that actually matched it." An own-property on the array rather than a
+      // sibling variable so the one array already threaded through submitOutcome and the
+      // extended-wait function carries the fact with it; JSON.stringify on an array only visits
+      // its indices, so this never leaks into the persisted network payload.
+      submitNetwork.hasBinding = Boolean(submitEndpointBinding);
+      // See the long comment above this variable's declaration for the full tri-state contract.
+      // false the moment a binding exists (flips true only on a matching request); null when this
+      // run's ATS has none.
+      submitRequestSeen = submitEndpointBinding ? false : null;
       const record = (entry) => { if (submitNetwork.length < 20) submitNetwork.push(entry); };
       const writeShaped = (request) => {
         const method = request.method();
@@ -5461,13 +5552,86 @@ let terminalFailureInput = null;
         if (type !== 'xhr' && type !== 'fetch' && type !== 'document') return null;
         return method;
       };
+      // Whether THIS request is the bound submit call for this run's ATS - not merely
+      // write-shaped. Also matches a sendBeacon/'ping'-shaped request against the same binding:
+      // navigator.sendBeacon and <a ping> both issue as a POST that writeShaped above would
+      // otherwise miss entirely (resourceType 'ping'/'other'/'beacon', never 'xhr'/'fetch'), and a
+      // Workable apply call that happens to travel that way must not silently read as "never
+      // seen." See the known-gaps comment above submitRequestSeen's declaration for what this
+      // still cannot catch (a beacon Chromium never surfaces to page.on('request') at all, a popup
+      // Page, the deadline-timer race).
+      const boundSubmitMatch = (request) => {
+        if (!submitEndpointBinding) return false;
+        try {
+          if (request.method() !== 'POST') return false;
+          return submitEndpointBinding.matchesUrl(request.url());
+        } catch { return false; }
+      };
+      /* THE MOMENT A WRITE-SHAPED REQUEST IS ISSUED, NOT ONLY THE MOMENT IT ANSWERS. Measured on
+       * the real incident this closes: Pony.ai on Workable, run a7876200, 2026-09-05 13:36Z. The
+       * submit button read "Submitting…" for the whole 30-second observation window, and the run's
+       * network record held ZERO entries, because the only two listeners here (response,
+       * requestfailed) fire on the way OUT of a request, and this one had gone out but had not come
+       * back. A response-only watch cannot tell "the press never touched the network" from "the
+       * press touched the network and the employer never answered" - both leave submitNetwork
+       * empty - and volley's unverifiedSubmissionReason had no way to say which had happened.
+       *
+       * Every entry is now created HERE, at issue time, keyed in openSubmitRequests by the same
+       * Playwright Request object the later response/requestfailed event hands back, so those
+       * listeners update the SAME object in place instead of racing to push a second, redundant
+       * entry. An entry that never gets a response keeps exactly what it was given at issue time -
+       * method, url, issued_at, outcome: 'unanswered' - all the way to finalizeSubmitNetworkWatch
+       * below, which is the one place that can honestly say how long it waited. Entries bound to
+       * this run's own submit endpoint (see boundSubmitMatch) additionally carry bound: true, so a
+       * reader can tell the apply call apart from unbound evidence (an analytics POST, a field
+       * autosave) recorded in the same array. */
+      const openSubmitRequests = new Map();
+      page.on('request', (request) => {
+        try {
+          const method = writeShaped(request);
+          const resourceType = (() => { try { return request.resourceType(); } catch { return null; } })();
+          const beaconShaped = resourceType === 'ping' || resourceType === 'other' || resourceType === 'beacon';
+          const bound = boundSubmitMatch(request);
+          // A write-shaped request is always recorded, bound or not (unbound entries are still
+          // useful evidence - see the module comment above submitOutcome's assembly). A
+          // beacon-shaped request is recorded ONLY when it matches the binding: an unbound beacon
+          // (analytics, a pixel) is not write-shaped by writeShaped's own definition and stays out
+          // of the record exactly as it did before this change.
+          if (!method && !(beaconShaped && bound)) return;
+          if (bound) submitRequestSeen = true;
+          const parsed = new URL(request.url());
+          const entry = {
+            method: method || request.method(),
+            url: (parsed.origin + parsed.pathname).slice(0, 300),
+            status: null,
+            issued_at: new Date().toISOString(),
+            outcome: 'unanswered',
+            ...(bound ? { bound: true } : {})
+          };
+          record(entry);
+          openSubmitRequests.set(request, { entry, issuedAtMs: Date.now() });
+        } catch (error) { /* a witness must never break the run */ }
+      });
       page.on('response', (response) => {
         try {
-          const method = writeShaped(response.request());
-          if (!method) return;
+          const request = response.request();
+          const method = writeShaped(request);
+          const open = openSubmitRequests.get(request);
+          if (!method && !open) return;
           const parsed = new URL(response.url());
-          const entry = { method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: response.status() };
-          record(entry);
+          // A request the 'request' listener above missed (an event ordering guarantee this file
+          // does not lean on) still gets an entry here, exactly as before that listener existed.
+          const entry = open
+            ? open.entry
+            : {
+                method,
+                url: (parsed.origin + parsed.pathname).slice(0, 300),
+                ...(boundSubmitMatch(request) ? { bound: true } : {})
+              };
+          entry.status = response.status();
+          delete entry.outcome;
+          if (!open) record(entry);
+          else openSubmitRequests.delete(request);
           // The native-replay path (settleHeldRoute) already read this exact response's body as
           // part of deciding what to fulfil the route with, and left the excerpt here keyed by the
           // same Request Playwright hands back on this event. Reuse it instead of reading again.
@@ -5490,12 +5654,40 @@ let terminalFailureInput = null;
       page.on('requestfailed', (request) => {
         try {
           const method = writeShaped(request);
-          if (!method) return;
-          const parsed = new URL(request.url());
+          const open = openSubmitRequests.get(request);
+          if (!method && !open) return;
           const failure = request.failure();
-          record({ method, url: (parsed.origin + parsed.pathname).slice(0, 300), status: null, failure: String(failure && failure.errorText || 'failed').slice(0, 120) });
+          const failureText = String(failure && failure.errorText || 'failed').slice(0, 120);
+          if (open) {
+            open.entry.status = null;
+            open.entry.outcome = 'unanswered';
+            open.entry.failure = failureText;
+            open.entry.waited_seconds = Math.max(0, Math.round((Date.now() - open.issuedAtMs) / 1000));
+            openSubmitRequests.delete(request);
+            return;
+          }
+          const parsed = new URL(request.url());
+          record({
+            method,
+            url: (parsed.origin + parsed.pathname).slice(0, 300),
+            status: null,
+            failure: failureText,
+            ...(boundSubmitMatch(request) ? { bound: true } : {})
+          });
         } catch (error) { /* a witness must never break the run */ }
       });
+      // The run's own end, or navigation, can leave a request open forever with no requestfailed
+      // ever firing for it (Chromium does not always emit one, e.g. on a page torn down mid-flight).
+      // Called once, right before submitOutcome is assembled, so every entry submitOutcome.network
+      // actually ships either resolved a status or carries an honest 'unanswered' plus how long this
+      // run waited for it - never a silently stale issued_at with no way to tell it apart from one
+      // that just started.
+      finalizeSubmitNetworkWatch = () => {
+        for (const open of openSubmitRequests.values()) {
+          open.entry.waited_seconds = Math.max(0, Math.round((Date.now() - open.issuedAtMs) / 1000));
+        }
+        openSubmitRequests.clear();
+      };
     };
     const managedTransportViolation = (message) => Object.assign(
       new Error(message),
@@ -10505,7 +10697,16 @@ let terminalFailureInput = null;
       const CONFIRMED_CONTAINERS = ['.ashby-application-form-success-container'];
       const REJECTED_CONTAINERS = ['.ashby-application-form-failure-container'];
       const CONFIRMED_TEXT = /thank you for (?:submitting|applying)|thanks for (?:applying|your application)|your application (?:has been |was )?(?:successfully )?(?:submitted|received)|application (?:has been )?(?:submitted|received)|we(?:'| ha)ve received your application/i;
-      const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)/i;
+      /* WORKABLE'S OWN TWO POST-PRESS FAILURE SENTENCES, added to the general vocabulary rather than
+       * kept family-local, because both are read here off a live_region/body-text arm that already
+       * runs for every family. Read verbatim off Workable's public candidate bundle
+       * (dcvxs6ggqztsa.cloudfront.net/candidate/releases/careers.16db0938022ceab4.js, fetched
+       * 2026-09-05 via curl - never by opening the employer portal): submit.error is
+       * "Something went wrong. We are working on this, please try again later.", rendered when the
+       * /apply POST itself came back bad, and submit.turnstileError is "We couldn't process your
+       * request. Please access the application from a different browser and try again.", Workable's
+       * own CAPTCHA/anti-bot refusal. Neither is guessable prose; both are the ATS's own copy. */
+      const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)|something went wrong\.\s*we are working on this,?\s*please try again later|we (?:could ?n[o']?t|couldn.t) process your request\.?\s*please access the application from a different browser/i;
       /* THE FORM IS THE COUNTER-WITNESS, so it has to be hard to miss. Probing only for file, email
        * and textarea controls missed a form whose email field is type="text", which is common, and
        * that single miss let the weakest arm below confirm a submission with the Submit button still
@@ -10592,7 +10793,13 @@ let terminalFailureInput = null;
        * a leaf node (a page-sized container matching by concatenation is not the message), and
        * matches only wording that names the application's own errors - never a bare "required",
        * which decorates half the labels on every form. */
-      const VALIDATION_REFUSAL_RE = /your application (?:contains|has) errors|please (?:fix|correct) the errors? (?:above|below|highlighted)/i;
+      /* Workable's own validation sentence joins the vocabulary here rather than getting a second
+       * family-gated arm, for the same reason Greenhouse's does: it is a validation sentence that
+       * exists only while the form does, so it belongs beside the rule that already trusts that
+       * shape. Read verbatim off Workable's public candidate bundle (see the REJECTED_TEXT comment
+       * above for the source and fetch date): submit.validationError is exactly "There are some
+       * issues with your application. Please revisit your data and try again." */
+      const VALIDATION_REFUSAL_RE = /your application (?:contains|has) errors|please (?:fix|correct) the errors? (?:above|below|highlighted)|there are some issues with your application/i;
       if (formStillPresent) {
         const leaves = [...document.querySelectorAll('div, p, span, label, small')]
           .filter((node) => node.children.length === 0 && isVisible(node));
@@ -10722,6 +10929,40 @@ let terminalFailureInput = null;
       if (!formStillPresent && CONFIRMED_TEXT.test(body)) {
         const sentence = (body.match(CONFIRMED_TEXT) || [''])[0];
         return { state: 'confirmed', source: 'page_text', evidence: 'body', message: clean(body.slice(Math.max(0, body.indexOf(sentence)), body.indexOf(sentence) + 400)), formStillPresent };
+      }
+      /* THE EMPLOYER'S SERVER MAY STILL BE ANSWERING, and that is a different fact from "no arm
+       * recognised this page" even though both leave state 'unknown'. Read off the SAME Workable
+       * candidate bundle the success and refusal arms above cite (dcvxs6ggqztsa.cloudfront.net/
+       * candidate/releases/careers.16db0938022ceab4.js, fetched 2026-09-05 via curl): the submit
+       * button's own three strings are "Submit application" (idle), "Submitting…" (disabled, while
+       * the client awaits the /apply POST's response) and nothing else - there is no fourth,
+       * separately-worded pending state. Measured live on Pony.ai application
+       * fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb (2026-09-05, ledger attempt 4496a103): the dashboard's
+       * post-press screenshot showed exactly this button, greyed out, reading "Submitting…", and no
+       * arm here recognised it, so the record said "no confirmation state" about a page that was
+       * visibly still waiting on the employer.
+       *
+       * Recognising it promotes NOTHING - it stays 'unknown', because the page has not said whether
+       * the employer accepted the request - it only lets the caller (and, in volley, the applicant's
+       * own sentence) say "the employer's server had not answered yet" instead of the flatly wrong
+       * "no confirmation state", which reads as though the press produced nothing to wait for at
+       * all. The 'pending' field is the one new fact this arm adds; every other arm leaves it unset,
+       * which the wire format and readManagedSubmitOutcome both treat the same as false. */
+      const WORKABLE_PENDING_BUTTON_RE = /^submitting…?$/i;
+      const workablePendingButton = formStillPresent && [...document.querySelectorAll(
+        'button, [role="button"], input[type=submit]'
+      )].some((node) => isVisible(node)
+        && (node.disabled === true || node.getAttribute('aria-disabled') === 'true')
+        && WORKABLE_PENDING_BUTTON_RE.test(clean(node.innerText || node.value || '')));
+      if (workablePendingButton) {
+        return {
+          state: 'unknown',
+          source: 'ats_state_unconfirmed',
+          evidence: 'workable_submitting_button',
+          message: 'Submitting…',
+          formStillPresent,
+          pending: true
+        };
       }
       /* NO ARM RECOGNISED THIS PAGE, and the old shape threw that fact away: message/evidence went
        * back null, so a genuinely new ATS shape left no residue from which to build a measured arm.
@@ -11025,11 +11266,113 @@ let terminalFailureInput = null;
         return 30_000;
       })();
       const deadline = Date.now() + POST_SUBMIT_SETTLE_MS;
+      let lastOutcome = null;
       while (Date.now() < deadline) {
         if (securityCodeSettles && await readSecurityCodeChallenge()) return;
-        const outcome = await readSubmitOutcome();
-        if (outcome.state === 'confirmed' || outcome.state === 'rejected') return;
+        lastOutcome = await readSubmitOutcome();
+        if (lastOutcome.state === 'confirmed' || lastOutcome.state === 'rejected') return;
         await page.waitForTimeout(50).catch(() => undefined);
+      }
+      /* THE 30-SECOND WINDOW ENDING ON A RECOGNISED "STILL WORKING" STATE IS NOT A DEAD END.
+       *
+       * Measured on the real incident this closes: Pony.ai on Workable, run a7876200, 2026-09-05
+       * 13:36Z. The whole 30-second window above elapsed with the submit button still disabled and
+       * reading "Submitting…" - readSubmitOutcome's workablePendingButton arm, which sets
+       * pending: true - and the run gave up right there even though MANAGED_RUN_TIMEOUT_MS (270s,
+       * managed-browser.js:20217 as of this change - see the constant's own comment for why 270 and
+       * not more) still had slack left. Giving up the moment a RECOGNISED in-flight state is still
+       * standing throws away exactly the case this file exists to resolve: the employer's server is
+       * demonstrably still answering, not silent.
+       *
+       * ONLY EXTENDS ON A NAMED SIGNAL, never on a bare 'unknown'. Two independent readers can each
+       * say "a bound submit request is still open": readSubmitOutcome's own pending: true (the DOM
+       * still shows Workable's disabled "Submitting…" button) and armSubmitNetworkWatch's network
+       * record carrying an entry with outcome: 'unanswered' (the submit XHR/fetch itself has not
+       * come back yet - see armSubmitNetworkWatch, above). Either is real, machine-read evidence
+       * that a request is in flight; a plain 'unknown' with neither signal is the same "nothing
+       * recognised this page" case every other ATS family already gets 30 seconds for, and extending
+       * it further would only spend browser time on a page that may never say anything at all.
+       *
+       * THE CEILING, worked out from every relevant clock rather than picked:
+       *
+       *   1. THIS RUN'S OWN REMAINING BUDGET. providerActionDeadlineMs (set above, from
+       *      input.providerDeadlineAt) is this sandbox's own hard stop: the deadline timer at that
+       *      constant's own definition force-closes the browser the instant it passes, so nothing
+       *      requested past it can ever be honoured anyway. providerActionDeadlineMs - Date.now(),
+       *      taken right here, is the true remaining budget, already net of whatever this run has
+       *      spent filling the form and pressing submit - no separate elapsed-time bookkeeping is
+       *      needed because this deadline already bakes it in.
+       *   2. VOLLEY'S PROVIDER-CALL LOCK. volley-backend src/lib/submissionAttemptLedger.ts:644,
+       *      PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000 (4 minutes). volley holds an advisory lock on
+       *      the applicant's account for the duration of this managed call; a browser-side wait that
+       *      outlives that lock is racing a caller that has already moved on. Approximated here from
+       *      this run's own elapsed time (Date.now() - startedAt), since the lock is acquired at
+       *      essentially the same moment this sandbox's own clock (startedAt) starts.
+       *   3. THE SEND'S BOUNDARY AUTHORIZATION. volley-backend src/lib/submissionAttemptLedger.ts:287,
+       *      SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 7 * 60 * 1000 = 420_000 (7 minutes) - the
+       *      window volley signs over to one managed send attempt (raised from 5 minutes together
+       *      with the prepare-fill deadline; see that constant's own comment for the TWG Global
+       *      measurement behind the raise). A wait past this is a wait past the authorization that
+       *      let this run touch the employer's form at all.
+       *
+       * The tightest of the three, minus a 60-second safety margin, bounds how much MORE time this
+       * function may spend beyond the 30 seconds already elapsed above. That extension is also
+       * capped at 90 seconds on its own terms, so a run with an unusually generous budget still
+       * targets a total post-press observation window of roughly 90-120 seconds (30 already spent
+       * plus up to 90 more) rather than camping on the page for the full remaining budget. Whichever
+       * is smaller wins, and either can legitimately drive the number down to zero on a run that
+       * pressed submit late. */
+      if (!lastOutcome) return;
+      // ROUND 3: when this run's ATS has a submit-endpoint binding (submitNetwork.hasBinding, set
+      // by armSubmitNetworkWatch), only a BOUND entry still reading 'unanswered' may justify the
+      // extension - an unrelated write-shaped request (analytics, a field autosave) left dangling
+      // says nothing about whether the employer's own apply call is still in flight. Where no
+      // binding exists, fall back to the prior generic behaviour: any unanswered write-shaped
+      // entry is still real, machine-read evidence for an ATS this file cannot bind by endpoint.
+      const unansweredSubmitNetworkEntry = (entries) => {
+        if (!Array.isArray(entries)) return false;
+        return entries.hasBinding
+          ? entries.some((entry) => entry && entry.outcome === 'unanswered' && entry.bound === true)
+          : entries.some((entry) => entry && entry.outcome === 'unanswered');
+      };
+      const submitAwaitingEmployerAnswer = lastOutcome.pending === true
+        || unansweredSubmitNetworkEntry(submitNetwork);
+      if (!submitAwaitingEmployerAnswer) return;
+      const EXTENDED_WAIT_SAFETY_MARGIN_MS = 60_000;
+      const EXTENDED_WAIT_TARGET_EXTRA_MS = 90_000;
+      const EXTENDED_WAIT_POLL_SLICE_MS = 3_000;
+      // volley-backend src/lib/submissionAttemptLedger.ts:644 - kept as a local literal because the
+      // sandbox script runs as its own process and cannot import a sibling repo's constant.
+      const VOLLEY_PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
+      // volley-backend src/lib/submissionAttemptLedger.ts:287 - same reason.
+      const VOLLEY_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 420_000;
+      const elapsedSoFarMs = Date.now() - startedAt;
+      const remainingRunBudgetMs = providerActionDeadlineMs - Date.now();
+      const remainingProviderLockMs = VOLLEY_PROVIDER_CALL_LOCK_TIMEOUT_MS - elapsedSoFarMs;
+      const remainingBoundaryAuthorizationMs = VOLLEY_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS - elapsedSoFarMs;
+      const tightestRemainingMs = Math.min(
+        remainingRunBudgetMs,
+        remainingProviderLockMs,
+        remainingBoundaryAuthorizationMs
+      );
+      const extraBudgetMs = Math.max(
+        0,
+        Math.min(EXTENDED_WAIT_TARGET_EXTRA_MS, tightestRemainingMs - EXTENDED_WAIT_SAFETY_MARGIN_MS)
+      );
+      if (extraBudgetMs <= 0) return;
+      const extendedDeadline = Date.now() + extraBudgetMs;
+      while (Date.now() < extendedDeadline) {
+        await page.waitForTimeout(
+          Math.max(0, Math.min(EXTENDED_WAIT_POLL_SLICE_MS, extendedDeadline - Date.now()))
+        ).catch(() => undefined);
+        if (securityCodeSettles && await readSecurityCodeChallenge()) return;
+        lastOutcome = await readSubmitOutcome();
+        if (lastOutcome.state === 'confirmed' || lastOutcome.state === 'rejected') return;
+        const stillAwaitingEmployerAnswer = lastOutcome.pending === true
+          || unansweredSubmitNetworkEntry(submitNetwork);
+        // The pending marker clearing without a terminal state means the one signal that justified
+        // extending the wait is gone; keep waiting only while it still stands.
+        if (!stillAwaitingEmployerAnswer) return;
       }
     };
 
@@ -18875,11 +19218,25 @@ let terminalFailureInput = null;
      * observationDisposition (below) still travel on the outcome either way, so nothing about the
      * containment event stops being visible; only the receipt itself stops being thrown away for
      * it. */
+    // Closes out any submit request still open (issued, never answered) before the outcome is
+    // read, so submitOutcome.network never carries a stale issued_at with no honest waited_seconds
+    // beside it. A no-op when the watch was never armed (finalSubmitPressed false) or every
+    // request it saw already resolved.
+    finalizeSubmitNetworkWatch();
     const submitOutcome = finalSubmitPressed
       ? {
           pressed: true,
           ...(await readSubmitOutcome()),
-          ...(submitNetwork ? { network: submitNetwork } : {}),
+          // submit_request_seen (ROUND 3, tri-state and endpoint-bound - see the long comment above
+          // its declaration far above): null when this run's ATS has no submit-endpoint binding
+          // (the watch may still have been armed and recorded unbound evidence into network, but
+          // that evidence never drives this flag), true the moment a request matching the binding
+          // was seen, false when a binding exists and the whole observation window elapsed without
+          // one ever hitting the wire - the "pressed, but the employer's own endpoint never
+          // answered" case volley's unverifiedSubmissionReason prints as "the request never left
+          // the browser." Passed through exactly as computed: no === true coercion, so the null
+          // case (no binding) survives as null rather than collapsing into false.
+          ...(submitNetwork ? { network: submitNetwork, submit_request_seen: submitRequestSeen } : {}),
           ...(submitTransportDisposition ? { transportDisposition: submitTransportDisposition } : {})
         }
       : { pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null };
