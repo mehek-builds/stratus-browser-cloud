@@ -10505,7 +10505,16 @@ let terminalFailureInput = null;
       const CONFIRMED_CONTAINERS = ['.ashby-application-form-success-container'];
       const REJECTED_CONTAINERS = ['.ashby-application-form-failure-container'];
       const CONFIRMED_TEXT = /thank you for (?:submitting|applying)|thanks for (?:applying|your application)|your application (?:has been |was )?(?:successfully )?(?:submitted|received)|application (?:has been )?(?:submitted|received)|we(?:'| ha)ve received your application/i;
-      const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)/i;
+      /* WORKABLE'S OWN TWO POST-PRESS FAILURE SENTENCES, added to the general vocabulary rather than
+       * kept family-local, because both are read here off a live_region/body-text arm that already
+       * runs for every family. Read verbatim off Workable's public candidate bundle
+       * (dcvxs6ggqztsa.cloudfront.net/candidate/releases/careers.16db0938022ceab4.js, fetched
+       * 2026-09-05 via curl - never by opening the employer portal): submit.error is
+       * "Something went wrong. We are working on this, please try again later.", rendered when the
+       * /apply POST itself came back bad, and submit.turnstileError is "We couldn't process your
+       * request. Please access the application from a different browser and try again.", Workable's
+       * own CAPTCHA/anti-bot refusal. Neither is guessable prose; both are the ATS's own copy. */
+      const REJECTED_TEXT = /we could ?n[o']?t submit your application|your application could not be submitted|there was a problem (?:submitting|with your application)|something went wrong\.\s*we are working on this,?\s*please try again later|we (?:could ?n[o']?t|couldn.t) process your request\.?\s*please access the application from a different browser/i;
       /* THE FORM IS THE COUNTER-WITNESS, so it has to be hard to miss. Probing only for file, email
        * and textarea controls missed a form whose email field is type="text", which is common, and
        * that single miss let the weakest arm below confirm a submission with the Submit button still
@@ -10592,7 +10601,13 @@ let terminalFailureInput = null;
        * a leaf node (a page-sized container matching by concatenation is not the message), and
        * matches only wording that names the application's own errors - never a bare "required",
        * which decorates half the labels on every form. */
-      const VALIDATION_REFUSAL_RE = /your application (?:contains|has) errors|please (?:fix|correct) the errors? (?:above|below|highlighted)/i;
+      /* Workable's own validation sentence joins the vocabulary here rather than getting a second
+       * family-gated arm, for the same reason Greenhouse's does: it is a validation sentence that
+       * exists only while the form does, so it belongs beside the rule that already trusts that
+       * shape. Read verbatim off Workable's public candidate bundle (see the REJECTED_TEXT comment
+       * above for the source and fetch date): submit.validationError is exactly "There are some
+       * issues with your application. Please revisit your data and try again." */
+      const VALIDATION_REFUSAL_RE = /your application (?:contains|has) errors|please (?:fix|correct) the errors? (?:above|below|highlighted)|there are some issues with your application/i;
       if (formStillPresent) {
         const leaves = [...document.querySelectorAll('div, p, span, label, small')]
           .filter((node) => node.children.length === 0 && isVisible(node));
@@ -10722,6 +10737,40 @@ let terminalFailureInput = null;
       if (!formStillPresent && CONFIRMED_TEXT.test(body)) {
         const sentence = (body.match(CONFIRMED_TEXT) || [''])[0];
         return { state: 'confirmed', source: 'page_text', evidence: 'body', message: clean(body.slice(Math.max(0, body.indexOf(sentence)), body.indexOf(sentence) + 400)), formStillPresent };
+      }
+      /* THE EMPLOYER'S SERVER MAY STILL BE ANSWERING, and that is a different fact from "no arm
+       * recognised this page" even though both leave state 'unknown'. Read off the SAME Workable
+       * candidate bundle the success and refusal arms above cite (dcvxs6ggqztsa.cloudfront.net/
+       * candidate/releases/careers.16db0938022ceab4.js, fetched 2026-09-05 via curl): the submit
+       * button's own three strings are "Submit application" (idle), "Submitting…" (disabled, while
+       * the client awaits the /apply POST's response) and nothing else - there is no fourth,
+       * separately-worded pending state. Measured live on Pony.ai application
+       * fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb (2026-09-05, ledger attempt 4496a103): the dashboard's
+       * post-press screenshot showed exactly this button, greyed out, reading "Submitting…", and no
+       * arm here recognised it, so the record said "no confirmation state" about a page that was
+       * visibly still waiting on the employer.
+       *
+       * Recognising it promotes NOTHING - it stays 'unknown', because the page has not said whether
+       * the employer accepted the request - it only lets the caller (and, in volley, the applicant's
+       * own sentence) say "the employer's server had not answered yet" instead of the flatly wrong
+       * "no confirmation state", which reads as though the press produced nothing to wait for at
+       * all. The 'pending' field is the one new fact this arm adds; every other arm leaves it unset,
+       * which the wire format and readManagedSubmitOutcome both treat the same as false. */
+      const WORKABLE_PENDING_BUTTON_RE = /^submitting…?$/i;
+      const workablePendingButton = formStillPresent && [...document.querySelectorAll(
+        'button, [role="button"], input[type=submit]'
+      )].some((node) => isVisible(node)
+        && (node.disabled === true || node.getAttribute('aria-disabled') === 'true')
+        && WORKABLE_PENDING_BUTTON_RE.test(clean(node.innerText || node.value || '')));
+      if (workablePendingButton) {
+        return {
+          state: 'unknown',
+          source: 'ats_state_unconfirmed',
+          evidence: 'workable_submitting_button',
+          message: 'Submitting…',
+          formStillPresent,
+          pending: true
+        };
       }
       /* NO ARM RECOGNISED THIS PAGE, and the old shape threw that fact away: message/evidence went
        * back null, so a genuinely new ATS shape left no residue from which to build a measured arm.

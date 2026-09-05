@@ -308,6 +308,91 @@ for (const [name, url, html] of [
   });
 }
 
+/* THE PONY.AI INCIDENT, 2026-09-05: ledger attempt 4496a103 pressed Send on this exact posting and
+ * came back "no confirmation state" while the button on screen still read "Submitting…", disabled,
+ * because the /apply POST had not answered yet. "Submitting…" is Workable's own button copy (read
+ * from its public candidate bundle, dcvxs6ggqztsa.cloudfront.net/candidate/releases/
+ * careers.16db0938022ceab4.js, fetched 2026-09-05) - it is not guessed prose. */
+test('a disabled Workable "Submitting…" button is recognised as still pending, not unrecognised', async () => {
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <input type="file" />
+      <button type="submit" disabled>Submitting…</button>
+    </form>`);
+  assert.equal(outcome.state, 'unknown');
+  assert.equal(outcome.source, 'ats_state_unconfirmed');
+  assert.equal(outcome.evidence, 'workable_submitting_button');
+  assert.equal(outcome.formStillPresent, true);
+  assert.equal(outcome.pending, true);
+  assert.match(outcome.message, /Submitting/);
+});
+
+test('an aria-disabled Workable "Submitting…" control is recognised the same way', async () => {
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <div role="button" aria-disabled="true">Submitting…</div>
+    </form>`);
+  assert.equal(outcome.pending, true);
+  assert.equal(outcome.state, 'unknown');
+});
+
+test('an ENABLED "Submitting…" label (dead markup, not a real pending state) is not treated as pending', async () => {
+  // Only a disabled/aria-disabled control counts: enabled text that happens to say "Submitting…" is
+  // not evidence the client is actually waiting on anything, and treating it as pending would let an
+  // employer page manufacture a "still waiting" reading it never earned.
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <button type="submit">Submitting…</button>
+    </form>`);
+  assert.notEqual(outcome.pending, true);
+});
+
+test('the idle "Submit application" button is never read as pending', async () => {
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <button type="submit">Submit application</button>
+    </form>`);
+  assert.notEqual(outcome.pending, true);
+  assert.equal(outcome.formStillPresent, true);
+});
+
+/* WORKABLE'S OWN TWO POST-PRESS FAILURE SENTENCES, from the same bundle fetch. Both name the
+ * employer's own answer rather than generic doubt, so both may resolve a run that would otherwise
+ * sit at 'unverified' forever. */
+test('Workable\'s client-validation sentence over a live form is a proven rejection', async () => {
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <div>There are some issues with your application. Please revisit your data and try again.</div>
+      <button type="submit">Submit application</button>
+    </form>`);
+  assert.equal(outcome.state, 'rejected');
+  assert.equal(outcome.source, 'client_validation');
+  assert.equal(outcome.formStillPresent, true);
+});
+
+test('Workable\'s server-side submit error, announced in a live region, is a proven rejection', async () => {
+  const outcome = await read(`
+    <form data-ui="application-form">
+      <input type="email" value="a@b.c" />
+      <button type="submit">Submit application</button>
+    </form>
+    <div role="alert">Something went wrong. We are working on this, please try again later.</div>`);
+  assert.equal(outcome.state, 'rejected');
+  assert.equal(outcome.source, 'live_region');
+});
+
+test('Workable\'s Turnstile refusal, announced in a live region, is a proven rejection', async () => {
+  const outcome = await read(`
+    <div role="alert">We couldn't process your request. Please access the application from a different browser and try again.</div>`);
+  assert.equal(outcome.state, 'rejected');
+  assert.equal(outcome.source, 'live_region');
+});
+
 for (const label of ['Continue', 'Next', 'Finish', 'Complete application', 'Retry', 'Please wait']) {
   test(`receipt-shaped prose over a live ${label} form stays unknown`, async () => {
     const outcome = await read(`
