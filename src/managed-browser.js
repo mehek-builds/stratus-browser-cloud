@@ -2653,6 +2653,9 @@ let terminalFailureInput = null;
       const containment = {
         mode: 'initial_navigation',
         allowedNavigationUrl: null,
+        /* How many times the page has been allowed to reload ITSELF during the fill. See the
+         * self-reload arm of the handler below for what that is and why it is bounded. */
+        selfReloadsAdmitted: 0,
         blockedAttemptCount: 0,
         blockedReason: null,
         blockedThirdPartyCount: 0,
@@ -2886,6 +2889,32 @@ let terminalFailureInput = null;
           try { target = canonicalPageUrl(request.url()); } catch {}
           if (target === containment.allowedNavigationUrl) {
             containment.allowedNavigationUrl = null;
+            return route.fallback();
+          }
+        }
+        /* A PAGE RELOADING ITSELF IS NOT A STEP TOWARD THE EMPLOYER.
+         *
+         * Measured on Celerant Tech (Paylocity) 2026-09-05T04:09Z and again at 04:28Z: Paylocity's
+         * public-apply bundle calls window.location.reload() whenever one of its own fetches comes
+         * back as an opaque redirect, and this handler refused that reload - a main-frame GET of the
+         * very page the run was already on - as 'navigation transport', ending the fill with nine
+         * question items answered. Re-reading the document the browser is already showing reaches
+         * nothing new on the employer's side: same origin, same path, same query, read-only method,
+         * and every subresource it pulls is admitted by the read-only arm at the bottom of this
+         * handler exactly as it was on first load. It is admitted when its canonical URL equals the
+         * page's own canonical URL - not the same host, not the same path prefix, the same page -
+         * and at most twice, so a board that reloads in a loop is still stopped rather than fed.
+         * A POST to the same URL never reaches this arm (readOnlyMethod), and a subframe never does
+         * either (mainFrameNavigation): both keep their existing refusals. */
+        if (mainFrameNavigation && readOnlyMethod && (containment.selfReloadsAdmitted || 0) < 2) {
+          let target = null;
+          let current = null;
+          try {
+            target = canonicalPageUrl(request.url());
+            current = canonicalPageUrl(page.url());
+          } catch {}
+          if (target && current && target === current) {
+            containment.selfReloadsAdmitted = (containment.selfReloadsAdmitted || 0) + 1;
             return route.fallback();
           }
         }
