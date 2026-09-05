@@ -24,8 +24,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CAPTCHA_WIDGET_FRAME_ORIGINS,
+  isBoardResumeStorageUploadHost,
   isCaptchaWidgetFrameRequest,
-  SANDBOX_RUNNER
+  SANDBOX_RUNNER,
+  transportRegistrableSuffix
 } from '../src/managed-browser.js';
 
 /* The exact URL Chromium requested on the live board, kept whole. The query carries the site key
@@ -317,7 +319,7 @@ function runV4Handler(request, mode) {
   const source = extractHandler('blockedTransportObserved: false,');
   const names = [
     'containment', 'canonicalPageUrl', 'resolvedManagedExactPageUrl', 'v4InitialNavigationBoundary',
-    'input', 'page', 'captchaWidgetFrame'
+    'input', 'page', 'captchaWidgetFrame', 'transportRegistrableSuffix', 'isBoardResumeStorageUploadHost'
   ];
   const handler = new Function(...names, `return ${source};`)(
     containment,
@@ -326,7 +328,9 @@ function runV4Handler(request, mode) {
     'https://job-boards.greenhouse.io/embed/job_app',
     { url: 'https://job-boards.greenhouse.io/embed/job_app' },
     PAGE,
-    CAPTCHA_WIDGET_FRAME(PAGE)
+    CAPTCHA_WIDGET_FRAME(PAGE),
+    transportRegistrableSuffix,
+    isBoardResumeStorageUploadHost
   );
   const route = fakeRoute(request);
   return handler(route).then(() => ({ calls: route.calls, containment }));
