@@ -434,7 +434,12 @@ test('the Ashby upload settle wait is bounded, Ashby-only, and does not touch fi
   // existing filled_fields bookkeeping - never before, never from any other action type.
   const calls = source.match(/await waitForAshbyUploadSettle\(\);/g) || [];
   assert.equal(calls.length, 1, 'the settle wait is invoked from exactly one place');
-  assert.match(source, /if \(action\.label\) filledFields\.push\(action\.label\);\s*\n\s*\/\/ Ashby's own upload settles asynchronously[\s\S]{0,200}await waitForAshbyUploadSettle\(\);\s*\n\s*\}\s*\n\s*if \(action\.type === 'waitForSelector'\)/);
+  // The Workable settle (waitForBoardStoreUploadSettle, keyed on WORKABLE_APPLY_SITE) follows it in
+  // the same block and is likewise a no-op everywhere else; the upload action still closes right after.
+  assert.match(source, /if \(action\.label\) filledFields\.push\(action\.label\);\s*\n\s*\/\/ Ashby's own upload settles asynchronously[\s\S]{0,200}await waitForAshbyUploadSettle\(\);\s*\n\s*\/\/ Workable's presigned round trip[\s\S]{0,160}await waitForBoardStoreUploadSettle\(\);\s*\n\s*\}\s*\n\s*if \(action\.type === 'waitForSelector'\)/);
+  assert.match(source, /let waitForBoardStoreUploadSettle = async \(\) => \{\};/);
+  assert.match(source, /if \(applicationTransportSite === WORKABLE_APPLY_SITE\) \{/);
+  assert.equal((source.match(/await waitForBoardStoreUploadSettle\(\);/g) || []).length, 1, 'the Workable settle is invoked from exactly one place');
 });
 
 test('the sandbox runner carries every new definition rather than a bare module reference', () => {
