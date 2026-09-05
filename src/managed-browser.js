@@ -3143,11 +3143,48 @@ let terminalFailureInput = null;
       }
     }
     let v4PreSubmitTransportContainment = null;
+    /* The v4 containment below lives outside the fill-containment block that injects these, and a
+     * bare module identifier is a ReferenceError inside the sandbox (b816a61). Same definitions. */
+    const transportRegistrableSuffix = ${transportRegistrableSuffix.toString()};
+    const isBoardResumeStorageUploadHost = ${isBoardResumeStorageUploadHost.toString()};
+    const WORKABLE_APPLY_SITE = ${JSON.stringify(WORKABLE_APPLY_SITE)};
     let v4InitialNavigationBoundary = canonicalPageUrl(input.url);
     if (retainedAtomicV4Run) {
+      /* THE PAGE HAS TO BOOT AND THE RESUME HAS TO LAND BEFORE THERE IS ANYTHING TO PRESS.
+       *
+       * Locked mode below refused EVERY request, reads included, from the moment navigation
+       * settled. That is the right rule for the pinned press window, and it made the send impossible
+       * on the one family this chooser serves: Workable's apply page is a client-rendered shell
+       * (7.8 KB, a loader cube and the job header) whose form arrives only after its own GET reads
+       * (account, job, form definition), and whose resume goes to its S3 bucket by POST the moment
+       * the file input changes. Measured 2026-09-05 on TWG Global, send run at 11:10Z: the pre-send
+       * probe read a 283-character page, the send died at action 4 (workable_cookie_preflight_cleared,
+       * waitForSelector 10 s) waiting for a form that could not render, and the same shell page had
+       * been the fill runs' error state until #190/#191 admitted the bucket and its round trip in the
+       * fill containment - which this run never installs (managedMutationContainmentRequired is
+       * false for a v4 run).
+       *
+       * So locked mode gains exactly the two admissions the fill containment already grants, and
+       * only those: a read-only xhr/fetch to the application's OWN registrable site (never a third
+       * party, never a navigation, never a write), and the upload window - POST/PUT xhr/fetch to the
+       * employer's site or to a named board bucket, only while an upload action is in flight, closed
+       * by the next mutation action exactly as the fill window is. Neither can file an application:
+       * a read carries no applicant answer to a new place, and storing bytes in a document bucket is
+       * what the fill run already does before any send exists. Everything a write to the employer
+       * outside that window would mean - the press, or something pretending to be one - still lands
+       * on blockedTransportObserved, which decideSubmitTransportGate reads as submit_transport_unpinned,
+       * unchanged. Activation mode (the pinned press itself) is untouched. */
+      const v4ApplicationSite = (() => {
+        try { return transportRegistrableSuffix(new URL(input.url).hostname); } catch { return null; }
+      })();
       const containment = {
         mode: 'initial_navigation',
         blockedTransportObserved: false,
+        applicationSite: v4ApplicationSite,
+        uploadActionArmed: false,
+        readsAdmitted: 0,
+        boardStoreUploadsAdmitted: 0,
+        boardStoreUploadResponses: 0,
         handler: null
       };
       containment.handler = async (route) => {
@@ -3157,6 +3194,12 @@ let terminalFailureInput = null;
         const navigation = request.isNavigationRequest();
         const mainFrameNavigation = request.isNavigationRequest()
           && request.frame() === page.mainFrame();
+        const resourceType = request.resourceType();
+        const dataTransport = resourceType === 'xhr' || resourceType === 'fetch';
+        const requestSite = (() => {
+          try { return transportRegistrableSuffix(new URL(request.url()).hostname); } catch { return null; }
+        })();
+        const sameSite = Boolean(containment.applicationSite) && requestSite === containment.applicationSite;
         if (containment.mode === 'initial_navigation') {
           if (readOnly && mainFrameNavigation) {
             const target = canonicalPageUrl(request.url());
@@ -3187,11 +3230,52 @@ let terminalFailureInput = null;
          * attempted an unbound network transport after applicant actions began". The page attempted
          * nothing of the sort: it was reloading a widget this runner had just killed. */
         if (captchaWidgetFrame(request)) return route.fallback();
+        /* Phase-0 admissions - see the block comment above the containment object. A same-site
+         * read-only data fetch is how a client-rendered board draws its form; the armed upload
+         * window is how the resume reaches the employer or its named bucket. Both are exactly what
+         * the fill containment admits; neither reaches blockedTransportObserved. */
+        if (readOnly && !navigation && dataTransport && sameSite) {
+          containment.readsAdmitted += 1;
+          return route.fallback();
+        }
+        if (containment.uploadActionArmed
+          && (method === 'POST' || method === 'PUT')
+          && dataTransport) {
+          let boardStore = false;
+          try { boardStore = isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { boardStore = false; }
+          if (sameSite || boardStore) {
+            if (boardStore) containment.boardStoreUploadsAdmitted += 1;
+            return route.fallback();
+          }
+        }
         containment.blockedTransportObserved = true;
         return route.abort('blockedbyclient');
       };
       await browserContext.route('**/*', containment.handler);
       v4PreSubmitTransportContainment = containment;
+      if (v4ApplicationSite === WORKABLE_APPLY_SITE) {
+        /* Workable's two-round-trip upload, on a send run: the same settle waitForBoardStoreUploadSettle
+         * provides for the fill containment (see #191), watching this containment's own counters. */
+        page.on('response', (response) => {
+          try {
+            const responseMethod = response.request().method().toUpperCase();
+            if (responseMethod !== 'POST' && responseMethod !== 'PUT') return;
+            if (!isBoardResumeStorageUploadHost(new URL(response.url()).hostname)) return;
+            containment.boardStoreUploadResponses += 1;
+          } catch {}
+        });
+        const V4_WORKABLE_UPLOAD_SETTLE_TIMEOUT_MS = 8000;
+        const V4_WORKABLE_UPLOAD_SETTLE_POLL_MS = 150;
+        waitForBoardStoreUploadSettle = async () => {
+          const responsesAtStart = containment.boardStoreUploadResponses;
+          const deadline = Date.now() + V4_WORKABLE_UPLOAD_SETTLE_TIMEOUT_MS;
+          for (;;) {
+            if (containment.boardStoreUploadResponses > responsesAtStart) return;
+            if (Date.now() >= deadline) return;
+            await new Promise((resolve) => setTimeout(resolve, V4_WORKABLE_UPLOAD_SETTLE_POLL_MS));
+          }
+        };
+      }
     }
     // A RUN THAT WAS NOT ASKED TO SUBMIT MUST BE STRUCTURALLY UNABLE TO SUBMIT.
     //
@@ -16088,6 +16172,16 @@ let terminalFailureInput = null;
        }
      });
      assertManagedMutationTransportClean();
+     if (v4PreSubmitTransportContainment) {
+       /* The v4 containment's upload window follows the same rule as the fill containment's below:
+        * armed by the upload action, closed by the next mutation action, read-only actions in
+        * between leave it open for the page's own upload XHR. */
+       if (action.type === 'upload') {
+         v4PreSubmitTransportContainment.uploadActionArmed = true;
+       } else if (!['waitForSelector', 'extract', 'requireCapability', 'discover'].includes(action.type)) {
+         v4PreSubmitTransportContainment.uploadActionArmed = false;
+       }
+     }
      if (managedMutationTransportContainment) {
        /* The upload allowance is scoped to the upload action itself plus any read-only actions
         * after it, because the page's own upload XHR starts on the change event and can still be
