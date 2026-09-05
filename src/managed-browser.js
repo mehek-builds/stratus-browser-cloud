@@ -266,6 +266,9 @@ export const isCaptchaWidgetFrameRequest = ({ method, resourceType, url, mainFra
 };
 
 export const ASHBY_PUBLIC_BOARD_SITE = 'ashbyhq.com';
+/* The registrable site of apply.workable.com, for the one Workable-specific wait in the runner (see
+ * waitForBoardStoreUploadSettle). */
+export const WORKABLE_APPLY_SITE = 'workable.com';
 export const ASHBY_PUBLIC_BOARD_GRAPHQL_PATH = '/api/non-user-graphql';
 export const ASHBY_PUBLIC_BOARD_READ_OPERATIONS = Object.freeze([
   'ApiJobPosting',
@@ -2663,6 +2666,7 @@ let terminalFailureInput = null;
     /* No-op until an Ashby run replaces it below. Every other board keeps today's behaviour exactly:
      * the 'upload' action returns the instant setInputFiles does, with nothing waiting on it. */
     let waitForAshbyUploadSettle = async () => {};
+    let waitForBoardStoreUploadSettle = async () => {};
     if (managedMutationContainmentRequired) {
       const transportTypes = new Set([
         'fetch', 'xhr', 'eventsource', 'websocket', 'ping', 'worker', 'serviceworker'
@@ -2676,6 +2680,15 @@ let terminalFailureInput = null;
         blockedAttemptCount: 0,
         blockedReason: null,
         blockedThirdPartyCount: 0,
+        /* Which third-party targets this run refused: method plus origin and path, never a query
+         * string or a body, bounded and deduplicated. For the run summary only - a refusal here is
+         * never fatal, which is exactly why it had to become visible: Workable's whole form vanished
+         * behind one of these for three runs on 2026-09-05 and nothing said which request. */
+        blockedThirdPartyTargets: [],
+        /* Board-store uploads admitted inside the armed window, and the responses that came back for
+         * them. waitForBoardStoreUploadSettle below watches the second number. */
+        boardStoreUploadsAdmitted: 0,
+        boardStoreUploadResponses: 0,
         uploadActionArmed: false,
         /* The one-shot upload target the #129 window's capture branch records from Ashby's own
          * ApiCreateFileUploadHandle response, and the observation flag its file-bind admission sets
@@ -2736,6 +2749,7 @@ let terminalFailureInput = null;
        * isTeamtailorCookieChoiceWrite in the module source for the 2026-09-04 measurement and the
        * public-bundle evidence this proof is built from. */
       const TEAMTAILOR_SITE = ${JSON.stringify(TEAMTAILOR_SITE)};
+      const WORKABLE_APPLY_SITE = ${JSON.stringify(WORKABLE_APPLY_SITE)};
       const TEAMTAILOR_COOKIE_CHOICE_PATH = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_PATH)};
       const TEAMTAILOR_COOKIE_CHOICE_CATEGORIES = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_CATEGORIES)};
       const TEAMTAILOR_COOKIE_CHOICE_FIELDS = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_FIELDS)};
@@ -2745,7 +2759,12 @@ let terminalFailureInput = null;
       /* The board's own resume store, admitted only inside the armed upload window below. See
        * isBoardResumeStorageUploadHost: Greenhouse's and Workable's eager S3 uploads, and nothing wider. */
       const boardResumeStorageUpload = (request) => {
-        try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
+        let admitted = false;
+        try { admitted = isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { admitted = false; }
+        // Consulted only after the armed window, the method and the resource type have matched (see
+        // the admission below), so a true here IS an admission, and the settle wait can count on it.
+        if (admitted) containment.boardStoreUploadsAdmitted += 1;
+        return admitted;
       };
       const registrableSuffix = transportRegistrableSuffix;
       const applicationTransportSite = (() => {
@@ -2885,6 +2904,13 @@ let terminalFailureInput = null;
               + bodyShape;
           } else {
             containment.blockedThirdPartyCount += 1;
+            if (containment.blockedThirdPartyTargets.length < 20) {
+              try {
+                const parsed = new URL(request.url());
+                const entry = request.method().toUpperCase() + ' ' + (parsed.origin + parsed.pathname).slice(0, 200);
+                if (!containment.blockedThirdPartyTargets.includes(entry)) containment.blockedThirdPartyTargets.push(entry);
+              } catch {}
+            }
           }
         }
         return route.abort('blockedbyclient');
@@ -3073,6 +3099,45 @@ let terminalFailureInput = null;
             if (failureToastShown) return;
             if (Date.now() >= deadline) return;
             await new Promise((resolve) => setTimeout(resolve, ASHBY_UPLOAD_SETTLE_POLL_MS));
+          }
+        };
+      }
+      if (applicationTransportSite === WORKABLE_APPLY_SITE) {
+        /* WORKABLE'S UPLOAD IS TWO ROUND TRIPS, AND THE WINDOW CLOSED BETWEEN THEM.
+         *
+         * On the file input's change event Workable's bundle first asks its own API for a presigned
+         * POST (GET /api/v1/jobs/<shortcode>/form/upload/resume), then posts the bytes to
+         * workable-application-form.s3.us-east-1.amazonaws.com. setInputFiles returns before either
+         * has happened, and the packet's next mutation action disarms uploadActionArmed - so the S3
+         * POST, admitted by isBoardResumeStorageUploadHost since #190, arrived at a closed window and
+         * was refused as third-party transport. Not run-fatal, but Workable's error mapper renders
+         * "Sorry, an unknown error occurred" for a request that fails without a status, and that view
+         * replaces the whole form: measured on TWG Global 2026-09-05, run 9c7b21eb, 8 fields filled,
+         * 14 skipped, a 205-character page, and a readiness scan that found nothing left to require.
+         *
+         * So a Workable upload action waits, bounded, for the board store to ANSWER a POST issued in
+         * its own window before control returns to the loop that disarms it - the same shape as
+         * waitForAshbyUploadSettle above, on the response count instead of Ashby's bind write. Eight
+         * seconds covers the presigned round trip plus a resume-sized POST with room; a Workable page
+         * that never issues the POST (no resume field, an already-attached file) pays the eight
+         * seconds once and moves on. Nothing here admits anything: the admission is the window's. */
+        page.on('response', (response) => {
+          try {
+            const method = response.request().method().toUpperCase();
+            if (method !== 'POST' && method !== 'PUT') return;
+            if (!isBoardResumeStorageUploadHost(new URL(response.url()).hostname)) return;
+            containment.boardStoreUploadResponses += 1;
+          } catch {}
+        });
+        const WORKABLE_UPLOAD_SETTLE_TIMEOUT_MS = 8000;
+        const WORKABLE_UPLOAD_SETTLE_POLL_MS = 150;
+        waitForBoardStoreUploadSettle = async () => {
+          const responsesAtStart = containment.boardStoreUploadResponses;
+          const deadline = Date.now() + WORKABLE_UPLOAD_SETTLE_TIMEOUT_MS;
+          for (;;) {
+            if (containment.boardStoreUploadResponses > responsesAtStart) return;
+            if (Date.now() >= deadline) return;
+            await new Promise((resolve) => setTimeout(resolve, WORKABLE_UPLOAD_SETTLE_POLL_MS));
           }
         };
       }
@@ -18501,6 +18566,8 @@ let terminalFailureInput = null;
         // Ashby's own upload settles asynchronously after setInputFiles returns; a no-op on every
         // other board. See where this is assigned, above, for the bounded wait and why it exists.
         await waitForAshbyUploadSettle();
+        // Workable's presigned round trip; a no-op on every other board. See where this is assigned.
+        await waitForBoardStoreUploadSettle();
       }
       if (action.type === 'waitForSelector') await page.waitForSelector(action.selector, { timeout: action.timeout || 10000 });
       if (action.type === 'press') {
@@ -18983,6 +19050,14 @@ let terminalFailureInput = null;
       filledFields: [...new Set(filledFields)],
       blockers: [...new Set(blockers)],
       skipped: [...new Set(skipped)],
+      ...(managedMutationTransportContainment ? {
+        transport: {
+          blockedThirdPartyCount: managedMutationTransportContainment.blockedThirdPartyCount,
+          blockedThirdPartyTargets: managedMutationTransportContainment.blockedThirdPartyTargets.slice(0, 20),
+          boardStoreUploadsAdmitted: managedMutationTransportContainment.boardStoreUploadsAdmitted,
+          boardStoreUploadResponses: managedMutationTransportContainment.boardStoreUploadResponses
+        }
+      } : {}),
       ...(actionDiagnostics.length > 0 ? { actionDiagnostics } : {}),
       humanVerification,
       securityCodeAttempt,

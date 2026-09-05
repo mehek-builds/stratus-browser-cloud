@@ -15,7 +15,13 @@ test('the completion line carries what the host needs and nothing from the page'
       skipped: [],
       humanVerification: { kind: 'security_code', fieldCount: 1, sentTo: null },
       submitOutcome: { pressed: false, state: 'not_attempted' },
-      actionDiagnostics: [{ outcome: 'filled' }, { outcome: 'filled' }, { outcome: 'refused' }]
+      actionDiagnostics: [{ outcome: 'filled' }, { outcome: 'filled' }, { outcome: 'refused' }],
+      transport: {
+        blockedThirdPartyCount: 3,
+        blockedThirdPartyTargets: ['POST https://www.google-analytics.com/g/collect', 'GET https://maps.googleapis.com/maps/api/js', 'POST https://workable-application-form.s3.us-east-1.amazonaws.com/'],
+        boardStoreUploadsAdmitted: 1,
+        boardStoreUploadResponses: 0
+      }
     },
     2345.6
   );
@@ -33,6 +39,9 @@ test('the completion line carries what the host needs and nothing from the page'
   assert.equal(summary.submitPressed, false);
   assert.equal(summary.submitState, 'not_attempted');
   assert.deepEqual(summary.actionOutcomes, { filled: 2, refused: 1 });
+  assert.equal(summary.blockedThirdParty, 3);
+  assert.deepEqual(summary.blockedThirdPartyTargets, ['POST https://www.google-analytics.com/g/collect', 'GET https://maps.googleapis.com/maps/api/js', 'POST https://workable-application-form.s3.us-east-1.amazonaws.com/']);
+  assert.deepEqual(summary.boardStoreUploads, { admitted: 1, responses: 0 });
   const serialised = JSON.stringify(summary);
   assert.equal(serialised.includes('SECRET'), false);
   assert.equal(serialised.includes('mehek@'), false);
@@ -45,4 +54,7 @@ test('a bare run and a bad url summarise without throwing', () => {
   assert.equal(summary.durationMs, null);
   assert.equal(summary.screenshot, false);
   assert.deepEqual(summary.actionOutcomes, {});
+  assert.equal(summary.blockedThirdParty, null);
+  assert.deepEqual(summary.blockedThirdPartyTargets, []);
+  assert.equal(summary.boardStoreUploads, null);
 });
