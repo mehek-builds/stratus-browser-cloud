@@ -42,6 +42,7 @@ const SOURCE = [
   extractBraced('function renderedText(node) {'),
   extractBraced('function labelledByText(el) {'),
   extractBraced('function blockOf(el) {'),
+  extractBraced('function ownQuestionBlock(el, block, choiceGroup) {'),
   extractBraced('function questionLabel(el) {'),
   extractBraced('function durableSelectorOf(el, block) {'),
 ].join('\n');
