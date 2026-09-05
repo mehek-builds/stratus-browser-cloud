@@ -23,7 +23,25 @@ test('the measured Greenhouse bucket is admitted, in every S3 virtual-hosted spe
   assert.equal(isBoardResumeStorageUploadHost('grnhse-prod-jben-us-east-1.s3.amazonaws.com.'), true);
 });
 
-test('nothing that is not a grnhse bucket on real S3 is admitted', () => {
+/* WORKABLE'S BUCKET, measured 2026-09-05 on TWG Global: the careers bundle asks
+ * GET /api/v1/jobs/<shortcode>/form/upload/resume for a presigned POST whose url is
+ * https://workable-application-form.s3.us-east-1.amazonaws.com, and posts the resume there on the
+ * file input's change event. Refusing it does not kill the run - the bundle's error mapper renders
+ * "Sorry, an unknown error occurred" for a request that fails without a status, replacing the whole
+ * form - so two 410 s runs found no controls to fill. Same admission, same arming, one more name. */
+test('the measured Workable bucket is admitted, in every S3 virtual-hosted spelling', () => {
+  assert.equal(isBoardResumeStorageUploadHost('workable-application-form.s3.us-east-1.amazonaws.com'), true);
+  assert.equal(isBoardResumeStorageUploadHost('workable-application-form.s3.amazonaws.com'), true);
+  assert.equal(isBoardResumeStorageUploadHost('workable-application-form.s3-us-east-1.amazonaws.com'), true);
+  assert.equal(isBoardResumeStorageUploadHost('WORKABLE-APPLICATION-FORM.S3.US-EAST-1.AMAZONAWS.COM.'), true);
+  // The name is pinned whole: a different Workable bucket, or the name with a suffix, is not this one.
+  assert.equal(isBoardResumeStorageUploadHost('workable-application-form-eu.s3.amazonaws.com'), false);
+  assert.equal(isBoardResumeStorageUploadHost('workable-uploads.s3.amazonaws.com'), false);
+  assert.equal(isBoardResumeStorageUploadHost('workable-application-form.s3.amazonaws.com.evil.example'), false);
+  assert.equal(isBoardResumeStorageUploadHost('apply.workable.com'), false);
+});
+
+test('nothing that is not a named board bucket on real S3 is admitted', () => {
   // Bare S3, other buckets, and AWS generally.
   assert.equal(isBoardResumeStorageUploadHost('s3.amazonaws.com'), false);
   assert.equal(isBoardResumeStorageUploadHost('some-other-bucket.s3.amazonaws.com'), false);

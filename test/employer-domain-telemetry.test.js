@@ -101,8 +101,9 @@ test('a telemetry host is refused admission to the #129 upload window', () => {
   assert.equal(admittedByUploadWindow('c.spl.greenhouse.io'), false, 'a beacon may not ride an upload');
   assert.equal(admittedByUploadWindow('spl.greenhouse.io'), false, 'nor may the collector apex');
   assert.equal(admittedByUploadWindow('job-boards.greenhouse.io'), true, 'a real upload must still be admitted');
-  // The second arm is a Greenhouse-named S3 bucket and nothing wider: amazonaws.com in general,
-  // and any other bucket, stay outside it.
+  // The second arm is a named board bucket (Greenhouse's grnhse-*, Workable's
+  // workable-application-form) and nothing wider: amazonaws.com in general, and any other bucket,
+  // stay outside it.
   assert.equal(isBoardResumeStorageUploadHost('grnhse-prod-jben-us-east-1.s3.amazonaws.com'), true);
   assert.equal(isBoardResumeStorageUploadHost('evil.s3.amazonaws.com'), false);
   assert.equal(isBoardResumeStorageUploadHost('s3.amazonaws.com'), false);

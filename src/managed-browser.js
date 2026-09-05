@@ -159,13 +159,25 @@ export const isEmployerTelemetryPath = (url) => {
  * Storing bytes in a document bucket cannot file an application - Greenhouse's submit later
  * references the stored document, it does not carry the bytes - so the bucket is admitted under
  * EXACTLY the same arming as the employer-bound case: only while the upload action is in flight,
- * only POST/PUT, only xhr/fetch. The host must be a Greenhouse-named bucket on Amazon S3
+ * only POST/PUT, only xhr/fetch. The host must be one of the named board buckets on Amazon S3
  * (virtual-hosted style, with or without a region infix) and nothing else; amazonaws.com in
- * general stays third-party-blocked, and outside the armed window this host is blocked exactly as
- * before. */
+ * general stays third-party-blocked, and outside the armed window these hosts are blocked exactly
+ * as before.
+ *
+ * WORKABLE UPLOADS THE SAME WAY, AND ITS FORM DOES NOT SURVIVE THE REFUSAL. Measured 2026-09-05 on
+ * TWG Global (apply.workable.com/twgai/j/772CD136FF): the careers bundle asks its own API for a
+ * presigned POST (GET /api/v1/jobs/<shortcode>/form/upload/resume answers
+ * {"uploadPostUrl":{"url":"https://workable-application-form.s3.us-east-1.amazonaws.com", ...}})
+ * and posts the bytes there the moment the file input changes. Under the Greenhouse-only pattern
+ * that POST was a third-party block: not run-fatal, but the bundle's error mapper renders "Sorry,
+ * an unknown error occurred" for any request that fails without a status, and that view replaces
+ * the whole form. Two runs (06:08Z and 06:28Z) each found the form gone after the upload and spent
+ * their full 410 s on controls that no longer existed; the discovery pass before each reported 3
+ * blocked requests and a 205-character page. The bucket name is Workable's own
+ * (workable-application-form), pinned exactly, in the same S3 host shapes as Greenhouse's. */
 export const isBoardResumeStorageUploadHost = (hostname) => {
   const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
-  return /^grnhse-[a-z0-9-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(host);
+  return /^(?:grnhse-[a-z0-9-]+|workable-application-form)\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(host);
 };
 
 /* THE HUMAN-CHECK WIDGET IS A THIRD-PARTY FRAME, AND THE CONTAINMENT WAS BREAKING IT.
@@ -2731,7 +2743,7 @@ let terminalFailureInput = null;
       const TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH = ${JSON.stringify(TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH)};
       const isTeamtailorCookieChoiceWrite = ${isTeamtailorCookieChoiceWrite.toString()};
       /* The board's own resume store, admitted only inside the armed upload window below. See
-       * isBoardResumeStorageUploadHost: Greenhouse's eager S3 upload, and nothing wider. */
+       * isBoardResumeStorageUploadHost: Greenhouse's and Workable's eager S3 uploads, and nothing wider. */
       const boardResumeStorageUpload = (request) => {
         try { return isBoardResumeStorageUploadHost(new URL(request.url()).hostname); } catch { return false; }
       };
@@ -2954,7 +2966,7 @@ let terminalFailureInput = null;
         }
         /* THE ONE-SHOT ADMISSION THE CAPTURE ABOVE FEEDS: Ashby's presigned upload target lives off
          * ashbyhq.com, so it satisfies neither employerBoundTransport nor boardResumeStorageUpload
-         * (that host pattern is Greenhouse-only, see isBoardResumeStorageUploadHost) and falls
+         * (that host pattern names Greenhouse's and Workable's buckets only, see isBoardResumeStorageUploadHost) and falls
          * through the pinned admission just above exactly like any other third-party POST would.
          * Admitted here by EXACT origin+pathname match against the target captureAshbyOneShotUploadTarget
          * recorded above, and by that alone - never a host pattern - for exactly one request, consumed the
