@@ -1503,7 +1503,7 @@ test('a choice control that already holds an answer is never emptied to look for
   // An answer that already matches is left exactly as it is, with no click at all.
   assert.match(SANDBOX_RUNNER, /if \(alreadyAnswered\.kind === 'chosen' && optionMatches\(alreadyAnswered\.value, wanted\)\) return true;/);
   // And if it was somehow lost anyway, it goes back.
-  assert.match(SANDBOX_RUNNER, /activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder\(control\);\n\s+if \(await searchFor\(control, alreadyAnswered\.value\)\) break;/);
+  assert.match(SANDBOX_RUNNER, /activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder\(control\);\n\s+activeControlIsLocationGeocoder = activeControlAllowsIdenticalExactLocationRows\n\s+\|\| await isAshbyLocationGeocoder\(control\);\n\s+if \(await searchFor\(control, alreadyAnswered\.value\)\) break;/);
 });
 
 test('a choice we could not make is reported as the applicant\'s, not as filled', () => {
@@ -1630,7 +1630,7 @@ test('React Select comboboxes are filled as choices, not plain text', () => {
   assert.match(SANDBOX_RUNNER, /fillShape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /shape\.role === 'combobox'/);
   assert.match(SANDBOX_RUNNER, /ariaAutocomplete === 'list'/);
-  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(target, allowIdenticalExactLocationRows = false\) =>/);
+  assert.match(SANDBOX_RUNNER, /const clickMatchingOption = async \(target, allowIdenticalExactLocationRows = false, locationGeocoder = false\) =>/);
   assert.match(SANDBOX_RUNNER, /await control\.fill\(option\)/);
   assert.match(SANDBOX_RUNNER, /await page\.keyboard\.type\(option, \{ delay: 5 \}\)/);
   assert.match(SANDBOX_RUNNER, /waitForTimeout\(1200\)/);
