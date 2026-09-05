@@ -970,14 +970,25 @@ export const isTeamtailorCookieChoiceWrite = ({
   if (Object.prototype.hasOwnProperty.call(policy, 'same_site') && policy.same_site !== 'None') {
     return false;
   }
-  if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid')) {
+  /* null IS ABSENT. Measured 2026-09-05 01:21Z on Covenant House International (application c24e48a2,
+   * run 0f09e52a), the first run to carry #184's body shape in its refusal:
+   *   body=json{cookie_policy:{referrer:null,categories:str0}}
+   * Teamtailor's page sets window.referrer to (window.referrer || utmSource || document.referrer)
+   * and its bundle posts referrer: window.referrer verbatim, so a runner that arrives with no
+   * referrer and no utm_source ships the key with a JSON null - and JSON.stringify keeps a null
+   * where it would have dropped an undefined. #180 read "present" as "must be a string" and refused
+   * the exact decline-all write it was written to admit, on every Teamtailor fill from this runner.
+   * A null carries nothing, so it is admitted exactly as the absent key is; the string rules below
+   * are unchanged for any value that is actually there. Same for visitor_uuid, which the page reads
+   * off an XHR that this containment aborts. */
+  if (Object.prototype.hasOwnProperty.call(policy, 'visitor_uuid') && policy.visitor_uuid !== null) {
     if (typeof policy.visitor_uuid !== 'string'
       || policy.visitor_uuid.length > TEAMTAILOR_COOKIE_CHOICE_MAX_FIELD_LENGTH) return false;
     // Round 1: length alone let ~4 KB of arbitrary text through. The analytics token Teamtailor's
     // own page assigns itself is UUID-shaped; anything else, or absent (empty), and nothing more.
     if (policy.visitor_uuid !== '' && !VISITOR_UUID_PATTERN.test(policy.visitor_uuid)) return false;
   }
-  if (Object.prototype.hasOwnProperty.call(policy, 'referrer')) {
+  if (Object.prototype.hasOwnProperty.call(policy, 'referrer') && policy.referrer !== null) {
     if (typeof policy.referrer !== 'string' || policy.referrer.length > MAX_REFERRER_LENGTH) return false;
     // Round 1: same length-only gap. document.referrer is always either empty or a real URL, so
     // require it parse as one - http(s), with a hostname - rather than merely counting characters.
