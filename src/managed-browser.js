@@ -6398,6 +6398,20 @@ let terminalFailureInput = null;
       }
       return hits.length === 1 ? hits[0] : -1;
     };
+    /* A GEOCODER ROW EXTENDS THE CITY. A server-searched location row is the place she typed
+     * followed by its region and country - "Los Angeles" comes back as "Los Angeles, California,
+     * United States" - so exactness can never match it and containment matches too much ("East Los
+     * Angeles, California, United States" contains it; so did "Los Ángeles, Biobío, Chile" once
+     * accents were folded). The row opens with the place when its leading comma-segments equal the
+     * segments she typed, case-insensitively and accent for accent: "Los Angeles" opens exactly one
+     * of Deepgram's two offered rows (2026-09-05), and "Los Angeles, California" would too. */
+    const placeOpensWith = (rowText, wanted) => {
+      const segments = (value) => clean(value).split(',').map((part) => part.trim().toLowerCase()).filter(Boolean);
+      const row = segments(rowText);
+      const place = segments(wanted);
+      if (place.length === 0 || row.length < place.length) return false;
+      return place.every((segment, index) => row[index] === segment);
+    };
     const optionMatches = (candidate, wanted) => {
       const a = normalized(candidate);
       if (!a) return false;
@@ -8156,7 +8170,10 @@ let terminalFailureInput = null;
         if (heldRow && heldRow === clean(clickedOptionText).toLowerCase()) {
           const rowIsTheAnswer = holdsAnswer(committed, expected) || declineMatches(committed, expected);
           const listTier = Boolean(clean(chooserTierAnswer || '')) && holdsAnswer(chooserTierAnswer, expected);
-          if (rowIsTheAnswer || listTier) { lastChoiceUnreadable = false; return true; }
+          /* The committed row of a geocoder extends the place she typed; see placeOpensWith. Only
+           * the control this call drove as a geocoder may be read this way. */
+          const placeRow = Boolean(lastChoiceControlWasGeocoder) && placeOpensWith(committed, expected);
+          if (rowIsTheAnswer || listTier || placeRow) { lastChoiceUnreadable = false; return true; }
         }
       }
       /* THE ROW THAT WAS CLICKED IS THE OPENER'S OWN RENDERED TEXT, on a control readChoiceState
@@ -9248,7 +9265,7 @@ let terminalFailureInput = null;
         // Shells are the declaredMenu / menuIsPortalled / menuIsBesideShell path's job; this tier is
         // only for the bare listbox opener that has no recognised select shell around it.
         if (scopedMenu) return;
-        const found = await control.evaluate((element) => {
+        const found = await control.evaluate((element, containerEl) => {
           const hasVisibleOption = (node) => Boolean(node)
             && [...node.querySelectorAll('[role="option"]')]
               .some((row) => row.getClientRects().length > 0);
@@ -9267,6 +9284,25 @@ let terminalFailureInput = null;
               if (owners.includes(element.id) && hasVisibleOption(listbox)) candidates.add(listbox);
             }
           }
+          /* A COMBOBOX THAT DECLARES NOTHING AND PORTALS ITS ROWS. Ashby's location typeahead
+           * (2026-09-05, Deepgram): role="combobox", aria-expanded flips true, no aria-controls, no
+           * id, and its popup of role="option" rows mounts outside the question's block. Every root
+           * above searched the block and the declared menu, found no rows, and reported 'no option
+           * matched' while the offers clause could list the rows it was not allowed to click. The
+           * rows are admitted only when the opened control is a combobox, the rows are visible,
+           * they sit outside this question's own container, and they form exactly ONE group - a
+           * page offering two open lists is left exactly as unreachable as before. */
+          if (candidates.size === 0
+            && String(element.getAttribute('role') || '').toLowerCase() === 'combobox'
+            && element.getAttribute('aria-expanded') === 'true') {
+            const groups = new Set();
+            for (const row of document.querySelectorAll('[role="option"]')) {
+              if (row.getClientRects().length === 0) continue;
+              if (containerEl && containerEl.contains(row)) continue;
+              groups.add(row.closest('[role="listbox"]') || row.parentElement);
+            }
+            if (groups.size === 1) candidates.add([...groups][0]);
+          }
           const nodes = [...candidates];
           if (nodes.length !== 1) return { count: nodes.length };
           const only = nodes[0];
@@ -9278,7 +9314,7 @@ let terminalFailureInput = null;
           }
           only.setAttribute('data-litos-opener-menu', '1');
           return { count: 1, selector: '[data-litos-opener-menu="1"]' };
-        }).catch(() => ({ count: 0 }));
+        }, await container.elementHandle().catch(() => null)).catch(() => ({ count: 0 }));
         if (found.count === 1 && found.selector) openerPortalMenu = page.locator(found.selector);
         else if (found.count > 1) openerNamesAmbiguousListboxes = true;
       };
@@ -9613,7 +9649,14 @@ let terminalFailureInput = null;
           && String(element.getAttribute('aria-autocomplete') || '').toLowerCase() === 'list'
           && [...labels, ...labelledBy].some((label) => labelName(label) === 'location (city)');
       }).catch(() => false);
-      const clickMatchingOption = async (target, allowIdenticalExactLocationRows = false) => {
+      /* ASHBY'S LOCATION TYPEAHEAD IS THE OTHER LIVE GEOCODER. Read off the Deepgram form: a bare
+       * role="combobox" input with no id and no name inside Ashby's own
+       * [data-field-path="_systemfield_location"] entry, answering one query string with places. */
+      const isAshbyLocationGeocoder = async (control) => await control.evaluate((element) => (
+        String(element.getAttribute('role') || '').toLowerCase() === 'combobox'
+        && Boolean(element.closest('[data-field-path="_systemfield_location"]'))
+      )).catch(() => false);
+      const clickMatchingOption = async (target, allowIdenticalExactLocationRows = false, locationGeocoder = false) => {
         const took = (option) => { lastClickedOptionAnswer = clean(option); return true; };
         /* EXACT FIRST, ACROSS THE WHOLE LIST AND ACROSS EVERY ANSWER, before any widened tier runs.
          *
@@ -9703,6 +9746,37 @@ let terminalFailureInput = null;
           const verdict = await takeNamed(pattern, option);
           if (verdict === 'took') return took(option);
           if (verdict === 'refused') return false;
+        }
+        /* A GEOCODER'S ROWS ARE PLACES, AND A PLACE IS MATCHED BY HOW IT OPENS. See placeOpensWith.
+         * Measured live on Deepgram (Ashby) run dcc8f598, 2026-09-05: "Los Angeles" against a menu
+         * offering "Los Angeles, California, United States" and "Los Ángeles, Biobío, Chile" ended
+         * in 'no option matched', with the required field left empty and the application parked.
+         * The exact tiers above cannot match a row that extends the city, and the widened tiers
+         * below must not: containment would take "East Los Angeles" for "Los Angeles" on a menu that
+         * offered nothing else. So a geocoder gets exactly one rule and no fallthrough: the ONE row
+         * that opens with the place she typed is taken; several are refused as the ambiguity they
+         * are (Springfield, Illinois against Springfield, Missouri); none is a refusal that names
+         * the place, not a guess among rows that open with other places. */
+        if (locationGeocoder) {
+          const root = menuRoot() ?? widenRoot();
+          const rows = root.locator(OPTION_NODES);
+          const offers = await offeredRows(rows);
+          /* No rows at all is the geocoder still answering, not a place it does not know: the
+           * bounded result grace the caller already gives a slow geocoder (measured 1250ms on the
+           * Greenhouse Location City control) must get to run the tiers again. Only a menu that
+           * offers rows, none of which opens with her place, is refused here. */
+          if (offers.length === 0) return false;
+          const texts = await rows.evaluateAll((nodes) => nodes.map((node) => String(node.textContent || '')))
+            .catch(() => []);
+          for (const option of answerOptions(target)) {
+            const opening = offers.filter((index) => placeOpensWith(texts[index] || '', option));
+            if (opening.length === 1) {
+              if (await clickIfPresent(rows.nth(opening[0]))) return took(option);
+              continue;
+            }
+            if (opening.length > 1) return refuseChoice(nearMissChoiceReason(option, opening.length));
+          }
+          return refuseChoice('no option opened with the place "' + clean(target) + '", left for you to choose');
         }
         /* THEN THE WIDENED TIERS, AND A WIDENED TIER MAY NOT GUESS.
          *
@@ -9910,6 +9984,7 @@ let terminalFailureInput = null;
         return true;
       };
       let activeControlAllowsIdenticalExactLocationRows = false;
+      let activeControlIsLocationGeocoder = false;
       const searchFor = async (control, target) => {
         for (const option of answerOptions(target)) {
           // Only blank the search box when the widget is holding nothing. See (1) above.
@@ -9939,7 +10014,7 @@ let terminalFailureInput = null;
           }
           if (await takeNarrowedGeocodeMatch(control, option)) return true;
           const refusalsBefore = choiceRefusals;
-          if (await clickMatchingOption(target, activeControlAllowsIdenticalExactLocationRows)) return true;
+          if (await clickMatchingOption(target, activeControlAllowsIdenticalExactLocationRows, activeControlIsLocationGeocoder)) return true;
           // And a refusal ends the search too, rather than being narrowed away by the next query.
           // See the control loop below for the shape this closes.
           if (choiceRefusals !== refusalsBefore) return false;
@@ -10056,11 +10131,13 @@ let terminalFailureInput = null;
         }).catch(() => '');
         if (CLEAR_CONTROL_RE.test(clears)) continue;
         activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder(control);
+        activeControlIsLocationGeocoder = activeControlAllowsIdenticalExactLocationRows
+          || await isAshbyLocationGeocoder(control);
         lastChoiceControlOpened = true;
         // Sticky across the control loop on purpose: one geocoder among this question's controls is
         // enough to make an empty menu unprovable for the whole question.
         lastChoiceControlWasGeocoder = lastChoiceControlWasGeocoder
-          || activeControlAllowsIdenticalExactLocationRows;
+          || activeControlIsLocationGeocoder;
         /* A role-less Greenhouse input is probed by one real pointer click before this chooser is
          * called. Clicking the same input again can toggle its menu closed, which would discard the
          * only structural evidence that separated it from a real text field. Only the exact control
@@ -10091,7 +10168,7 @@ let terminalFailureInput = null;
         // The unfiltered list this control is offering, recorded before any tier judges it, so a
         // refusal below can say what was actually on offer. See recordChoiceOffers.
         await recordChoiceOffers();
-        if (await clickMatchingOption(wanted, activeControlAllowsIdenticalExactLocationRows)) return true;
+        if (await clickMatchingOption(wanted, activeControlAllowsIdenticalExactLocationRows, activeControlIsLocationGeocoder)) return true;
         /* A REFUSAL ENDS THE CONTROL, not just the tier that made it. Without this, searchFor typed
          * into the widget and re-entered the whole tier stack against a menu the search had filtered,
          * and a filtered menu can offer one row where the full menu offered two: the ambiguity that
@@ -10136,6 +10213,8 @@ let terminalFailureInput = null;
             await control.click().catch(() => undefined);
             await page.waitForTimeout(150).catch(() => undefined);
             activeControlAllowsIdenticalExactLocationRows = await isGreenhouseLocationCityGeocoder(control);
+            activeControlIsLocationGeocoder = activeControlAllowsIdenticalExactLocationRows
+              || await isAshbyLocationGeocoder(control);
             if (await searchFor(control, alreadyAnswered.value)) break;
             await page.keyboard.press('Escape').catch(() => undefined);
           }

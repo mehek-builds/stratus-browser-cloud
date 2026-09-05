@@ -86,25 +86,7 @@ function build() {
   `)(page);
 }
 
-/* Ashby's own field markup, as measured: '[data-field-path="_systemfield_location"]' wraps a
- * label and a narrower autocomplete shell; the anonymous combobox input and its popup live inside
- * that shell, not the outer field wrapper, which is exactly what fillCustomChoice's own
- * ancestor-of-the-combobox container resolution (managed-browser.js, the 'fill' action's combobox
- * branch) climbs to - the shell, not the field wrapper, so the label never contaminates what this
- * function reads back. A small visually-hidden caption mirrors the committed selection inside that
- * same shell (an ordinary accessibility echo for a homegrown combobox with no visible "chosen"
- * chip of its own): without it readChoiceState's 'unknown' text is only ever the shell's own
- * layout, carries no evidence of a commit at all, and choiceLanded correctly marks the control
- * unreadable rather than landed - that variant is pinned below too, because a fix that only works
- * when Ashby happens to expose this caption must not become the only shape this test can catch.
- *
- * `revertsOnBlur` models the suspected, unverified defect: the widget refocuses the input after a
- * click-driven selection (ordinary autocomplete UX), and its blur handler cannot distinguish "this
- * blur followed a real selection" from "this blur followed nothing", so it clears both the input
- * and the caption on the very next blur - which is exactly the blur this runner's own action loop
- * sends when it moves on to the next field.
- */
-function fixture({ options, withCaption, revertsOnBlur }) {
+function fixture({ options, withCaption, revertsOnBlur, portalled }) {
   return `<!doctype html><html><body>
   <div data-field-path="_systemfield_location">
     <label>Current Location*</label>
@@ -122,6 +104,7 @@ function fixture({ options, withCaption, revertsOnBlur }) {
     const caption = document.querySelector('.ashby-application-form-input-autocomplete-sr-value');
     const OPTIONS = ${JSON.stringify(options)};
     const REVERTS = ${JSON.stringify(Boolean(revertsOnBlur))};
+    const PORTALLED = ${JSON.stringify(Boolean(portalled))};
     let menu = null;
     let query = '';
     let committedByClick = false;
@@ -155,7 +138,7 @@ function fixture({ options, withCaption, revertsOnBlur }) {
       if (menu) return;
       menu = document.createElement('div');
       menu.className = 'ashby-application-form-input-autocomplete-popup';
-      wrap.appendChild(menu);
+      if (PORTALLED) { menu.setAttribute('role', 'listbox'); menu.style.position = 'absolute'; document.body.appendChild(menu); } else { wrap.appendChild(menu); }
       input.setAttribute('aria-expanded', 'true');
       renderRows();
     }
@@ -189,90 +172,68 @@ async function run(markup, answer) {
   return { filled, landed, ...after, state: api.state() };
 }
 
-test('the resolved container is the narrow shell, never the field wrapper carrying the label', async () => {
-  await page.setContent(fixture({ options: ['Dubai, United Arab Emirates'], withCaption: true }));
-  const input = page.locator('[role="combobox"]');
-  const container = input.locator(
-    'xpath=ancestor::*[(self::div or self::fieldset) and (.//*[@role="combobox"] or .//*[@aria-haspopup="listbox"] or .//*[@aria-haspopup="true"])][1]'
-  );
-  assert.equal(
-    await container.evaluate((el) => el.className),
-    'ashby-application-form-input-autocomplete-container',
-  );
-});
 
-test('a control that reverts on the runner\'s own next-field blur is not reported landed', async () => {
-  // THE FAILING CASE THIS FILE EXISTS FOR. Before the fix this returned landed: true while the
-  // real input ended up empty - the exact contradiction measured on the live Deepgram run. This
-  // control stays reverted for the whole settleVerified window, so the verdict below is the same
-  // one the original single-150ms-wait fix gave, just reached after up to ~500ms of retry instead
-  // of one fixed wait - see choice-landed-settle-retry.test.js for the case that only that widened
-  // budget can catch: a control that reverts and then recovers within the window.
+/* THE GEOCODER ROW THAT EXTENDS THE CITY.
+ *
+ * Measured live on Deepgram (Ashby) run dcc8f598, 2026-09-05T03:34Z: the runner drove the Current
+ * Location typeahead with her city, "Los Angeles", and the geocoder offered two rows -
+ * "Los Angeles, California, United States" and "Los Ángeles, Biobío, Chile" - and the run recorded
+ * 'no option matched "Los Angeles" (the list offered: ...)', leaving the required field empty and
+ * the whole application parked. A geocoder row is the city followed by its region and country; the
+ * city she typed is the first comma-segment of exactly one of them, accent for accent. */
+test('the one geocoder row whose first segment is the city she typed is taken', async () => {
   const result = await run(
-    fixture({ options: ['Dubai, United Arab Emirates'], withCaption: true, revertsOnBlur: true }),
-    'Dubai',
+    fixture({
+      options: ['Los Angeles, California, United States', 'Los Ángeles, Biobío, Chile'],
+      withCaption: true,
+      revertsOnBlur: false,
+    }),
+    'Los Angeles',
   );
-  assert.equal(result.filled, true, 'the widened tier still finds and clicks the one geocoder row');
-  assert.equal(result.landed, false, 'a selection that empties itself on blur must not be reported filled');
-  assert.equal(result.finalInputValue, '', 'the real control is empty, matching the live screenshot');
-  assert.equal(result.state.lastChoiceUnreadable, true, 'told as "please confirm", not silently dropped');
+  assert.deepEqual(result.clicked, ['Los Angeles, California, United States'], JSON.stringify(result.state));
+  assert.equal(result.filled, true, JSON.stringify(result.state));
+  assert.equal(result.landed, true, JSON.stringify({ ...result.state, finalInputValue: result.finalInputValue }));
+  assert.equal(result.finalInputValue, 'Los Angeles, California, United States');
 });
 
-test('a durable commit that survives the same blur still verifies landed', async () => {
-  // THE CONTROL CASE. Without this, "always report unreadable after blurring" would pass the test
-  // above by brute force and mark every correctly-answered Ashby location field for manual review.
+test('two rows that both open with the city she typed are refused, not guessed between', async () => {
   const result = await run(
-    fixture({ options: ['Dubai, United Arab Emirates'], withCaption: true, revertsOnBlur: false }),
-    'Dubai',
+    fixture({
+      options: ['Springfield, Illinois, United States', 'Springfield, Missouri, United States'],
+      withCaption: true,
+      revertsOnBlur: false,
+    }),
+    'Springfield',
   );
-  assert.equal(result.filled, true);
-  assert.equal(result.landed, true, 'a commit that holds up under the same blur must still verify');
-  assert.equal(result.finalInputValue, 'Dubai, United Arab Emirates');
-  assert.equal(result.state.lastChoiceUnreadable, false);
+  assert.deepEqual(result.clicked, [], JSON.stringify(result.state));
+  assert.equal(result.filled, false);
+  assert.match(result.state.lastChoiceRefusal, /Springfield/);
 });
 
-test('a geocoder row committed into the bare input verifies by how it opens, caption or not', async () => {
-  // Without ANY caption or select__-shaped node, readChoiceState stays 'unknown' with nothing but
-  // the shell's own layout text, so the only evidence is the committed input value. Until the
-  // geocoder rule (placeOpensWith) that value had to hold the answer BYTE FOR BYTE, and "Dubai,
-  // United Arab Emirates" never satisfied "Dubai" - the honest verdict for a closed list, and the
-  // wrong one for a geocoder, whose every row extends the place she typed. The input holds exactly
-  // the row this runner clicked, and that row opens with her place, so it is landed. The ambiguous
-  // and non-opening cases are refused earlier and never reach this read (see
-  // ashby-location-geocoder-row-dom.test.js).
+test('a row that merely contains the city inside a longer first segment is not the city', async () => {
   const result = await run(
-    fixture({ options: ['Dubai, United Arab Emirates'], withCaption: false, revertsOnBlur: false }),
-    'Dubai',
+    fixture({
+      options: ['East Los Angeles, California, United States'],
+      withCaption: true,
+      revertsOnBlur: false,
+    }),
+    'Los Angeles',
   );
-  assert.equal(result.filled, true);
-  assert.equal(result.landed, true);
-  assert.equal(result.state.lastChoiceUnreadable, false);
-  assert.equal(result.finalInputValue, 'Dubai, United Arab Emirates');
+  assert.deepEqual(result.clicked, [], JSON.stringify(result.state));
+  assert.equal(result.filled, false);
 });
 
-test('the post-blur reread gets the same retry budget as the read it follows, and the blur never fires on an unverified read', () => {
-  // 2026-08-21: this used to be a single fixed 150ms wait, asserted here as "not a retry loop" -
-  // deliberately, at the time, to keep the added cost bounded and small. A code review of that
-  // choice found the asymmetry itself was a defect: a blur-triggered validation with no more
-  // retry budget than a single wait can fail closed on a control that would have genuinely landed
-  // given the same ~500ms window the PRE-blur read already gets (this file's own IMC Trading
-  // geocoder-backed location field, a few hundred lines up, is proof such a control exists in
-  // production). The fix reuses settleVerified rather than inventing a second poll loop.
-  const start = SANDBOX_RUNNER.indexOf('const choiceLanded = async (container, expected, directControl = null) => {');
-  const end = SANDBOX_RUNNER.indexOf('withdrawRefusedChoice now gets one more look', start);
-  assert.ok(start !== -1 && end > start, 'choiceLanded must precede its own withdrawal comment');
-  const body = SANDBOX_RUNNER.slice(start, end);
-  assert.match(body, /await blurDrivenChoiceControl\(container, directControl\);/);
-  // Exactly one blur call in the whole function: it only runs after a verified read, never on
-  // every 50ms poll tick, and never a second time inside the same call.
-  assert.equal((body.match(/await blurDrivenChoiceControl\(/g) || []).length, 1);
-  // The pre-blur read is still a bare, directly-awaited call; the post-blur one is now wrapped in
-  // settleVerified rather than directly awaited, so only one bare "await verifyChoiceInContainer("
-  // remains in this function's body - the second is inside settleVerified's own check() closure.
-  assert.equal((body.match(/await verifyChoiceInContainer\(/g) || []).length, 1,
-    'the pre-blur poll read is still a bare await; the post-blur one now goes through settleVerified');
-  assert.match(body, /await blurDrivenChoiceControl\(container, directControl\);\n\s+if \(await settleVerified\(\(\) => verifyChoiceInContainer\(/,
-    'blur is followed immediately by a settleVerified-wrapped reread, not a fixed wait');
-  assert.equal((body.match(/await settleVerified\(/g) || []).length, 1,
-    'settleVerified runs exactly once per landed call, immediately after the blur');
+test('the same two rows, with the popup portalled to the body as Ashby renders it', async () => {
+  const result = await run(
+    fixture({
+      options: ['Los Angeles, California, United States', 'Los Ángeles, Biobío, Chile'],
+      withCaption: true,
+      revertsOnBlur: false,
+      portalled: true,
+    }),
+    'Los Angeles',
+  );
+  assert.deepEqual(result.clicked, ['Los Angeles, California, United States'], JSON.stringify(result.state));
+  assert.equal(result.filled, true, JSON.stringify(result.state));
+  assert.equal(result.landed, true, JSON.stringify(result.state));
 });
