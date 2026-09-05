@@ -8,3 +8,4 @@ npm-debug.log*
 work/
 .env*
 .vercel
+node_modules
