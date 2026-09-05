@@ -82,6 +82,18 @@ export function managedRunCompletionLogSummary(input, run, durationMs) {
     continuation: typeof input?.continuationToken === 'string',
     screenshotRequested: input?.screenshot !== false,
     screenshotWait: input?.screenshotWait === true,
+    /* Third-party refusals are never fatal, so they were never logged - and a board whose form
+     * dies on one (Workable, 2026-09-05) left three runs unexplained. Method, origin and path only. */
+    blockedThirdParty: Number.isFinite(run?.transport?.blockedThirdPartyCount) ? run.transport.blockedThirdPartyCount : null,
+    blockedThirdPartyTargets: Array.isArray(run?.transport?.blockedThirdPartyTargets)
+      ? run.transport.blockedThirdPartyTargets.slice(0, 8).map((entry) => String(entry).slice(0, 220))
+      : [],
+    boardStoreUploads: run?.transport
+      ? {
+        admitted: Number.isFinite(run.transport.boardStoreUploadsAdmitted) ? run.transport.boardStoreUploadsAdmitted : null,
+        responses: Number.isFinite(run.transport.boardStoreUploadResponses) ? run.transport.boardStoreUploadResponses : null
+      }
+      : null,
     screenshot: typeof run?.screenshot === 'string' && run.screenshot.length > 0,
     textLength: typeof run?.text === 'string' ? run.text.length : 0,
     filledFields: Array.isArray(run?.filledFields) ? run.filledFields.length : 0,
