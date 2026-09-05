@@ -144,6 +144,51 @@ test('an unanswered submit-network entry extends the wait even when pending is u
   }
 });
 
+/* ROUND 3: when submitNetwork carries a binding for this run's ATS (submitNetwork.hasBinding, set
+ * by armSubmitNetworkWatch - see managed-browser.js), only a BOUND unanswered entry may justify
+ * extending the wait. An unrelated write-shaped request (analytics, a field autosave) left
+ * dangling on a bound ATS says nothing about whether the employer's OWN apply call is still in
+ * flight, and must not be allowed to hold the wait open on that basis alone. */
+test('an unanswered entry is ignored when a binding exists and no entry is bound', async () => {
+  const submitNetworkRef = { current: Object.assign(
+    [{ method: 'POST', url: 'https://apply.workable.com/api/v1/track', status: null, outcome: 'unanswered' }],
+    { hasBinding: true },
+  ) };
+  const readSubmitOutcomeSequence = [{ state: 'unknown', pending: false }];
+  const harness = buildHarness({ postSubmitSettleMs: 200, readSubmitOutcomeSequence, submitNetworkRef });
+  try {
+    await harness.waitFn();
+    const elapsedMs = harness.getFakeNow() - harness.getStartedAt();
+    assert.ok(
+      elapsedMs < 1_000,
+      'an unbound entry must not extend the wait once a binding exists for this ATS: elapsed '
+        + elapsedMs + 'ms',
+    );
+  } finally {
+    harness.restore();
+  }
+});
+
+test('a bound unanswered entry still extends the wait when a binding exists', async () => {
+  const submitNetworkRef = { current: Object.assign(
+    [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABCDEF1234/apply', status: null, outcome: 'unanswered', bound: true }],
+    { hasBinding: true },
+  ) };
+  const readSubmitOutcomeSequence = [{ state: 'unknown' }, { state: 'unknown' }, { state: 'rejected' }];
+  const harness = buildHarness({ postSubmitSettleMs: 200, readSubmitOutcomeSequence, submitNetworkRef });
+  try {
+    await harness.waitFn();
+    assert.ok(
+      harness.calls.length >= 3,
+      'a bound unanswered entry must extend the wait exactly like the unbound-ATS generic case: got '
+        + JSON.stringify(harness.calls),
+    );
+    assert.equal(harness.calls[harness.calls.length - 1].outcome.state, 'rejected');
+  } finally {
+    harness.restore();
+  }
+});
+
 test('the extension exits the moment the pending marker clears without a terminal state', async () => {
   // Stays pending through the whole 200ms/50ms-tick initial window (comfortably covered by five
   // calls), then clears pending without ever reaching a terminal state - the one condition the
