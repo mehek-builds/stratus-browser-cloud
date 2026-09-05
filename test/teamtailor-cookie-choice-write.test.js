@@ -68,6 +68,34 @@ test('the accept-all body (all three categories, comma-joined) is admitted too',
   }
 });
 
+/* MEASURED 2026-09-05 01:21Z on Covenant House International (application c24e48a2, run 0f09e52a),
+ * the first refusal to carry #184's body shape: body=json{cookie_policy:{referrer:null,categories:str0}}.
+ * The page sets `window.referrer = window.referrer || utmSource || document.referrer` and the bundle
+ * posts `referrer: window.referrer` verbatim; a runner with no referrer and no utm_source ships a
+ * JSON null, which JSON.stringify keeps where it drops an undefined. "Present" is not "a string". */
+test('a null referrer or visitor_uuid is the absent value, and is admitted like one', () => {
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { referrer: null, categories: '' } })
+  })), true, 'the live Covenant House decline-all body');
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { visitor_uuid: null, referrer: null, categories: '' } })
+  })), true);
+  assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+    postData: JSON.stringify({ cookie_policy: { visitor_uuid: null, referrer: null, categories: 'analytics,marketing', same_site: 'None' } })
+  })), true);
+  // null is the only non-string admitted: every other non-string value is still refused.
+  for (const bad of [0, false, true, {}, [], 'not a url']) {
+    assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+      postData: JSON.stringify({ cookie_policy: { referrer: bad, categories: '' } })
+    })), false, 'referrer ' + JSON.stringify(bad));
+  }
+  for (const bad of [0, false, {}, [], 'not-a-uuid']) {
+    assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
+      postData: JSON.stringify({ cookie_policy: { visitor_uuid: bad, categories: '' } })
+    })), false, 'visitor_uuid ' + JSON.stringify(bad));
+  }
+});
+
 test('same_site "None" (the inside-iframe shape) is admitted; any other value is not', () => {
   assert.equal(isTeamtailorCookieChoiceWrite(cookieWrite({
     postData: declineAllBody({ same_site: 'None' })
